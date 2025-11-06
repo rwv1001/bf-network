@@ -1,0 +1,75 @@
+client hp5130 {
+  ipaddr = 192.168.99.1
+  secret = sUp3rSecr3t
+  require_message_authenticator = auto
+  nastype = other
+}
+
+client AP1 {
+  ipaddr = 192.168.1.113
+  secret = sUp3rSecr3t
+  require_message_authenticator = auto
+  nastype = other
+}
+
+client AP2 {
+  ipaddr = 192.168.1.81
+  secret = sUp3rSecr3t
+  require_message_authenticator = auto
+  nastype = other
+}
+
+client AP3 {
+  ipaddr = 192.168.1.76
+  secret = sUp3rSecr3t
+  require_message_authenticator = auto
+  nastype = other
+}
+
+client AP4 {
+  ipaddr = 192.168.1.107
+  secret = sUp3rSecr3t
+  require_message_authenticator = auto
+  nastype = other
+}
+
+client AP5 {
+  ipaddr = 192.168.1.139
+  secret = sUp3rSecr3t
+  require_message_authenticator = auto
+  nastype = other
+}
+
+client AP6 {
+  ipaddr = 192.168.1.73
+  secret = sUp3rSecr3t
+  require_message_authenticator = auto
+  nastype = other
+}
+
+client AP6 {
+  ipaddr = 192.168.1.11
+  secret = sUp3rSecr3t
+  require_message_authenticator = auto
+  nastype = other
+}
+
+
+
+client localhost {
+  ipaddr = 127.0.0.1
+  secret = sUp3rSecr3t
+}
+
+# Captive Portal - needs CoA capability
+client captive-portal {
+  ipaddr = 192.168.99.4
+  secret = testing123
+  require_message_authenticator = auto
+  nastype = other
+  
+  # Enable CoA for this client
+  coa_server = yes
+  coa_secret = testing123
+}
+

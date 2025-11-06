@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+
+{% block title %}Admin Dashboard - Network Access Portal{% endblock %}
+
+{% block header %}Admin Dashboard{% endblock %}
+
+{% block content %}
+<div style="margin-bottom: 30px;">
+    <a href="{{ url_for('admin_add_user') }}" class="btn">+ Add New User</a>
+</div>
+
+{% if pending_requests %}
+<h2 style="margin-top: 30px; color: #667eea;">Pending Registration Requests ({{ pending_requests|length }})</h2>
+
+<table>
+    <thead>
+        <tr>
+            <th>Submitted</th>
+            <th>Name</th>
+            <th>Email</th>
+            <th>Phone</th>
+            <th>MAC Address</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for req in pending_requests %}
+        <tr>
+            <td>{{ req.submitted_at.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td>{{ req.full_name }}</td>
+            <td>{{ req.email }}</td>
+            <td>{{ req.phone_number or '-' }}</td>
+            <td style="font-family: monospace; font-size: 12px;">{{ req.mac_address }}</td>
+            <td>
+                <a href="{{ url_for('admin_approve_request', token=req.approval_token) }}" class="btn btn-success btn-small">
+                    Review
+                </a>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+
+<h2 style="margin-top: 40px; color: #667eea;">Authorized Users ({{ users|length }})</h2>
+
+<table>
+    <thead>
+        <tr>
+            <th>Email</th>
+            <th>Name</th>
+            <th>Status</th>
+            <th>Dates</th>
+            <th>Devices</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for user in users %}
+        <tr>
+            <td>{{ user.email }}</td>
+            <td>{{ user.full_name }}</td>
+            <td>
+                <span class="badge {% if user.is_active %}badge-active{% else %}badge-restricted{% endif %}">
+                    {{ user.status }}
+                </span>
+            </td>
+            <td style="font-size: 12px;">
+                {{ user.begin_date }} to {{ user.expiry_date }}
+            </td>
+            <td>{{ user.devices|length }}</td>
+            <td>
+                <a href="{{ url_for('admin_edit_user', user_id=user.id) }}" class="btn btn-small">
+                    Edit
+                </a>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<h2 style="margin-top: 40px; color: #667eea;">Recent Devices (Last 50)</h2>
+
+<table>
+    <thead>
+        <tr>
+            <th>Registered</th>
+            <th>MAC Address</th>
+            <th>User</th>
+            <th>Status</th>
+            <th>VLAN</th>
+            <th>IP</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for device in devices %}
+        <tr>
+            <td>{{ device.registered_at.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td style="font-family: monospace; font-size: 12px;">{{ device.mac_address }}</td>
+            <td>{{ device.user.email if device.user else '-' }}</td>
+            <td>
+                <span class="badge 
+                    {% if device.registration_status == 'active' %}badge-active
+                    {% elif device.registration_status == 'pending' %}badge-pending
+                    {% else %}badge-restricted{% endif %}">
+                    {{ device.registration_status }}
+                </span>
+            </td>
+            <td>{{ device.current_vlan or '-' }}</td>
+            <td>{{ device.ip_address or '-' }}</td>
+            <td>
+                {% if device.registration_status == 'active' %}
+                <form method="POST" action="{{ url_for('admin_disconnect_device', device_id=device.id) }}" style="display: inline;">
+                    <button type="submit" class="btn btn-danger btn-small" 
+                            onclick="return confirm('Disconnect this device?')">
+                        Disconnect
+                    </button>
+                </form>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<h3 style="margin-top: 40px; color: #667eea;">VLAN Mappings</h3>
+<table>
+    <thead>
+        <tr>
+            <th>Status</th>
+            <th>VLAN ID</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for status, vlan_id in vlan_map.items() %}
+        <tr>
+            <td>{{ status }}</td>
+            <td>{{ vlan_id }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

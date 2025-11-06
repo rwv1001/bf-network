@@ -1,0 +1,68 @@
+version: "3.8"
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: captive-portal-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: captive_portal
+      POSTGRES_USER: portal_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-change_this_password}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    network_mode: host
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U portal_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: captive-portal-redis
+    restart: unless-stopped
+    network_mode: host
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build: ./app
+    container_name: captive-portal-web
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://portal_user:${DB_PASSWORD:-change_this_password}@127.0.0.1:5432/captive_portal
+      REDIS_URL: redis://127.0.0.1:6379/0
+      SECRET_KEY: ${SECRET_KEY:-change_this_secret_key_in_production}
+      SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
+      SMTP_FROM: ${SMTP_FROM}
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+      RADIUS_SECRET: ${RADIUS_SECRET:-testing123}
+      RADIUS_SERVER: ${RADIUS_SERVER:-192.168.99.4}
+      RADIUS_NAS_IP: ${RADIUS_NAS_IP:-192.168.99.1}
+      PORTAL_URL: ${PORTAL_URL:-http://portal.local}
+      EMAIL_VERIFICATION_REQUIRED: ${EMAIL_VERIFICATION_REQUIRED:-false}
+      VERIFICATION_TIMEOUT_MINUTES: ${VERIFICATION_TIMEOUT_MINUTES:-15}
+    volumes:
+      - ./app:/app
+    network_mode: host
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+# Note: Using host network mode so the portal is accessible on all Pi interfaces
+# This ensures devices on VLAN 99 (192.168.99.0/24) can reach it at 192.168.99.4:8080

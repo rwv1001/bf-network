@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+
+{% block title %}Edit User - Network Access Portal{% endblock %}
+
+{% block header %}Edit User: {{ user.email }}{% endblock %}
+
+{% block content %}
+<form method="POST" action="{{ url_for('admin_edit_user', user_id=user.id) }}">
+    <div class="form-group">
+        <label>Email Address</label>
+        <input type="text" value="{{ user.email }}" disabled style="background-color: #f5f5f5;">
+        <small style="color: #666; display: block; margin-top: 5px;">
+            Email cannot be changed
+        </small>
+    </div>
+    
+    <div class="form-group">
+        <label for="first_name">First Name</label>
+        <input type="text" id="first_name" name="first_name" value="{{ user.first_name or '' }}">
+    </div>
+    
+    <div class="form-group">
+        <label for="last_name">Last Name</label>
+        <input type="text" id="last_name" name="last_name" value="{{ user.last_name or '' }}">
+    </div>
+    
+    <div class="form-group">
+        <label for="phone_number">Phone Number</label>
+        <input type="tel" id="phone_number" name="phone_number" value="{{ user.phone_number or '' }}">
+    </div>
+    
+    <div class="form-group">
+        <label for="status">Access Level <span class="required">*</span></label>
+        <select id="status" name="status" required>
+            {% for status in vlan_map.keys() %}
+                {% if status not in ['unregistered', 'restricted'] %}
+                <option value="{{ status }}" {% if status == user.status %}selected{% endif %}>
+                    {{ status.title() }}
+                </option>
+                {% endif %}
+            {% endfor %}
+        </select>
+        <small style="color: #666; display: block; margin-top: 5px;">
+            Changing status will update all active devices to the new VLAN
+        </small>
+    </div>
+    
+    <div class="form-group">
+        <label for="begin_date">Begin Date <span class="required">*</span></label>
+        <input type="date" id="begin_date" name="begin_date" required value="{{ user.begin_date }}">
+    </div>
+    
+    <div class="form-group">
+        <label for="expiry_date">Expiry Date <span class="required">*</span></label>
+        <input type="date" id="expiry_date" name="expiry_date" required value="{{ user.expiry_date }}">
+    </div>
+    
+    <div class="form-group">
+        <label for="notes">Notes</label>
+        <textarea id="notes" name="notes" rows="3">{{ user.notes or '' }}</textarea>
+    </div>
+    
+    <div class="info-box">
+        <strong>User Information</strong>
+        <ul style="margin: 10px 0 0 20px;">
+            <li>Created: {{ user.created_at.strftime('%Y-%m-%d %H:%M') }}</li>
+            <li>Created by: {{ user.created_by }}</li>
+            <li>Registered devices: {{ user.devices|length }}</li>
+        </ul>
+    </div>
+    
+    <div style="margin-top: 30px;">
+        <button type="submit" class="btn">Save Changes</button>
+        <a href="{{ url_for('admin_dashboard') }}" class="btn btn-secondary" style="margin-left: 10px;">Cancel</a>
+    </div>
+</form>
+
+{% if user.devices %}
+<h3 style="margin-top: 40px; color: #667eea;">User's Devices</h3>
+<table>
+    <thead>
+        <tr>
+            <th>MAC Address</th>
+            <th>Status</th>
+            <th>VLAN</th>
+            <th>Registered</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for device in user.devices %}
+        <tr>
+            <td style="font-family: monospace;">{{ device.mac_address }}</td>
+            <td>
+                <span class="badge 
+                    {% if device.registration_status == 'active' %}badge-active
+                    {% elif device.registration_status == 'pending' %}badge-pending
+                    {% else %}badge-restricted{% endif %}">
+                    {{ device.registration_status }}
+                </span>
+            </td>
+            <td>{{ device.current_vlan or '-' }}</td>
+            <td>{{ device.registered_at.strftime('%Y-%m-%d %H:%M') }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+{% endblock %}

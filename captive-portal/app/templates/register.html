@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+
+{% block title %}Register Device - Blackfriars Captive Portal{% endblock %}
+
+{% block header %}Blackfriars Captive Portal{% endblock %}
+
+{% block subheader %}
+<p style="margin-top: 10px; opacity: 0.9;">Please provide your information to access the network</p>
+{% endblock %}
+
+{% block content %}
+<form method="POST" action="{{ url_for('register') }}">
+    <div class="form-group">
+        <label for="email">Email Address <span class="required">*</span></label>
+        <input type="email" id="email" name="email" required placeholder="your.email@example.com">
+        <small style="color: #666; display: block; margin-top: 5px;">
+            Use the email address registered with the network administrator
+        </small>
+    </div>
+    
+    <div class="form-group">
+        <label for="first_name">First Name <span class="required">*</span></label>
+        <input type="text" id="first_name" name="first_name" required placeholder="John">
+    </div>
+    
+    <div class="form-group">
+        <label for="last_name">Last Name <span class="required">*</span></label>
+        <input type="text" id="last_name" name="last_name" required placeholder="Smith">
+    </div>
+    
+    <div class="form-group">
+        <label for="phone_number">Phone Number</label>
+        <input type="tel" id="phone_number" name="phone_number" placeholder="+44 1234 567890">
+        <small style="color: #666; display: block; margin-top: 5px;">
+            Optional - helps us contact you if needed
+        </small>
+    </div>
+    
+    <div class="info-box">
+        <strong>What happens next?</strong>
+        <ul style="margin: 10px 0 0 20px;">
+            <li>If you're pre-registered, you'll get immediate or verified access</li>
+            <li>If not, an administrator will review your request and contact you</li>
+        </ul>
+    </div>
+    
+    <button type="submit" class="btn">Register Device</button>
+</form>
+
+<div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e0e0e0; text-align: center;">
+    <a href="{{ url_for('status') }}" style="color: #667eea; text-decoration: none;">
+        Check registration status →
+    </a>
+</div>
+{% endblock %}

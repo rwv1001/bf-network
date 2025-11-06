@@ -1,0 +1,11 @@
+services:
+  kea:
+    image: jonasal/kea-dhcp4:3.0-alpine   # even minor = stable/LTS
+    container_name: kea
+    restart: unless-stopped
+    network_mode: host
+    cap_add: [ NET_ADMIN ]
+    volumes:
+      - ./config:/kea/config:ro
+      - ./leases:/kea/leases        # directory, not a single file
+    command: ["-c","/kea/config/dhcp4.json"]

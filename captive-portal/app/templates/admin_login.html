@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+
+{% block title %}Admin Login - Network Access Portal{% endblock %}
+
+{% block header %}Administrator Login{% endblock %}
+
+{% block content %}
+<form method="POST" action="{{ url_for('admin_login') }}">
+    <div class="form-group">
+        <label for="username">Username</label>
+        <input type="text" id="username" name="username" required autofocus>
+    </div>
+    
+    <div class="form-group">
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" required>
+    </div>
+    
+    <button type="submit" class="btn">Login</button>
+</form>
+
+<div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e0e0e0; text-align: center;">
+    <a href="{{ url_for('index') }}" style="color: #667eea; text-decoration: none;">
+        ← Back to portal
+    </a>
+</div>
+{% endblock %}

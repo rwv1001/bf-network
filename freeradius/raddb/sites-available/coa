@@ -1,0 +1,43 @@
+# FreeRADIUS CoA Server Configuration
+
+# This configuration enables Change-of-Authorization (CoA) support
+# CoA allows the captive portal to dynamically change device VLANs
+
+# Listen for CoA requests on port 3799
+server coa {
+    listen {
+        type = coa
+        ipaddr = *
+        port = 3799
+        
+        # Limit to specific interfaces if needed
+        # interface = eth0
+    }
+    
+    # Process incoming CoA requests
+    recv-coa {
+        # Log the CoA request
+        update control {
+            &Module-Failure-Message := "Received CoA request for %{Calling-Station-Id}"
+        }
+        
+        # Accept the CoA request
+        ok
+    }
+    
+    # Process incoming Disconnect requests
+    recv-disconnect {
+        # Log the disconnect request
+        update control {
+            &Module-Failure-Message := "Received Disconnect request for %{Calling-Station-Id}"
+        }
+        
+        # Accept the disconnect request
+        ok
+    }
+    
+    # Send CoA acknowledgment
+    send-coa {
+        ok
+    }
+}

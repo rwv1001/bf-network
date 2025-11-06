@@ -1,0 +1,18 @@
+version: "3.8"
+services:
+  freeradius:
+    image: freeradius/freeradius-dev:arm64v8-v3.2.x
+    container_name: freeradius
+    restart: unless-stopped
+
+    # host networking keeps UDP 1812/1813 simple
+    network_mode: host
+
+    volumes:
+      - ./raddb/clients.conf:/etc/raddb/clients.conf:ro
+      - ./raddb/mods-config/files/authorize:/etc/raddb/mods-config/files/authorize:ro
+      - ./raddb/sites-available/coa:/etc/raddb/sites-available/coa:ro
+      - ./raddb/sites-enabled/coa:/etc/raddb/sites-enabled/coa:ro
+
+    # for first run, start in debug; later remove "-X"
+    command: [ "radiusd", "-X", "-f" ]
