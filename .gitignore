@@ -1,0 +1,18 @@
+# logs & temp
+*.log
+*.tmp
+# python caches (remove if not needed)
+__pycache__/
+*.pyc
+# OS cruft
+Thumbs.db
+.DS_Store
+kea/leases/*
+npm/data/
+npm/letsencrypt/
+data/
+letsencrypt/
+**/keys.json
+npmold/
+freeradius/raddb/mods-config/files/authorize
+freeradius/raddb/clients.conf

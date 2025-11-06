@@ -1,0 +1,95 @@
+{
+  "Dhcp4": {
+    "interfaces-config": {
+      "interfaces": [ "eth0.10", "eth0.20", "eth0.30", "eth0.40", "eth0.50", "eth0.60", "eth0.70", "eth0.99" ]
+    },
+    "lease-database": {
+      "type": "memfile",
+      "persist": true,
+      "name": "/kea/leases/kea-leases4.csv"
+    },
+    "valid-lifetime": 7200,
+    "subnet4": [
+      {
+        "id": 10,
+        "subnet": "192.168.10.0/24",
+        "pools": [ { "pool": "192.168.10.100 - 192.168.10.200" } ],
+        "option-data": [
+          { "name": "routers", "data": "192.168.10.1" },
+          { "name": "domain-name-servers", "data": "192.168.10.1" }
+        ]
+      },
+      {
+        "id": 20,
+        "subnet": "192.168.20.0/24",
+        "pools": [ { "pool": "192.168.20.100 - 192.168.20.200" } ],
+        "option-data": [
+          { "name": "routers", "data": "192.168.20.1" },
+          { "name": "domain-name-servers", "data": "192.168.20.1" }
+        ]
+      },
+      {
+        "id": 30,
+        "subnet": "192.168.30.0/24",
+        "pools": [ { "pool": "192.168.30.100 - 192.168.30.200" } ],
+        "option-data": [
+          { "name": "routers", "data": "192.168.30.1" },
+          { "name": "domain-name-servers", "data": "192.168.30.1" }
+        ]
+      },
+      {
+        "id": 40,
+        "subnet": "192.168.40.0/24",
+        "pools": [ { "pool": "192.168.40.100 - 192.168.40.200" } ],
+        "option-data": [
+          { "name": "routers", "data": "192.168.40.1" },
+          { "name": "domain-name-servers", "data": "192.168.40.1" }
+        ]
+      },
+      {
+        "id": 50,
+        "subnet": "192.168.50.0/24",
+        "pools": [ { "pool": "192.168.50.100 - 192.168.50.200" } ],
+        "option-data": [
+          { "name": "routers", "data": "192.168.50.1" },
+          { "name": "domain-name-servers", "data": "192.168.50.1" }
+        ]
+      },
+      {
+        "id": 60,
+        "subnet": "192.168.60.0/24",
+        "pools": [ { "pool": "192.168.60.100 - 192.168.60.200" } ],
+        "option-data": [
+          { "name": "routers", "data": "192.168.60.1" },
+          { "name": "domain-name-servers", "data": "192.168.60.1" }
+        ]
+      },
+      {
+        "id": 70,
+        "subnet": "192.168.70.0/24",
+        "pools": [ { "pool": "192.168.70.100 - 192.168.70.200" } ],
+        "option-data": [
+          { "name": "routers", "data": "192.168.70.1" },
+          { "name": "domain-name-servers", "data": "192.168.70.1" }
+        ]
+      },
+      {
+        "id": 99,
+        "subnet": "192.168.99.0/24",
+        "pools": [ { "pool": "192.168.99.100 - 192.168.99.200" } ],
+        "option-data": [
+          { "name": "routers", "data": "192.168.99.1" },
+          { "name": "domain-name-servers", "data": "192.168.99.4" }
+        ]
+      }
+    ],
+    "loggers": [
+      {
+        "name": "kea-dhcp4",
+        "output-options": [ { "output": "stdout" } ],
+        "severity": "INFO",
+        "debuglevel": 0
+      }
+    ]
+  }
+}

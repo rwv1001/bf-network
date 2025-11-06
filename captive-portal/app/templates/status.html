@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+
+{% block title %}Registration Status - Network Access Portal{% endblock %}
+
+{% block header %}Registration Status{% endblock %}
+
+{% block content %}
+{% if device %}
+    {% if device.registration_status == 'active' %}
+        <div class="alert alert-success">
+            <strong>✓ Your device is registered and active!</strong>
+        </div>
+        
+        <table>
+            <tr>
+                <th>Status</th>
+                <td><span class="badge badge-active">Active</span></td>
+            </tr>
+            <tr>
+                <th>Access Level</th>
+                <td>{{ device.user.status.title() if device.user else 'Guest' }}</td>
+            </tr>
+            <tr>
+                <th>Current VLAN</th>
+                <td>{{ device.current_vlan }}</td>
+            </tr>
+            <tr>
+                <th>Registered On</th>
+                <td>{{ device.registered_at.strftime('%Y-%m-%d %H:%M') }}</td>
+            </tr>
+            {% if device.user %}
+            <tr>
+                <th>Access Valid Until</th>
+                <td>{{ device.user.expiry_date }}</td>
+            </tr>
+            {% endif %}
+        </table>
+        
+        <div class="info-box">
+            You now have full network access. Enjoy!
+        </div>
+        
+    {% elif device.registration_status == 'pending' %}
+        <div class="alert alert-warning">
+            <strong>⏳ Verification Pending</strong>
+        </div>
+        
+        <div class="info-box">
+            <p>A verification email has been sent to you. Please check your email and click the verification link to complete your registration.</p>
+            
+            {% if device.verification_expires_at %}
+            <p style="margin-top: 10px;">
+                <strong>Time remaining:</strong> Verification link expires at {{ device.verification_expires_at.strftime('%Y-%m-%d %H:%M') }}
+            </p>
+            {% endif %}
+            
+            <p style="margin-top: 10px; color: #856404;">
+                <strong>Important:</strong> If you don't verify in time, your device will be placed on a restricted network.
+            </p>
+        </div>
+        
+    {% elif device.registration_status == 'restricted' %}
+        <div class="alert alert-error">
+            <strong>⚠ Restricted Access</strong>
+        </div>
+        
+        <div class="info-box">
+            <p>Your device has been placed on a restricted network because:</p>
+            <ul style="margin: 10px 0 0 20px;">
+                <li>Your verification link expired, or</li>
+                <li>There was an issue with your registration</li>
+            </ul>
+            
+            <p style="margin-top: 15px;">
+                <strong>What to do:</strong> Please contact the network administrator at {{ admin_email or 'the admin email' }} to resolve this issue.
+            </p>
+        </div>
+        
+    {% else %}
+        <div class="alert alert-info">
+            <strong>ℹ Registration Status: {{ device.registration_status.title() }}</strong>
+        </div>
+        
+        <p>Your device is registered but not yet active. An administrator will review your request shortly.</p>
+    {% endif %}
+    
+    <table style="margin-top: 30px;">
+        <tr>
+            <th>Device Information</th>
+            <th></th>
+        </tr>
+        <tr>
+            <td>MAC Address</td>
+            <td style="font-family: monospace;">{{ device.mac_address }}</td>
+        </tr>
+        <tr>
+            <td>IP Address</td>
+            <td>{{ device.ip_address or 'Not available' }}</td>
+        </tr>
+        <tr>
+            <td>Last Seen</td>
+            <td>{{ device.last_seen.strftime('%Y-%m-%d %H:%M') if device.last_seen else 'Just now' }}</td>
+        </tr>
+    </table>
+    
+{% else %}
+    <div class="alert alert-info">
+        <strong>ℹ No Registration Found</strong>
+    </div>
+    
+    <p>We couldn't find a registration for your device.</p>
+    
+    <div class="info-box">
+        <p><strong>This could mean:</strong></p>
+        <ul style="margin: 10px 0 0 20px;">
+            <li>Your device is not yet registered</li>
+            <li>We couldn't detect your device's MAC address</li>
+        </ul>
+    </div>
+    
+    <a href="{{ url_for('register') }}" class="btn" style="margin-top: 20px;">Register Now</a>
+{% endif %}
+
+<div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e0e0e0; text-align: center;">
+    <a href="{{ url_for('register') }}" style="color: #667eea; text-decoration: none;">
+        ← Back to registration
+    </a>
+</div>
+{% endblock %}

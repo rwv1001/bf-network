@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+
+{% block title %}Approve Request - Network Access Portal{% endblock %}
+
+{% block header %}Review Registration Request{% endblock %}
+
+{% block content %}
+<div class="info-box">
+    <strong>⚠ Verify User Identity</strong>
+    <p style="margin-top: 10px;">
+        Before approving this request, please contact the user via phone or email to verify their identity 
+        and confirm they are authorized for network access.
+    </p>
+</div>
+
+<h3 style="color: #667eea; margin-top: 30px;">Request Details</h3>
+
+<table>
+    <tr>
+        <th>Name</th>
+        <td>{{ request.full_name }}</td>
+    </tr>
+    <tr>
+        <th>Email</th>
+        <td><a href="mailto:{{ request.email }}">{{ request.email }}</a></td>
+    </tr>
+    <tr>
+        <th>Phone</th>
+        <td>
+            {% if request.phone_number %}
+            <a href="tel:{{ request.phone_number }}">{{ request.phone_number }}</a>
+            {% else %}
+            Not provided
+            {% endif %}
+        </td>
+    </tr>
+    <tr>
+        <th>MAC Address</th>
+        <td style="font-family: monospace;">{{ request.mac_address }}</td>
+    </tr>
+    <tr>
+        <th>IP Address</th>
+        <td>{{ request.ip_address }}</td>
+    </tr>
+    <tr>
+        <th>Submitted</th>
+        <td>{{ request.submitted_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+    </tr>
+</table>
+
+<h3 style="color: #667eea; margin-top: 30px;">Approve Access</h3>
+
+<form method="POST" action="{{ url_for('admin_process_request', request_id=request.id) }}">
+    <input type="hidden" name="action" value="approve">
+    
+    <div class="form-group">
+        <label for="status">Access Level <span class="required">*</span></label>
+        <select id="status" name="status" required>
+            <option value="">-- Select Status --</option>
+            {% for status in vlan_map.keys() %}
+                {% if status not in ['unregistered', 'restricted'] %}
+                <option value="{{ status }}">{{ status.title() }} (VLAN {{ vlan_map[status] }})</option>
+                {% endif %}
+            {% endfor %}
+        </select>
+    </div>
+    
+    <div class="form-group">
+        <label for="begin_date">Begin Date <span class="required">*</span></label>
+        <input type="date" id="begin_date" name="begin_date" required value="{{ now or '2025-11-05' }}">
+    </div>
+    
+    <div class="form-group">
+        <label for="expiry_date">Expiry Date <span class="required">*</span></label>
+        <input type="date" id="expiry_date" name="expiry_date" required>
+    </div>
+    
+    <div class="form-group">
+        <label for="notes">Notes</label>
+        <textarea id="notes" name="notes" rows="3" placeholder="Optional notes about this approval"></textarea>
+    </div>
+    
+    <div style="margin-top: 30px;">
+        <button type="submit" class="btn btn-success">✓ Approve and Activate</button>
+    </div>
+</form>
+
+<h3 style="color: #dc3545; margin-top: 40px;">Or Reject Request</h3>
+
+<form method="POST" action="{{ url_for('admin_process_request', request_id=request.id) }}">
+    <input type="hidden" name="action" value="reject">
+    
+    <div class="form-group">
+        <label for="notes">Rejection Reason</label>
+        <textarea id="notes" name="notes" rows="3" placeholder="Optional reason for rejection"></textarea>
+    </div>
+    
+    <div style="margin-top: 20px;">
+        <button type="submit" class="btn btn-danger" onclick="return confirm('Reject this request?')">
+            ✗ Reject Request
+        </button>
+        <a href="{{ url_for('admin_dashboard') }}" class="btn btn-secondary" style="margin-left: 10px;">Cancel</a>
+    </div>
+</form>
+{% endblock %}
