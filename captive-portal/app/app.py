@@ -109,6 +109,7 @@ def index():
     return redirect(url_for('register'))
 
 
+@app.route('/portal')
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     """User registration form"""

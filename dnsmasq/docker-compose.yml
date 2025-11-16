@@ -1,0 +1,13 @@
+services:
+  dnsmasq:
+    image: 4km3/dnsmasq:latest
+    container_name: dnsmasq
+    network_mode: host              # needed for DNS/DHCP on the host IPs
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - NET_BIND_SERVICE
+    volumes:
+      - ./conf:/etc/dnsmasq.d:ro
+      - ./leases:/var/lib/misc
+    command: ["-k", "--conf-file=/etc/dnsmasq.d/blac-onboarding.conf"]
