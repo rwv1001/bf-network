@@ -3,7 +3,7 @@ Database models for Captive Portal
 """
 
 from flask_sqlalchemy import SQLAlchemy
-from datetime import datetime
+from datetime import datetime, timedelta
 
 db = SQLAlchemy()
 
@@ -54,11 +54,35 @@ class Device(db.Model):
     verification_token = db.Column(db.String(255))
     verification_expires_at = db.Column(db.DateTime)
     registered_at = db.Column(db.DateTime, default=datetime.utcnow)
+    first_seen = db.Column(db.DateTime, default=datetime.utcnow, index=True)  # For pool assignment
     last_seen = db.Column(db.DateTime)
     ip_address = db.Column(db.String(45))
     
+    # WiFi-specific fields
+    connection_type = db.Column(db.String(10), default='unknown')  # 'wifi' or 'wired'
+    ssid = db.Column(db.String(100))  # WiFi SSID (e.g., 'Blackfriars-Guests')
+    unregister_token = db.Column(db.String(255), unique=True, index=True)  # For email unregister link
+    
     def __repr__(self):
         return f'<Device {self.mac_address}>'
+    
+    def get_pool_assignment(self):
+        """
+        Determine which DHCP pool this device should be in.
+        
+        Returns:
+            str: 'registered', 'newly_unregistered', or 'old_unregistered'
+        """
+        if self.registration_status == 'approved':
+            return 'registered'
+        
+        # Check how long ago device was first seen
+        if self.first_seen:
+            time_since_first_seen = datetime.utcnow() - self.first_seen
+            if time_since_first_seen < timedelta(minutes=30):
+                return 'newly_unregistered'
+        
+        return 'old_unregistered'
 
 
 class RegistrationRequest(db.Model):

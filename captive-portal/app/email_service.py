@@ -1,62 +1,124 @@
 """
-Email service for sending notifications
+Email service for sending notifications via Microsoft Graph API
 """
 
 import os
 import logging
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import json
+import msal
+import requests
 
 logger = logging.getLogger(__name__)
 
-# SMTP configuration
-SMTP_HOST = os.getenv('SMTP_HOST', 'smtp.gmail.com')
-SMTP_PORT = int(os.getenv('SMTP_PORT', 587))
-SMTP_USER = os.getenv('SMTP_USER')
-SMTP_PASSWORD = os.getenv('SMTP_PASSWORD')
-SMTP_FROM = os.getenv('SMTP_FROM', SMTP_USER)
+# Microsoft Graph API configuration
+GRAPH_TENANT_ID = os.getenv('GRAPH_TENANT_ID')  # Azure AD Tenant ID
+GRAPH_CLIENT_ID = os.getenv('GRAPH_CLIENT_ID')  # App Registration Client ID
+GRAPH_CLIENT_SECRET = os.getenv('GRAPH_CLIENT_SECRET')  # App Registration Secret
+GRAPH_FROM_EMAIL = os.getenv('GRAPH_FROM_EMAIL')  # Email address to send from
 ADMIN_EMAIL = os.getenv('ADMIN_EMAIL')
+
+# Microsoft Graph API endpoints
+GRAPH_AUTHORITY = f'https://login.microsoftonline.com/{GRAPH_TENANT_ID}'
+GRAPH_SCOPE = ['https://graph.microsoft.com/.default']
+GRAPH_ENDPOINT = 'https://graph.microsoft.com/v1.0'
+
+
+def get_graph_access_token():
+    """
+    Get access token for Microsoft Graph API using client credentials flow.
+    
+    Returns:
+        str: Access token or None if authentication fails
+    """
+    if not all([GRAPH_TENANT_ID, GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET]):
+        logger.warning("Microsoft Graph credentials not configured")
+        return None
+    
+    try:
+        app = msal.ConfidentialClientApplication(
+            GRAPH_CLIENT_ID,
+            authority=GRAPH_AUTHORITY,
+            client_credential=GRAPH_CLIENT_SECRET
+        )
+        
+        result = app.acquire_token_for_client(scopes=GRAPH_SCOPE)
+        
+        if 'access_token' in result:
+            return result['access_token']
+        else:
+            logger.error(f"Failed to acquire token: {result.get('error_description')}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error getting Graph access token: {e}")
+        return None
 
 
 def send_email(to_email, subject, html_body, text_body=None):
     """
-    Send an email
+    Send an email via Microsoft Graph API
     
     Args:
         to_email: Recipient email address
         subject: Email subject
         html_body: HTML email body
-        text_body: Plain text email body (optional)
+        text_body: Plain text email body (optional, falls back to HTML if not provided)
     
     Returns:
         bool: True if successful, False otherwise
     """
-    if not SMTP_USER or not SMTP_PASSWORD:
-        logger.warning("SMTP not configured, skipping email")
+    if not GRAPH_FROM_EMAIL:
+        logger.warning("Microsoft Graph not configured (GRAPH_FROM_EMAIL missing), skipping email")
         return False
     
     try:
-        msg = MIMEMultipart('alternative')
-        msg['Subject'] = subject
-        msg['From'] = SMTP_FROM
-        msg['To'] = to_email
+        # Get access token
+        access_token = get_graph_access_token()
+        if not access_token:
+            logger.error("Failed to get Microsoft Graph access token")
+            return False
         
-        # Add plain text version
-        if text_body:
-            msg.attach(MIMEText(text_body, 'plain'))
+        # Build email message
+        email_message = {
+            "message": {
+                "subject": subject,
+                "body": {
+                    "contentType": "HTML",
+                    "content": html_body
+                },
+                "toRecipients": [
+                    {
+                        "emailAddress": {
+                            "address": to_email
+                        }
+                    }
+                ]
+            },
+            "saveToSentItems": "true"
+        }
         
-        # Add HTML version
-        msg.attach(MIMEText(html_body, 'html'))
+        # Send via Graph API
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/json'
+        }
         
-        # Connect and send
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASSWORD)
-            server.send_message(msg)
+        # Use sendMail endpoint
+        send_url = f"{GRAPH_ENDPOINT}/users/{GRAPH_FROM_EMAIL}/sendMail"
         
-        logger.info(f"Email sent to {to_email}: {subject}")
-        return True
+        response = requests.post(
+            send_url,
+            headers=headers,
+            data=json.dumps(email_message),
+            timeout=30
+        )
+        
+        if response.status_code == 202:  # Accepted
+            logger.info(f"Email sent to {to_email}: {subject}")
+            return True
+        else:
+            logger.error(f"Failed to send email: HTTP {response.status_code} - {response.text}")
+            return False
         
     except Exception as e:
         logger.error(f"Failed to send email to {to_email}: {e}")
@@ -258,6 +320,106 @@ def send_approval_notification(user_email, first_name, status):
     Your device should now have full network access. If you experience any issues, please contact the network administrator.
     
     Thank you!
+    """
+    
+    return send_email(user_email, subject, html_body, text_body)
+
+
+def send_wifi_registration_confirmation(user_email, first_name, ssid, mac_address, unregister_url):
+    """
+    Send WiFi registration confirmation with unregister link
+    
+    Args:
+        user_email: User's email address
+        first_name: User's first name
+        ssid: WiFi SSID name
+        mac_address: Device MAC address
+        unregister_url: URL to unregister this device
+    """
+    subject = f"WiFi Registration Confirmed - {ssid}"
+    
+    html_body = f"""
+    <html>
+    <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+        <div style="max-width: 600px; margin: 0 auto;">
+            <div style="background: linear-gradient(135deg, #1a2b1a 0%, #263326 100%); color: white; padding: 30px; text-align: center;">
+                <h1 style="margin: 0; font-size: 28px;">Welcome to {ssid}!</h1>
+            </div>
+            
+            <div style="padding: 30px; background-color: #f9f9f9;">
+                <h2 style="color: #263326; margin-top: 0;">Hi {first_name},</h2>
+                
+                <p style="font-size: 16px;">Your device has been successfully registered on our WiFi network.</p>
+                
+                <div style="background-color: white; border-left: 4px solid #263326; padding: 15px; margin: 20px 0;">
+                    <p style="margin: 0;"><strong>Network:</strong> {ssid}</p>
+                    <p style="margin: 10px 0 0; font-family: monospace; font-size: 14px;"><strong>Device:</strong> {mac_address}</p>
+                </div>
+                
+                <div style="background-color: #e8f5e9; border-left: 4px solid #4caf50; padding: 15px; margin: 20px 0;">
+                    <p style="margin: 0; color: #2e7d32;"><strong>✓ Your connection is now active</strong></p>
+                    <p style="margin: 10px 0 0; font-size: 14px;">Please wait up to 30 seconds for your device to renew its connection and gain full internet access.</p>
+                </div>
+                
+                <h3 style="color: #263326; margin-top: 30px;">Need to Remove This Device?</h3>
+                
+                <p>If you no longer use this device or need to unregister it for any reason, you can do so at any time:</p>
+                
+                <p style="text-align: center; margin: 25px 0;">
+                    <a href="{unregister_url}" 
+                       style="background-color: #d32f2f; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: bold;">
+                        Unregister This Device
+                    </a>
+                </p>
+                
+                <p style="font-size: 13px; color: #666; border-top: 1px solid #ddd; padding-top: 15px; margin-top: 30px;">
+                    <strong>Important:</strong> Clicking the unregister link will immediately revoke network access for this device. 
+                    This prevents someone else from impersonating your device using its MAC address.
+                </p>
+                
+                <p style="font-size: 13px; color: #666;">
+                    If you experience any connection issues, please contact the network administrator.
+                </p>
+            </div>
+            
+            <div style="background-color: #263326; color: #999; padding: 20px; text-align: center; font-size: 12px;">
+                <p style="margin: 0;">This is an automated message from Blackfriars Network Access Portal</p>
+                <p style="margin: 10px 0 0;">If you didn't register this device, please contact us immediately</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    
+    text_body = f"""
+    Welcome to {ssid}!
+    
+    Hi {first_name},
+    
+    Your device has been successfully registered on our WiFi network.
+    
+    Network: {ssid}
+    Device: {mac_address}
+    
+    ✓ Your connection is now active
+    
+    Please wait up to 30 seconds for your device to renew its connection and gain full internet access.
+    
+    
+    NEED TO REMOVE THIS DEVICE?
+    
+    If you no longer use this device or need to unregister it for any reason, visit:
+    
+    {unregister_url}
+    
+    Important: Clicking the unregister link will immediately revoke network access for this device.
+    This prevents someone else from impersonating your device using its MAC address.
+    
+    If you experience any connection issues, please contact the network administrator.
+    
+    ---
+    This is an automated message from Blackfriars Network Access Portal
+    If you didn't register this device, please contact us immediately
     """
     
     return send_email(user_email, subject, html_body, text_body)

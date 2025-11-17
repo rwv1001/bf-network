@@ -13,7 +13,8 @@ import secrets
 
 from models import db, User, Device, RegistrationRequest, VlanMapping, Setting
 from radius_coa import send_coa_disconnect, send_coa_change
-from email_service import send_verification_email, send_admin_notification
+from email_service import send_verification_email, send_admin_notification, send_wifi_registration_confirmation
+from kea_integration import get_kea_client
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -27,6 +28,10 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # Initialize database
 db.init_app(app)
+
+# Initialize Kea client for WiFi registrations
+KEA_SOCKET = os.getenv('KEA_CONTROL_SOCKET', '/kea/leases/kea4-ctrl-socket')
+kea_client = None
 
 # Initialize login manager
 login_manager = LoginManager()
@@ -45,6 +50,20 @@ VLAN_MAP = {
     'restricted': int(os.getenv('VLAN_RESTRICTED', 90)),
     'unregistered': int(os.getenv('VLAN_UNREGISTERED', 99)),
 }
+
+# VLANs that auto-approve registrations (no admin approval needed)
+AUTO_APPROVE_VLANS = [
+    VLAN_MAP['guests'],      # 40 - Guests auto-approved
+    VLAN_MAP['students'],    # 30 - Students auto-approved
+    VLAN_MAP['volunteers'],  # 60 - Volunteers auto-approved
+]
+
+# VLANs that require admin approval
+ADMIN_APPROVAL_VLANS = [
+    VLAN_MAP['friars'],      # 10 - Friars need approval
+    VLAN_MAP['staff'],       # 20 - Staff need approval
+    VLAN_MAP['contractors'], # 50 - Contractors need approval
+]
 
 # Admin user (simple single admin - extend for multiple admins)
 ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'admin')
@@ -78,13 +97,64 @@ def load_user(user_id):
 
 
 def get_client_mac():
-    """Extract MAC address from request - may need adjustment based on your setup"""
-    # Try common headers set by captive portal redirects
+    """
+    Extract MAC address from Kea lease database based on client IP.
+    This works for both WiFi and wired connections.
+    """
+    # Try common headers set by captive portal redirects first
     mac = request.headers.get('X-Client-MAC')
     if not mac:
         mac = request.args.get('mac')
     if not mac:
         mac = request.form.get('mac')
+    
+    # If not in headers/params, query Kea lease database
+    if not mac:
+        ip_address = get_client_ip()
+        if ip_address:
+            try:
+                # Read Kea lease file directly (CSV format)
+                # Format: address,hwaddr,client_id,valid_lifetime,expire,subnet_id,fqdn_fwd,fqdn_rev,hostname,state,user_context,pool_id
+                lease_files = [
+                    '/kea/leases/kea-leases4.csv',
+                    '/kea/leases/kea-leases4.csv.2',
+                    '/kea/leases/kea-leases4.csv.1'
+                ]
+                
+                # Try each lease file until we find the MAC
+                for lease_file in lease_files:
+                    try:
+                        with open(lease_file, 'r') as f:
+                            for line in f:
+                                # Skip header line
+                                if line.startswith('address,'):
+                                    continue
+                                    
+                                fields = line.strip().split(',')
+                                if len(fields) >= 2:
+                                    lease_ip = fields[0]
+                                    lease_hwaddr = fields[1]
+                                    
+                                    # Check if IP matches
+                                    if lease_ip == ip_address:
+                                        # MAC address is in fields[1] in format xx:xx:xx:xx:xx:xx
+                                        mac = lease_hwaddr
+                                        logger.info(f"Found MAC {mac} for IP {ip_address} in Kea lease file {lease_file}")
+                                        break
+                        
+                        # If we found the MAC, stop searching other files
+                        if mac:
+                            break
+                            
+                    except FileNotFoundError:
+                        logger.debug(f"Kea lease file not found: {lease_file}")
+                        continue
+                    except Exception as e:
+                        logger.error(f"Error reading Kea lease file {lease_file}: {e}")
+                        continue
+                        
+            except Exception as e:
+                logger.error(f"Error looking up MAC address: {e}")
     
     # Normalize MAC address format
     if mac:
@@ -103,10 +173,81 @@ def get_client_ip():
     return request.remote_addr
 
 
+def detect_connection_type(ip_address):
+    """
+    Detect if connection is WiFi or wired based on source IP/VLAN.
+    
+    Wired connections: VLAN 99 (registration VLAN for wired MAC auth)
+    WiFi connections: All other VLANs (10, 20, 30, 40, 50, 60, 70, 90)
+    
+    Args:
+        ip_address: Client IP address
+        
+    Returns:
+        tuple: (connection_type, vlan_id, ssid)
+    """
+    if not ip_address:
+        return ('unknown', None, None)
+    
+    # Extract VLAN from IP (192.168.XX.YYY)
+    parts = ip_address.split('.')
+    if len(parts) == 4:
+        try:
+            vlan_id = int(parts[2])
+            
+            # VLAN 99 = wired (registration VLAN)
+            if vlan_id == 99:
+                return ('wired', vlan_id, None)
+            
+            # Map VLAN to SSID (WiFi)
+            ssid_map = {
+                10: 'Blackfriars-Friars',
+                20: 'Blackfriars-Staff',
+                30: 'Blackfriars-Students',
+                40: 'Blackfriars-Guests',
+                50: 'Blackfriars-Contractors',
+                60: 'Blackfriars-Volunteers',
+                70: 'Blackfriars-IoT',
+                90: 'Blackfriars-Restricted'
+            }
+            
+            if vlan_id in ssid_map:
+                return ('wifi', vlan_id, ssid_map[vlan_id])
+        except ValueError:
+            pass
+    
+    return ('unknown', None, None)
+
+
+def get_kea():
+    """Get or initialize Kea client"""
+    global kea_client
+    if kea_client is None:
+        try:
+            kea_client = get_kea_client(control_socket=KEA_SOCKET)
+        except Exception as e:
+            logger.error(f"Failed to initialize Kea client: {e}")
+            kea_client = None
+    return kea_client
+
+
 @app.route('/')
 def index():
     """Landing page - redirect to registration"""
     return redirect(url_for('register'))
+
+
+# Captive portal detection endpoints
+@app.route('/generate_204')
+@app.route('/gen_204')
+@app.route('/ncsi.txt')
+@app.route('/connecttest.txt')
+@app.route('/hotspot-detect.html')
+@app.route('/library/test/success.html')
+def captive_portal_detection():
+    """Respond to captive portal detection probes"""
+    # Return HTTP 200 with redirect to trigger captive portal login
+    return redirect(url_for('register')), 302
 
 
 @app.route('/portal')
@@ -167,6 +308,14 @@ def register():
             device.ip_address = ip_address
             device.last_seen = datetime.now()
             
+            # Detect connection type
+            connection_type, vlan_id, ssid = detect_connection_type(ip_address)
+            device.connection_type = connection_type
+            device.ssid = ssid
+            device.current_vlan = vlan_id
+            
+            logger.info(f"Connection type: {connection_type}, VLAN: {vlan_id}, SSID: {ssid}")
+            
             # Check if email verification is required
             email_verification_required = Setting.get_value('email_verification_required', 'false') == 'true'
             
@@ -176,7 +325,6 @@ def register():
                 timeout_minutes = int(Setting.get_value('verification_timeout_minutes', '15'))
                 device.verification_expires_at = datetime.now() + timedelta(minutes=timeout_minutes)
                 device.registration_status = 'pending'
-                device.current_vlan = VLAN_MAP['unregistered']
                 
                 # Send verification email
                 verification_url = f"{os.getenv('PORTAL_URL')}/verify?token={device.verification_token}"
@@ -190,51 +338,170 @@ def register():
             else:
                 # Immediately activate
                 device.registration_status = 'active'
-                target_vlan = VLAN_MAP.get(user.status, VLAN_MAP['guests'])
-                device.current_vlan = target_vlan
+                
+                # Generate unregister token for WiFi devices
+                if connection_type == 'wifi':
+                    device.unregister_token = secrets.token_urlsafe(32)
                 
                 if not existing_device:
                     db.session.add(device)
                 db.session.commit()
                 
-                # Send RADIUS CoA to move device to correct VLAN
-                success = send_coa_change(mac_address, target_vlan)
-                
-                if success:
-                    flash(f'Registration successful! You now have {user.status} access.', 'success')
-                    logger.info(f"Device {mac_address} registered for user {email} on VLAN {target_vlan}")
+                # Handle registration based on connection type
+                if connection_type == 'wifi':
+                    # WiFi: Register in Kea DHCP
+                    kea = get_kea()
+                    if kea:
+                        success = kea.register_mac(
+                            mac=mac_address,
+                            vlan=vlan_id,
+                            hostname=f"{first_name.lower()}-{last_name.lower()}-device"
+                        )
+                        
+                        if success:
+                            # Send WiFi confirmation email with unregister link
+                            unregister_url = f"{os.getenv('PORTAL_URL')}/unregister/{device.unregister_token}"
+                            send_wifi_registration_confirmation(
+                                user_email=email,
+                                first_name=first_name,
+                                ssid=ssid,
+                                mac_address=mac_address,
+                                unregister_url=unregister_url
+                            )
+                            
+                            flash(f'Registration successful! Connecting you to {ssid}... (wait 30 seconds)', 'success')
+                            logger.info(f"WiFi device {mac_address} registered for {email} on VLAN {vlan_id}")
+                        else:
+                            flash('Registration saved, but there was an issue with DHCP setup. Please contact support.', 'warning')
+                    else:
+                        flash('DHCP service unavailable. Please contact support.', 'error')
+                        
+                elif connection_type == 'wired':
+                    # Wired: Use RADIUS CoA
+                    target_vlan = VLAN_MAP.get(user.status, VLAN_MAP['guests'])
+                    device.current_vlan = target_vlan
+                    db.session.commit()
+                    
+                    success = send_coa_change(mac_address, target_vlan)
+                    
+                    if success:
+                        flash(f'Registration successful! You now have {user.status} access.', 'success')
+                        logger.info(f"Wired device {mac_address} registered for {email} on VLAN {target_vlan}")
+                    else:
+                        flash('Registration saved, but there was an issue updating your network access. Please contact support.', 'warning')
                 else:
-                    flash('Registration saved, but there was an issue updating your network access. Please contact support.', 'warning')
-                
+                    flash('Registration saved, but connection type could not be determined. Please contact support.', 'warning')
+            
             db.session.commit()
             return redirect(url_for('status'))
             
         else:
-            # Scenario 2: User not pre-authorized - create registration request
-            reg_request = RegistrationRequest(
-                mac_address=mac_address,
-                email=email,
-                first_name=first_name,
-                last_name=last_name,
-                phone_number=phone_number,
-                ip_address=ip_address,
-                user_agent=request.headers.get('User-Agent', ''),
-                approval_token=secrets.token_urlsafe(32)
-            )
+            # Scenario 2: User not pre-authorized - create registration request OR auto-approve
+            connection_type, vlan_id, ssid = detect_connection_type(ip_address)
             
-            db.session.add(reg_request)
-            db.session.commit()
+            # Check if this VLAN allows auto-approval
+            if vlan_id in AUTO_APPROVE_VLANS:
+                # Auto-approve: Create user and device immediately
+                logger.info(f"Auto-approving registration for {email} on VLAN {vlan_id} (auto-approve VLAN)")
+                
+                # Create new user with guest status
+                user = User(
+                    email=email,
+                    first_name=first_name,
+                    last_name=last_name,
+                    phone_number=phone_number,
+                    status='guests',  # Default status for auto-approved users
+                    begin_date=datetime.now().date(),
+                    expiry_date=datetime.now().date() + timedelta(days=30)  # 30 days access
+                )
+                db.session.add(user)
+                db.session.flush()  # Get user.id
+                
+                # Create device
+                device = Device(
+                    mac_address=mac_address,
+                    user_id=user.id,
+                    ip_address=ip_address,
+                    registration_status='active',
+                    current_vlan=vlan_id,
+                    connection_type=connection_type,
+                    ssid=ssid,
+                    last_seen=datetime.now()
+                )
+                
+                # Generate unregister token for WiFi
+                if connection_type == 'wifi':
+                    device.unregister_token = secrets.token_urlsafe(32)
+                
+                db.session.add(device)
+                db.session.commit()
+                
+                # Register in Kea DHCP for WiFi
+                if connection_type == 'wifi':
+                    kea = get_kea()
+                    if kea:
+                        success = kea.register_mac(
+                            mac=mac_address,
+                            vlan=vlan_id,
+                            hostname=f"{first_name.lower()}-{last_name.lower()}-device"
+                        )
+                        
+                        if success:
+                            # Send WiFi confirmation email
+                            unregister_url = f"{os.getenv('PORTAL_URL')}/unregister/{device.unregister_token}"
+                            send_wifi_registration_confirmation(
+                                user_email=email,
+                                first_name=first_name,
+                                ssid=ssid,
+                                mac_address=mac_address,
+                                unregister_url=unregister_url
+                            )
+                            
+                            flash(f'Registration successful! You now have guest access. Reconnecting... (wait 30 seconds)', 'success')
+                            logger.info(f"Auto-approved WiFi device {mac_address} for {email} on VLAN {vlan_id}")
+                        else:
+                            flash('Registration saved, but there was an issue with DHCP setup. Please contact support.', 'warning')
+                    else:
+                        flash('DHCP service unavailable. Please contact support.', 'error')
+                else:
+                    # Wired connection - use RADIUS CoA
+                    success = send_coa_change(mac_address, vlan_id)
+                    if success:
+                        flash(f'Registration successful! You now have guest access.', 'success')
+                        logger.info(f"Auto-approved wired device {mac_address} for {email} on VLAN {vlan_id}")
+                    else:
+                        flash('Registration saved, but there was an issue updating network access. Please contact support.', 'warning')
+                
+                return redirect(url_for('status'))
             
-            # Send notification to admin
-            approval_url = f"{os.getenv('PORTAL_URL')}/admin/approve/{reg_request.approval_token}"
-            send_admin_notification(reg_request, approval_url)
-            
-            flash('Your registration request has been submitted. An administrator will review it shortly and contact you.', 'info')
-            logger.info(f"Registration request submitted for {email} from MAC {mac_address}")
-            
-            return redirect(url_for('status'))
+            else:
+                # Admin approval required
+                logger.info(f"Creating registration request for {email} on VLAN {vlan_id} (admin approval required)")
+                
+                reg_request = RegistrationRequest(
+                    mac_address=mac_address,
+                    email=email,
+                    first_name=first_name,
+                    last_name=last_name,
+                    phone_number=phone_number,
+                    ip_address=ip_address,
+                    user_agent=request.headers.get('User-Agent', ''),
+                    approval_token=secrets.token_urlsafe(32)
+                )
+                
+                db.session.add(reg_request)
+                db.session.commit()
+                
+                # Send notification to admin
+                approval_url = f"{os.getenv('PORTAL_URL')}/admin/approve/{reg_request.approval_token}"
+                send_admin_notification(reg_request, approval_url)
+                
+                flash('Your registration request has been submitted. An administrator will review it shortly and contact you.', 'info')
+                logger.info(f"Registration request submitted for {email} from MAC {mac_address}")
+                
+                return redirect(url_for('status'))
     
-    return render_template('register.html')
+    return render_template('register.html', detected_mac=mac_address, detected_ip=ip_address)
 
 
 @app.route('/verify')
@@ -297,6 +564,61 @@ def status():
     return render_template('status.html', device=device)
 
 
+@app.route('/unregister/<token>')
+def unregister(token):
+    """
+    Unregister a device via email token.
+    
+    This removes the device from the registered pool and returns it to
+    the walled garden (unregistered pool) with restricted access.
+    """
+    if not token:
+        flash('Invalid unregister link', 'error')
+        return redirect(url_for('index'))
+    
+    # Find device by unregister token
+    device = Device.query.filter_by(unregister_token=token).first()
+    
+    if not device:
+        flash('Invalid or expired unregister token', 'error')
+        return redirect(url_for('index'))
+    
+    mac_address = device.mac_address
+    connection_type = device.connection_type
+    vlan_id = device.current_vlan
+    user_email = device.user.email if device.user else 'Unknown'
+    
+    # Remove device registration
+    if connection_type == 'wifi':
+        # Remove from Kea
+        kea = get_kea()
+        if kea and vlan_id:
+            success = kea.unregister_mac(mac=mac_address, vlan=vlan_id)
+            if success:
+                logger.info(f"WiFi device {mac_address} unregistered from VLAN {vlan_id}")
+            else:
+                logger.warning(f"Failed to unregister WiFi device {mac_address} from Kea")
+    
+    elif connection_type == 'wired':
+        # Send RADIUS CoA to move to unregistered VLAN
+        success = send_coa_change(mac_address, VLAN_MAP['unregistered'])
+        if success:
+            logger.info(f"Wired device {mac_address} moved to unregistered VLAN")
+        else:
+            logger.warning(f"Failed to send CoA for wired device {mac_address}")
+    
+    # Update device status in database
+    device.registration_status = 'unregistered'
+    device.unregister_token = None  # Invalidate token
+    device.user_id = None  # Remove user association
+    db.session.commit()
+    
+    flash(f'Device {mac_address} has been unregistered successfully. Access has been restricted.', 'success')
+    logger.info(f"Device {mac_address} (user: {user_email}) unregistered via email token")
+    
+    return render_template('status.html', device=device, unregistered=True)
+
+
 @app.route('/admin/login', methods=['GET', 'POST'])
 def admin_login():
     """Admin login page"""
@@ -325,16 +647,25 @@ def admin_logout():
 @app.route('/admin')
 @login_required
 def admin_dashboard():
-    """Admin dashboard"""
+    """Admin dashboard with MAC address management"""
+    # Get all devices with user info, ordered by first_seen (most recent first)
+    devices = db.session.query(Device, User).join(User, Device.user_id == User.id, isouter=True)\
+        .order_by(Device.first_seen.desc()).all()
+    
+    # Get pending registration requests
+    pending_requests = RegistrationRequest.query.filter_by(status='pending')\
+        .order_by(RegistrationRequest.submitted_at.desc()).all()
+    
+    # Get all users
     users = User.query.order_by(User.email).all()
-    devices = Device.query.order_by(Device.registered_at.desc()).limit(50).all()
-    pending_requests = RegistrationRequest.query.filter_by(status='pending').order_by(RegistrationRequest.submitted_at.desc()).all()
     
     return render_template('admin_dashboard.html', 
+                         devices=devices,
                          users=users, 
-                         devices=devices, 
                          pending_requests=pending_requests,
-                         vlan_map=VLAN_MAP)
+                         vlan_map=VLAN_MAP,
+                         auto_approve_vlans=AUTO_APPROVE_VLANS,
+                         admin_approval_vlans=ADMIN_APPROVAL_VLANS)
 
 
 @app.route('/admin/users/add', methods=['GET', 'POST'])
@@ -511,6 +842,85 @@ def admin_disconnect_device(device_id):
         flash(f'Device {device.mac_address} disconnected', 'success')
     else:
         flash('Failed to disconnect device', 'error')
+    
+    return redirect(url_for('admin_dashboard'))
+
+
+@app.route('/admin/device/<int:device_id>/block', methods=['POST'])
+@login_required
+def admin_block_device(device_id):
+    """Block a device"""
+    device = Device.query.get_or_404(device_id)
+    
+    device.registration_status = 'blocked'
+    device.current_vlan = VLAN_MAP['restricted']  # Move to restricted VLAN
+    db.session.commit()
+    
+    # Disconnect from network if WiFi
+    if device.connection_type == 'wifi':
+        kea = get_kea()
+        if kea:
+            kea.unregister_mac(device.mac_address, device.current_vlan)
+    elif device.connection_type == 'wired':
+        send_coa_disconnect(device.mac_address)
+    
+    flash(f'Device {device.mac_address} has been blocked', 'success')
+    logger.info(f"Admin blocked device {device.mac_address}")
+    
+    return redirect(url_for('admin_dashboard'))
+
+
+@app.route('/admin/device/<int:device_id>/unblock', methods=['POST'])
+@login_required
+def admin_unblock_device(device_id):
+    """Unblock a device"""
+    device = Device.query.get_or_404(device_id)
+    user = User.query.get(device.user_id)
+    
+    device.registration_status = 'active'
+    
+    # Determine target VLAN based on user status
+    if user:
+        device.current_vlan = VLAN_MAP.get(user.status, VLAN_MAP['guests'])
+    else:
+        device.current_vlan = VLAN_MAP['guests']
+    
+    db.session.commit()
+    
+    # Re-register in network
+    if device.connection_type == 'wifi':
+        kea = get_kea()
+        if kea:
+            kea.register_mac(device.mac_address, device.current_vlan)
+    elif device.connection_type == 'wired':
+        send_coa_change(device.mac_address, device.current_vlan)
+    
+    flash(f'Device {device.mac_address} has been unblocked', 'success')
+    logger.info(f"Admin unblocked device {device.mac_address}")
+    
+    return redirect(url_for('admin_dashboard'))
+
+
+@app.route('/admin/device/<int:device_id>/delete', methods=['POST'])
+@login_required
+def admin_delete_device(device_id):
+    """Delete a device registration"""
+    device = Device.query.get_or_404(device_id)
+    mac_address = device.mac_address
+    
+    # Unregister from network first
+    if device.connection_type == 'wifi':
+        kea = get_kea()
+        if kea:
+            kea.unregister_mac(device.mac_address, device.current_vlan)
+    elif device.connection_type == 'wired':
+        send_coa_disconnect(device.mac_address)
+    
+    db.session.delete(device)
+    db.session.commit()
+    
+    flash(f'Device {mac_address} has been deleted', 'success')
+    logger.info(f"Admin deleted device {mac_address}")
     
     return redirect(url_for('admin_dashboard'))
 

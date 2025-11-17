@@ -1,0 +1,27 @@
+# FreeRADIUS clients configuration
+# This template file uses environment variables
+
+# HP 5130 switch - MAC authentication
+client hp5130-switch {
+	ipaddr = 192.168.99.1
+	secret = ${RADIUS_SECRET}
+	shortname = hp5130
+	nas_type = other
+}
+
+# Captive Portal - CoA requests
+client captive-portal {
+	ipaddr = 192.168.99.4
+	secret = ${RADIUS_SECRET}
+	shortname = portal
+	
+	# This client can send CoA/Disconnect requests
+	# Note: The CoA server is configured in sites-available/coa
+}
+
+# Localhost for testing
+client localhost {
+	ipaddr = 127.0.0.1
+	secret = ${RADIUS_SECRET}
+	shortname = localhost
+}

@@ -38,11 +38,11 @@ services:
       DATABASE_URL: postgresql://portal_user:${DB_PASSWORD:-change_this_password}@127.0.0.1:5432/captive_portal
       REDIS_URL: redis://127.0.0.1:6379/0
       SECRET_KEY: ${SECRET_KEY:-change_this_secret_key_in_production}
-      SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
-      SMTP_PORT: ${SMTP_PORT:-587}
-      SMTP_USER: ${SMTP_USER}
-      SMTP_PASSWORD: ${SMTP_PASSWORD}
-      SMTP_FROM: ${SMTP_FROM}
+      # Microsoft Graph API (for email via Microsoft 365)
+      GRAPH_TENANT_ID: ${GRAPH_TENANT_ID}
+      GRAPH_CLIENT_ID: ${GRAPH_CLIENT_ID}
+      GRAPH_CLIENT_SECRET: ${GRAPH_CLIENT_SECRET}
+      GRAPH_FROM_EMAIL: ${GRAPH_FROM_EMAIL}
       ADMIN_EMAIL: ${ADMIN_EMAIL}
       RADIUS_SECRET: ${RADIUS_SECRET:-testing123}
       RADIUS_SERVER: ${RADIUS_SERVER:-192.168.99.4}
@@ -50,8 +50,11 @@ services:
       PORTAL_URL: ${PORTAL_URL:-http://portal.local}
       EMAIL_VERIFICATION_REQUIRED: ${EMAIL_VERIFICATION_REQUIRED:-false}
       VERIFICATION_TIMEOUT_MINUTES: ${VERIFICATION_TIMEOUT_MINUTES:-15}
+      KEA_CONTROL_SOCKET: ${KEA_CONTROL_SOCKET:-/kea/sockets/kea4-ctrl-socket}
     volumes:
       - ./app:/app
+      - ../kea/leases:/kea/leases:ro  # Access to Kea lease database
+      - ../kea/sockets:/kea/sockets:ro  # Access to Kea control socket
     network_mode: host
     depends_on:
       db:

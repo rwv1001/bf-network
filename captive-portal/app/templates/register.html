@@ -6,6 +6,15 @@
 
 {% block subheader %}
 <p style="margin-top: 10px; opacity: 0.9;">Please provide your information to access the network</p>
+{% if detected_mac %}
+<p style="margin-top: 10px; font-size: 0.9em; color: #4CAF50;">
+    ✓ Detected: IP {{ detected_ip }} | MAC {{ detected_mac }}
+</p>
+{% else %}
+<p style="margin-top: 10px; font-size: 0.9em; color: #f44336;">
+    ⚠ Could not detect MAC address - please contact administrator
+</p>
+{% endif %}
 {% endblock %}
 
 {% block content %}

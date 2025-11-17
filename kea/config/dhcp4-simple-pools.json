@@ -1,0 +1,231 @@
+{
+  "Dhcp4": {
+    "interfaces-config": {
+      "interfaces": [ "eth0.10", "eth0.20", "eth0.30", "eth0.40", "eth0.50", "eth0.60", "eth0.70", "eth0.99" ]
+    },
+    "control-socket": {
+      "socket-type": "unix",
+      "socket-name": "/tmp/kea-dhcp4.sock"
+    },
+    "lease-database": {
+      "type": "memfile",
+      "persist": true,
+      "name": "/kea/leases/kea-leases4.csv"
+    },
+    "hosts-database": {
+      "type": "memfile",
+      "persist": true,
+      "name": "/kea/data/kea-reservations.json"
+    },
+    "hooks-libraries": [
+      {
+        "library": "/usr/local/lib/kea/hooks/libdhcp_lease_cmds.so"
+      },
+      {
+        "library": "/usr/local/lib/kea/hooks/libdhcp_host_cmds.so"
+      }
+    ],
+    "subnet4": [
+      {
+        "id": 10,
+        "subnet": "192.168.10.0/24",
+        "pools": [
+          {
+            "pool": "192.168.10.5 - 192.168.10.127",
+            "comment": "Registered devices (24h lease)"
+          },
+          {
+            "pool": "192.168.10.128 - 192.168.10.191",
+            "comment": "Newly unregistered devices (60s lease)"
+          },
+          {
+            "pool": "192.168.10.192 - 192.168.10.254",
+            "comment": "Old unregistered devices (24h lease)"
+          }
+        ],
+        "option-data": [
+          { "name": "routers", "data": "192.168.10.1" },
+          { "name": "domain-name-servers", "data": "192.168.10.4" }
+        ],
+        "reservations-global": false,
+        "reservations-in-subnet": true,
+        "reservations-out-of-pool": false,
+        "valid-lifetime": 86400
+      },
+      {
+        "id": 20,
+        "subnet": "192.168.20.0/24",
+        "pools": [
+          {
+            "pool": "192.168.20.5 - 192.168.20.127"
+          },
+          {
+            "pool": "192.168.20.128 - 192.168.20.191"
+          },
+          {
+            "pool": "192.168.20.192 - 192.168.20.254"
+          }
+        ],
+        "option-data": [
+          { "name": "routers", "data": "192.168.20.1" },
+          { "name": "domain-name-servers", "data": "192.168.20.4" }
+        ],
+        "reservations-global": false,
+        "reservations-in-subnet": true,
+        "reservations-out-of-pool": false,
+        "valid-lifetime": 86400
+      },
+      {
+        "id": 30,
+        "subnet": "192.168.30.0/24",
+        "pools": [
+          {
+            "pool": "192.168.30.5 - 192.168.30.127"
+          },
+          {
+            "pool": "192.168.30.128 - 192.168.30.191"
+          },
+          {
+            "pool": "192.168.30.192 - 192.168.30.254"
+          }
+        ],
+        "option-data": [
+          { "name": "routers", "data": "192.168.30.1" },
+          { "name": "domain-name-servers", "data": "192.168.30.4" }
+        ],
+        "reservations-global": false,
+        "reservations-in-subnet": true,
+        "reservations-out-of-pool": false,
+        "valid-lifetime": 86400
+      },
+      {
+        "id": 40,
+        "subnet": "192.168.40.0/24",
+        "pools": [
+          {
+            "pool": "192.168.40.5 - 192.168.40.127"
+          },
+          {
+            "pool": "192.168.40.128 - 192.168.40.191"
+          },
+          {
+            "pool": "192.168.40.192 - 192.168.40.254"
+          }
+        ],
+        "option-data": [
+          { "name": "routers", "data": "192.168.40.1" },
+          { "name": "domain-name-servers", "data": "192.168.40.4" }
+        ],
+        "reservations-global": false,
+        "reservations-in-subnet": true,
+        "reservations-out-of-pool": false,
+        "valid-lifetime": 86400
+      },
+      {
+        "id": 50,
+        "subnet": "192.168.50.0/24",
+        "pools": [
+          {
+            "pool": "192.168.50.5 - 192.168.50.127"
+          },
+          {
+            "pool": "192.168.50.128 - 192.168.50.191"
+          },
+          {
+            "pool": "192.168.50.192 - 192.168.50.254"
+          }
+        ],
+        "option-data": [
+          { "name": "routers", "data": "192.168.50.1" },
+          { "name": "domain-name-servers", "data": "192.168.50.4" }
+        ],
+        "reservations-global": false,
+        "reservations-in-subnet": true,
+        "reservations-out-of-pool": false,
+        "valid-lifetime": 86400
+      },
+      {
+        "id": 60,
+        "subnet": "192.168.60.0/24",
+        "pools": [
+          {
+            "pool": "192.168.60.5 - 192.168.60.127"
+          },
+          {
+            "pool": "192.168.60.128 - 192.168.60.191"
+          },
+          {
+            "pool": "192.168.60.192 - 192.168.60.254"
+          }
+        ],
+        "option-data": [
+          { "name": "routers", "data": "192.168.60.1" },
+          { "name": "domain-name-servers", "data": "192.168.60.4" }
+        ],
+        "reservations-global": false,
+        "reservations-in-subnet": true,
+        "reservations-out-of-pool": false,
+        "valid-lifetime": 86400
+      },
+      {
+        "id": 70,
+        "subnet": "192.168.70.0/24",
+        "pools": [
+          {
+            "pool": "192.168.70.5 - 192.168.70.127"
+          },
+          {
+            "pool": "192.168.70.128 - 192.168.70.191"
+          },
+          {
+            "pool": "192.168.70.192 - 192.168.70.254"
+          }
+        ],
+        "option-data": [
+          { "name": "routers", "data": "192.168.70.1" },
+          { "name": "domain-name-servers", "data": "192.168.70.4" }
+        ],
+        "reservations-global": false,
+        "reservations-in-subnet": true,
+        "reservations-out-of-pool": false,
+        "valid-lifetime": 86400
+      },
+      {
+        "id": 99,
+        "subnet": "192.168.99.0/24",
+        "pools": [
+          {
+            "pool": "192.168.99.5 - 192.168.99.127"
+          },
+          {
+            "pool": "192.168.99.128 - 192.168.99.191"
+          },
+          {
+            "pool": "192.168.99.192 - 192.168.99.254"
+          }
+        ],
+        "option-data": [
+          { "name": "routers", "data": "192.168.99.1" },
+          { "name": "domain-name-servers", "data": "192.168.99.4" }
+        ],
+        "reservations-global": false,
+        "reservations-in-subnet": true,
+        "reservations-out-of-pool": false,
+        "valid-lifetime": 86400
+      }
+    ],
+    "loggers": [
+      {
+        "name": "kea-dhcp4",
+        "output-options": [
+          {
+            "output": "stdout",
+            "flush": true
+          }
+        ],
+        "severity": "INFO",
+        "debuglevel": 0
+      }
+    ]
+  }
+}

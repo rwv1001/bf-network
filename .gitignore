@@ -1,18 +1,77 @@
-# logs & temp
+# Logs & temporary files
 *.log
 *.tmp
-# python caches (remove if not needed)
+*.swp
+*.swo
+*~
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+venv/
+venv-*/
+env/
+ENV/
+
 # OS cruft
 Thumbs.db
 .DS_Store
+.directory
+*.bak
+
+# Environment files with secrets (CRITICAL)
+.env
+**/.env
+*.env
+.env.*
+!.env.example
+
+# Database data
+data/
+**/data/
+postgres/
+**/postgres/
+captive-portal/data/postgres/
+
+# Kea DHCP sensitive files
 kea/leases/*
+kea/sockets/*
+!kea/leases/.gitkeep
+!kea/sockets/.gitkeep
+
+# FreeRADIUS sensitive files
+freeradius/raddb/clients.conf
+freeradius/raddb/mods-config/files/authorize
+!freeradius/raddb/clients.conf.example
+!freeradius/raddb/clients.conf.template
+
+# Nginx Proxy Manager
 npm/data/
 npm/letsencrypt/
-data/
-letsencrypt/
-**/keys.json
 npmold/
-freeradius/raddb/mods-config/files/authorize
-freeradius/raddb/clients.conf
+**/keys.json
+
+# SSL certificates and keys
+*.key
+*.pem
+*.crt
+*.csr
+!**/cacert.pem
+letsencrypt/
+
+# Backup files
+*.backup
+*.bak
+*-backup.*
+
+# Session data
+sessions/
+**/sessions/

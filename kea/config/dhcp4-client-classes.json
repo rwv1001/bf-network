@@ -7,7 +7,7 @@
     
     "control-socket": {
       "socket-type": "unix",
-      "socket-name": "/kea/sockets/kea4-ctrl-socket"
+      "socket-name": "/kea/leases/kea4-ctrl-socket"
     },
     
     "lease-database": {
@@ -15,6 +15,10 @@
       "persist": true,
       "name": "/kea/leases/kea-leases4.csv",
       "lfc-interval": 3600
+    },
+    
+    "hosts-database": {
+      "type": "memfile"
     },
     
     "expired-leases-processing": {
@@ -40,7 +44,7 @@
     "client-classes": [
       {
         "name": "REGISTERED",
-        "test": "member('KNOWN')",
+        "test": "pkt.reserved('user-context') and pkt.reserved('user-context').contains('registered') and pkt.reserved('user-context').get('registered') == true",
         "option-data": [
           {
             "name": "domain-name-servers",
@@ -51,7 +55,7 @@
       },
       {
         "name": "UNREGISTERED",
-        "test": "not member('KNOWN')",
+        "test": "not member('REGISTERED')",
         "option-data": [
           {
             "name": "domain-name-servers",

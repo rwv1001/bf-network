@@ -7,10 +7,11 @@
 {% block content %}
 <div style="margin-bottom: 30px;">
     <a href="{{ url_for('admin_add_user') }}" class="btn">+ Add New User</a>
+    <a href="{{ url_for('admin_logout') }}" class="btn" style="background: #999; margin-left: 10px;">Logout</a>
 </div>
 
 {% if pending_requests %}
-<h2 style="margin-top: 30px; color: #667eea;">Pending Registration Requests ({{ pending_requests|length }})</h2>
+<h2 style="margin-top: 30px; color: #667eea;">⏳ Pending Registration Requests ({{ pending_requests|length }})</h2>
 
 <table>
     <thead>
@@ -20,6 +21,7 @@
             <th>Email</th>
             <th>Phone</th>
             <th>MAC Address</th>
+            <th>IP Address</th>
             <th>Actions</th>
         </tr>
     </thead>
@@ -27,10 +29,11 @@
         {% for req in pending_requests %}
         <tr>
             <td>{{ req.submitted_at.strftime('%Y-%m-%d %H:%M') }}</td>
-            <td>{{ req.full_name }}</td>
+            <td>{{ req.first_name }} {{ req.last_name }}</td>
             <td>{{ req.email }}</td>
             <td>{{ req.phone_number or '-' }}</td>
             <td style="font-family: monospace; font-size: 12px;">{{ req.mac_address }}</td>
+            <td>{{ req.ip_address or '-' }}</td>
             <td>
                 <a href="{{ url_for('admin_approve_request', token=req.approval_token) }}" class="btn btn-success btn-small">
                     Review
@@ -79,52 +82,132 @@
     </tbody>
 </table>
 
-<h2 style="margin-top: 40px; color: #667eea;">Recent Devices (Last 50)</h2>
+<h2 style="margin-top: 40px; color: #667eea;">📱 All Registered Devices ({{ devices|length }})</h2>
 
 <table>
     <thead>
         <tr>
-            <th>Registered</th>
             <th>MAC Address</th>
-            <th>User</th>
+            <th>Name</th>
+            <th>Email</th>
             <th>Status</th>
+            <th>Type</th>
+            <th>SSID</th>
+            <th>First Seen</th>
+            <th>Last Seen</th>
             <th>VLAN</th>
-            <th>IP</th>
             <th>Actions</th>
         </tr>
     </thead>
     <tbody>
-        {% for device in devices %}
-        <tr>
-            <td>{{ device.registered_at.strftime('%Y-%m-%d %H:%M') }}</td>
+        {% for device, user in devices %}
+        <tr {% if device.registration_status == 'blocked' %}style="background: #ffebee;"{% endif %}>
             <td style="font-family: monospace; font-size: 12px;">{{ device.mac_address }}</td>
-            <td>{{ device.user.email if device.user else '-' }}</td>
+            <td>
+                {% if user %}
+                    {{ user.first_name }} {{ user.last_name }}
+                {% else %}
+                    <em style="color: #999;">Unknown</em>
+                {% endif %}
+            </td>
+            <td>
+                {% if user %}
+                    {{ user.email }}
+                {% else %}
+                    <em style="color: #999;">-</em>
+                {% endif %}
+            </td>
             <td>
                 <span class="badge 
                     {% if device.registration_status == 'active' %}badge-active
                     {% elif device.registration_status == 'pending' %}badge-pending
+                    {% elif device.registration_status == 'blocked' %}badge-restricted
                     {% else %}badge-restricted{% endif %}">
                     {{ device.registration_status }}
                 </span>
             </td>
-            <td>{{ device.current_vlan or '-' }}</td>
-            <td>{{ device.ip_address or '-' }}</td>
+            <td>
+                {% if device.connection_type == 'wifi' %}
+                    📶 WiFi
+                {% elif device.connection_type == 'wired' %}
+                    🔌 Wired
+                {% else %}
+                    {{ device.connection_type or '-' }}
+                {% endif %}
+            </td>
+            <td>{{ device.ssid or '-' }}</td>
+            <td style="font-size: 12px;">
+                {% if device.first_seen %}
+                    {{ device.first_seen.strftime('%Y-%m-%d %H:%M') }}
+                {% else %}
+                    <em style="color: #999;">-</em>
+                {% endif %}
+            </td>
+            <td style="font-size: 12px;">
+                {% if device.last_seen %}
+                    {{ device.last_seen.strftime('%Y-%m-%d %H:%M') }}
+                {% else %}
+                    <em style="color: #999;">-</em>
+                {% endif %}
+            </td>
+            <td>VLAN {{ device.current_vlan }}</td>
             <td>
                 {% if device.registration_status == 'active' %}
-                <form method="POST" action="{{ url_for('admin_disconnect_device', device_id=device.id) }}" style="display: inline;">
+                <form method="POST" action="{{ url_for('admin_block_device', device_id=device.id) }}" style="display: inline;">
                     <button type="submit" class="btn btn-danger btn-small" 
-                            onclick="return confirm('Disconnect this device?')">
-                        Disconnect
+                            onclick="return confirm('Block this device? It will be moved to restricted VLAN.')">
+                        🚫 Block
+                    </button>
+                </form>
+                {% elif device.registration_status == 'blocked' %}
+                <form method="POST" action="{{ url_for('admin_unblock_device', device_id=device.id) }}" style="display: inline;">
+                    <button type="submit" class="btn btn-success btn-small">
+                        ✅ Unblock
                     </button>
                 </form>
                 {% endif %}
+                <form method="POST" action="{{ url_for('admin_delete_device', device_id=device.id) }}" style="display: inline; margin-left: 5px;">
+                    <button type="submit" class="btn btn-small" 
+                            style="background: #999;"
+                            onclick="return confirm('Delete this device? It will be disconnected from the network.')">
+                        🗑️ Delete
+                    </button>
+                </form>
             </td>
         </tr>
         {% endfor %}
     </tbody>
 </table>
 
-<h3 style="margin-top: 40px; color: #667eea;">VLAN Mappings</h3>
+<h3 style="margin-top: 40px; color: #667eea;">ℹ️ VLAN Configuration</h3>
+
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
+    <div style="background: #e8f5e9; padding: 15px; border-radius: 8px; border-left: 4px solid #4CAF50;">
+        <h4 style="margin: 0 0 10px 0; color: #2E7D32;">✅ Auto-Approve VLANs</h4>
+        <ul style="margin: 0; padding-left: 20px;">
+            {% for vlan in auto_approve_vlans %}
+                <li>VLAN {{ vlan }} - {% for name, id in vlan_map.items() %}{% if id == vlan %}{{ name.title() }}{% endif %}{% endfor %}</li>
+            {% endfor %}
+        </ul>
+        <p style="margin: 10px 0 0 0; font-size: 13px; color: #666;">
+            Users on these VLANs are automatically registered and granted access.
+        </p>
+    </div>
+    
+    <div style="background: #fff3e0; padding: 15px; border-radius: 8px; border-left: 4px solid #FF9800;">
+        <h4 style="margin: 0 0 10px 0; color: #E65100;">⏳ Admin Approval VLANs</h4>
+        <ul style="margin: 0; padding-left: 20px;">
+            {% for vlan in admin_approval_vlans %}
+                <li>VLAN {{ vlan }} - {% for name, id in vlan_map.items() %}{% if id == vlan %}{{ name.title() }}{% endif %}{% endfor %}</li>
+            {% endfor %}
+        </ul>
+        <p style="margin: 10px 0 0 0; font-size: 13px; color: #666;">
+            Users on these VLANs require administrator approval before access is granted.
+        </p>
+    </div>
+</div>
+
+<h3 style="margin-top: 30px; color: #667eea;">VLAN Mappings</h3>
 <table>
     <thead>
         <tr>

@@ -8,11 +8,16 @@ services:
     # host networking keeps UDP 1812/1813 simple
     network_mode: host
 
+    # Environment variables (loaded from .env file)
+    environment:
+      - RADIUS_SECRET=${RADIUS_SECRET}
+
     volumes:
-      - ./raddb/clients.conf:/etc/raddb/clients.conf:ro
+      - ./raddb/clients.conf.template:/etc/raddb/clients.conf.template:ro
       - ./raddb/mods-config/files/authorize:/etc/raddb/mods-config/files/authorize:ro
       - ./raddb/sites-available/coa:/etc/raddb/sites-available/coa:ro
       - ./raddb/sites-enabled/coa:/etc/raddb/sites-enabled/coa:ro
+      - ./entrypoint.sh:/entrypoint.sh:ro
 
-    # for first run, start in debug; later remove "-X"
-    command: [ "radiusd", "-X", "-f" ]
+    # Use custom entrypoint to substitute environment variables
+    entrypoint: ["/entrypoint.sh"]
