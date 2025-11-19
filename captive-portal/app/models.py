@@ -19,7 +19,7 @@ class User(db.Model):
     phone_number = db.Column(db.String(20))
     status = db.Column(db.String(50), nullable=False)  # friars, staff, students, etc.
     begin_date = db.Column(db.Date, nullable=False)
-    expiry_date = db.Column(db.Date, nullable=False)
+    expiry_date = db.Column(db.Date, nullable=True)  # NULL means no expiration
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     created_by = db.Column(db.String(100), default='admin')
@@ -38,6 +38,9 @@ class User(db.Model):
     @property
     def is_active(self):
         today = datetime.now().date()
+        # No expiry date means permanent access
+        if self.expiry_date is None:
+            return self.begin_date <= today
         return self.begin_date <= today <= self.expiry_date
 
 
@@ -95,6 +98,7 @@ class RegistrationRequest(db.Model):
     first_name = db.Column(db.String(100))
     last_name = db.Column(db.String(100))
     phone_number = db.Column(db.String(20))
+    device_type = db.Column(db.String(50))  # laptop, phone, tablet, etc.
     ip_address = db.Column(db.String(45))
     user_agent = db.Column(db.Text)
     status = db.Column(db.String(50), default='pending')

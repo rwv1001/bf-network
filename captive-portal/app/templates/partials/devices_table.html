@@ -1,0 +1,192 @@
+<div id="devices-table-section">
+<h2 style="margin-top: 40px; color: #667eea;">📱 All Registered Devices ({{ devices_total }})</h2>
+
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 15px; flex-wrap: wrap;">
+    <form onsubmit="return searchTable('devices', this.devices_search.value);" style="display: flex; gap: 10px; align-items: center; flex: 1; min-width: 300px;">
+        <input type="text" name="devices_search" value="{{ devices_search }}" 
+               placeholder="Search devices..." 
+               style="flex: 1; padding: 8px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+        <button type="submit" class="btn btn-small" style="white-space: nowrap;">Search</button>
+        {% if devices_search %}
+        <a href="#" onclick="return searchTable('devices', '');" class="btn btn-small" style="background: #999; white-space: nowrap;">Clear</a>
+        {% endif %}
+    </form>
+    <div style="display: flex; gap: 5px; align-items: center;">
+        <label for="devices_per_page" style="font-size: 14px; white-space: nowrap;">Show:</label>
+        <select name="devices_per_page" id="devices_per_page" onchange="changePerPage('devices', this.value)"
+                style="padding: 6px 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+            <option value="10" {% if devices_per_page == 10 %}selected{% endif %}>10</option>
+            <option value="25" {% if devices_per_page == 25 %}selected{% endif %}>25</option>
+            <option value="50" {% if devices_per_page == 50 %}selected{% endif %}>50</option>
+            <option value="100" {% if devices_per_page == 100 %}selected{% endif %}>100</option>
+        </select>
+    </div>
+</div>
+
+<div class="table-responsive">
+<table>
+    <thead>
+        <tr>
+            <th class="sortable {% if devices_sort == 'mac_address' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('devices', 'mac_address');">
+                    MAC Address
+                    <span class="sort-arrow">{% if devices_sort == 'mac_address' %}{{ '▼' if devices_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if devices_sort == 'device_name' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('devices', 'device_name');">
+                    Device Type
+                    <span class="sort-arrow">{% if devices_sort == 'device_name' %}{{ '▼' if devices_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if devices_sort == 'user_name' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('devices', 'user_name');">
+                    Name
+                    <span class="sort-arrow">{% if devices_sort == 'user_name' %}{{ '▼' if devices_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if devices_sort == 'user_email' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('devices', 'user_email');">
+                    Email
+                    <span class="sort-arrow">{% if devices_sort == 'user_email' %}{{ '▼' if devices_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if devices_sort == 'registration_status' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('devices', 'registration_status');">
+                    Status
+                    <span class="sort-arrow">{% if devices_sort == 'registration_status' %}{{ '▼' if devices_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if devices_sort == 'connection_type' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('devices', 'connection_type');">
+                    Connection
+                    <span class="sort-arrow">{% if devices_sort == 'connection_type' %}{{ '▼' if devices_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if devices_sort == 'ssid' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('devices', 'ssid');">
+                    SSID
+                    <span class="sort-arrow">{% if devices_sort == 'ssid' %}{{ '▼' if devices_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if devices_sort == 'first_seen' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('devices', 'first_seen');">
+                    First Seen
+                    <span class="sort-arrow">{% if devices_sort == 'first_seen' %}{{ '▼' if devices_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if devices_sort == 'last_seen' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('devices', 'last_seen');">
+                    Last Seen
+                    <span class="sort-arrow">{% if devices_sort == 'last_seen' %}{{ '▼' if devices_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if devices_sort == 'current_vlan' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('devices', 'current_vlan');">
+                    VLAN
+                    <span class="sort-arrow">{% if devices_sort == 'current_vlan' %}{{ '▼' if devices_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for device, user in devices %}
+        <tr {% if device.registration_status == 'blocked' %}style="background: #ffebee;"{% endif %}>
+            <td style="font-family: monospace; font-size: 12px;">{{ device.mac_address }}</td>
+            <td>{{ device.device_name or '-' }}</td>
+            <td>
+                {% if user %}
+                    {{ user.first_name }} {{ user.last_name }}
+                {% else %}
+                    <em style="color: #999;">Unknown</em>
+                {% endif %}
+            </td>
+            <td>
+                {% if user %}
+                    {{ user.email }}
+                {% else %}
+                    <em style="color: #999;">-</em>
+                {% endif %}
+            </td>
+            <td>
+                <span class="badge 
+                    {% if device.registration_status == 'active' %}badge-active
+                    {% elif device.registration_status == 'pending' %}badge-pending
+                    {% elif device.registration_status == 'blocked' %}badge-restricted
+                    {% else %}badge-restricted{% endif %}">
+                    {{ device.registration_status }}
+                </span>
+            </td>
+            <td>
+                {% if device.connection_type == 'wifi' %}
+                    📶 WiFi
+                {% elif device.connection_type == 'wired' %}
+                    🔌 Wired
+                {% else %}
+                    {{ device.connection_type or '-' }}
+                {% endif %}
+            </td>
+            <td>{{ device.ssid or '-' }}</td>
+            <td style="font-size: 12px;">
+                {% if device.first_seen %}
+                    {{ device.first_seen.strftime('%Y-%m-%d %H:%M') }}
+                {% else %}
+                    <em style="color: #999;">-</em>
+                {% endif %}
+            </td>
+            <td style="font-size: 12px;">
+                {% if device.last_seen %}
+                    {{ device.last_seen.strftime('%Y-%m-%d %H:%M') }}
+                {% else %}
+                    <em style="color: #999;">-</em>
+                {% endif %}
+            </td>
+            <td>VLAN {{ device.current_vlan }}</td>
+            <td>
+                {% if device.registration_status == 'active' %}
+                <form method="POST" action="{{ url_for('admin_block_device', device_id=device.id) }}" style="display: inline;">
+                    <button type="submit" class="btn btn-danger btn-small" 
+                            onclick="return confirm('Block this device? It will be moved to restricted VLAN.')">
+                        🚫 Block
+                    </button>
+                </form>
+                {% elif device.registration_status == 'blocked' %}
+                <form method="POST" action="{{ url_for('admin_unblock_device', device_id=device.id) }}" style="display: inline;">
+                    <button type="submit" class="btn btn-success btn-small">
+                        ✅ Unblock
+                    </button>
+                </form>
+                {% endif %}
+                <form method="POST" action="{{ url_for('admin_delete_device', device_id=device.id) }}" style="display: inline; margin-left: 5px;">
+                    <button type="submit" class="btn btn-small" 
+                            style="background: #999;"
+                            onclick="return confirm('Delete this device? It will be disconnected from the network.')">
+                        🗑️ Delete
+                    </button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+</div>
+
+{% if devices_pages > 1 %}
+<div style="display: flex; justify-content: center; align-items: center; gap: 10px; margin-top: 15px; flex-wrap: wrap;">
+    {% if devices_page > 1 %}
+    <a href="#" onclick="return changeTablePage('devices', 1);" class="btn btn-small">« First</a>
+    <a href="#" onclick="return changeTablePage('devices', {{ devices_page - 1 }});" class="btn btn-small">‹ Prev</a>
+    {% endif %}
+    
+    <span style="padding: 8px 15px; background: #f5f5f5; border-radius: 4px; font-size: 14px;">
+        Page {{ devices_page }} of {{ devices_pages }}
+    </span>
+    
+    {% if devices_page < devices_pages %}
+    <a href="#" onclick="return changeTablePage('devices', {{ devices_page + 1 }});" class="btn btn-small">Next ›</a>
+    <a href="#" onclick="return changeTablePage('devices', {{ devices_pages }});" class="btn btn-small">Last »</a>
+    {% endif %}
+</div>
+{% endif %}
+</div>

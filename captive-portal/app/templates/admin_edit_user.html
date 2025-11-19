@@ -51,8 +51,11 @@
     </div>
     
     <div class="form-group">
-        <label for="expiry_date">Expiry Date <span class="required">*</span></label>
-        <input type="date" id="expiry_date" name="expiry_date" required value="{{ user.expiry_date }}">
+        <label for="expiry_date">Expiry Date</label>
+        <input type="date" id="expiry_date" name="expiry_date" value="{{ user.expiry_date or '' }}">
+        <small style="color: #666; font-size: 13px; display: block; margin-top: 5px;">
+            Leave blank for permanent access (no expiration)
+        </small>
     </div>
     
     <div class="form-group">

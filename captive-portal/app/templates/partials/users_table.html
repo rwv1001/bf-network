@@ -1,0 +1,110 @@
+<div id="users-table-section">
+<h2 style="margin-top: 40px; color: #667eea;">👥 Authorized Users ({{ users_total }})</h2>
+
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 15px; flex-wrap: wrap;">
+    <form onsubmit="return searchTable('users', this.users_search.value);" style="display: flex; gap: 10px; align-items: center; flex: 1; min-width: 300px;">
+        <input type="text" name="users_search" value="{{ users_search }}" 
+               placeholder="Search users..." 
+               style="flex: 1; padding: 8px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+        <button type="submit" class="btn btn-small" style="white-space: nowrap;">Search</button>
+        {% if users_search %}
+        <a href="#" onclick="return searchTable('users', '');" class="btn btn-small" style="background: #999; white-space: nowrap;">Clear</a>
+        {% endif %}
+    </form>
+    <div style="display: flex; gap: 5px; align-items: center;">
+        <label for="users_per_page" style="font-size: 14px; white-space: nowrap;">Show:</label>
+        <select name="users_per_page" id="users_per_page" onchange="changePerPage('users', this.value)"
+                style="padding: 6px 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+            <option value="10" {% if users_per_page == 10 %}selected{% endif %}>10</option>
+            <option value="25" {% if users_per_page == 25 %}selected{% endif %}>25</option>
+            <option value="50" {% if users_per_page == 50 %}selected{% endif %}>50</option>
+            <option value="100" {% if users_per_page == 100 %}selected{% endif %}>100</option>
+        </select>
+    </div>
+</div>
+
+<div class="table-responsive">
+<table>
+    <thead>
+        <tr>
+            <th class="sortable {% if users_sort == 'email' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('users', 'email');">
+                    Email
+                    <span class="sort-arrow">{% if users_sort == 'email' %}{{ '▼' if users_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if users_sort == 'first_name' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('users', 'first_name');">
+                    Name
+                    <span class="sort-arrow">{% if users_sort == 'first_name' %}{{ '▼' if users_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if users_sort == 'status' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('users', 'status');">
+                    Status
+                    <span class="sort-arrow">{% if users_sort == 'status' %}{{ '▼' if users_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if users_sort == 'begin_date' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('users', 'begin_date');">
+                    Dates
+                    <span class="sort-arrow">{% if users_sort == 'begin_date' %}{{ '▼' if users_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th>MAC Address(es)</th>
+            <th>Devices</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for user in users %}
+        <tr>
+            <td>{{ user.email }}</td>
+            <td>{{ user.full_name }}</td>
+            <td>
+                <span class="badge {% if user.is_active %}badge-active{% else %}badge-restricted{% endif %}">
+                    {{ user.status }}
+                </span>
+            </td>
+            <td style="font-size: 12px;">
+                {{ user.begin_date }} to {% if user.expiry_date %}{{ user.expiry_date }}{% else %}<em>Never</em>{% endif %}
+            </td>
+            <td style="font-family: monospace; font-size: 11px;">
+                {% if user.devices %}
+                    {% for device in user.devices %}
+                        <div style="margin: 2px 0;">{{ device.mac_address }}</div>
+                    {% endfor %}
+                {% else %}
+                    <em style="color: #999;">-</em>
+                {% endif %}
+            </td>
+            <td>{{ user.devices|length }}</td>
+            <td>
+                <a href="{{ url_for('admin_edit_user', user_id=user.id) }}" class="btn btn-small">
+                    Edit
+                </a>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+</div>
+
+{% if users_pages > 1 %}
+<div style="display: flex; justify-content: center; align-items: center; gap: 10px; margin-top: 15px; flex-wrap: wrap;">
+    {% if users_page > 1 %}
+    <a href="#" onclick="return changeTablePage('users', 1);" class="btn btn-small">« First</a>
+    <a href="#" onclick="return changeTablePage('users', {{ users_page - 1 }});" class="btn btn-small">‹ Prev</a>
+    {% endif %}
+    
+    <span style="padding: 8px 15px; background: #f5f5f5; border-radius: 4px; font-size: 14px;">
+        Page {{ users_page }} of {{ users_pages }}
+    </span>
+    
+    {% if users_page < users_pages %}
+    <a href="#" onclick="return changeTablePage('users', {{ users_page + 1 }});" class="btn btn-small">Next ›</a>
+    <a href="#" onclick="return changeTablePage('users', {{ users_pages }});" class="btn btn-small">Last »</a>
+    {% endif %}
+</div>
+{% endif %}
+</div>

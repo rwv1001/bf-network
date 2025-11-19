@@ -4,23 +4,275 @@
 
 {% block header %}Admin Dashboard{% endblock %}
 
+{% block extra_head %}
+<style>
+    /* Override container max-width for admin dashboard */
+    .container {
+        max-width: 95%;
+        margin: 20px auto;
+    }
+    
+    /* Responsive table wrapper */
+    .table-responsive {
+        overflow-x: auto;
+        margin: 20px 0;
+        border-radius: 5px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    
+    .table-responsive table {
+        min-width: 800px;
+        margin: 0;
+    }
+    
+    /* Sortable column headers */
+    th.sortable {
+        cursor: pointer;
+        user-select: none;
+        position: relative;
+        padding-right: 25px;
+    }
+    
+    th.sortable:hover {
+        background: #e0e0e0 !important;
+    }
+    
+    th.sortable a {
+        color: inherit;
+        text-decoration: none;
+        display: block;
+        padding: 12px 25px 12px 12px;
+        margin: -12px -25px -12px -12px;
+    }
+    
+    th.sortable .sort-arrow {
+        position: absolute;
+        right: 8px;
+        top: 50%;
+        transform: translateY(-50%);
+        font-size: 11px;
+        color: #999;
+        font-weight: bold;
+    }
+    
+    th.sortable.active {
+        background: #d4e3fc !important;
+    }
+    
+    th.sortable.active .sort-arrow {
+        color: #667eea;
+    }
+    
+    /* Alternating column shading */
+    th:nth-child(odd) {
+        background: #e8e8e8;
+    }
+    
+    th:nth-child(even) {
+        background: #f5f5f5;
+    }
+    
+    td:nth-child(odd) {
+        background: #fafafa;
+    }
+    
+    td:nth-child(even) {
+        background: #ffffff;
+    }
+    
+    /* Row striping for better readability */
+    tr:nth-child(even) td {
+        filter: brightness(0.97);
+    }
+    
+    tr:hover td:nth-child(odd) {
+        background: #fffbea !important;
+    }
+    
+    tr:hover td:nth-child(even) {
+        background: #fffef5 !important;
+    }
+</style>
+<script>
+// Generic function to update a table via AJAX
+function updateTable(tableType, params = {}) {
+    // Get current URL parameters
+    const urlParams = new URLSearchParams(window.location.search);
+    
+    // Update with new parameters
+    Object.keys(params).forEach(key => {
+        urlParams.set(key, params[key]);
+    });
+    
+    // Add parameter to indicate which table is being updated (for AJAX detection)
+    urlParams.set('ajax_table', tableType);
+    
+    // Build URL for fetch (with ajax_table parameter)
+    const fetchUrl = window.location.pathname + '?' + urlParams.toString();
+    
+    // Remove ajax_table from URL that we'll show in browser
+    urlParams.delete('ajax_table');
+    const displayUrl = window.location.pathname + '?' + urlParams.toString();
+    
+    // Update URL without reload
+    history.pushState({}, '', displayUrl);
+    
+    // Fetch updated table content
+    fetch(fetchUrl, {
+        headers: {
+            'X-Requested-With': 'XMLHttpRequest'
+        }
+    })
+    .then(response => response.text())
+    .then(html => {
+        // Parse the response HTML
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(html, 'text/html');
+        
+        // Replace the appropriate table section
+        const tableId = tableType + '-table-section';
+        const newSection = doc.getElementById(tableId);
+        const currentSection = document.getElementById(tableId);
+        
+        if (newSection && currentSection) {
+            currentSection.innerHTML = newSection.innerHTML;
+        }
+    })
+    .catch(error => {
+        console.error('Error updating table:', error);
+        // Fall back to full page reload on error
+        window.location.href = displayUrl;
+    });
+    
+    return false;
+}
+
+function sortTable(tableType, sortField) {
+    event.preventDefault();
+    
+    // Get current URL parameters
+    const urlParams = new URLSearchParams(window.location.search);
+    
+    // Determine current sort order for this field
+    const currentSort = urlParams.get(tableType + '_sort');
+    const currentOrder = urlParams.get(tableType + '_order') || 'asc';
+    
+    // Toggle order if clicking same field, otherwise default to desc
+    let newOrder = 'desc';
+    if (currentSort === sortField && currentOrder === 'desc') {
+        newOrder = 'asc';
+    }
+    
+    // Update table with new sort parameters
+    updateTable(tableType, {
+        [tableType + '_sort']: sortField,
+        [tableType + '_order']: newOrder,
+        [tableType + '_page']: '1'
+    });
+    
+    return false;
+}
+
+function changeTablePage(tableType, page) {
+    event.preventDefault();
+    updateTable(tableType, {
+        [tableType + '_page']: page
+    });
+    return false;
+}
+
+function changePerPage(tableType, perPage) {
+    updateTable(tableType, {
+        [tableType + '_per_page']: perPage,
+        [tableType + '_page']: '1'
+    });
+    return false;
+}
+
+function searchTable(tableType, searchValue) {
+    event.preventDefault();
+    updateTable(tableType, {
+        [tableType + '_search']: searchValue,
+        [tableType + '_page']: '1'
+    });
+    return false;
+}
+</script>
+{% endblock %}
+
 {% block content %}
 <div style="margin-bottom: 30px;">
     <a href="{{ url_for('admin_add_user') }}" class="btn">+ Add New User</a>
+    <a href="{{ url_for('admin_vlan_config') }}" class="btn" style="background: #764ba2; margin-left: 10px;">⚙️ VLAN Configuration</a>
     <a href="{{ url_for('admin_logout') }}" class="btn" style="background: #999; margin-left: 10px;">Logout</a>
 </div>
 
-{% if pending_requests %}
-<h2 style="margin-top: 30px; color: #667eea;">⏳ Pending Registration Requests ({{ pending_requests|length }})</h2>
+{% if pending_total > 0 %}
+<div id="pending-table-section">
+<h2 style="margin-top: 30px; color: #667eea;">⏳ Pending Registration Requests ({{ pending_total }})</h2>
 
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 15px; flex-wrap: wrap;">
+    <form onsubmit="return searchTable('pending', this.pending_search.value);" style="display: flex; gap: 10px; align-items: center; flex: 1; min-width: 300px;">
+        <input type="text" name="pending_search" value="{{ pending_search }}" 
+               placeholder="Search pending requests..." 
+               style="flex: 1; padding: 8px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+        <button type="submit" class="btn btn-small" style="white-space: nowrap;">Search</button>
+        {% if pending_search %}
+        <a href="#" onclick="return searchTable('pending', '');" class="btn btn-small" style="background: #999; white-space: nowrap;">Clear</a>
+        {% endif %}
+    </form>
+    <div style="display: flex; gap: 5px; align-items: center;">
+        <label for="pending_per_page" style="font-size: 14px; white-space: nowrap;">Show:</label>
+        <select name="pending_per_page" id="pending_per_page" onchange="changePerPage('pending', this.value)"
+                style="padding: 6px 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+            <option value="10" {% if pending_per_page == 10 %}selected{% endif %}>10</option>
+            <option value="25" {% if pending_per_page == 25 %}selected{% endif %}>25</option>
+            <option value="50" {% if pending_per_page == 50 %}selected{% endif %}>50</option>
+            <option value="100" {% if pending_per_page == 100 %}selected{% endif %}>100</option>
+        </select>
+    </div>
+</div>
+
+<div class="table-responsive">
 <table>
     <thead>
         <tr>
-            <th>Submitted</th>
-            <th>Name</th>
-            <th>Email</th>
-            <th>Phone</th>
-            <th>MAC Address</th>
+            <th class="sortable {% if pending_sort == 'submitted_at' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('pending', 'submitted_at');">
+                    Submitted
+                    <span class="sort-arrow">{% if pending_sort == 'submitted_at' %}{{ '▼' if pending_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if pending_sort == 'name' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('pending', 'name');">
+                    Name
+                    <span class="sort-arrow">{% if pending_sort == 'name' %}{{ '▼' if pending_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if pending_sort == 'email' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('pending', 'email');">
+                    Email
+                    <span class="sort-arrow">{% if pending_sort == 'email' %}{{ '▼' if pending_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if pending_sort == 'phone' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('pending', 'phone');">
+                    Phone
+                    <span class="sort-arrow">{% if pending_sort == 'phone' %}{{ '▼' if pending_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if pending_sort == 'device_type' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('pending', 'device_type');">
+                    Device Type
+                    <span class="sort-arrow">{% if pending_sort == 'device_type' %}{{ '▼' if pending_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if pending_sort == 'mac_address' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('pending', 'mac_address');">
+                    MAC Address
+                    <span class="sort-arrow">{% if pending_sort == 'mac_address' %}{{ '▼' if pending_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
             <th>IP Address</th>
             <th>Actions</th>
         </tr>
@@ -28,32 +280,115 @@
     <tbody>
         {% for req in pending_requests %}
         <tr>
-            <td>{{ req.submitted_at.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td style="padding: 8px;">
+                {% for timestamp in req.submitted_times %}
+                    <div style="margin: 4px 0;">{{ timestamp.strftime('%Y-%m-%d %H:%M') }}</div>
+                {% endfor %}
+            </td>
             <td>{{ req.first_name }} {{ req.last_name }}</td>
             <td>{{ req.email }}</td>
             <td>{{ req.phone_number or '-' }}</td>
+            <td>{{ req.device_type or '-' }}</td>
             <td style="font-family: monospace; font-size: 12px;">{{ req.mac_address }}</td>
-            <td>{{ req.ip_address or '-' }}</td>
+            <td style="padding: 8px;">
+                {% if req.ip_addresses %}
+                    {% for ip in req.ip_addresses %}
+                        <div style="margin: 4px 0;">{{ ip }}</div>
+                    {% endfor %}
+                {% else %}
+                    -
+                {% endif %}
+            </td>
             <td>
                 <a href="{{ url_for('admin_approve_request', token=req.approval_token) }}" class="btn btn-success btn-small">
                     Review
                 </a>
+                {% if req.submitted_times|length > 1 %}
+                    <span style="display: block; font-size: 11px; color: #666; margin-top: 4px;">
+                        ({{ req.submitted_times|length }} attempts)
+                    </span>
+                {% endif %}
             </td>
         </tr>
         {% endfor %}
     </tbody>
 </table>
+</div>
+
+{% if pending_pages > 1 %}
+<div style="display: flex; justify-content: center; align-items: center; gap: 10px; margin-top: 15px; flex-wrap: wrap;">
+    {% if pending_page > 1 %}
+    <a href="#" onclick="return changeTablePage('pending', 1);" class="btn btn-small">« First</a>
+    <a href="#" onclick="return changeTablePage('pending', {{ pending_page - 1 }});" class="btn btn-small">‹ Prev</a>
+    {% endif %}
+    
+    <span style="padding: 8px 15px; background: #f5f5f5; border-radius: 4px; font-size: 14px;">
+        Page {{ pending_page }} of {{ pending_pages }}
+    </span>
+    
+    {% if pending_page < pending_pages %}
+    <a href="#" onclick="return changeTablePage('pending', {{ pending_page + 1 }});" class="btn btn-small">Next ›</a>
+    <a href="#" onclick="return changeTablePage('pending', {{ pending_pages }});" class="btn btn-small">Last »</a>
+    {% endif %}
+</div>
+{% endif %}
+</div>
 {% endif %}
 
-<h2 style="margin-top: 40px; color: #667eea;">Authorized Users ({{ users|length }})</h2>
+<div id="users-table-section">
+<h2 style="margin-top: 40px; color: #667eea;">👥 Authorized Users ({{ users_total }})</h2>
 
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 15px; flex-wrap: wrap;">
+    <form onsubmit="return searchTable('users', this.users_search.value);" style="display: flex; gap: 10px; align-items: center; flex: 1; min-width: 300px;">
+        <input type="text" name="users_search" value="{{ users_search }}" 
+               placeholder="Search users..." 
+               style="flex: 1; padding: 8px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+        <button type="submit" class="btn btn-small" style="white-space: nowrap;">Search</button>
+        {% if users_search %}
+        <a href="#" onclick="return searchTable('users', '');" class="btn btn-small" style="background: #999; white-space: nowrap;">Clear</a>
+        {% endif %}
+    </form>
+    <div style="display: flex; gap: 5px; align-items: center;">
+        <label for="users_per_page" style="font-size: 14px; white-space: nowrap;">Show:</label>
+        <select name="users_per_page" id="users_per_page" onchange="changePerPage('users', this.value)"
+                style="padding: 6px 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+            <option value="10" {% if users_per_page == 10 %}selected{% endif %}>10</option>
+            <option value="25" {% if users_per_page == 25 %}selected{% endif %}>25</option>
+            <option value="50" {% if users_per_page == 50 %}selected{% endif %}>50</option>
+            <option value="100" {% if users_per_page == 100 %}selected{% endif %}>100</option>
+        </select>
+    </div>
+</div>
+
+<div class="table-responsive">
 <table>
     <thead>
         <tr>
-            <th>Email</th>
-            <th>Name</th>
-            <th>Status</th>
-            <th>Dates</th>
+            <th class="sortable {% if users_sort == 'email' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('users', 'email');">
+                    Email
+                    <span class="sort-arrow">{% if users_sort == 'email' %}{{ '▼' if users_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if users_sort == 'first_name' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('users', 'first_name');">
+                    Name
+                    <span class="sort-arrow">{% if users_sort == 'first_name' %}{{ '▼' if users_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if users_sort == 'status' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('users', 'status');">
+                    Status
+                    <span class="sort-arrow">{% if users_sort == 'status' %}{{ '▼' if users_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if users_sort == 'begin_date' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('users', 'begin_date');">
+                    Dates
+                    <span class="sort-arrow">{% if users_sort == 'begin_date' %}{{ '▼' if users_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th>MAC Address(es)</th>
             <th>Devices</th>
             <th>Actions</th>
         </tr>
@@ -69,7 +404,16 @@
                 </span>
             </td>
             <td style="font-size: 12px;">
-                {{ user.begin_date }} to {{ user.expiry_date }}
+                {{ user.begin_date }} to {% if user.expiry_date %}{{ user.expiry_date }}{% else %}<em>Never</em>{% endif %}
+            </td>
+            <td style="font-family: monospace; font-size: 11px;">
+                {% if user.devices %}
+                    {% for device in user.devices %}
+                        <div style="margin: 2px 0;">{{ device.mac_address }}</div>
+                    {% endfor %}
+                {% else %}
+                    <em style="color: #999;">-</em>
+                {% endif %}
             </td>
             <td>{{ user.devices|length }}</td>
             <td>
@@ -81,21 +425,116 @@
         {% endfor %}
     </tbody>
 </table>
+</div>
 
-<h2 style="margin-top: 40px; color: #667eea;">📱 All Registered Devices ({{ devices|length }})</h2>
+{% if users_pages > 1 %}
+<div style="display: flex; justify-content: center; align-items: center; gap: 10px; margin-top: 15px; flex-wrap: wrap;">
+    {% if users_page > 1 %}
+    <a href="#" onclick="return changeTablePage('users', 1);" class="btn btn-small">« First</a>
+    <a href="#" onclick="return changeTablePage('users', {{ users_page - 1 }});" class="btn btn-small">‹ Prev</a>
+    {% endif %}
+    
+    <span style="padding: 8px 15px; background: #f5f5f5; border-radius: 4px; font-size: 14px;">
+        Page {{ users_page }} of {{ users_pages }}
+    </span>
+    
+    {% if users_page < users_pages %}
+    <a href="#" onclick="return changeTablePage('users', {{ users_page + 1 }});" class="btn btn-small">Next ›</a>
+    <a href="#" onclick="return changeTablePage('users', {{ users_pages }});" class="btn btn-small">Last »</a>
+    {% endif %}
+</div>
+{% endif %}
+</div>
 
+<div id="devices-table-section">
+<h2 style="margin-top: 40px; color: #667eea;">📱 All Registered Devices ({{ devices_total }})</h2>
+
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 15px; flex-wrap: wrap;">
+    <form onsubmit="return searchTable('devices', this.devices_search.value);" style="display: flex; gap: 10px; align-items: center; flex: 1; min-width: 300px;">
+        <input type="text" name="devices_search" value="{{ devices_search }}" 
+               placeholder="Search devices..." 
+               style="flex: 1; padding: 8px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+        <button type="submit" class="btn btn-small" style="white-space: nowrap;">Search</button>
+        {% if devices_search %}
+        <a href="#" onclick="return searchTable('devices', '');" class="btn btn-small" style="background: #999; white-space: nowrap;">Clear</a>
+        {% endif %}
+    </form>
+    <div style="display: flex; gap: 5px; align-items: center;">
+        <label for="devices_per_page" style="font-size: 14px; white-space: nowrap;">Show:</label>
+        <select name="devices_per_page" id="devices_per_page" onchange="changePerPage('devices', this.value)"
+                style="padding: 6px 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+            <option value="10" {% if devices_per_page == 10 %}selected{% endif %}>10</option>
+            <option value="25" {% if devices_per_page == 25 %}selected{% endif %}>25</option>
+            <option value="50" {% if devices_per_page == 50 %}selected{% endif %}>50</option>
+            <option value="100" {% if devices_per_page == 100 %}selected{% endif %}>100</option>
+        </select>
+    </div>
+</div>
+
+<div class="table-responsive">
 <table>
     <thead>
         <tr>
-            <th>MAC Address</th>
-            <th>Name</th>
-            <th>Email</th>
-            <th>Status</th>
-            <th>Type</th>
-            <th>SSID</th>
-            <th>First Seen</th>
-            <th>Last Seen</th>
-            <th>VLAN</th>
+            <th class="sortable {% if devices_sort == 'mac_address' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('devices', 'mac_address');">
+                    MAC Address
+                    <span class="sort-arrow">{% if devices_sort == 'mac_address' %}{{ '▼' if devices_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if devices_sort == 'device_name' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('devices', 'device_name');">
+                    Device Type
+                    <span class="sort-arrow">{% if devices_sort == 'device_name' %}{{ '▼' if devices_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if devices_sort == 'user_name' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('devices', 'user_name');">
+                    Name
+                    <span class="sort-arrow">{% if devices_sort == 'user_name' %}{{ '▼' if devices_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if devices_sort == 'user_email' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('devices', 'user_email');">
+                    Email
+                    <span class="sort-arrow">{% if devices_sort == 'user_email' %}{{ '▼' if devices_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if devices_sort == 'registration_status' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('devices', 'registration_status');">
+                    Status
+                    <span class="sort-arrow">{% if devices_sort == 'registration_status' %}{{ '▼' if devices_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if devices_sort == 'connection_type' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('devices', 'connection_type');">
+                    Connection
+                    <span class="sort-arrow">{% if devices_sort == 'connection_type' %}{{ '▼' if devices_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if devices_sort == 'ssid' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('devices', 'ssid');">
+                    SSID
+                    <span class="sort-arrow">{% if devices_sort == 'ssid' %}{{ '▼' if devices_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if devices_sort == 'first_seen' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('devices', 'first_seen');">
+                    First Seen
+                    <span class="sort-arrow">{% if devices_sort == 'first_seen' %}{{ '▼' if devices_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if devices_sort == 'last_seen' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('devices', 'last_seen');">
+                    Last Seen
+                    <span class="sort-arrow">{% if devices_sort == 'last_seen' %}{{ '▼' if devices_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if devices_sort == 'current_vlan' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('devices', 'current_vlan');">
+                    VLAN
+                    <span class="sort-arrow">{% if devices_sort == 'current_vlan' %}{{ '▼' if devices_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
             <th>Actions</th>
         </tr>
     </thead>
@@ -103,6 +542,7 @@
         {% for device, user in devices %}
         <tr {% if device.registration_status == 'blocked' %}style="background: #ffebee;"{% endif %}>
             <td style="font-family: monospace; font-size: 12px;">{{ device.mac_address }}</td>
+            <td>{{ device.device_name or '-' }}</td>
             <td>
                 {% if user %}
                     {{ user.first_name }} {{ user.last_name }}
@@ -178,6 +618,26 @@
         {% endfor %}
     </tbody>
 </table>
+</div>
+
+{% if devices_pages > 1 %}
+<div style="display: flex; justify-content: center; align-items: center; gap: 10px; margin-top: 15px; flex-wrap: wrap;">
+    {% if devices_page > 1 %}
+    <a href="#" onclick="return changeTablePage('devices', 1);" class="btn btn-small">« First</a>
+    <a href="#" onclick="return changeTablePage('devices', {{ devices_page - 1 }});" class="btn btn-small">‹ Prev</a>
+    {% endif %}
+    
+    <span style="padding: 8px 15px; background: #f5f5f5; border-radius: 4px; font-size: 14px;">
+        Page {{ devices_page }} of {{ devices_pages }}
+    </span>
+    
+    {% if devices_page < devices_pages %}
+    <a href="#" onclick="return changeTablePage('devices', {{ devices_page + 1 }});" class="btn btn-small">Next ›</a>
+    <a href="#" onclick="return changeTablePage('devices', {{ devices_pages }});" class="btn btn-small">Last »</a>
+    {% endif %}
+</div>
+{% endif %}
+</div>
 
 <h3 style="margin-top: 40px; color: #667eea;">ℹ️ VLAN Configuration</h3>
 
@@ -208,6 +668,7 @@
 </div>
 
 <h3 style="margin-top: 30px; color: #667eea;">VLAN Mappings</h3>
+<div class="table-responsive">
 <table>
     <thead>
         <tr>
@@ -224,4 +685,5 @@
         {% endfor %}
     </tbody>
 </table>
+</div>
 {% endblock %}

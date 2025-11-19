@@ -38,32 +38,35 @@ login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'admin_login'
 
-# VLAN configuration
-VLAN_MAP = {
-    'friars': int(os.getenv('VLAN_FRIARS', 10)),
-    'staff': int(os.getenv('VLAN_STAFF', 20)),
-    'students': int(os.getenv('VLAN_STUDENTS', 30)),
-    'guests': int(os.getenv('VLAN_GUESTS', 40)),
-    'contractors': int(os.getenv('VLAN_CONTRACTORS', 50)),
-    'volunteers': int(os.getenv('VLAN_VOLUNTEERS', 60)),
-    'iot': int(os.getenv('VLAN_IOT', 70)),
-    'restricted': int(os.getenv('VLAN_RESTRICTED', 90)),
-    'unregistered': int(os.getenv('VLAN_UNREGISTERED', 99)),
-}
+# VLAN configuration - load from database with fallback to env vars
+def get_vlan_map():
+    """Get VLAN mappings from database"""
+    mappings = VlanMapping.query.all()
+    if mappings:
+        return {m.status: m.vlan_id for m in mappings}
+    
+    # Fallback to environment variables if database is empty
+    return {
+        'friars': int(os.getenv('VLAN_FRIARS', 10)),
+        'staff': int(os.getenv('VLAN_STAFF', 20)),
+        'students': int(os.getenv('VLAN_STUDENTS', 30)),
+        'guests': int(os.getenv('VLAN_GUESTS', 40)),
+        'contractors': int(os.getenv('VLAN_CONTRACTORS', 50)),
+        'volunteers': int(os.getenv('VLAN_VOLUNTEERS', 60)),
+        'iot': int(os.getenv('VLAN_IOT', 70)),
+        'restricted': int(os.getenv('VLAN_RESTRICTED', 90)),
+        'unregistered': int(os.getenv('VLAN_UNREGISTERED', 99)),
+    }
 
-# VLANs that auto-approve registrations (no admin approval needed)
-AUTO_APPROVE_VLANS = [
-    VLAN_MAP['guests'],      # 40 - Guests auto-approved
-    VLAN_MAP['students'],    # 30 - Students auto-approved
-    VLAN_MAP['volunteers'],  # 60 - Volunteers auto-approved
-]
+def get_auto_approve_vlans():
+    """Get list of VLANs that auto-approve from settings"""
+    auto_approve_str = Setting.get_value('auto_approve_vlans', '40,30,60')
+    return [int(v.strip()) for v in auto_approve_str.split(',') if v.strip()]
 
-# VLANs that require admin approval
-ADMIN_APPROVAL_VLANS = [
-    VLAN_MAP['friars'],      # 10 - Friars need approval
-    VLAN_MAP['staff'],       # 20 - Staff need approval
-    VLAN_MAP['contractors'], # 50 - Contractors need approval
-]
+def get_admin_approval_vlans():
+    """Get list of VLANs that require admin approval from settings"""
+    admin_approval_str = Setting.get_value('admin_approval_vlans', '10,20,50')
+    return [int(v.strip()) for v in admin_approval_str.split(',') if v.strip()]
 
 # Admin user (simple single admin - extend for multiple admins)
 ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'admin')
@@ -264,10 +267,11 @@ def register():
         first_name = request.form.get('first_name', '').strip()
         last_name = request.form.get('last_name', '').strip()
         phone_number = request.form.get('phone_number', '').strip()
+        device_type = request.form.get('device_type', '').strip()
         
-        if not email or not first_name or not last_name:
+        if not email or not first_name or not last_name or not device_type:
             flash('Please fill in all required fields', 'error')
-            return render_template('register.html')
+            return render_template('register.html', detected_mac=mac_address, detected_ip=ip_address)
         
         if not mac_address:
             flash('Could not detect your device MAC address. Please contact the administrator.', 'error')
@@ -305,6 +309,7 @@ def register():
             # Create or update device record
             device = existing_device or Device(mac_address=mac_address)
             device.user_id = user.id
+            device.device_name = device_type
             device.ip_address = ip_address
             device.last_seen = datetime.now()
             
@@ -378,7 +383,8 @@ def register():
                         
                 elif connection_type == 'wired':
                     # Wired: Use RADIUS CoA
-                    target_vlan = VLAN_MAP.get(user.status, VLAN_MAP['guests'])
+                    vlan_map = get_vlan_map()
+                    target_vlan = vlan_map.get(user.status, vlan_map['guests'])
                     device.current_vlan = target_vlan
                     db.session.commit()
                     
@@ -400,7 +406,8 @@ def register():
             connection_type, vlan_id, ssid = detect_connection_type(ip_address)
             
             # Check if this VLAN allows auto-approval
-            if vlan_id in AUTO_APPROVE_VLANS:
+            auto_approve_vlans = get_auto_approve_vlans()
+            if vlan_id in auto_approve_vlans:
                 # Auto-approve: Create user and device immediately
                 logger.info(f"Auto-approving registration for {email} on VLAN {vlan_id} (auto-approve VLAN)")
                 
@@ -421,6 +428,7 @@ def register():
                 device = Device(
                     mac_address=mac_address,
                     user_id=user.id,
+                    device_name=device_type,
                     ip_address=ip_address,
                     registration_status='active',
                     current_vlan=vlan_id,
@@ -484,6 +492,7 @@ def register():
                     first_name=first_name,
                     last_name=last_name,
                     phone_number=phone_number,
+                    device_type=device_type,
                     ip_address=ip_address,
                     user_agent=request.headers.get('User-Agent', ''),
                     approval_token=secrets.token_urlsafe(32)
@@ -521,11 +530,12 @@ def verify():
     
     if device.verification_expires_at < datetime.now():
         # Token expired - move to restricted VLAN
+        vlan_map = get_vlan_map()
         device.registration_status = 'restricted'
-        device.current_vlan = VLAN_MAP['restricted']
+        device.current_vlan = vlan_map['restricted']
         db.session.commit()
         
-        send_coa_change(device.mac_address, VLAN_MAP['restricted'])
+        send_coa_change(device.mac_address, vlan_map['restricted'])
         
         flash('Verification link has expired. Your device has been placed on a restricted network. Please contact the administrator.', 'error')
         return redirect(url_for('status'))
@@ -533,7 +543,8 @@ def verify():
     # Verification successful
     user = device.user
     if user:
-        target_vlan = VLAN_MAP.get(user.status, VLAN_MAP['guests'])
+        vlan_map = get_vlan_map()
+        target_vlan = vlan_map.get(user.status, vlan_map['guests'])
         device.registration_status = 'active'
         device.current_vlan = target_vlan
         device.verification_token = None
@@ -601,7 +612,8 @@ def unregister(token):
     
     elif connection_type == 'wired':
         # Send RADIUS CoA to move to unregistered VLAN
-        success = send_coa_change(mac_address, VLAN_MAP['unregistered'])
+        vlan_map = get_vlan_map()
+        success = send_coa_change(mac_address, vlan_map['unregistered'])
         if success:
             logger.info(f"Wired device {mac_address} moved to unregistered VLAN")
         else:
@@ -644,28 +656,267 @@ def admin_logout():
     return redirect(url_for('index'))
 
 
+@app.route('/admin/vlan-config', methods=['GET', 'POST'])
+@login_required
+def admin_vlan_config():
+    """VLAN configuration page"""
+    if request.method == 'POST':
+        # Update VLAN mappings
+        for status in ['friars', 'staff', 'students', 'guests', 'contractors', 'volunteers', 'iot', 'restricted', 'unregistered']:
+            vlan_id = request.form.get(f'vlan_{status}')
+            if vlan_id:
+                mapping = VlanMapping.query.filter_by(status=status).first()
+                if mapping:
+                    mapping.vlan_id = int(vlan_id)
+                else:
+                    mapping = VlanMapping(status=status, vlan_id=int(vlan_id))
+                    db.session.add(mapping)
+        
+        # Update auto-approve VLANs
+        auto_approve_vlans = []
+        for status in ['friars', 'staff', 'students', 'guests', 'contractors', 'volunteers', 'iot']:
+            if request.form.get(f'auto_approve_{status}'):
+                vlan_id = request.form.get(f'vlan_{status}')
+                if vlan_id:
+                    auto_approve_vlans.append(vlan_id)
+        
+        Setting.set_value('auto_approve_vlans', ','.join(auto_approve_vlans))
+        
+        # Update admin approval VLANs (inverse of auto-approve)
+        vlan_map = get_vlan_map()
+        admin_approval_vlans = []
+        for status in ['friars', 'staff', 'students', 'guests', 'contractors', 'volunteers', 'iot']:
+            vlan_id = str(vlan_map.get(status, ''))
+            if vlan_id and vlan_id not in auto_approve_vlans:
+                admin_approval_vlans.append(vlan_id)
+        
+        Setting.set_value('admin_approval_vlans', ','.join(admin_approval_vlans))
+        
+        db.session.commit()
+        
+        flash('VLAN configuration updated successfully', 'success')
+        logger.info(f"Admin updated VLAN configuration")
+        
+        return redirect(url_for('admin_vlan_config'))
+    
+    # Load current configuration
+    vlan_map = get_vlan_map()
+    auto_approve_vlans = get_auto_approve_vlans()
+    
+    return render_template('admin_vlan_config.html', 
+                         vlan_map=vlan_map,
+                         auto_approve_vlans=auto_approve_vlans)
+
+
 @app.route('/admin')
 @login_required
 def admin_dashboard():
-    """Admin dashboard with MAC address management"""
-    # Get all devices with user info, ordered by first_seen (most recent first)
-    devices = db.session.query(Device, User).join(User, Device.user_id == User.id, isouter=True)\
-        .order_by(Device.first_seen.desc()).all()
+    """Admin dashboard with MAC address management, pagination, and search"""
+    # Get pagination and search parameters
+    pending_page = request.args.get('pending_page', 1, type=int)
+    pending_per_page = request.args.get('pending_per_page', 25, type=int)
+    pending_search = request.args.get('pending_search', '', type=str).strip().lower()
+    pending_sort = request.args.get('pending_sort', 'submitted_at')
+    pending_order = request.args.get('pending_order', 'desc')
     
-    # Get pending registration requests
-    pending_requests = RegistrationRequest.query.filter_by(status='pending')\
+    users_page = request.args.get('users_page', 1, type=int)
+    users_per_page = request.args.get('users_per_page', 25, type=int)
+    users_search = request.args.get('users_search', '', type=str).strip().lower()
+    users_sort = request.args.get('users_sort', 'email')
+    users_order = request.args.get('users_order', 'asc')
+    
+    devices_page = request.args.get('devices_page', 1, type=int)
+    devices_per_page = request.args.get('devices_per_page', 25, type=int)
+    devices_search = request.args.get('devices_search', '', type=str).strip().lower()
+    devices_sort = request.args.get('devices_sort', 'first_seen')
+    devices_order = request.args.get('devices_order', 'desc')
+    
+    # Get pending registration requests grouped by MAC address
+    all_pending = RegistrationRequest.query.filter_by(status='pending')\
         .order_by(RegistrationRequest.submitted_at.desc()).all()
     
-    # Get all users
-    users = User.query.order_by(User.email).all()
+    # Group requests by MAC address
+    grouped_requests = {}
+    for req in all_pending:
+        mac = req.mac_address
+        if mac not in grouped_requests:
+            grouped_requests[mac] = {
+                'mac_address': mac,
+                'latest_request': req,  # Most recent due to ordering
+                'email': req.email,
+                'first_name': req.first_name,
+                'last_name': req.last_name,
+                'phone_number': req.phone_number,
+                'device_type': req.device_type,
+                'approval_token': req.approval_token,
+                'submitted_times': [req.submitted_at],
+                'ip_addresses': [req.ip_address] if req.ip_address else []
+            }
+        else:
+            # Add additional submission times and IPs
+            grouped_requests[mac]['submitted_times'].append(req.submitted_at)
+            if req.ip_address and req.ip_address not in grouped_requests[mac]['ip_addresses']:
+                grouped_requests[mac]['ip_addresses'].append(req.ip_address)
     
-    return render_template('admin_dashboard.html', 
-                         devices=devices,
-                         users=users, 
-                         pending_requests=pending_requests,
-                         vlan_map=VLAN_MAP,
-                         auto_approve_vlans=AUTO_APPROVE_VLANS,
-                         admin_approval_vlans=ADMIN_APPROVAL_VLANS)
+    # Convert to list
+    all_pending_list = list(grouped_requests.values())
+    
+    # Filter pending requests by search
+    if pending_search:
+        all_pending_list = [r for r in all_pending_list if 
+                           pending_search in r['email'].lower() or
+                           pending_search in r['first_name'].lower() or
+                           pending_search in r['last_name'].lower() or
+                           pending_search in (r['phone_number'] or '').lower() or
+                           pending_search in r['mac_address'].lower() or
+                           pending_search in (r['device_type'] or '').lower()]
+    
+    # Sort pending requests
+    reverse_order = (pending_order == 'desc')
+    if pending_sort == 'submitted_at':
+        all_pending_list.sort(key=lambda x: x['submitted_times'][0], reverse=reverse_order)
+    elif pending_sort == 'name':
+        all_pending_list.sort(key=lambda x: f"{x['first_name']} {x['last_name']}".lower(), reverse=reverse_order)
+    elif pending_sort == 'email':
+        all_pending_list.sort(key=lambda x: x['email'].lower(), reverse=reverse_order)
+    elif pending_sort == 'phone':
+        all_pending_list.sort(key=lambda x: (x['phone_number'] or '').lower(), reverse=reverse_order)
+    elif pending_sort == 'device_type':
+        all_pending_list.sort(key=lambda x: (x['device_type'] or '').lower(), reverse=reverse_order)
+    elif pending_sort == 'mac_address':
+        all_pending_list.sort(key=lambda x: x['mac_address'].lower(), reverse=reverse_order)
+    
+    # Paginate pending requests
+    pending_total = len(all_pending_list)
+    pending_start = (pending_page - 1) * pending_per_page
+    pending_end = pending_start + pending_per_page
+    pending_requests = all_pending_list[pending_start:pending_end]
+    pending_pages = (pending_total + pending_per_page - 1) // pending_per_page if pending_per_page > 0 else 0
+    
+    # Get all users with search filter
+    users_query = User.query
+    if users_search:
+        # Search in user fields OR in their devices' MAC addresses
+        users_query = users_query.outerjoin(Device).filter(
+            db.or_(
+                User.email.ilike(f'%{users_search}%'),
+                User.first_name.ilike(f'%{users_search}%'),
+                User.last_name.ilike(f'%{users_search}%'),
+                User.phone_number.ilike(f'%{users_search}%'),
+                User.status.ilike(f'%{users_search}%'),
+                Device.mac_address.ilike(f'%{users_search}%')
+            )
+        )
+    
+    # Apply sorting to users - must be before distinct() to work properly
+    # Validate sort column exists on User model
+    valid_user_sorts = ['email', 'first_name', 'last_name', 'status', 'begin_date', 'expiry_date', 'created_at', 'phone_number']
+    if users_sort not in valid_user_sorts:
+        users_sort = 'email'
+    
+    sort_column = getattr(User, users_sort)
+    if users_order == 'desc':
+        users_query = users_query.order_by(sort_column.desc())
+    else:
+        users_query = users_query.order_by(sort_column.asc())
+    
+    # Apply distinct after ordering
+    if users_search:
+        users_query = users_query.distinct()
+    
+    users_total = users_query.count()
+    users = users_query.offset((users_page - 1) * users_per_page).limit(users_per_page).all()
+    users_pages = (users_total + users_per_page - 1) // users_per_page if users_per_page > 0 else 0
+    
+    # Get devices with their users for display with search filter
+    devices_query = db.session.query(Device, User).join(User, Device.user_id == User.id, isouter=True)
+    
+    if devices_search:
+        devices_query = devices_query.filter(
+            db.or_(
+                Device.mac_address.ilike(f'%{devices_search}%'),
+                Device.device_name.ilike(f'%{devices_search}%'),
+                Device.connection_type.ilike(f'%{devices_search}%'),
+                Device.ssid.ilike(f'%{devices_search}%'),
+                Device.registration_status.ilike(f'%{devices_search}%'),
+                User.email.ilike(f'%{devices_search}%'),
+                User.first_name.ilike(f'%{devices_search}%'),
+                User.last_name.ilike(f'%{devices_search}%')
+            )
+        )
+    
+    # Apply sorting to devices
+    if devices_sort == 'user_name':
+        # Sort by user's first name
+        if devices_order == 'desc':
+            devices_query = devices_query.order_by(User.first_name.desc())
+        else:
+            devices_query = devices_query.order_by(User.first_name.asc())
+    elif devices_sort == 'user_email':
+        # Sort by user's email
+        if devices_order == 'desc':
+            devices_query = devices_query.order_by(User.email.desc())
+        else:
+            devices_query = devices_query.order_by(User.email.asc())
+    else:
+        # Sort by device field
+        sort_column = getattr(Device, devices_sort, Device.first_seen)
+        if devices_order == 'desc':
+            devices_query = devices_query.order_by(sort_column.desc())
+        else:
+            devices_query = devices_query.order_by(sort_column.asc())
+    
+    devices_total = devices_query.count()
+    devices = devices_query.offset((devices_page - 1) * devices_per_page).limit(devices_per_page).all()
+    devices_pages = (devices_total + devices_per_page - 1) // devices_per_page if devices_per_page > 0 else 0
+    
+    # Check if this is an AJAX request
+    is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+    
+    # Common template variables
+    template_vars = dict(
+        devices=devices,
+        devices_page=devices_page,
+        devices_per_page=devices_per_page,
+        devices_pages=devices_pages,
+        devices_total=devices_total,
+        devices_search=devices_search,
+        devices_sort=devices_sort,
+        devices_order=devices_order,
+        users=users,
+        users_page=users_page,
+        users_per_page=users_per_page,
+        users_pages=users_pages,
+        users_total=users_total,
+        users_search=users_search,
+        users_sort=users_sort,
+        users_order=users_order,
+        pending_requests=pending_requests,
+        pending_page=pending_page,
+        pending_per_page=pending_per_page,
+        pending_pages=pending_pages,
+        pending_total=pending_total,
+        pending_search=pending_search,
+        pending_sort=pending_sort,
+        pending_order=pending_order,
+        vlan_map=get_vlan_map(),
+        auto_approve_vlans=get_auto_approve_vlans(),
+        admin_approval_vlans=get_admin_approval_vlans()
+    )
+    
+    # For AJAX requests, determine which table section to render
+    if is_ajax:
+        # Check which table is being sorted based on ajax_table parameter
+        ajax_table = request.args.get('ajax_table', '')
+        if ajax_table == 'pending':
+            return render_template('partials/pending_table.html', **template_vars)
+        elif ajax_table == 'users':
+            return render_template('partials/users_table.html', **template_vars)
+        elif ajax_table == 'devices':
+            return render_template('partials/devices_table.html', **template_vars)
+    
+    # For regular requests, render the full page
+    return render_template('admin_dashboard.html', **template_vars)
 
 
 @app.route('/admin/users/add', methods=['GET', 'POST'])
@@ -679,17 +930,21 @@ def admin_add_user():
         phone_number = request.form.get('phone_number', '').strip()
         status = request.form.get('status')
         begin_date = datetime.strptime(request.form.get('begin_date'), '%Y-%m-%d').date()
-        expiry_date = datetime.strptime(request.form.get('expiry_date'), '%Y-%m-%d').date()
+        
+        # Expiry date is optional - None means no expiration
+        expiry_date_str = request.form.get('expiry_date', '').strip()
+        expiry_date = datetime.strptime(expiry_date_str, '%Y-%m-%d').date() if expiry_date_str else None
+        
         notes = request.form.get('notes', '').strip()
         
         if not email or not status:
             flash('Email and status are required', 'error')
-            return render_template('admin_add_user.html', vlan_map=VLAN_MAP)
+            return render_template('admin_add_user.html', vlan_map=get_vlan_map())
         
         existing_user = User.query.filter_by(email=email).first()
         if existing_user:
             flash('User with this email already exists', 'error')
-            return render_template('admin_add_user.html', vlan_map=VLAN_MAP)
+            return render_template('admin_add_user.html', vlan_map=get_vlan_map())
         
         user = User(
             email=email,
@@ -711,7 +966,7 @@ def admin_add_user():
         
         return redirect(url_for('admin_dashboard'))
     
-    return render_template('admin_add_user.html', vlan_map=VLAN_MAP)
+    return render_template('admin_add_user.html', vlan_map=get_vlan_map())
 
 
 @app.route('/admin/users/<int:user_id>/edit', methods=['GET', 'POST'])
@@ -726,13 +981,18 @@ def admin_edit_user(user_id):
         user.phone_number = request.form.get('phone_number', '').strip()
         user.status = request.form.get('status')
         user.begin_date = datetime.strptime(request.form.get('begin_date'), '%Y-%m-%d').date()
-        user.expiry_date = datetime.strptime(request.form.get('expiry_date'), '%Y-%m-%d').date()
+        
+        # Expiry date is optional - None means no expiration
+        expiry_date_str = request.form.get('expiry_date', '').strip()
+        user.expiry_date = datetime.strptime(expiry_date_str, '%Y-%m-%d').date() if expiry_date_str else None
+        
         user.notes = request.form.get('notes', '').strip()
         
         db.session.commit()
         
         # Update all active devices for this user
-        target_vlan = VLAN_MAP.get(user.status, VLAN_MAP['guests'])
+        vlan_map = get_vlan_map()
+        target_vlan = vlan_map.get(user.status, vlan_map['guests'])
         devices = Device.query.filter_by(user_id=user.id, registration_status='active').all()
         
         for device in devices:
@@ -746,7 +1006,7 @@ def admin_edit_user(user_id):
         
         return redirect(url_for('admin_dashboard'))
     
-    return render_template('admin_edit_user.html', user=user, vlan_map=VLAN_MAP)
+    return render_template('admin_edit_user.html', user=user, vlan_map=get_vlan_map())
 
 
 @app.route('/admin/approve/<token>')
@@ -759,7 +1019,7 @@ def admin_approve_request(token):
         flash('This request has already been processed', 'info')
         return redirect(url_for('admin_dashboard'))
     
-    return render_template('admin_approve_request.html', request=reg_request, vlan_map=VLAN_MAP)
+    return render_template('admin_approve_request.html', request=reg_request, vlan_map=get_vlan_map())
 
 
 @app.route('/admin/requests/<int:request_id>/process', methods=['POST'])
@@ -773,7 +1033,11 @@ def admin_process_request(request_id):
     if action == 'approve':
         status = request.form.get('status')
         begin_date = datetime.strptime(request.form.get('begin_date'), '%Y-%m-%d').date()
-        expiry_date = datetime.strptime(request.form.get('expiry_date'), '%Y-%m-%d').date()
+        
+        # Expiry date is optional - None means no expiration
+        expiry_date_str = request.form.get('expiry_date', '').strip()
+        expiry_date = datetime.strptime(expiry_date_str, '%Y-%m-%d').date() if expiry_date_str else None
+        
         notes = request.form.get('notes', '').strip()
         
         # Create user
@@ -792,18 +1056,26 @@ def admin_process_request(request_id):
         db.session.flush()
         
         # Create device
+        vlan_map = get_vlan_map()
         device = Device(
             mac_address=reg_request.mac_address,
             user_id=user.id,
+            device_name=reg_request.device_type or 'unknown',
             registration_status='active',
-            current_vlan=VLAN_MAP.get(status, VLAN_MAP['guests'])
+            current_vlan=vlan_map.get(status, vlan_map['guests'])
         )
         db.session.add(device)
         
-        # Update request
-        reg_request.status = 'approved'
-        reg_request.processed_at = datetime.now()
-        reg_request.processed_by = current_user.username
+        # Mark ALL pending requests for this MAC as approved
+        all_mac_requests = RegistrationRequest.query.filter_by(
+            mac_address=reg_request.mac_address, 
+            status='pending'
+        ).all()
+        
+        for req in all_mac_requests:
+            req.status = 'approved'
+            req.processed_at = datetime.now()
+            req.processed_by = current_user.username
         
         db.session.commit()
         
@@ -836,8 +1108,9 @@ def admin_disconnect_device(device_id):
     success = send_coa_disconnect(device.mac_address)
     
     if success:
+        vlan_map = get_vlan_map()
         device.registration_status = 'disconnected'
-        device.current_vlan = VLAN_MAP['unregistered']
+        device.current_vlan = vlan_map['unregistered']
         db.session.commit()
         flash(f'Device {device.mac_address} disconnected', 'success')
     else:
@@ -852,8 +1125,9 @@ def admin_block_device(device_id):
     """Block a device"""
     device = Device.query.get_or_404(device_id)
     
+    vlan_map = get_vlan_map()
     device.registration_status = 'blocked'
-    device.current_vlan = VLAN_MAP['restricted']  # Move to restricted VLAN
+    device.current_vlan = vlan_map['restricted']  # Move to restricted VLAN
     db.session.commit()
     
     # Disconnect from network if WiFi
@@ -880,10 +1154,11 @@ def admin_unblock_device(device_id):
     device.registration_status = 'active'
     
     # Determine target VLAN based on user status
+    vlan_map = get_vlan_map()
     if user:
-        device.current_vlan = VLAN_MAP.get(user.status, VLAN_MAP['guests'])
+        device.current_vlan = vlan_map.get(user.status, vlan_map['guests'])
     else:
-        device.current_vlan = VLAN_MAP['guests']
+        device.current_vlan = vlan_map['guests']
     
     db.session.commit()
     

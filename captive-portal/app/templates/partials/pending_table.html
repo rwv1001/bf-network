@@ -1,0 +1,125 @@
+<div id="pending-table-section">
+<h2 style="margin-top: 30px; color: #667eea;">⏳ Pending Registration Requests ({{ pending_total }})</h2>
+
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 15px; flex-wrap: wrap;">
+    <form onsubmit="return searchTable('pending', this.pending_search.value);" style="display: flex; gap: 10px; align-items: center; flex: 1; min-width: 300px;">
+        <input type="text" name="pending_search" value="{{ pending_search }}" 
+               placeholder="Search pending requests..." 
+               style="flex: 1; padding: 8px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+        <button type="submit" class="btn btn-small" style="white-space: nowrap;">Search</button>
+        {% if pending_search %}
+        <a href="#" onclick="return searchTable('pending', '');" class="btn btn-small" style="background: #999; white-space: nowrap;">Clear</a>
+        {% endif %}
+    </form>
+    <div style="display: flex; gap: 5px; align-items: center;">
+        <label for="pending_per_page" style="font-size: 14px; white-space: nowrap;">Show:</label>
+        <select name="pending_per_page" id="pending_per_page" onchange="changePerPage('pending', this.value)"
+                style="padding: 6px 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+            <option value="10" {% if pending_per_page == 10 %}selected{% endif %}>10</option>
+            <option value="25" {% if pending_per_page == 25 %}selected{% endif %}>25</option>
+            <option value="50" {% if pending_per_page == 50 %}selected{% endif %}>50</option>
+            <option value="100" {% if pending_per_page == 100 %}selected{% endif %}>100</option>
+        </select>
+    </div>
+</div>
+
+<div class="table-responsive">
+<table>
+    <thead>
+        <tr>
+            <th class="sortable {% if pending_sort == 'submitted_at' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('pending', 'submitted_at');">
+                    Submitted
+                    <span class="sort-arrow">{% if pending_sort == 'submitted_at' %}{{ '▼' if pending_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if pending_sort == 'name' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('pending', 'name');">
+                    Name
+                    <span class="sort-arrow">{% if pending_sort == 'name' %}{{ '▼' if pending_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if pending_sort == 'email' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('pending', 'email');">
+                    Email
+                    <span class="sort-arrow">{% if pending_sort == 'email' %}{{ '▼' if pending_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if pending_sort == 'phone' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('pending', 'phone');">
+                    Phone
+                    <span class="sort-arrow">{% if pending_sort == 'phone' %}{{ '▼' if pending_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if pending_sort == 'device_type' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('pending', 'device_type');">
+                    Device Type
+                    <span class="sort-arrow">{% if pending_sort == 'device_type' %}{{ '▼' if pending_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if pending_sort == 'mac_address' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('pending', 'mac_address');">
+                    MAC Address
+                    <span class="sort-arrow">{% if pending_sort == 'mac_address' %}{{ '▼' if pending_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th>IP Address</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for req in pending_requests %}
+        <tr>
+            <td style="padding: 8px;">
+                {% for timestamp in req.submitted_times %}
+                    <div style="margin: 4px 0;">{{ timestamp.strftime('%Y-%m-%d %H:%M') }}</div>
+                {% endfor %}
+            </td>
+            <td>{{ req.first_name }} {{ req.last_name }}</td>
+            <td>{{ req.email }}</td>
+            <td>{{ req.phone_number or '-' }}</td>
+            <td>{{ req.device_type or '-' }}</td>
+            <td style="font-family: monospace; font-size: 12px;">{{ req.mac_address }}</td>
+            <td style="padding: 8px;">
+                {% if req.ip_addresses %}
+                    {% for ip in req.ip_addresses %}
+                        <div style="margin: 4px 0;">{{ ip }}</div>
+                    {% endfor %}
+                {% else %}
+                    -
+                {% endif %}
+            </td>
+            <td>
+                <a href="{{ url_for('admin_approve_request', token=req.approval_token) }}" class="btn btn-success btn-small">
+                    Review
+                </a>
+                {% if req.submitted_times|length > 1 %}
+                    <span style="display: block; font-size: 11px; color: #666; margin-top: 4px;">
+                        ({{ req.submitted_times|length }} attempts)
+                    </span>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+</div>
+
+{% if pending_pages > 1 %}
+<div style="display: flex; justify-content: center; align-items: center; gap: 10px; margin-top: 15px; flex-wrap: wrap;">
+    {% if pending_page > 1 %}
+    <a href="#" onclick="return changeTablePage('pending', 1);" class="btn btn-small">« First</a>
+    <a href="#" onclick="return changeTablePage('pending', {{ pending_page - 1 }});" class="btn btn-small">‹ Prev</a>
+    {% endif %}
+    
+    <span style="padding: 8px 15px; background: #f5f5f5; border-radius: 4px; font-size: 14px;">
+        Page {{ pending_page }} of {{ pending_pages }}
+    </span>
+    
+    {% if pending_page < pending_pages %}
+    <a href="#" onclick="return changeTablePage('pending', {{ pending_page + 1 }});" class="btn btn-small">Next ›</a>
+    <a href="#" onclick="return changeTablePage('pending', {{ pending_pages }});" class="btn btn-small">Last »</a>
+    {% endif %}
+</div>
+{% endif %}
+</div>
