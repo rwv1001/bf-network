@@ -294,7 +294,7 @@ def register():
                 flash(f'Your access begins on {user.begin_date}. Please try again after that date.', 'warning')
                 return render_template('register.html')
             
-            if user.expiry_date < today:
+            if user.expiry_date and user.expiry_date < today:
                 flash('Your access has expired. Please contact the administrator.', 'error')
                 return render_template('register.html')
             
@@ -411,13 +411,21 @@ def register():
                 # Auto-approve: Create user and device immediately
                 logger.info(f"Auto-approving registration for {email} on VLAN {vlan_id} (auto-approve VLAN)")
                 
-                # Create new user with guest status
+                # Determine user status from VLAN
+                vlan_map = get_vlan_map()
+                user_status = 'guests'  # Default fallback
+                for status, vid in vlan_map.items():
+                    if vid == vlan_id and status not in ['restricted', 'unregistered']:
+                        user_status = status
+                        break
+                
+                # Create new user with status based on VLAN
                 user = User(
                     email=email,
                     first_name=first_name,
                     last_name=last_name,
                     phone_number=phone_number,
-                    status='guests',  # Default status for auto-approved users
+                    status=user_status,
                     begin_date=datetime.now().date(),
                     expiry_date=datetime.now().date() + timedelta(days=30)  # 30 days access
                 )
@@ -1057,12 +1065,20 @@ def admin_process_request(request_id):
         
         # Create device
         vlan_map = get_vlan_map()
+        target_vlan = vlan_map.get(status, vlan_map['guests'])
+        
+        # Detect connection type from IP address
+        connection_type, detected_vlan, ssid = detect_connection_type(reg_request.ip_address)
+        
         device = Device(
             mac_address=reg_request.mac_address,
             user_id=user.id,
             device_name=reg_request.device_type or 'unknown',
+            ip_address=reg_request.ip_address,
             registration_status='active',
-            current_vlan=vlan_map.get(status, vlan_map['guests'])
+            current_vlan=target_vlan,
+            connection_type=connection_type,
+            ssid=ssid
         )
         db.session.add(device)
         
@@ -1079,8 +1095,30 @@ def admin_process_request(request_id):
         
         db.session.commit()
         
-        # Send CoA
-        send_coa_change(device.mac_address, device.current_vlan)
+        # Register in network based on connection type
+        if device.connection_type == 'wifi':
+            # WiFi: Register MAC in Kea DHCP
+            kea = get_kea()
+            if kea:
+                success = kea.register_mac(
+                    mac=device.mac_address,
+                    vlan=target_vlan,
+                    hostname=f"{user.first_name.lower()}-{user.last_name.lower()}-device",
+                    ip_address=None  # Let Kea assign from registered pool
+                )
+                if success and device.ip_address:
+                    # Delete the old lease to force device to get new IP from registered pool
+                    try:
+                        kea.force_lease_renewal(device.mac_address, device.ip_address)
+                    except Exception as e:
+                        logger.warning(f"Could not force lease renewal: {e}")
+                if not success:
+                    logger.error(f"Failed to register MAC {device.mac_address} in Kea after approval")
+            else:
+                logger.error("Kea client unavailable for WiFi device registration")
+        else:
+            # Wired: Use RADIUS CoA
+            send_coa_change(device.mac_address, target_vlan)
         
         flash(f'Request approved and user {user.email} created', 'success')
         logger.info(f"Admin approved registration request for {user.email}")

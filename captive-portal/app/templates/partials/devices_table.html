@@ -33,6 +33,12 @@
                     <span class="sort-arrow">{% if devices_sort == 'mac_address' %}{{ '▼' if devices_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
                 </a>
             </th>
+            <th class="sortable {% if devices_sort == 'ip_address' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('devices', 'ip_address');">
+                    IP Address
+                    <span class="sort-arrow">{% if devices_sort == 'ip_address' %}{{ '▼' if devices_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
             <th class="sortable {% if devices_sort == 'device_name' %}active{% endif %}">
                 <a href="#" onclick="return sortTable('devices', 'device_name');">
                     Device Type
@@ -94,6 +100,13 @@
         {% for device, user in devices %}
         <tr {% if device.registration_status == 'blocked' %}style="background: #ffebee;"{% endif %}>
             <td style="font-family: monospace; font-size: 12px;">{{ device.mac_address }}</td>
+            <td style="font-family: monospace; font-size: 12px;">
+                {% if device.ip_address %}
+                    {{ device.ip_address }}
+                {% else %}
+                    <em style="color: #999;">-</em>
+                {% endif %}
+            </td>
             <td>{{ device.device_name or '-' }}</td>
             <td>
                 {% if user %}

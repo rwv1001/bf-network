@@ -139,6 +139,7 @@ class KeaIntegration:
             
             # Build reservation with user-context for client class evaluation
             reservation = {
+                "subnet-id": subnet_id,
                 "hw-address": mac,
                 "user-context": {
                     "registered": True,
@@ -149,7 +150,11 @@ class KeaIntegration:
             if hostname:
                 reservation["hostname"] = hostname
             
+            # Don't assign a specific IP - let the hook select the correct subnet
+            # and Kea will assign any available IP from that subnet's pool.
+            # This avoids NAK issues when switching from unregistered to registered subnet.
             if ip_address:
+                # Only set IP if explicitly provided (for manual assignments)
                 # Validate IP is in registered pool range (.5-.127)
                 ip_parts = ip_address.split('.')
                 if len(ip_parts) == 4:
@@ -158,14 +163,16 @@ class KeaIntegration:
                         logger.error(f"IP {ip_address} not in registered pool range (.5-.127)")
                         return False
                 reservation["ip-address"] = ip_address
+                logger.info(f"Assigning specific IP {ip_address} to MAC {mac}")
+            else:
+                logger.info(f"Creating reservation for MAC {mac} without specific IP - Kea will assign from pool")
             
             # Build command
             command = {
                 "command": "reservation-add",
                 "service": ["dhcp4"],
                 "arguments": {
-                    "reservation": reservation,
-                    "subnet-id": subnet_id
+                    "reservation": reservation
                 }
             }
             
@@ -296,6 +303,55 @@ class KeaIntegration:
             logger.error(f"Error getting all reservations for VLAN {vlan}: {e}")
             return []
     
+    def _find_available_registered_ip(self, subnet_id: int) -> Optional[str]:
+        """
+        Find an available IP in the registered pool (.5-.127) for the subnet.
+        
+        Args:
+            subnet_id: Subnet ID (e.g., 10 for 192.168.10.0/24)
+            
+        Returns:
+            Available IP address or None if pool is full
+        """
+        try:
+            # Build base IP from subnet_id (assumes 192.168.X.0/24 format)
+            base_ip = f"192.168.{subnet_id}"
+            
+            # Get all current leases and reservations
+            command = {
+                "command": "lease4-get-all",
+                "service": ["dhcp4"],
+                "arguments": {
+                    "subnets": [subnet_id]
+                }
+            }
+            
+            response = self._send_command(command)
+            used_ips = set()
+            
+            if response.get("result") == 0:
+                leases = response.get("arguments", {}).get("leases", [])
+                for lease in leases:
+                    used_ips.add(lease.get("ip-address"))
+            
+            # Get all reservations for this subnet
+            reservations = self.get_all_reservations(subnet_id)
+            for res in reservations:
+                if "ip-address" in res:
+                    used_ips.add(res["ip-address"])
+            
+            # Find first available IP in registered pool (.5-.127)
+            for last_octet in range(5, 128):
+                candidate_ip = f"{base_ip}.{last_octet}"
+                if candidate_ip not in used_ips:
+                    return candidate_ip
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error finding available IP: {e}")
+            return None
+    
     def get_lease(self, ip: str) -> Optional[Dict[str, Any]]:
         """
         Get current lease information for an IP address.
@@ -359,38 +415,46 @@ class KeaIntegration:
             logger.error(f"Error getting lease for MAC {mac}: {e}")
             return None
     
-    def force_lease_renewal(self, mac: str) -> bool:
+    def force_lease_renewal(self, mac: str, ip_address: Optional[str] = None) -> bool:
         """
         Force a lease to expire, triggering renewal on next request.
         
         Args:
             mac: MAC address
+            ip_address: Optional IP address. If not provided, will try to look it up
             
         Returns:
             True if successful, False otherwise
         """
         try:
-            # Get current lease
-            lease = self.get_lease_by_mac(mac)
-            if not lease:
-                logger.warning(f"No active lease found for MAC {mac}")
-                return False
-            
-            ip_address = lease.get("ip-address")
+            # If IP not provided, try to get it from lease
             if not ip_address:
-                logger.error(f"No IP address in lease for MAC {mac}")
+                lease = self.get_lease_by_mac(mac)
+                if not lease:
+                    logger.warning(f"No active lease found for MAC {mac}")
+                    return False
+                ip_address = lease.get("ip-address")
+            
+            if not ip_address:
+                logger.error(f"No IP address available for MAC {mac}")
                 return False
             
-            # Delete the lease
+            # Delete the lease by IP (with subnet-id for memfile backend)
+            # Extract subnet ID from IP's third octet (e.g., 192.168.10.x -> subnet 10)
+            subnet_id = int(ip_address.split('.')[2])
+            
             command = {
                 "command": "lease4-del",
                 "service": ["dhcp4"],
                 "arguments": {
-                    "ip-address": ip_address
+                    "ip-address": ip_address,
+                    "subnet-id": subnet_id
                 }
             }
             
+            logger.info(f"Sending lease4-del command: {command}")
             response = self._send_command(command)
+            logger.info(f"lease4-del response: {response}")
             
             if response.get("result") == 0:
                 logger.info(f"Successfully deleted lease for MAC {mac}, IP {ip_address}")

@@ -75,3 +75,5 @@ letsencrypt/
 # Session data
 sessions/
 **/sessions/
+
+kea-compare/

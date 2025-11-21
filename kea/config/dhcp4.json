@@ -1,5 +1,6 @@
 {
   "Dhcp4": {
+    "authoritative": true,
     "interfaces-config": {
       "interfaces": [ "*" ],
       "dhcp-socket-type": "raw"
@@ -10,11 +11,35 @@
       "socket-name": "/kea/sockets/kea4-ctrl-socket"
     },
     
+    "hooks-libraries": [
+      {
+        "library": "/usr/local/lib/kea/hooks/libdhcp_pgsql.so"
+      },
+      {
+        "library": "/usr/local/lib/kea/hooks/libdhcp_host_cmds.so"
+      },
+      {
+        "library": "/usr/local/lib/kea/hooks/libdhcp_lease_cmds.so"
+      },
+      {
+        "library": "/usr/local/lib/kea/hooks/dhcp_dynamic_subnet.so"
+      }
+    ],
+    
     "lease-database": {
       "type": "memfile",
       "persist": true,
       "name": "/kea/leases/kea-leases4.csv",
       "lfc-interval": 3600
+    },
+    
+    "hosts-database": {
+      "type": "postgresql",
+      "name": "captive_portal",
+      "user": "portal_user",
+      "password": "change_this_password",
+      "host": "127.0.0.1",
+      "port": 5432
     },
     
     "expired-leases-processing": {
@@ -67,21 +92,46 @@
         "id": 10,
         "pools": [
           {
-            "pool": "192.168.10.128 - 192.168.10.254",
-            "client-class": "UNREGISTERED"
-          },
-          {
-            "pool": "192.168.10.5 - 192.168.10.127",
-            "client-class": "REGISTERED"
+            "pool": "192.168.10.5 - 192.168.10.127"
           }
         ],
+        "interface": "eth0.10",
         "option-data": [
           {
             "name": "routers",
             "data": "192.168.10.1"
+          },
+          {
+            "name": "domain-name-servers",
+            "data": "8.8.8.8, 8.8.4.4"
           }
         ],
-        "reservations": []
+        "renew-timer": 43200,
+        "rebind-timer": 64800,
+        "valid-lifetime": 86400
+      },
+      {
+        "subnet": "192.168.10.128/25",
+        "id": 11,
+        "pools": [
+          {
+            "pool": "192.168.10.128 - 192.168.10.254"
+          }
+        ],
+        "interface": "eth0.10",
+        "option-data": [
+          {
+            "name": "routers",
+            "data": "192.168.10.1"
+          },
+          {
+            "name": "domain-name-servers",
+            "data": "192.168.99.4"
+          }
+        ],
+        "renew-timer": 30,
+        "rebind-timer": 45,
+        "valid-lifetime": 60
       },
       {
         "subnet": "192.168.20.0/24",

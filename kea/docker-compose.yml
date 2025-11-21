@@ -10,3 +10,12 @@ services:
       - ./config:/kea/config
       - ./leases:/kea/leases
       - ./sockets:/kea/sockets
+    entrypoint: |
+      sh -c '
+      rm -f /usr/local/var/run/kea/dhcp4.kea-dhcp4.pid
+      kea-dhcp4 -c /kea/config/dhcp4.json &
+      KEA_PID=$!
+      sleep 3
+      chmod 666 /kea/sockets/kea4-ctrl-socket
+      wait $KEA_PID
+      '
