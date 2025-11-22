@@ -243,13 +243,34 @@ def index():
 # Captive portal detection endpoints
 @app.route('/generate_204')
 @app.route('/gen_204')
+def android_captive_portal_detection():
+    """Android captive portal detection - return 302 to show portal"""
+    return redirect(url_for('register')), 302
+
+@app.route('/hotspot-detect.html')
+def ios_captive_portal_detection():
+    """iOS captive portal detection - MUST NOT return Success or iOS won't show portal"""
+    mac_address = get_client_mac()
+    
+    # Check if device is already registered
+    if mac_address:
+        device = Device.query.filter_by(mac_address=mac_address).first()
+        if device and device.registration_status == 'active':
+            # Device is registered - return Success to bypass portal
+            return "<HTML><BODY>Success</BODY></HTML>", 200
+    
+    # Device not registered - redirect to portal (triggers iOS captive portal UI)
+    return redirect(url_for('register')), 302
+
+@app.route('/library/test/success.html')
+def ios_captive_success():
+    """iOS success check after authentication"""
+    return "<HTML><BODY>Success</BODY></HTML>", 200
+
 @app.route('/ncsi.txt')
 @app.route('/connecttest.txt')
-@app.route('/hotspot-detect.html')
-@app.route('/library/test/success.html')
-def captive_portal_detection():
-    """Respond to captive portal detection probes"""
-    # Return HTTP 200 with redirect to trigger captive portal login
+def windows_captive_portal_detection():
+    """Windows captive portal detection"""
     return redirect(url_for('register')), 302
 
 
