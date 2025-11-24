@@ -1,8 +1,9 @@
 services:
-  dnsmasq:
+  # Normal DNSmasq - serves 192.168.99.4 for registered devices and VLAN 99 wired
+  dnsmasq-normal:
     image: 4km3/dnsmasq:latest
-    container_name: dnsmasq
-    network_mode: host              # needed for DNS/DHCP on the host IPs
+    container_name: dnsmasq-normal
+    network_mode: host
     restart: unless-stopped
     cap_add:
       - NET_ADMIN
@@ -11,3 +12,18 @@ services:
       - ./conf:/etc/dnsmasq.d:ro
       - ./leases:/var/lib/misc
     command: ["-k", "--conf-file=/etc/dnsmasq.d/blac-onboarding.conf"]
+
+  # Hijacking DNSmasq - serves 192.168.99.5 for unregistered devices
+  # Redirects ALL domains to captive portal
+  dnsmasq-hijack:
+    image: 4km3/dnsmasq:latest
+    container_name: dnsmasq-hijack
+    network_mode: host
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - NET_BIND_SERVICE
+    volumes:
+      - ./conf:/etc/dnsmasq.d:ro
+      - /var/log:/var/log
+    command: ["-k", "--conf-file=/etc/dnsmasq.d/hijack.conf"]

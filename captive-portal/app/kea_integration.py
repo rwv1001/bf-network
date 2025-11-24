@@ -183,8 +183,14 @@ class KeaIntegration:
                 logger.info(f"Successfully registered MAC {mac} in VLAN {vlan} (registered pool)")
                 return True
             else:
-                logger.error(f"Failed to register MAC {mac}: {response.get('text')}")
-                return False
+                error_text = response.get('text', '')
+                # Treat duplicate entry as success - reservation already exists
+                if 'duplicate' in error_text.lower() or 'already exists' in error_text.lower():
+                    logger.info(f"MAC {mac} already registered in VLAN {vlan} (duplicate is OK)")
+                    return True
+                else:
+                    logger.error(f"Failed to register MAC {mac}: {error_text}")
+                    return False
         
         except Exception as e:
             logger.error(f"Error registering MAC {mac}: {e}")

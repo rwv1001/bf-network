@@ -5,6 +5,7 @@ Main Flask application for network device registration
 
 import os
 import logging
+import subprocess
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -234,6 +235,42 @@ def get_kea():
     return kea_client
 
 
+def manage_dns_hijack(action, ip_address):
+    """
+    Manage DNS hijacking for unregistered devices.
+    
+    Args:
+        action: 'hijack' to enable DNS redirect, 'unhijack' to remove it
+        ip_address: Device IP address
+        
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    script_path = '/home/admin/bf-network/scripts/dns-hijack.sh'
+    
+    try:
+        result = subprocess.run(
+            [script_path, action, ip_address],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        
+        if result.returncode == 0:
+            logger.info(f"DNS {action} successful for {ip_address}: {result.stdout.strip()}")
+            return True
+        else:
+            logger.error(f"DNS {action} failed for {ip_address}: {result.stderr.strip()}")
+            return False
+            
+    except subprocess.TimeoutExpired:
+        logger.error(f"DNS {action} timed out for {ip_address}")
+        return False
+    except Exception as e:
+        logger.error(f"DNS {action} error for {ip_address}: {e}")
+        return False
+
+
 @app.route('/')
 def index():
     """Landing page - redirect to registration"""
@@ -385,6 +422,9 @@ def register():
                         )
                         
                         if success:
+                            # Remove DNS hijacking now that device is registered
+                            manage_dns_hijack('unhijack', ip_address)
+                            
                             # Send WiFi confirmation email with unregister link
                             unregister_url = f"{os.getenv('PORTAL_URL')}/unregister/{device.unregister_token}"
                             send_wifi_registration_confirmation(
@@ -398,6 +438,8 @@ def register():
                             flash(f'Registration successful! Connecting you to {ssid}... (wait 30 seconds)', 'success')
                             logger.info(f"WiFi device {mac_address} registered for {email} on VLAN {vlan_id}")
                         else:
+                            # Kea registration failed, but still unhijack (device might already be registered)
+                            manage_dns_hijack('unhijack', ip_address)
                             flash('Registration saved, but there was an issue with DHCP setup. Please contact support.', 'warning')
                     else:
                         flash('DHCP service unavailable. Please contact support.', 'error')
@@ -412,6 +454,9 @@ def register():
                     success = send_coa_change(mac_address, target_vlan)
                     
                     if success:
+                        # Remove DNS hijacking now that device is registered
+                        manage_dns_hijack('unhijack', ip_address)
+                        
                         flash(f'Registration successful! You now have {user.status} access.', 'success')
                         logger.info(f"Wired device {mac_address} registered for {email} on VLAN {target_vlan}")
                     else:
@@ -484,6 +529,9 @@ def register():
                         )
                         
                         if success:
+                            # Remove DNS hijacking now that device is registered
+                            manage_dns_hijack('unhijack', ip_address)
+                            
                             # Send WiFi confirmation email
                             unregister_url = f"{os.getenv('PORTAL_URL')}/unregister/{device.unregister_token}"
                             send_wifi_registration_confirmation(
@@ -504,6 +552,9 @@ def register():
                     # Wired connection - use RADIUS CoA
                     success = send_coa_change(mac_address, vlan_id)
                     if success:
+                        # Remove DNS hijacking now that device is registered
+                        manage_dns_hijack('unhijack', ip_address)
+                        
                         flash(f'Registration successful! You now have guest access.', 'success')
                         logger.info(f"Auto-approved wired device {mac_address} for {email} on VLAN {vlan_id}")
                     else:
@@ -1135,11 +1186,24 @@ def admin_process_request(request_id):
                         logger.warning(f"Could not force lease renewal: {e}")
                 if not success:
                     logger.error(f"Failed to register MAC {device.mac_address} in Kea after approval")
+                    # Still unhijack even if Kea registration fails (might already be registered)
+                    if device.ip_address:
+                        manage_dns_hijack('unhijack', device.ip_address)
+                else:
+                    # Successfully registered, remove DNS hijacking
+                    if device.ip_address:
+                        manage_dns_hijack('unhijack', device.ip_address)
             else:
                 logger.error("Kea client unavailable for WiFi device registration")
+                # Unhijack anyway if we have an IP
+                if device.ip_address:
+                    manage_dns_hijack('unhijack', device.ip_address)
         else:
             # Wired: Use RADIUS CoA
             send_coa_change(device.mac_address, target_vlan)
+            # Remove DNS hijacking for wired devices too
+            if device.ip_address:
+                manage_dns_hijack('unhijack', device.ip_address)
         
         flash(f'Request approved and user {user.email} created', 'success')
         logger.info(f"Admin approved registration request for {user.email}")

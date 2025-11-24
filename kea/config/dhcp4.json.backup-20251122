@@ -22,7 +22,7 @@
         "library": "/usr/local/lib/kea/hooks/libdhcp_lease_cmds.so"
       },
       {
-        "library": "/usr/local/lib/kea/hooks/dhcp_dns_hijack.so"
+        "library": "/usr/local/lib/kea/hooks/dhcp_dynamic_subnet.so"
       }
     ],
     
@@ -59,10 +59,30 @@
       {
         "name": "domain-name",
         "data": "blackfriars.local"
+      }
+    ],
+    
+    "client-classes": [
+      {
+        "name": "REGISTERED",
+        "test": "member('KNOWN')",
+        "option-data": [
+          {
+            "name": "domain-name-servers",
+            "data": "8.8.8.8, 8.8.4.4"
+          }
+        ],
+        "valid-lifetime": 86400
       },
       {
-        "name": "domain-name-servers",
-        "data": "192.168.99.4"
+        "name": "UNREGISTERED",
+        "test": "not member('KNOWN')",
+        "option-data": [
+          {
+            "name": "domain-name-servers",
+            "data": "192.168.99.4"
+          }
+        ]
       }
     ],
     
@@ -72,7 +92,7 @@
         "id": 10,
         "pools": [
           {
-            "pool": "192.168.10.6 - 192.168.10.254"
+            "pool": "192.168.10.5 - 192.168.10.127"
           }
         ],
         "interface": "eth0.10",
@@ -80,19 +100,52 @@
           {
             "name": "routers",
             "data": "192.168.10.1"
+          },
+          {
+            "name": "domain-name-servers",
+            "data": "8.8.8.8, 8.8.4.4"
           }
         ],
-        "reservations": []
+        "renew-timer": 43200,
+        "rebind-timer": 64800,
+        "valid-lifetime": 86400
+      },
+      {
+        "subnet": "192.168.10.128/25",
+        "id": 11,
+        "pools": [
+          {
+            "pool": "192.168.10.128 - 192.168.10.254"
+          }
+        ],
+        "interface": "eth0.10",
+        "option-data": [
+          {
+            "name": "routers",
+            "data": "192.168.10.1"
+          },
+          {
+            "name": "domain-name-servers",
+            "data": "8.8.8.8, 8.8.4.4"
+          }
+        ],
+        "renew-timer": 30,
+        "rebind-timer": 45,
+        "valid-lifetime": 60
       },
       {
         "subnet": "192.168.20.0/24",
         "id": 20,
         "pools": [
           {
-            "pool": "192.168.20.6 - 192.168.20.254"
+            "pool": "192.168.20.5 - 192.168.20.127",
+            "client-class": "REGISTERED"
+          },
+          {
+            "pool": "192.168.20.128 - 192.168.20.254",
+            "client-class": "UNREGISTERED"
           }
         ],
-        "interface": "eth0.20",
         "option-data": [
           {
             "name": "routers",
@@ -106,10 +159,14 @@
         "id": 30,
         "pools": [
           {
-            "pool": "192.168.30.6 - 192.168.30.254"
+            "pool": "192.168.30.5 - 192.168.30.127",
+            "client-class": "REGISTERED"
+          },
+          {
+            "pool": "192.168.30.128 - 192.168.30.254",
+            "client-class": "UNREGISTERED"
           }
         ],
-        "interface": "eth0.30",
         "option-data": [
           {
             "name": "routers",
@@ -123,10 +180,14 @@
         "id": 40,
         "pools": [
           {
-            "pool": "192.168.40.6 - 192.168.40.254"
+            "pool": "192.168.40.5 - 192.168.40.127",
+            "client-class": "REGISTERED"
+          },
+          {
+            "pool": "192.168.40.128 - 192.168.40.254",
+            "client-class": "UNREGISTERED"
           }
         ],
-        "interface": "eth0.40",
         "option-data": [
           {
             "name": "routers",
@@ -140,10 +201,14 @@
         "id": 50,
         "pools": [
           {
-            "pool": "192.168.50.6 - 192.168.50.254"
+            "pool": "192.168.50.5 - 192.168.50.127",
+            "client-class": "REGISTERED"
+          },
+          {
+            "pool": "192.168.50.128 - 192.168.50.254",
+            "client-class": "UNREGISTERED"
           }
         ],
-        "interface": "eth0.50",
         "option-data": [
           {
             "name": "routers",
@@ -157,10 +222,14 @@
         "id": 60,
         "pools": [
           {
-            "pool": "192.168.60.6 - 192.168.60.254"
+            "pool": "192.168.60.5 - 192.168.60.127",
+            "client-class": "REGISTERED"
+          },
+          {
+            "pool": "192.168.60.128 - 192.168.60.254",
+            "client-class": "UNREGISTERED"
           }
         ],
-        "interface": "eth0.60",
         "option-data": [
           {
             "name": "routers",
@@ -169,7 +238,48 @@
         ],
         "reservations": []
       },
-
+      {
+        "subnet": "192.168.70.0/24",
+        "id": 70,
+        "pools": [
+          {
+            "pool": "192.168.70.5 - 192.168.70.127",
+            "client-class": "REGISTERED"
+          },
+          {
+            "pool": "192.168.70.128 - 192.168.70.254",
+            "client-class": "UNREGISTERED"
+          }
+        ],
+        "option-data": [
+          {
+            "name": "routers",
+            "data": "192.168.70.1"
+          }
+        ],
+        "reservations": []
+      },
+      {
+        "subnet": "192.168.90.0/24",
+        "id": 90,
+        "pools": [
+          {
+            "pool": "192.168.90.5 - 192.168.90.127",
+            "client-class": "REGISTERED"
+          },
+          {
+            "pool": "192.168.90.128 - 192.168.90.254",
+            "client-class": "UNREGISTERED"
+          }
+        ],
+        "option-data": [
+          {
+            "name": "routers",
+            "data": "192.168.90.1"
+          }
+        ],
+        "reservations": []
+      },
       {
         "subnet": "192.168.99.0/24",
         "id": 99,
@@ -178,11 +288,14 @@
             "pool": "192.168.99.100 - 192.168.99.254"
           }
         ],
-        "interface": "eth0.99",
         "option-data": [
           {
             "name": "routers",
             "data": "192.168.99.1"
+          },
+          {
+            "name": "domain-name-servers",
+            "data": "192.168.99.4"
           }
         ],
         "reservations": []

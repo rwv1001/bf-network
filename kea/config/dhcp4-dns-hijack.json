@@ -22,7 +22,7 @@
         "library": "/usr/local/lib/kea/hooks/libdhcp_lease_cmds.so"
       },
       {
-        "library": "/usr/local/lib/kea/hooks/dhcp_dns_hijack.so"
+        "library": "/usr/local/lib/kea/hooks/dhcp_dynamic_subnet.so"
       }
     ],
     
@@ -169,7 +169,40 @@
         ],
         "reservations": []
       },
-
+      {
+        "subnet": "192.168.70.0/24",
+        "id": 70,
+        "pools": [
+          {
+            "pool": "192.168.70.6 - 192.168.70.254"
+          }
+        ],
+        "interface": "eth0.70",
+        "option-data": [
+          {
+            "name": "routers",
+            "data": "192.168.70.1"
+          }
+        ],
+        "reservations": []
+      },
+      {
+        "subnet": "192.168.90.0/24",
+        "id": 90,
+        "pools": [
+          {
+            "pool": "192.168.90.6 - 192.168.90.254"
+          }
+        ],
+        "interface": "eth0.90",
+        "option-data": [
+          {
+            "name": "routers",
+            "data": "192.168.90.1"
+          }
+        ],
+        "reservations": []
+      },
       {
         "subnet": "192.168.99.0/24",
         "id": 99,

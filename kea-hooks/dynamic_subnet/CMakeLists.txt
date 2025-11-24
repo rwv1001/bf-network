@@ -16,18 +16,18 @@ endif()
 
 include_directories(${KEA_INCLUDE_DIR})
 
-# Build the hook library
-add_library(kea_dynamic_subnet SHARED
-    dynamic_subnet.cc
+# Build the DNS hijack hook library
+add_library(kea_dns_hijack SHARED
+    dns_hijack_hook.cc
 )
 
 # Set proper library name (without 'lib' prefix for Kea hooks)
-set_target_properties(kea_dynamic_subnet PROPERTIES
+set_target_properties(kea_dns_hijack PROPERTIES
     PREFIX ""
-    OUTPUT_NAME "dhcp_dynamic_subnet"
+    OUTPUT_NAME "dhcp_dns_hijack"
 )
 
 # Install to Kea hooks directory
-install(TARGETS kea_dynamic_subnet
+install(TARGETS kea_dns_hijack
     LIBRARY DESTINATION /usr/local/lib/kea/hooks
 )

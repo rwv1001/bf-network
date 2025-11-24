@@ -55,7 +55,9 @@ services:
       - ./app:/app
       - ../kea/leases:/kea/leases:ro  # Access to Kea lease database
       - ../kea/sockets:/kea/sockets:ro  # Access to Kea control socket
+      - ../scripts:/home/admin/bf-network/scripts:ro  # Access to dns-hijack.sh
     network_mode: host
+    privileged: true  # Required for iptables manipulation from non-root user
     depends_on:
       db:
         condition: service_healthy

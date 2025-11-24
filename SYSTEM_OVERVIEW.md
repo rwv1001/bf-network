@@ -42,89 +42,101 @@ A comprehensive captive portal solution for your network that enables:
 │           ├── admin_edit_user.html
 │           └── admin_approve_request.html
 │
-├── freeradius/                  # UPDATED - RADIUS server
-│   ├── docker-compose.yml       # Updated with CoA mounts
+├── freeradius/                  # RADIUS server for wired CoA
+│   ├── docker-compose.yml       
 │   ├── raddb/
-│   │   ├── clients.conf         # Updated with portal client
+│   │   ├── clients.conf         # Portal client config
 │   │   ├── sites-available/
-│   │   │   └── coa              # NEW - CoA server config
+│   │   │   └── coa              # CoA server config
 │   │   └── sites-enabled/
 │   │       └── coa -> ../sites-available/coa
-│   └── COA_SETUP.md             # NEW - CoA documentation
+│   └── COA_SETUP.md             # CoA documentation
 │
-├── DEPLOYMENT_GUIDE.md          # NEW - Complete deployment guide
+├── dnsmasq/                     # NEW - Dual DNS setup
+│   ├── docker-compose.yml       # Two DNSmasq instances
+│   ├── conf/
+│   │   ├── blac-onboarding.conf # Normal DNS (192.168.99.4)
+│   │   └── hijack.conf          # Hijacking DNS (192.168.99.5)
 │
-├── kea/                         # Existing - DHCP server (unchanged)
+├── kea/                         # DHCP server with DNS hijack hook
+│   ├── config/
+│   │   └── dhcp4.json           # Single pool per VLAN
+│   └── hooks/
+│       └── dhcp_dns_hijack.so   # NEW - Automatic DNS hijacking
+│
+├── scripts/                     # NEW - DNS hijacking management
+│   ├── dns-hijack.sh            # iptables DNS redirect control
+│   └── setup-ip-alias.sh        # Create 192.168.99.5 IP alias
+│
+├── DNS_HIJACK_IMPLEMENTATION.md # NEW - Complete DNS hijack guide
+├── DEPLOYMENT_GUIDE.md          # Complete deployment guide
+│
+├── docs/archived/               # OLD documentation (deprecated)
 ├── npm/                         # Existing - Nginx Proxy Manager (unchanged)
 └── tftp-inbox/                  # Existing - TFTP backup location (unchanged)
 ```
 
 ## How It Works
 
-### User Registration Flow (Pre-Authorized)
+### WiFi Registration Flow (DNS Hijacking)
 
-1. Admin pre-registers user in admin panel:
-   - Email: user@example.com
-   - Status: staff (VLAN 20)
-   - Dates: 2025-11-05 to 2026-11-05
+1. User connects device to WiFi SSID
+   - Device gets IP from single pool (.6-.254)
+   - DNS server: 192.168.99.4
 
-2. User connects device to WiFi or Ethernet (port 19 or 21)
+2. Kea hook detects unregistered device (no reservation)
+   - Calls `dns-hijack.sh hijack <ip>`
+   - iptables redirects DNS queries to 192.168.99.5
 
-3. HP5130 switch performs MAC authentication via RADIUS
+3. DNS hijacking active
+   - All domain lookups return 192.168.99.4 (captive portal)
+   - Device sees captive portal for any website
 
-4. RADIUS assigns VLAN 99 (unregistered) - default for unknown MACs
+4. User fills registration form on portal
 
-5. Device gets IP on VLAN 99 (192.168.99.x)
+5. Portal checks database:
+   - **Pre-authorized**: Email found → auto-approve
+   - **New user**: Creates registration request → admin approves
 
-6. User opens browser → redirected to captive portal
+6. On approval, portal:
+   - Creates Kea host reservation (MAC address)
+   - Calls `dns-hijack.sh unhijack <ip>`
+   - Removes iptables redirect rule
 
-7. User fills form with email and name
+7. Device immediately has normal internet
+   - DNS resolves normally via 192.168.99.4 → 1.1.1.1
+   - No IP change, no reconnection needed
+   - Instant access!
 
-8. Portal checks database:
+### Wired Registration Flow (RADIUS CoA)
+
+1. User connects device to wired port (e.g., port 19, 21)
+
+2. HP5130 switch performs MAC authentication via RADIUS
+
+3. RADIUS assigns VLAN 99 (unregistered) - default for unknown MACs
+
+4. Device gets IP on VLAN 99 (192.168.99.x)
+
+5. User opens browser → redirected to captive portal
+
+6. User fills form with email and name
+
+7. Portal checks database:
    - Email found ✓
    - Dates valid ✓
    - Status: staff → VLAN 20
 
-9. Portal sends RADIUS CoA packet:
+8. Portal sends RADIUS CoA packet:
    - Target: Switch (192.168.99.1)
    - MAC: Device MAC address
    - New VLAN: 20
 
-10. Switch receives CoA and moves device to VLAN 20
+9. Switch receives CoA and moves device to VLAN 20
 
-11. Device disconnects and reconnects on VLAN 20
+10. Device gets new IP (192.168.20.x)
 
-12. Device gets new IP (192.168.20.x)
-
-13. Full network access granted
-
-### User Registration Flow (Unknown User)
-
-1. User connects device (same as above, gets VLAN 99)
-
-2. User fills registration form with NEW email
-
-3. Portal creates registration request in database
-
-4. Portal sends email to admin with approval link
-
-5. Admin receives notification, reviews request
-
-6. Admin clicks link or accesses admin panel
-
-7. Admin contacts user to verify (phone/email)
-
-8. Admin approves request:
-   - Sets status: guests (VLAN 40)
-   - Sets dates: Today to +30 days
-
-9. Portal creates user in database
-
-10. Portal sends CoA to move device to VLAN 40
-
-11. Device moves to VLAN 40, gets full access
-
-12. User can register additional devices using same email (flow 1)
+11. Full network access granted
 
 ## VLAN Assignments
 
@@ -149,6 +161,7 @@ A comprehensive captive portal solution for your network that enables:
   - User registration form
   - Device status page
   - Admin dashboard
+  - DNS hijacking integration for WiFi devices
   - User management
   - Device management
   - Request approval workflow

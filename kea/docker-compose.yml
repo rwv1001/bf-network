@@ -1,6 +1,7 @@
 services:
   kea:
-    image: jonasal/kea-dhcp4:3.0-alpine   # even minor = stable/LTS
+    build: .
+    image: kea-custom:3.0-alpine
     container_name: kea
     restart: unless-stopped
     network_mode: host
@@ -10,6 +11,8 @@ services:
       - ./config:/kea/config
       - ./leases:/kea/leases
       - ./sockets:/kea/sockets
+      - ../scripts:/scripts:ro
+      - ../kea-hooks/dynamic_subnet/dhcp_dns_hijack.so:/usr/local/lib/kea/hooks/dhcp_dns_hijack.so:ro
     entrypoint: |
       sh -c '
       rm -f /usr/local/var/run/kea/dhcp4.kea-dhcp4.pid
