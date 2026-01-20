@@ -119,43 +119,50 @@ def get_client_mac():
             try:
                 # Read Kea lease file directly (CSV format)
                 # Format: address,hwaddr,client_id,valid_lifetime,expire,subnet_id,fqdn_fwd,fqdn_rev,hostname,state,user_context,pool_id
-                lease_files = [
-                    '/kea/leases/kea-leases4.csv',
-                    '/kea/leases/kea-leases4.csv.2',
-                    '/kea/leases/kea-leases4.csv.1'
-                ]
+                # Only use the current lease file, not backups
+                lease_file = '/kea/leases/kea-leases4.csv'
                 
-                # Try each lease file until we find the MAC
-                for lease_file in lease_files:
-                    try:
-                        with open(lease_file, 'r') as f:
-                            for line in f:
-                                # Skip header line
-                                if line.startswith('address,'):
-                                    continue
-                                    
-                                fields = line.strip().split(',')
-                                if len(fields) >= 2:
-                                    lease_ip = fields[0]
-                                    lease_hwaddr = fields[1]
-                                    
-                                    # Check if IP matches
-                                    if lease_ip == ip_address:
-                                        # MAC address is in fields[1] in format xx:xx:xx:xx:xx:xx
-                                        mac = lease_hwaddr
-                                        logger.info(f"Found MAC {mac} for IP {ip_address} in Kea lease file {lease_file}")
-                                        break
-                        
-                        # If we found the MAC, stop searching other files
-                        if mac:
-                            break
+                # Collect all matching entries (there may be duplicates for same IP)
+                matching_macs = []
+                
+                try:
+                    with open(lease_file, 'r') as f:
+                        for line in f:
+                            # Skip header line
+                            if line.startswith('address,'):
+                                continue
+                                
+                            fields = line.strip().split(',')
+                            if len(fields) >= 2:
+                                lease_ip = fields[0]
+                                lease_hwaddr = fields[1]
+                                
+                                # Check if IP matches
+                                if lease_ip == ip_address:
+                                    matching_macs.append(lease_hwaddr)
+                    
+                    # Use the LAST matching MAC (most recent entry)
+                    if matching_macs:
+                        mac = matching_macs[-1]
+                        logger.info(f"Found MAC {mac} for IP {ip_address} in Kea lease file {lease_file}")
                             
-                    except FileNotFoundError:
-                        logger.debug(f"Kea lease file not found: {lease_file}")
-                        continue
+                except FileNotFoundError:
+                    logger.debug(f"Kea lease file not found: {lease_file}")
+                except Exception as e:
+                    logger.error(f"Error reading Kea lease file {lease_file}: {e}")
+                
+                # If not found in lease file, try querying Kea control socket directly
+                if not mac:
+                    try:
+                        kea = get_kea()
+                        if kea:
+                            lease = kea.get_lease(ip_address)
+                            if lease:
+                                mac = lease.get('hw-address')
+                                if mac:
+                                    logger.info(f"Found MAC {mac} for IP {ip_address} via Kea control socket")
                     except Exception as e:
-                        logger.error(f"Error reading Kea lease file {lease_file}: {e}")
-                        continue
+                        logger.error(f"Error querying Kea control socket: {e}")
                         
             except Exception as e:
                 logger.error(f"Error looking up MAC address: {e}")
@@ -172,6 +179,10 @@ def get_client_mac():
 
 def get_client_ip():
     """Get client IP address"""
+    # Check X-Real-IP first (set by nginx proxy manager)
+    if request.headers.get('X-Real-IP'):
+        return request.headers.get('X-Real-IP').strip()
+    # Then check X-Forwarded-For
     if request.headers.get('X-Forwarded-For'):
         return request.headers.get('X-Forwarded-For').split(',')[0].strip()
     return request.remote_addr
@@ -271,10 +282,132 @@ def manage_dns_hijack(action, ip_address):
         return False
 
 
+def manage_switch_acl(action, ip_address, vlan_id):
+    """
+    Manage HP5130 ACL rules for blocking/unblocking specific IPs using NETCONF.
+    
+    Args:
+        action: 'block' to deny traffic, 'unblock' to remove deny rule
+        ip_address: Device IP address to block/unblock
+        vlan_id: VLAN ID (e.g., 10)
+        
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        from ncclient import manager
+        from ncclient.xml_ import to_ele
+    except ImportError:
+        logger.error("ncclient not installed - cannot manage switch ACLs")
+        return False
+    
+    switch_host = os.getenv('SWITCH_HOST', '192.168.99.1')
+    switch_user = os.getenv('SWITCH_USER', 'admin')
+    switch_pass = os.getenv('SWITCH_PASS', '')
+    switch_port = int(os.getenv('SWITCH_NETCONF_PORT', '830'))
+    
+    if not switch_pass:
+        logger.error("SWITCH_PASS not configured")
+        return False
+    
+    # ACL number based on VLAN (e.g., VLAN 10 = ACL 3100)
+    acl_num = 3000 + (vlan_id * 10)
+    
+    try:
+        # Connect to switch via NETCONF
+        with manager.connect(
+            host=switch_host,
+            port=switch_port,
+            username=switch_user,
+            password=switch_pass,
+            hostkey_verify=False,
+            device_params={'name': 'huawei'},
+            timeout=30
+        ) as m:
+            
+            if action == 'block':
+                # Add deny rule for this specific IP
+                # Rule 101 will deny this specific IP, placed after rule 100 but before rule 200
+                config_xml = f"""
+                <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+                  <acl xmlns="http://www.hp.com/netconf/config:1.0">
+                    <group>
+                      <number>{acl_num}</number>
+                      <rule>
+                        <id>101</id>
+                        <action>deny</action>
+                        <source-ip>{ip_address}</source-ip>
+                        <source-wildcard>0.0.0.0</source-wildcard>
+                      </rule>
+                    </group>
+                  </acl>
+                </config>
+                """
+                logger.info(f"Adding ACL deny rule for {ip_address} on VLAN {vlan_id}")
+                
+            elif action == 'unblock':
+                # Remove the deny rule for this IP (use delete operation)
+                config_xml = f"""
+                <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+                  <acl xmlns="http://www.hp.com/netconf/config:1.0">
+                    <group>
+                      <number>{acl_num}</number>
+                      <rule operation="delete">
+                        <id>101</id>
+                      </rule>
+                    </group>
+                  </acl>
+                </config>
+                """
+                logger.info(f"Removing ACL deny rule for {ip_address} on VLAN {vlan_id}")
+            
+            else:
+                logger.error(f"Invalid action: {action}")
+                return False
+            
+            # Send edit-config via NETCONF
+            response = m.edit_config(target='running', config=config_xml)
+            
+            if response.ok:
+                logger.info(f"ACL {action} successful for {ip_address} on VLAN {vlan_id}")
+                return True
+            else:
+                logger.error(f"ACL {action} failed: {response}")
+                return False
+        
+    except Exception as e:
+        logger.error(f"Switch ACL {action} failed for {ip_address}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return False
+
+
 @app.route('/')
 def index():
-    """Landing page - redirect to registration"""
+    """Landing page - check if device is blocked, otherwise redirect to registration"""
+    ip_address = request.remote_addr
+    mac_address = get_client_mac()
+    
+    # Check if device is blocked
+    if mac_address:
+        device = Device.query.filter_by(mac_address=mac_address).first()
+        if device and device.registration_status == 'blocked':
+            return redirect(url_for('blocked_page'))
+    
     return redirect(url_for('register'))
+
+
+@app.route('/blocked')
+def blocked_page():
+    """Show blocked device page"""
+    ip_address = get_client_ip()
+    mac_address = get_client_mac()
+    admin_email = os.getenv('ADMIN_EMAIL', 'admin@example.com')
+    
+    return render_template('blocked.html', 
+                         ip_address=ip_address,
+                         mac_address=mac_address,
+                         admin_email=admin_email)
 
 
 # Captive portal detection endpoints
@@ -282,6 +415,11 @@ def index():
 @app.route('/gen_204')
 def android_captive_portal_detection():
     """Android captive portal detection - return 302 to show portal"""
+    mac_address = get_client_mac()
+    if mac_address:
+        device = Device.query.filter_by(mac_address=mac_address).first()
+        if device and device.registration_status == 'blocked':
+            return redirect(url_for('blocked_page')), 302
     return redirect(url_for('register')), 302
 
 @app.route('/hotspot-detect.html')
@@ -295,6 +433,9 @@ def ios_captive_portal_detection():
         if device and device.registration_status == 'active':
             # Device is registered - return Success to bypass portal
             return "<HTML><BODY>Success</BODY></HTML>", 200
+        elif device and device.registration_status == 'blocked':
+            # Device is blocked - show blocked page
+            return redirect(url_for('blocked_page')), 302
     
     # Device not registered - redirect to portal (triggers iOS captive portal UI)
     return redirect(url_for('register')), 302
@@ -308,6 +449,11 @@ def ios_captive_success():
 @app.route('/connecttest.txt')
 def windows_captive_portal_detection():
     """Windows captive portal detection"""
+    mac_address = get_client_mac()
+    if mac_address:
+        device = Device.query.filter_by(mac_address=mac_address).first()
+        if device and device.registration_status == 'blocked':
+            return redirect(url_for('blocked_page')), 302
     return redirect(url_for('register')), 302
 
 
@@ -319,6 +465,12 @@ def register():
     ip_address = get_client_ip()
     
     logger.info(f"Registration page accessed from IP: {ip_address}, MAC: {mac_address}")
+    
+    # Check if device is blocked first
+    if mac_address:
+        device = Device.query.filter_by(mac_address=mac_address).first()
+        if device and device.registration_status == 'blocked':
+            return redirect(url_for('blocked_page'))
     
     if request.method == 'POST':
         email = request.form.get('email', '').strip().lower()
@@ -585,10 +737,10 @@ def register():
                 approval_url = f"{os.getenv('PORTAL_URL')}/admin/approve/{reg_request.approval_token}"
                 send_admin_notification(reg_request, approval_url)
                 
-                flash('Your registration request has been submitted. An administrator will review it shortly and contact you.', 'info')
+                flash('Your registration request has been submitted. Waiting for approval...', 'info')
                 logger.info(f"Registration request submitted for {email} from MAC {mac_address}")
                 
-                return redirect(url_for('status'))
+                return redirect(url_for('register', registered='true'))
     
     return render_template('register.html', detected_mac=mac_address, detected_ip=ip_address)
 
@@ -653,6 +805,49 @@ def status():
     
     device = Device.query.filter_by(mac_address=mac_address).first()
     return render_template('status.html', device=device)
+
+
+@app.route('/api/registration-status')
+def api_registration_status():
+    """API endpoint for checking registration status via AJAX"""
+    mac_address = get_client_mac()
+    
+    if not mac_address:
+        return jsonify({'status': 'unknown', 'message': 'Could not detect MAC address'})
+    
+    # Check if device is registered
+    device = Device.query.filter_by(mac_address=mac_address).first()
+    if device:
+        return jsonify({
+            'status': device.registration_status,
+            'message': f'Device is {device.registration_status}'
+        })
+    
+    # Check if there's a pending registration request
+    reg_request = RegistrationRequest.query.filter_by(mac_address=mac_address).order_by(RegistrationRequest.submitted_at.desc()).first()
+    if reg_request:
+        return jsonify({
+            'status': reg_request.status,
+            'message': f'Registration request is {reg_request.status}'
+        })
+    
+    return jsonify({'status': 'unregistered', 'message': 'Not registered'})
+
+
+@app.route('/api/block-status')
+def api_block_status():
+    """API endpoint for checking if device is still blocked"""
+    mac_address = get_client_mac()
+    
+    if not mac_address:
+        return jsonify({'blocked': True, 'message': 'Could not detect MAC address'})
+    
+    device = Device.query.filter_by(mac_address=mac_address).first()
+    
+    if device and device.registration_status == 'blocked':
+        return jsonify({'blocked': True, 'message': 'Device is blocked'})
+    
+    return jsonify({'blocked': False, 'message': 'Device is not blocked'})
 
 
 @app.route('/unregister/<token>')
@@ -1245,24 +1440,24 @@ def admin_disconnect_device(device_id):
 @app.route('/admin/device/<int:device_id>/block', methods=['POST'])
 @login_required
 def admin_block_device(device_id):
-    """Block a device"""
+    """Block a device via HP5130 ACL for immediate effect"""
     device = Device.query.get_or_404(device_id)
     
-    vlan_map = get_vlan_map()
     device.registration_status = 'blocked'
-    device.current_vlan = vlan_map['restricted']  # Move to restricted VLAN
     db.session.commit()
     
-    # Disconnect from network if WiFi
-    if device.connection_type == 'wifi':
-        kea = get_kea()
-        if kea:
-            kea.unregister_mac(device.mac_address, device.current_vlan)
-    elif device.connection_type == 'wired':
-        send_coa_disconnect(device.mac_address)
-    
-    flash(f'Device {device.mac_address} has been blocked', 'success')
-    logger.info(f"Admin blocked device {device.mac_address}")
+    # Apply ACL block on HP5130 switch for immediate effect (bypasses DoH)
+    if device.ip_address and device.current_vlan:
+        acl_success = manage_switch_acl('block', device.ip_address, device.current_vlan)
+        if acl_success:
+            flash(f'Device {device.mac_address} blocked immediately via switch ACL. Internet access denied.', 'success')
+            logger.info(f"Admin blocked device {device.mac_address} at {device.ip_address} via switch ACL")
+        else:
+            flash(f'Device {device.mac_address} marked as blocked, but ACL update failed. Check switch credentials.', 'warning')
+            logger.error(f"ACL block failed for {device.mac_address} at {device.ip_address}")
+    else:
+        flash(f'Device {device.mac_address} marked as blocked, but no IP/VLAN found. Cannot apply ACL.', 'warning')
+        logger.warning(f"No IP/VLAN for device {device.mac_address}, cannot apply ACL")
     
     return redirect(url_for('admin_dashboard'))
 
@@ -1270,31 +1465,24 @@ def admin_block_device(device_id):
 @app.route('/admin/device/<int:device_id>/unblock', methods=['POST'])
 @login_required
 def admin_unblock_device(device_id):
-    """Unblock a device"""
+    """Unblock a device by removing switch ACL rule"""
     device = Device.query.get_or_404(device_id)
-    user = User.query.get(device.user_id)
     
     device.registration_status = 'active'
-    
-    # Determine target VLAN based on user status
-    vlan_map = get_vlan_map()
-    if user:
-        device.current_vlan = vlan_map.get(user.status, vlan_map['guests'])
-    else:
-        device.current_vlan = vlan_map['guests']
-    
     db.session.commit()
     
-    # Re-register in network
-    if device.connection_type == 'wifi':
-        kea = get_kea()
-        if kea:
-            kea.register_mac(device.mac_address, device.current_vlan)
-    elif device.connection_type == 'wired':
-        send_coa_change(device.mac_address, device.current_vlan)
-    
-    flash(f'Device {device.mac_address} has been unblocked', 'success')
-    logger.info(f"Admin unblocked device {device.mac_address}")
+    # Remove ACL block on HP5130 switch
+    if device.ip_address and device.current_vlan:
+        acl_success = manage_switch_acl('unblock', device.ip_address, device.current_vlan)
+        if acl_success:
+            flash(f'Device {device.mac_address} unblocked. Internet access restored.', 'success')
+            logger.info(f"Admin unblocked device {device.mac_address} at {device.ip_address} via switch ACL")
+        else:
+            flash(f'Device {device.mac_address} marked as active, but ACL removal failed.', 'warning')
+            logger.error(f"ACL unblock failed for {device.mac_address}")
+    else:
+        flash(f'Device {device.mac_address} marked as active, but no IP/VLAN found.', 'warning')
+        logger.warning(f"No IP/VLAN for device {device.mac_address}")
     
     return redirect(url_for('admin_dashboard'))
 
@@ -1305,12 +1493,18 @@ def admin_delete_device(device_id):
     """Delete a device registration"""
     device = Device.query.get_or_404(device_id)
     mac_address = device.mac_address
+    ip_address = device.ip_address
     
     # Unregister from network first
     if device.connection_type == 'wifi':
         kea = get_kea()
         if kea:
             kea.unregister_mac(device.mac_address, device.current_vlan)
+        
+        # Add DNS hijacking so they see registration page again
+        if ip_address:
+            manage_dns_hijack('hijack', ip_address)
+            logger.info(f"DNS hijacked for deleted device {mac_address} at {ip_address}")
     elif device.connection_type == 'wired':
         send_coa_disconnect(device.mac_address)
     
@@ -1328,7 +1522,8 @@ def health():
     """Health check endpoint"""
     try:
         # Check database connection
-        db.session.execute('SELECT 1')
+        from sqlalchemy import text
+        db.session.execute(text('SELECT 1'))
         return jsonify({'status': 'healthy'}), 200
     except Exception as e:
         logger.error(f"Health check failed: {e}")

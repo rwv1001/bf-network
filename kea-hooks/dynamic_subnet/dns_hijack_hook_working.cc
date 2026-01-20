@@ -60,6 +60,8 @@ int lease4_select(CalloutHandle& handle) {
         std::cout.flush();
         
         // Check for reservation
+        std::cout << "DNS Hijack Hook: Checking subnet reservation..." << std::endl;
+        std::cout.flush();
         ConstHostPtr host = HostMgr::instance().get4Any(SUBNET_ID_GLOBAL, Host::IDENT_HWADDR,
                                                          &hwaddr->hwaddr_[0], hwaddr->hwaddr_.size());
         
@@ -116,6 +118,8 @@ int lease4_renew(CalloutHandle& handle) {
         std::cout.flush();
         
         // Check for reservation
+        std::cout << "DNS Hijack Hook: Checking subnet reservation..." << std::endl;
+        std::cout.flush();
         ConstHostPtr host = HostMgr::instance().get4Any(SUBNET_ID_GLOBAL, Host::IDENT_HWADDR,
                                                          &hwaddr->hwaddr_[0], hwaddr->hwaddr_.size());
         

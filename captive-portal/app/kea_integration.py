@@ -148,7 +148,11 @@ class KeaIntegration:
             }
             
             if hostname:
-                reservation["hostname"] = hostname
+                # Sanitize hostname: remove special chars, replace with dash
+                import re
+                sanitized = re.sub(r'[^a-z0-9-]', '-', hostname.lower())
+                sanitized = re.sub(r'-+', '-', sanitized).strip('-')  # Remove multiple dashes
+                reservation["hostname"] = sanitized if sanitized else "device"
             
             # Don't assign a specific IP - let the hook select the correct subnet
             # and Kea will assign any available IP from that subnet's pool.

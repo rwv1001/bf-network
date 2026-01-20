@@ -13,7 +13,7 @@ else
 fi
 
 if [ -z "$ACTION" ] || [ -z "$IP_ADDRESS" ]; then
-    echo "Usage: $0 {hijack|unhijack} <ip_address>"
+    echo "Usage: $0 {hijack|unhijack|block|unblock} <ip_address>"
     exit 1
 fi
 
@@ -55,9 +55,44 @@ case "$ACTION" in
         fi
         ;;
         
+    block)
+        # DNS HIJACKING ONLY - Internet blocking happens via VLAN on HP5130
+        # This just hijacks DNS to trigger captive portal detection
+        
+        $SUDO iptables -t nat -C PREROUTING -s "$IP_ADDRESS" -p udp --dport 53 -d 192.168.99.4 -j DNAT --to-destination 192.168.99.5:53 2>/dev/null
+        if [ $? -ne 0 ]; then
+            $SUDO iptables -t nat -A PREROUTING -s "$IP_ADDRESS" -p udp --dport 53 -d 192.168.99.4 -j DNAT --to-destination 192.168.99.5:53
+            echo "DNS hijack enabled for $IP_ADDRESS (UDP)"
+        fi
+        
+        $SUDO iptables -t nat -C PREROUTING -s "$IP_ADDRESS" -p tcp --dport 53 -d 192.168.99.4 -j DNAT --to-destination 192.168.99.5:53 2>/dev/null
+        if [ $? -ne 0 ]; then
+            $SUDO iptables -t nat -A PREROUTING -s "$IP_ADDRESS" -p tcp --dport 53 -d 192.168.99.4 -j DNAT --to-destination 192.168.99.5:53
+            echo "DNS hijack enabled for $IP_ADDRESS (TCP)"
+        fi
+        
+        echo "Device $IP_ADDRESS DNS hijacked - actual blocking via VLAN 90 on HP5130"
+        ;;
+        
+    unblock)
+        # Remove DNS hijacking only (VLAN change handled by Kea/RADIUS)
+        
+        $SUDO iptables -t nat -D PREROUTING -s "$IP_ADDRESS" -p udp --dport 53 -d 192.168.99.4 -j DNAT --to-destination 192.168.99.5:53 2>/dev/null
+        if [ $? -eq 0 ]; then
+            echo "DNS hijack removed for $IP_ADDRESS (UDP)"
+        fi
+        
+        $SUDO iptables -t nat -D PREROUTING -s "$IP_ADDRESS" -p tcp --dport 53 -d 192.168.99.4 -j DNAT --to-destination 192.168.99.5:53 2>/dev/null
+        if [ $? -eq 0 ]; then
+            echo "DNS hijack removed for $IP_ADDRESS (TCP)"
+        fi
+        
+        echo "Device $IP_ADDRESS DNS unhijacked"
+        ;;
+        
     *)
         echo "Error: Unknown action '$ACTION'"
-        echo "Usage: $0 {hijack|unhijack} <ip_address>"
+        echo "Usage: $0 {hijack|unhijack|block|unblock} <ip_address>"
         exit 1
         ;;
 esac

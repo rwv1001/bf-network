@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+
+{% block title %}Device Blocked - Network Access Portal{% endblock %}
+
+{% block header %}🚫 Device Blocked{% endblock %}
+
+{% block content %}
+<div style="max-width: 600px; margin: 40px auto;">
+    <div style="background-color: #ffebee; border-left: 4px solid #d32f2f; padding: 20px; margin-bottom: 30px; border-radius: 4px;">
+        <h2 style="color: #c62828; margin-top: 0;">⚠️ Network Access Denied</h2>
+        <p style="font-size: 16px; margin-bottom: 0;">This device has been blocked from accessing the network.</p>
+    </div>
+
+    <div style="background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+        <h3 style="color: #263326; margin-top: 0;">Why was my device blocked?</h3>
+        <p>Your device may have been blocked for one of the following reasons:</p>
+        <ul style="line-height: 1.8;">
+            <li>Violation of network usage policies</li>
+            <li>Suspicious or malicious activity detected</li>
+            <li>Administrative action required</li>
+            <li>Security concerns</li>
+        </ul>
+
+        <h3 style="color: #263326; margin-top: 30px;">What should I do?</h3>
+        <p>Please contact the network administrator to resolve this issue:</p>
+        
+        <div style="background-color: #f5f5f5; padding: 15px; border-radius: 4px; margin: 20px 0;">
+            <p style="margin: 0;"><strong>Email:</strong> {{ admin_email }}</p>
+        </div>
+
+        <p style="font-size: 14px; color: #666; margin-top: 30px;">
+            <strong>Device Information:</strong><br>
+            {% if mac_address %}
+            <span style="font-family: monospace;">MAC: {{ mac_address }}</span><br>
+            {% endif %}
+            {% if ip_address %}
+            <span style="font-family: monospace;">IP: {{ ip_address }}</span>
+            {% endif %}
+        </p>
+    </div>
+
+    <div style="margin-top: 30px; padding: 20px; background-color: #fff3cd; border-left: 4px solid #ffc107; border-radius: 4px;">
+        <p style="margin: 0; color: #856404;">
+            <strong>Note:</strong> This block affects all network services. You will not be able to access the internet or internal resources until the block is removed.
+        </p>
+    </div>
+    
+    <!-- Status checking message -->
+    <div id="statusCheck" style="margin-top: 20px; padding: 15px; background-color: #e3f2fd; border-left: 4px solid #2196f3; border-radius: 4px; display: none;">
+        <p style="margin: 0; color: #1565c0;">
+            ⏳ Checking if your device has been unblocked...
+        </p>
+    </div>
+</div>
+
+<script>
+// Poll every 5 seconds to check if device has been unblocked
+let checkInterval = setInterval(function() {
+    fetch('/api/block-status')
+        .then(response => response.json())
+        .then(data => {
+            if (data.blocked === false) {
+                clearInterval(checkInterval);
+                // Show success message
+                document.getElementById('statusCheck').style.display = 'block';
+                document.getElementById('statusCheck').style.backgroundColor = '#e8f5e9';
+                document.getElementById('statusCheck').style.borderColor = '#4caf50';
+                document.getElementById('statusCheck').innerHTML = '<p style="margin: 0; color: #2e7d32;">✓ Your device has been unblocked! Redirecting...</p>';
+                
+                // Redirect to test internet connectivity
+                setTimeout(function() {
+                    window.location.href = 'http://captive.apple.com/hotspot-detect.html';
+                }, 2000);
+            }
+        })
+        .catch(error => {
+            console.log('Status check failed:', error);
+        });
+}, 5000);
+
+// Show initial checking message after 10 seconds
+setTimeout(function() {
+    document.getElementById('statusCheck').style.display = 'block';
+}, 10000);
+</script>
+{% endblock %}

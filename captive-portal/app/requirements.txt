@@ -16,3 +16,6 @@ itsdangerous==2.1.2
 # Microsoft Graph API for email
 msal==1.26.0
 requests==2.31.0
+
+# HP5130 Switch Management via NETCONF
+ncclient==0.6.15

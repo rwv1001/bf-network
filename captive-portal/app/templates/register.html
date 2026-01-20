@@ -69,12 +69,87 @@
         </ul>
     </div>
     
-    <button type="submit" class="btn">Register Device</button>
+    <button type="submit" class="btn" id="registerBtn">Register Device</button>
 </form>
+
+<div id="statusMessage" style="display: none; margin-top: 20px; padding: 15px; border-radius: 8px; text-align: center;"></div>
 
 <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e0e0e0; text-align: center;">
     <a href="{{ url_for('status') }}" style="color: #667eea; text-decoration: none;">
         Check registration status →
     </a>
 </div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const form = document.querySelector('form');
+    const registerBtn = document.getElementById('registerBtn');
+    const statusMessage = document.getElementById('statusMessage');
+    let pollInterval = null;
+    let registrationSubmitted = false;
+    
+    form.addEventListener('submit', function(e) {
+        // Disable button to prevent double submission
+        registerBtn.disabled = true;
+        registerBtn.textContent = 'Registering...';
+        registerBtn.style.opacity = '0.6';
+        registerBtn.style.cursor = 'not-allowed';
+        registrationSubmitted = true;
+    });
+    
+    // If we came back from a registration submission, start polling
+    const urlParams = new URLSearchParams(window.location.search);
+    if (urlParams.has('registered') || registrationSubmitted) {
+        startPolling();
+    }
+    
+    function startPolling() {
+        showStatus('Waiting for approval...', 'info');
+        
+        pollInterval = setInterval(function() {
+            fetch('/api/registration-status')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'approved' || data.status === 'active') {
+                        clearInterval(pollInterval);
+                        showStatus('✓ Registration approved! You now have internet access.', 'success');
+                        
+                        // Try to redirect after 3 seconds to confirm internet works
+                        setTimeout(function() {
+                            showStatus('✓ Testing internet connection...', 'success');
+                            window.location.href = 'http://captive.apple.com/hotspot-detect.html';
+                        }, 3000);
+                    } else if (data.status === 'pending') {
+                        showStatus('⏳ Your registration request is pending admin approval...', 'info');
+                    } else if (data.status === 'rejected') {
+                        clearInterval(pollInterval);
+                        showStatus('✗ Registration request was rejected. Please contact administrator.', 'error');
+                    }
+                })
+                .catch(error => {
+                    console.error('Status check failed:', error);
+                });
+        }, 2000); // Poll every 2 seconds
+    }
+    
+    function showStatus(message, type) {
+        statusMessage.style.display = 'block';
+        statusMessage.textContent = message;
+        
+        if (type === 'success') {
+            statusMessage.style.backgroundColor = '#d4edda';
+            statusMessage.style.color = '#155724';
+            statusMessage.style.border = '1px solid #c3e6cb';
+        } else if (type === 'error') {
+            statusMessage.style.backgroundColor = '#f8d7da';
+            statusMessage.style.color = '#721c24';
+            statusMessage.style.border = '1px solid #f5c6cb';
+        } else {
+            statusMessage.style.backgroundColor = '#d1ecf1';
+            statusMessage.style.color = '#0c5460';
+            statusMessage.style.border = '1px solid #bee5eb';
+        }
+    }
+});
+</script>
 {% endblock %}
