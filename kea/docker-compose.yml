@@ -16,9 +16,16 @@ services:
     entrypoint: |
       sh -c '
       rm -f /usr/local/var/run/kea/dhcp4.kea-dhcp4.pid
+      mkdir -p /kea/sockets
+      chown -R 0:1000 /kea/sockets || true
+      chmod 750 /kea/sockets || true
+      mkdir -p /kea/leases
+      chmod 755 /kea/leases || true
       kea-dhcp4 -c /kea/config/dhcp4.json &
       KEA_PID=$!
       sleep 3
-      chmod 666 /kea/sockets/kea4-ctrl-socket
+      chown 0:1000 /kea/sockets/kea4-ctrl-socket || true
+      chmod 660 /kea/sockets/kea4-ctrl-socket || true
+      chmod 644 /kea/leases/kea-leases4.csv || true
       wait $KEA_PID
       '

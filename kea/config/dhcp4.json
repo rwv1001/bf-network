@@ -2,8 +2,12 @@
   "Dhcp4": {
     "authoritative": true,
     "interfaces-config": {
-      "interfaces": [ "*" ],
+      "interfaces": [ "eth0.10", "eth0.20", "eth0.30", "eth0.40", "eth0.50", "eth0.60", "eth0.99" ],
       "dhcp-socket-type": "raw"
+    },
+
+    "multi-threading": {
+      "enable-multi-threading": true
     },
     
     "control-socket": {

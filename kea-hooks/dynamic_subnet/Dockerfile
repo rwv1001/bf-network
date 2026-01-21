@@ -13,6 +13,7 @@ RUN apk add --no-cache \
 
 # Copy hook source
 COPY dynamic_subnet.cc /src/
+COPY dns_hijack_hook.cc /src/
 COPY CMakeLists.txt /src/
 
 WORKDIR /src
@@ -24,4 +25,4 @@ RUN mkdir build && cd build && \
 
 # Final stage - just the compiled hook
 FROM scratch
-COPY --from=builder /src/build/dhcp_dynamic_subnet.so /
+COPY --from=builder /src/build/dhcp_dns_hijack.so /
