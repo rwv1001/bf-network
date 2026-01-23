@@ -13,6 +13,12 @@ services:
       - ./sockets:/kea/sockets
       - ../scripts:/scripts:ro
       - ../kea-hooks/dynamic_subnet/dhcp_dns_hijack.so:/usr/local/lib/kea/hooks/dhcp_dns_hijack.so:ro
+      - /home/admin/.ssh:/keys:ro
+    environment:
+      SWITCH_HOST: ${SWITCH_HOST:-192.168.1.3}
+      SWITCH_USER: ${SWITCH_USER:-robert}
+      SWITCH_SSH_PORT: ${SWITCH_SSH_PORT:-22}
+      SWITCH_KEY_PATH: /keys/id_rsa
     entrypoint: |
       sh -c '
       rm -f /usr/local/var/run/kea/dhcp4.kea-dhcp4.pid

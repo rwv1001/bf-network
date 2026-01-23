@@ -70,6 +70,25 @@ void manage_dns_hijack(const std::string& action, const std::string& ip_address)
     std::cout.flush();
 }
 
+// Helper function to call HP5130 ACL script
+void manage_acl(const std::string& action, const std::string& ip_address) {
+    std::cout << "DNS Hijack Hook: [DEBUG] manage_acl ENTRY (action="
+              << action << ", ip=" << ip_address << ")" << std::endl;
+    std::cout.flush();
+
+    std::stringstream cmd;
+    cmd << "/scripts/hp5130-acl.sh " << action << " " << ip_address << " >/dev/null 2>&1 &";
+
+    std::cout << "DNS Hijack Hook: [DEBUG] ACL Command: " << cmd.str() << std::endl;
+    std::cout.flush();
+
+    int status = system(cmd.str().c_str());
+    if (status != 0) {
+        std::cerr << "DNS Hijack Hook WARNING: ACL script launch status " << status << std::endl;
+        std::cerr.flush();
+    }
+}
+
 int lease4_select(CalloutHandle& handle) {
     try {
         // Get the lease that was selected
@@ -276,6 +295,32 @@ int lease4_renew(CalloutHandle& handle) {
     } catch (const std::exception& ex) {
         std::cout << "DNS Hijack Hook ERROR in lease4_renew: " << ex.what() << std::endl;
         std::cout.flush();
+        handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
+        return 1;
+    }
+}
+
+// Called when a lease expires (cleanup ACL for released IP)
+int lease4_expire(CalloutHandle& handle) {
+    try {
+        Lease4Ptr lease;
+        handle.getArgument("lease4", lease);
+        if (!lease) {
+            handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
+            return 0;
+        }
+
+        std::string ip_address = lease->addr_.toText();
+        std::cout << "DNS Hijack Hook: Lease expired - removing ACL for IP: " << ip_address << std::endl;
+        std::cout.flush();
+
+        manage_acl("unblock", ip_address);
+
+        handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
+        return 0;
+
+    } catch (const std::exception& ex) {
+        std::cout << "DNS Hijack Hook ERROR in lease4_expire: " << ex.what() << std::endl;
         handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
         return 1;
     }

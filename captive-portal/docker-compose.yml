@@ -51,11 +51,17 @@ services:
       EMAIL_VERIFICATION_REQUIRED: ${EMAIL_VERIFICATION_REQUIRED:-false}
       VERIFICATION_TIMEOUT_MINUTES: ${VERIFICATION_TIMEOUT_MINUTES:-15}
       KEA_CONTROL_SOCKET: ${KEA_CONTROL_SOCKET:-/kea/sockets/kea4-ctrl-socket}
+      SWITCH_HOST: ${SWITCH_HOST:-192.168.99.1}
+      SWITCH_USER: ${SWITCH_USER:-admin}
+      SWITCH_PASS: ${SWITCH_PASS}
+      SWITCH_NETCONF_PORT: ${SWITCH_NETCONF_PORT:-830}
+      SWITCH_KEY_PATH: ${SWITCH_KEY_PATH:-}
     volumes:
       - ./app:/app
       - ../kea/leases:/kea/leases:ro  # Access to Kea lease database
       - ../kea/sockets:/kea/sockets  # Access to Kea control socket
       - ../scripts:/home/admin/bf-network/scripts:ro  # Access to dns-hijack.sh
+      - /home/admin/.ssh:/keys:ro  # SSH keys for switch access
     network_mode: host
     privileged: true  # Required for iptables manipulation from non-root user
     depends_on:

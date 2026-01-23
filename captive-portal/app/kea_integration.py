@@ -312,6 +312,81 @@ class KeaIntegration:
         except Exception as e:
             logger.error(f"Error getting all reservations for VLAN {vlan}: {e}")
             return []
+
+    def set_block_status(self, mac: str, vlan: int, blocked: bool) -> bool:
+        """
+        Set blocked status for a MAC using user-context for pool assignment.
+
+        Args:
+            mac: MAC address (format: aa:bb:cc:dd:ee:ff)
+            vlan: VLAN number
+            blocked: True to mark blocked, False to clear
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            mac = mac.lower().replace('-', ':')
+            subnet_id = vlan
+
+            existing = self.get_reservation(mac, vlan)
+            reservation = {
+                "subnet-id": subnet_id,
+                "hw-address": mac,
+                "user-context": {}
+            }
+
+            if existing:
+                existing_res = existing.get("reservation", {})
+                if "hostname" in existing_res:
+                    reservation["hostname"] = existing_res["hostname"]
+                if "ip-address" in existing_res:
+                    reservation["ip-address"] = existing_res["ip-address"]
+                if "client-classes" in existing_res:
+                    reservation["client-classes"] = existing_res["client-classes"]
+
+                user_context = existing_res.get("user-context", {}) or {}
+                reservation["user-context"].update(user_context)
+
+            if blocked:
+                reservation["client-classes"] = ["BLOCKED"]
+                reservation["user-context"]["blocked"] = True
+            else:
+                reservation.pop("client-classes", None)
+                reservation["user-context"]["blocked"] = False
+
+            if existing:
+                del_cmd = {
+                    "command": "reservation-del",
+                    "service": ["dhcp4"],
+                    "arguments": {
+                        "subnet-id": subnet_id,
+                        "identifier-type": "hw-address",
+                        "identifier": mac
+                    }
+                }
+                self._send_command(del_cmd)
+
+            add_cmd = {
+                "command": "reservation-add",
+                "service": ["dhcp4"],
+                "arguments": {
+                    "reservation": reservation
+                }
+            }
+
+            response = self._send_command(add_cmd)
+            if response.get("result") == 0:
+                logger.info(f"Set blocked={blocked} for MAC {mac} in VLAN {vlan}")
+                return True
+
+            error_text = response.get("text", "")
+            logger.error(f"Failed to set blocked={blocked} for MAC {mac}: {error_text}")
+            return False
+
+        except Exception as e:
+            logger.error(f"Error setting blocked status for MAC {mac}: {e}")
+            return False
     
     def _find_available_registered_ip(self, subnet_id: int) -> Optional[str]:
         """

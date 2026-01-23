@@ -6,6 +6,7 @@ Main Flask application for network device registration
 import os
 import logging
 import subprocess
+import time
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -177,6 +178,43 @@ def get_client_mac():
     return mac
 
 
+def get_ip_for_mac(mac_address):
+    """
+    Find the most recent IP address for a MAC address from the Kea lease file.
+    """
+    if not mac_address:
+        return None
+
+    normalized = mac_address.lower().replace('-', ':')
+    lease_file = '/kea/leases/kea-leases4.csv'
+    matching_ips = []
+
+    try:
+        with open(lease_file, 'r') as f:
+            for line in f:
+                if line.startswith('address,'):
+                    continue
+
+                fields = line.strip().split(',')
+                if len(fields) >= 2:
+                    lease_ip = fields[0]
+                    lease_hwaddr = fields[1].lower()
+                    if lease_hwaddr == normalized:
+                        matching_ips.append(lease_ip)
+
+        if matching_ips:
+            ip_address = matching_ips[-1]
+            logger.info(f"Found IP {ip_address} for MAC {normalized} in Kea lease file")
+            return ip_address
+
+    except FileNotFoundError:
+        logger.debug(f"Kea lease file not found: {lease_file}")
+    except Exception as e:
+        logger.error(f"Error reading Kea lease file {lease_file}: {e}")
+
+    return None
+
+
 def get_client_ip():
     """Get client IP address"""
     # Check X-Real-IP first (set by nginx proxy manager)
@@ -284,7 +322,7 @@ def manage_dns_hijack(action, ip_address):
 
 def manage_switch_acl(action, ip_address, vlan_id):
     """
-    Manage HP5130 ACL rules for blocking/unblocking specific IPs using NETCONF.
+    Manage HP5130 ACL rules for blocking/unblocking specific IPs using SSH.
     
     Args:
         action: 'block' to deny traffic, 'unblock' to remove deny rule
@@ -295,86 +333,102 @@ def manage_switch_acl(action, ip_address, vlan_id):
         bool: True if successful, False otherwise
     """
     try:
-        from ncclient import manager
-        from ncclient.xml_ import to_ele
+        import paramiko
     except ImportError:
-        logger.error("ncclient not installed - cannot manage switch ACLs")
+        logger.error("paramiko not installed - cannot manage switch ACLs")
         return False
-    
+
     switch_host = os.getenv('SWITCH_HOST', '192.168.99.1')
     switch_user = os.getenv('SWITCH_USER', 'admin')
     switch_pass = os.getenv('SWITCH_PASS', '')
-    switch_port = int(os.getenv('SWITCH_NETCONF_PORT', '830'))
-    
-    if not switch_pass:
-        logger.error("SWITCH_PASS not configured")
+    switch_key = os.getenv('SWITCH_KEY_PATH', '')
+    switch_ssh_port = int(os.getenv('SWITCH_SSH_PORT', '22'))
+
+    if not switch_pass and not switch_key:
+        logger.error("SWITCH_PASS or SWITCH_KEY_PATH must be configured")
         return False
-    
-    # ACL number based on VLAN (e.g., VLAN 10 = ACL 3100)
+
+    if not vlan_id and ip_address:
+        try:
+            vlan_id = int(ip_address.split('.')[2])
+        except (IndexError, ValueError):
+            vlan_id = None
+
+    if not vlan_id:
+        logger.error("Unable to determine VLAN ID for ACL update")
+        return False
+
     acl_num = 3000 + (vlan_id * 10)
-    
     try:
-        # Connect to switch via NETCONF
-        with manager.connect(
-            host=switch_host,
-            port=switch_port,
-            username=switch_user,
-            password=switch_pass,
-            hostkey_verify=False,
-            device_params={'name': 'huawei'},
-            timeout=30
-        ) as m:
-            
-            if action == 'block':
-                # Add deny rule for this specific IP
-                # Rule 101 will deny this specific IP, placed after rule 100 but before rule 200
-                config_xml = f"""
-                <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
-                  <acl xmlns="http://www.hp.com/netconf/config:1.0">
-                    <group>
-                      <number>{acl_num}</number>
-                      <rule>
-                        <id>101</id>
-                        <action>deny</action>
-                        <source-ip>{ip_address}</source-ip>
-                        <source-wildcard>0.0.0.0</source-wildcard>
-                      </rule>
-                    </group>
-                  </acl>
-                </config>
-                """
-                logger.info(f"Adding ACL deny rule for {ip_address} on VLAN {vlan_id}")
-                
-            elif action == 'unblock':
-                # Remove the deny rule for this IP (use delete operation)
-                config_xml = f"""
-                <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
-                  <acl xmlns="http://www.hp.com/netconf/config:1.0">
-                    <group>
-                      <number>{acl_num}</number>
-                      <rule operation="delete">
-                        <id>101</id>
-                      </rule>
-                    </group>
-                  </acl>
-                </config>
-                """
-                logger.info(f"Removing ACL deny rule for {ip_address} on VLAN {vlan_id}")
-            
-            else:
-                logger.error(f"Invalid action: {action}")
-                return False
-            
-            # Send edit-config via NETCONF
-            response = m.edit_config(target='running', config=config_xml)
-            
-            if response.ok:
-                logger.info(f"ACL {action} successful for {ip_address} on VLAN {vlan_id}")
-                return True
-            else:
-                logger.error(f"ACL {action} failed: {response}")
-                return False
-        
+        host_octet = int(ip_address.split('.')[3])
+    except (IndexError, ValueError):
+        logger.error("Unable to determine host octet for ACL rule")
+        return False
+
+    rule_num = 1000 + host_octet
+
+    if action == 'block':
+        logger.info(f"Adding ACL deny rule for {ip_address} on VLAN {vlan_id} via SSH")
+        commands = [
+            "system-view",
+            f"acl advanced {acl_num}",
+            f"rule {rule_num} deny ip source {ip_address} 0",
+            "quit",
+            "quit",
+            "save force"
+        ]
+    elif action == 'unblock':
+        logger.info(f"Removing ACL deny rule for {ip_address} on VLAN {vlan_id} via SSH")
+        commands = [
+            "system-view",
+            f"acl advanced {acl_num}",
+            f"undo rule {rule_num}",
+            "quit",
+            "quit",
+            "save force"
+        ]
+    else:
+        logger.error(f"Invalid action: {action}")
+        return False
+
+    try:
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+        connect_kwargs = {
+            "hostname": switch_host,
+            "port": switch_ssh_port,
+            "username": switch_user,
+            "allow_agent": False,
+            "look_for_keys": False,
+            "timeout": 10,
+            "disabled_algorithms": {"pubkeys": ["rsa-sha2-512", "rsa-sha2-256"]}
+        }
+
+        if switch_key:
+            connect_kwargs["key_filename"] = switch_key
+        else:
+            connect_kwargs["password"] = switch_pass
+
+        client.connect(**connect_kwargs)
+        chan = client.invoke_shell()
+        output = ""
+
+        for cmd in commands:
+            chan.send(cmd + "\n")
+            time.sleep(1)
+            if chan.recv_ready():
+                output += chan.recv(65535).decode("utf-8", errors="ignore")
+
+        chan.close()
+        client.close()
+
+        if output:
+            logger.debug(f"SSH ACL output: {output}")
+
+        logger.info(f"ACL {action} successful for {ip_address} on VLAN {vlan_id} via SSH")
+        return True
+
     except Exception as e:
         logger.error(f"Switch ACL {action} failed for {ip_address}: {e}")
         import traceback
@@ -1445,7 +1499,18 @@ def admin_block_device(device_id):
     
     device.registration_status = 'blocked'
     db.session.commit()
+
+    # Mark device as blocked in Kea so next lease comes from blocked pool
+    kea = get_kea()
+    if kea and device.current_vlan:
+        kea.set_block_status(device.mac_address, device.current_vlan, True)
     
+    # Refresh IP from Kea lease before ACL changes
+    latest_ip = get_ip_for_mac(device.mac_address)
+    if latest_ip and latest_ip != device.ip_address:
+        device.ip_address = latest_ip
+        db.session.commit()
+
     # Apply ACL block on HP5130 switch for immediate effect (bypasses DoH)
     if device.ip_address and device.current_vlan:
         acl_success = manage_switch_acl('block', device.ip_address, device.current_vlan)
@@ -1455,6 +1520,8 @@ def admin_block_device(device_id):
         else:
             flash(f'Device {device.mac_address} marked as blocked, but ACL update failed. Check switch credentials.', 'warning')
             logger.error(f"ACL block failed for {device.mac_address} at {device.ip_address}")
+
+        manage_dns_hijack('hijack', device.ip_address)
     else:
         flash(f'Device {device.mac_address} marked as blocked, but no IP/VLAN found. Cannot apply ACL.', 'warning')
         logger.warning(f"No IP/VLAN for device {device.mac_address}, cannot apply ACL")
@@ -1470,7 +1537,18 @@ def admin_unblock_device(device_id):
     
     device.registration_status = 'active'
     db.session.commit()
+
+    # Clear blocked flag in Kea so next lease comes from unblocked pool
+    kea = get_kea()
+    if kea and device.current_vlan:
+        kea.set_block_status(device.mac_address, device.current_vlan, False)
     
+    # Refresh IP from Kea lease before ACL changes
+    latest_ip = get_ip_for_mac(device.mac_address)
+    if latest_ip and latest_ip != device.ip_address:
+        device.ip_address = latest_ip
+        db.session.commit()
+
     # Remove ACL block on HP5130 switch
     if device.ip_address and device.current_vlan:
         acl_success = manage_switch_acl('unblock', device.ip_address, device.current_vlan)
@@ -1480,6 +1558,8 @@ def admin_unblock_device(device_id):
         else:
             flash(f'Device {device.mac_address} marked as active, but ACL removal failed.', 'warning')
             logger.error(f"ACL unblock failed for {device.mac_address}")
+
+        manage_dns_hijack('unhijack', device.ip_address)
     else:
         flash(f'Device {device.mac_address} marked as active, but no IP/VLAN found.', 'warning')
         logger.warning(f"No IP/VLAN for device {device.mac_address}")

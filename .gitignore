@@ -58,6 +58,7 @@ npm/data/
 npm/letsencrypt/
 npmold/
 **/keys.json
+keys/
 
 # SSL certificates and keys
 *.key
