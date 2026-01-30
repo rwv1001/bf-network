@@ -87,7 +87,7 @@
           },
           {
             "pool": "192.168.10.214 - 192.168.10.254",
-            "client-class": "BLOCKED"
+            "client-classes": ["BLOCKED"]
           }
         ],
         "interface": "eth0.10",
@@ -108,7 +108,7 @@
           },
           {
             "pool": "192.168.20.214 - 192.168.20.254",
-            "client-class": "BLOCKED"
+            "client-classes": ["BLOCKED"]
           }
         ],
         "interface": "eth0.20",
@@ -129,7 +129,7 @@
           },
           {
             "pool": "192.168.30.214 - 192.168.30.254",
-            "client-class": "BLOCKED"
+            "client-classes": ["BLOCKED"]
           }
         ],
         "interface": "eth0.30",
@@ -150,7 +150,7 @@
           },
           {
             "pool": "192.168.40.214 - 192.168.40.254",
-            "client-class": "BLOCKED"
+            "client-classes": ["BLOCKED"]
           }
         ],
         "interface": "eth0.40",
@@ -171,7 +171,7 @@
           },
           {
             "pool": "192.168.50.214 - 192.168.50.254",
-            "client-class": "BLOCKED"
+            "client-classes": ["BLOCKED"]
           }
         ],
         "interface": "eth0.50",
@@ -192,7 +192,7 @@
           },
           {
             "pool": "192.168.60.214 - 192.168.60.254",
-            "client-class": "BLOCKED"
+            "client-classes": ["BLOCKED"]
           }
         ],
         "interface": "eth0.60",

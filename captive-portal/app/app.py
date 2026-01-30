@@ -178,7 +178,7 @@ def get_client_mac():
     return mac
 
 
-def get_ip_for_mac(mac_address):
+def get_ip_for_mac(mac_address, subnet_id=None):
     """
     Find the most recent IP address for a MAC address from the Kea lease file.
     """
@@ -211,6 +211,17 @@ def get_ip_for_mac(mac_address):
         logger.debug(f"Kea lease file not found: {lease_file}")
     except Exception as e:
         logger.error(f"Error reading Kea lease file {lease_file}: {e}")
+
+    # Fallback to Kea control socket when lease file is unavailable
+    try:
+        kea = get_kea()
+        if kea:
+            lease_ip = kea.get_lease_ip_for_mac(normalized, subnet_id=subnet_id)
+            if lease_ip:
+                logger.info(f"Found IP {lease_ip} for MAC {normalized} via Kea control socket")
+                return lease_ip
+    except Exception as e:
+        logger.error(f"Error querying Kea for MAC {normalized}: {e}")
 
     return None
 
@@ -1197,6 +1208,43 @@ def admin_dashboard():
     
     devices_total = devices_query.count()
     devices = devices_query.offset((devices_page - 1) * devices_per_page).limit(devices_per_page).all()
+
+    # Refresh IPs from Kea lease file for devices on the current page
+    ip_updated = False
+    kea = get_kea()
+    for row in devices:
+        device = row
+        # Unwrap SQLAlchemy Row (Device, User) tuples
+        if not hasattr(device, "mac_address"):
+            try:
+                device = row[0]
+            except Exception:
+                device = row
+
+        if device and getattr(device, "mac_address", None):
+            latest_ip = None
+            if kea:
+                try:
+                    latest_ip = kea.get_lease_ip_for_mac(device.mac_address, subnet_id=device.current_vlan)
+                    logger.info(
+                        "Dashboard IP refresh (Kea socket): MAC=%s lease_ip=%s",
+                        device.mac_address,
+                        latest_ip,
+                    )
+                except Exception as e:
+                    logger.error(f"Error querying Kea lease for {device.mac_address}: {e}")
+            if not latest_ip:
+                latest_ip = get_ip_for_mac(device.mac_address, subnet_id=device.current_vlan)
+                logger.info(
+                    "Dashboard IP refresh (fallback): MAC=%s lease_ip=%s",
+                    device.mac_address,
+                    latest_ip,
+                )
+            if latest_ip and latest_ip != device.ip_address:
+                device.ip_address = latest_ip
+                ip_updated = True
+    if ip_updated:
+        db.session.commit()
     devices_pages = (devices_total + devices_per_page - 1) // devices_per_page if devices_per_page > 0 else 0
     
     # Check if this is an AJAX request
@@ -1503,10 +1551,17 @@ def admin_block_device(device_id):
     # Mark device as blocked in Kea so next lease comes from blocked pool
     kea = get_kea()
     if kea and device.current_vlan:
-        kea.set_block_status(device.mac_address, device.current_vlan, True)
+        kea.set_block_status(device.mac_address, device.current_vlan, True, blocked_ip=device.ip_address)
+        if device.ip_address:
+            kea.force_lease_renewal(device.mac_address, device.ip_address)
+        # Refresh IP from Kea lease so dashboard stays accurate
+        new_ip = kea.get_lease_ip_for_mac(device.mac_address, subnet_id=device.current_vlan)
+        if new_ip and new_ip != device.ip_address:
+            device.ip_address = new_ip
+            db.session.commit()
     
     # Refresh IP from Kea lease before ACL changes
-    latest_ip = get_ip_for_mac(device.mac_address)
+    latest_ip = get_ip_for_mac(device.mac_address, subnet_id=device.current_vlan)
     if latest_ip and latest_ip != device.ip_address:
         device.ip_address = latest_ip
         db.session.commit()
@@ -1540,11 +1595,18 @@ def admin_unblock_device(device_id):
 
     # Clear blocked flag in Kea so next lease comes from unblocked pool
     kea = get_kea()
+    blocked_ip = None
     if kea and device.current_vlan:
+        blocked_ip = kea.get_blocked_ip_from_reservation(device.mac_address, device.current_vlan)
         kea.set_block_status(device.mac_address, device.current_vlan, False)
+        # Refresh IP from Kea lease so dashboard stays accurate
+        new_ip = kea.get_lease_ip_for_mac(device.mac_address, subnet_id=device.current_vlan)
+        if new_ip and new_ip != device.ip_address:
+            device.ip_address = new_ip
+            db.session.commit()
     
     # Refresh IP from Kea lease before ACL changes
-    latest_ip = get_ip_for_mac(device.mac_address)
+    latest_ip = get_ip_for_mac(device.mac_address, subnet_id=device.current_vlan)
     if latest_ip and latest_ip != device.ip_address:
         device.ip_address = latest_ip
         db.session.commit()
@@ -1560,6 +1622,9 @@ def admin_unblock_device(device_id):
             logger.error(f"ACL unblock failed for {device.mac_address}")
 
         manage_dns_hijack('unhijack', device.ip_address)
+        if blocked_ip and blocked_ip != device.ip_address:
+            manage_switch_acl('unblock', blocked_ip, device.current_vlan)
+            manage_dns_hijack('unhijack', blocked_ip)
     else:
         flash(f'Device {device.mac_address} marked as active, but no IP/VLAN found.', 'warning')
         logger.warning(f"No IP/VLAN for device {device.mac_address}")

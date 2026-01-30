@@ -280,6 +280,22 @@ class KeaIntegration:
         except Exception as e:
             logger.error(f"Error getting reservation for MAC {mac}: {e}")
             return None
+
+    def get_blocked_ip_from_reservation(self, mac: str, vlan: int) -> Optional[str]:
+        """
+        Return blocked-ip from reservation user-context if present.
+        """
+        try:
+            res = self.get_reservation(mac, vlan)
+            if not res:
+                return None
+            reservation = res.get("reservation", {})
+            user_context = reservation.get("user-context", {}) or {}
+            blocked_ip = user_context.get("blocked-ip")
+            return blocked_ip
+        except Exception as e:
+            logger.error(f"Error reading blocked-ip for MAC {mac}: {e}")
+            return None
     
     def get_all_reservations(self, vlan: int) -> List[Dict[str, Any]]:
         """
@@ -313,7 +329,7 @@ class KeaIntegration:
             logger.error(f"Error getting all reservations for VLAN {vlan}: {e}")
             return []
 
-    def set_block_status(self, mac: str, vlan: int, blocked: bool) -> bool:
+    def set_block_status(self, mac: str, vlan: int, blocked: bool, blocked_ip: Optional[str] = None) -> bool:
         """
         Set blocked status for a MAC using user-context for pool assignment.
 
@@ -321,6 +337,7 @@ class KeaIntegration:
             mac: MAC address (format: aa:bb:cc:dd:ee:ff)
             vlan: VLAN number
             blocked: True to mark blocked, False to clear
+            blocked_ip: Optional IP to remember for ACL cleanup on renewal
 
         Returns:
             True if successful, False otherwise
@@ -351,9 +368,21 @@ class KeaIntegration:
             if blocked:
                 reservation["client-classes"] = ["BLOCKED"]
                 reservation["user-context"]["blocked"] = True
+                if blocked_ip:
+                    reservation["user-context"]["blocked-ip"] = blocked_ip
+
+                blocked_pool_ip = self._find_available_blocked_ip(subnet_id)
+                if blocked_pool_ip:
+                    reservation["ip-address"] = blocked_pool_ip
+                else:
+                    logger.error(f"Blocked pool is full for subnet {subnet_id}")
+                    return False
             else:
                 reservation.pop("client-classes", None)
                 reservation["user-context"]["blocked"] = False
+                if "blocked-ip" in reservation["user-context"]:
+                    reservation["user-context"].pop("blocked-ip", None)
+                reservation.pop("ip-address", None)
 
             if existing:
                 del_cmd = {
@@ -436,6 +465,45 @@ class KeaIntegration:
         except Exception as e:
             logger.error(f"Error finding available IP: {e}")
             return None
+
+    def _find_available_blocked_ip(self, subnet_id: int) -> Optional[str]:
+        """
+        Find an available IP in the blocked pool (.214-.254) for the subnet.
+        """
+        try:
+            base_ip = f"192.168.{subnet_id}"
+
+            command = {
+                "command": "lease4-get-all",
+                "service": ["dhcp4"],
+                "arguments": {
+                    "subnets": [subnet_id]
+                }
+            }
+
+            response = self._send_command(command)
+            used_ips = set()
+
+            if response.get("result") == 0:
+                leases = response.get("arguments", {}).get("leases", [])
+                for lease in leases:
+                    used_ips.add(lease.get("ip-address"))
+
+            reservations = self.get_all_reservations(subnet_id)
+            for res in reservations:
+                if "ip-address" in res:
+                    used_ips.add(res["ip-address"])
+
+            for last_octet in range(214, 255):
+                candidate_ip = f"{base_ip}.{last_octet}"
+                if candidate_ip not in used_ips:
+                    return candidate_ip
+
+            return None
+
+        except Exception as e:
+            logger.error(f"Error finding blocked pool IP: {e}")
+            return None
     
     def get_lease(self, ip: str) -> Optional[Dict[str, Any]]:
         """
@@ -467,7 +535,7 @@ class KeaIntegration:
             logger.error(f"Error getting lease for IP {ip}: {e}")
             return None
     
-    def get_lease_by_mac(self, mac: str) -> Optional[Dict[str, Any]]:
+    def get_lease_by_mac(self, mac: str, subnet_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """
         Get current lease information for a MAC address.
         
@@ -480,13 +548,18 @@ class KeaIntegration:
         try:
             mac = mac.lower().replace('-', ':')
             
+            arguments = {
+                "identifier-type": "hw-address",
+                "identifier": mac
+            }
+
+            if subnet_id is not None:
+                arguments["subnet-id"] = subnet_id
+
             command = {
                 "command": "lease4-get",
                 "service": ["dhcp4"],
-                "arguments": {
-                    "identifier-type": "hw-address",
-                    "identifier": mac
-                }
+                "arguments": arguments
             }
             
             response = self._send_command(command)
@@ -499,6 +572,15 @@ class KeaIntegration:
         except Exception as e:
             logger.error(f"Error getting lease for MAC {mac}: {e}")
             return None
+
+    def get_lease_ip_for_mac(self, mac: str, subnet_id: Optional[int] = None) -> Optional[str]:
+        """
+        Return the current IP address for a MAC, if present.
+        """
+        lease = self.get_lease_by_mac(mac, subnet_id=subnet_id)
+        if lease and isinstance(lease, dict):
+            return lease.get("ip-address")
+        return None
     
     def force_lease_renewal(self, mac: str, ip_address: Optional[str] = None) -> bool:
         """

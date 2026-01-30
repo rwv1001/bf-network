@@ -5,11 +5,17 @@
 #include <dhcpsrv/subnet.h>
 #include <dhcpsrv/host_mgr.h>
 #include <dhcpsrv/host.h>
+#include <dhcpsrv/client_class_def.h>
 #include <dhcpsrv/lease.h>
 #include <asiolink/io_address.h>
+#include <cc/data.h>
+#include <cerrno>
+#include <cstring>
 #include <iostream>
 #include <cstdlib>
 #include <sstream>
+#include <string>
+#include <map>
 
 using namespace isc::hooks;
 using namespace isc::dhcp;
@@ -47,8 +53,8 @@ void manage_dns_hijack(const std::string& action, const std::string& ip_address)
     std::cout << "DNS Hijack Hook: [DEBUG] Building command" << std::endl;
     std::cout.flush();
     
-    // Run in background to avoid blocking Kea
-    cmd << "/scripts/dns-hijack.sh " << action << " " << ip_address << " >/dev/null 2>&1 &";
+    // Run inline (quick iptables updates) to avoid fork failures
+    cmd << "/scripts/dns-hijack.sh " << action << " " << ip_address << " >/dev/null 2>&1";
     
     std::cout << "DNS Hijack Hook: [DEBUG] Command: " << cmd.str() << std::endl;
     std::cout.flush();
@@ -61,13 +67,56 @@ void manage_dns_hijack(const std::string& action, const std::string& ip_address)
     std::cout << "DNS Hijack Hook: [DEBUG] system() returned: " << status << std::endl;
     std::cout.flush();
     
-    if (status != 0) {
-        std::cerr << "DNS Hijack Hook WARNING: Script launch status " << status << std::endl;
+    if (status == -1) {
+        std::cerr << "DNS Hijack Hook WARNING: Script launch failed errno="
+                  << errno << " (" << std::strerror(errno) << ")" << std::endl;
+        std::cerr.flush();
+    } else if (status != 0) {
+        std::cerr << "DNS Hijack Hook WARNING: Script exit status " << status << std::endl;
         std::cerr.flush();
     }
     
     std::cout << "DNS Hijack Hook: [DEBUG] manage_dns_hijack EXIT" << std::endl;
     std::cout.flush();
+}
+
+// Helper function to call DNS hijacking script without an IP argument
+void manage_dns_hijack_pools(const std::string& action) {
+    std::cout << "DNS Hijack Hook: [DEBUG] manage_dns_hijack_pools ENTRY (action="
+              << action << ")" << std::endl;
+    std::cout.flush();
+
+    std::stringstream cmd;
+    cmd << "/scripts/dns-hijack.sh " << action << " >/dev/null 2>&1";
+
+    std::cout << "DNS Hijack Hook: [DEBUG] Pools Command: " << cmd.str() << std::endl;
+    std::cout.flush();
+
+    int status = system(cmd.str().c_str());
+    if (status == -1) {
+        std::cerr << "DNS Hijack Hook WARNING: Pools script launch failed errno="
+                  << errno << " (" << std::strerror(errno) << ")" << std::endl;
+        std::cerr.flush();
+    } else if (status != 0) {
+        std::cerr << "DNS Hijack Hook WARNING: Pools script exit status " << status << std::endl;
+        std::cerr.flush();
+    }
+}
+
+bool is_blocked_pool_ip(const std::string& ip_address) {
+    std::size_t last_dot = ip_address.rfind('.');
+    if (last_dot == std::string::npos || last_dot + 1 >= ip_address.size()) {
+        return false;
+    }
+
+    int last_octet = -1;
+    try {
+        last_octet = std::stoi(ip_address.substr(last_dot + 1));
+    } catch (...) {
+        return false;
+    }
+
+    return (last_octet >= 214 && last_octet <= 254);
 }
 
 // Helper function to call HP5130 ACL script
@@ -83,10 +132,79 @@ void manage_acl(const std::string& action, const std::string& ip_address) {
     std::cout.flush();
 
     int status = system(cmd.str().c_str());
-    if (status != 0) {
-        std::cerr << "DNS Hijack Hook WARNING: ACL script launch status " << status << std::endl;
+    std::cout << "DNS Hijack Hook: [DEBUG] ACL system() returned: " << status << std::endl;
+    std::cout.flush();
+    if (status == -1) {
+        std::cerr << "DNS Hijack Hook WARNING: ACL script launch failed errno="
+                  << errno << " (" << std::strerror(errno) << ")" << std::endl;
+        std::cerr.flush();
+    } else if (status != 0) {
+        std::cerr << "DNS Hijack Hook WARNING: ACL script exit status " << status << std::endl;
         std::cerr.flush();
     }
+}
+
+// Helper: extract "blocked-ip" from reservation user-context if present
+std::string get_blocked_ip_from_reservation(const ConstHostPtr& host) {
+    if (!host) {
+        return "";
+    }
+
+    try {
+        isc::data::ConstElementPtr ctx = host->getContext();
+        if (!ctx || (ctx->getType() != isc::data::Element::map)) {
+            return "";
+        }
+
+        isc::data::ConstElementPtr blocked_ip = ctx->get("blocked-ip");
+        if (!blocked_ip) {
+            return "";
+        }
+
+        if (blocked_ip->getType() == isc::data::Element::string) {
+            return blocked_ip->stringValue();
+        }
+    } catch (...) {
+        return "";
+    }
+
+    return "";
+}
+
+bool is_blocked_host(const ConstHostPtr& host) {
+    if (!host) {
+        return false;
+    }
+
+    // Prefer client-classes if present
+    try {
+        const ClientClasses& classes4 = host->getClientClasses4();
+        if (classes4.contains("BLOCKED")) {
+            return true;
+        }
+    } catch (...) {
+        // Ignore and fall back to user-context
+    }
+
+    try {
+        isc::data::ConstElementPtr ctx = host->getContext();
+        if (!ctx || (ctx->getType() != isc::data::Element::map)) {
+            return false;
+        }
+
+        isc::data::ConstElementPtr blocked = ctx->get("blocked");
+        if (!blocked) {
+            return false;
+        }
+
+        if (blocked->getType() == isc::data::Element::boolean) {
+            return blocked->boolValue();
+        }
+    } catch (...) {
+        return false;
+    }
+
+    return false;
 }
 
 int lease4_select(CalloutHandle& handle) {
@@ -136,9 +254,43 @@ int lease4_select(CalloutHandle& handle) {
         }
         
         if (host) {
-            std::cout << "DNS Hijack Hook: Device " << mac_address 
-                      << " is REGISTERED - removing DNS hijack" << std::endl;
-            manage_dns_hijack("unhijack", ip_address);
+            bool blocked = is_blocked_host(host);
+            std::string blocked_ip = get_blocked_ip_from_reservation(host);
+            isc::data::ConstElementPtr ctx = host->getContext();
+
+            if (ctx) {
+                std::cout << "DNS Hijack Hook: [DEBUG] user-context=" << ctx->str() << std::endl;
+            }
+            try {
+                const ClientClasses& classes4 = host->getClientClasses4();
+                std::cout << "DNS Hijack Hook: [DEBUG] client-classes=" << classes4.toText() << std::endl;
+            } catch (...) {
+                std::cout << "DNS Hijack Hook: [DEBUG] client-classes unavailable" << std::endl;
+            }
+
+            if (blocked) {
+                std::cout << "DNS Hijack Hook: Device " << mac_address
+                          << " is BLOCKED - enabling DNS hijack" << std::endl;
+                if (is_blocked_pool_ip(ip_address)) {
+                    std::cout << "DNS Hijack Hook: [DEBUG] Ensuring blocked-pool DNS hijack ranges" << std::endl;
+                    manage_dns_hijack_pools("hijack-blocked-pools");
+                }
+                manage_dns_hijack("hijack", ip_address);
+            } else {
+                std::cout << "DNS Hijack Hook: Device " << mac_address
+                          << " is REGISTERED - removing DNS hijack" << std::endl;
+                manage_dns_hijack("unhijack", ip_address);
+            }
+
+            if (!blocked_ip.empty() && blocked_ip != ip_address) {
+                std::cout << "DNS Hijack Hook: [DEBUG] Removing ACL for blocked IP: "
+                          << blocked_ip << std::endl;
+                manage_acl("unblock", blocked_ip);
+
+                std::cout << "DNS Hijack Hook: [DEBUG] Removing per-IP DNS hijack for: "
+                          << blocked_ip << std::endl;
+                manage_dns_hijack("unhijack", blocked_ip);
+            }
         } else {
             std::cout << "DNS Hijack Hook: Device " << mac_address 
                       << " is UNREGISTERED - enabling DNS hijack" << std::endl;
@@ -258,17 +410,54 @@ int lease4_renew(CalloutHandle& handle) {
         std::cout.flush();
         
         if (host) {
-            std::cout << "DNS Hijack Hook: Device " << mac_address 
-                      << " is REGISTERED - removing DNS hijack" << std::endl;
-            std::cout.flush();
-            
-            std::cout << "DNS Hijack Hook: [DEBUG] Calling manage_dns_hijack(unhijack)" << std::endl;
-            std::cout.flush();
-            
-            manage_dns_hijack("unhijack", ip_address);
-            
-            std::cout << "DNS Hijack Hook: [DEBUG] manage_dns_hijack(unhijack) returned" << std::endl;
-            std::cout.flush();
+            bool blocked = is_blocked_host(host);
+            std::string blocked_ip = get_blocked_ip_from_reservation(host);
+            isc::data::ConstElementPtr ctx = host->getContext();
+
+            if (ctx) {
+                std::cout << "DNS Hijack Hook: [DEBUG] user-context=" << ctx->str() << std::endl;
+                std::cout.flush();
+            }
+            try {
+                const ClientClasses& classes4 = host->getClientClasses4();
+                std::cout << "DNS Hijack Hook: [DEBUG] client-classes=" << classes4.toText() << std::endl;
+                std::cout.flush();
+            } catch (...) {
+                std::cout << "DNS Hijack Hook: [DEBUG] client-classes unavailable" << std::endl;
+                std::cout.flush();
+            }
+
+            if (blocked) {
+                std::cout << "DNS Hijack Hook: Device " << mac_address
+                          << " is BLOCKED - enabling DNS hijack" << std::endl;
+                std::cout.flush();
+
+                if (is_blocked_pool_ip(ip_address)) {
+                    std::cout << "DNS Hijack Hook: [DEBUG] Ensuring blocked-pool DNS hijack ranges" << std::endl;
+                    std::cout.flush();
+                    manage_dns_hijack_pools("hijack-blocked-pools");
+                }
+
+                manage_dns_hijack("hijack", ip_address);
+            } else {
+                std::cout << "DNS Hijack Hook: Device " << mac_address
+                          << " is REGISTERED - removing DNS hijack" << std::endl;
+                std::cout.flush();
+
+                manage_dns_hijack("unhijack", ip_address);
+            }
+
+            if (!blocked_ip.empty() && blocked_ip != ip_address) {
+                std::cout << "DNS Hijack Hook: [DEBUG] Removing ACL for blocked IP: "
+                          << blocked_ip << std::endl;
+                std::cout.flush();
+                manage_acl("unblock", blocked_ip);
+
+                std::cout << "DNS Hijack Hook: [DEBUG] Removing per-IP DNS hijack for: "
+                          << blocked_ip << std::endl;
+                std::cout.flush();
+                manage_dns_hijack("unhijack", blocked_ip);
+            }
         } else {
             std::cout << "DNS Hijack Hook: Device " << mac_address 
                       << " is UNREGISTERED - enabling DNS hijack" << std::endl;
