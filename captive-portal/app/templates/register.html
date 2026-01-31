@@ -18,6 +18,13 @@
 {% endblock %}
 
 {% block content %}
+<style>
+    .btn[disabled] {
+        opacity: 0.6;
+        cursor: not-allowed;
+        pointer-events: none;
+    }
+</style>
 <form method="POST" action="{{ url_for('register') }}">
     <div class="form-group">
         <label for="email">Email Address <span class="required">*</span></label>
@@ -88,13 +95,18 @@ document.addEventListener('DOMContentLoaded', function() {
     let pollInterval = null;
     let registrationSubmitted = false;
     
-    form.addEventListener('submit', function(e) {
-        // Disable button to prevent double submission
-        registerBtn.disabled = true;
-        registerBtn.textContent = 'Registering...';
-        registerBtn.style.opacity = '0.6';
-        registerBtn.style.cursor = 'not-allowed';
+    form.addEventListener('submit', function() {
+        if (!form.checkValidity()) {
+            return;
+        }
+
+        // Defer disabling to avoid blocking the submit in some browsers
+        setTimeout(() => {
+            registerBtn.disabled = true;
+            registerBtn.textContent = 'Registering...';
+        }, 0);
         registrationSubmitted = true;
+        showStatus('Submitting registration...', 'info');
     });
     
     // If we came back from a registration submission, start polling

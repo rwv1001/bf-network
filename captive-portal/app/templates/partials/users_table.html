@@ -62,9 +62,13 @@
             <td>{{ user.email }}</td>
             <td>{{ user.full_name }}</td>
             <td>
+                {% if user.blocked %}
+                <span class="badge badge-restricted">blocked</span>
+                {% else %}
                 <span class="badge {% if user.is_active %}badge-active{% else %}badge-restricted{% endif %}">
                     {{ user.status }}
                 </span>
+                {% endif %}
             </td>
             <td style="font-size: 12px;">
                 {{ user.begin_date }} to {% if user.expiry_date %}{{ user.expiry_date }}{% else %}<em>Never</em>{% endif %}
@@ -83,6 +87,21 @@
                 <a href="{{ url_for('admin_edit_user', user_id=user.id) }}" class="btn btn-small">
                     Edit
                 </a>
+                {% if user.blocked %}
+                <form method="POST" action="{{ url_for('admin_unblock_user', user_id=user.id) }}" style="display: inline; margin-left: 5px;">
+                    <button type="submit" class="btn btn-success btn-small"
+                            onclick="return confirm('Unblock all devices for this user?')">
+                        ✅ Unblock
+                    </button>
+                </form>
+                {% else %}
+                <form method="POST" action="{{ url_for('admin_block_user', user_id=user.id) }}" style="display: inline; margin-left: 5px;">
+                    <button type="submit" class="btn btn-danger btn-small"
+                            onclick="return confirm('Block all devices for this user?')">
+                        🚫 Block
+                    </button>
+                </form>
+                {% endif %}
             </td>
         </tr>
         {% endfor %}

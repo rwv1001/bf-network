@@ -15,7 +15,12 @@ import secrets
 
 from models import db, User, Device, RegistrationRequest, VlanMapping, Setting
 from radius_coa import send_coa_disconnect, send_coa_change
-from email_service import send_verification_email, send_admin_notification, send_wifi_registration_confirmation
+from email_service import (
+    send_verification_email,
+    send_admin_notification,
+    send_wifi_registration_confirmation,
+    send_user_blocked_device_notice
+)
 from kea_integration import get_kea_client
 
 # Configure logging
@@ -447,6 +452,80 @@ def manage_switch_acl(action, ip_address, vlan_id):
         return False
 
 
+def apply_device_block(device, flash_messages=False):
+    """Block a device (DB status, Kea, ACL, DNS hijack)."""
+    device.registration_status = 'blocked'
+    db.session.commit()
+
+    kea = get_kea()
+    if kea and device.current_vlan:
+        kea.set_block_status(device.mac_address, device.current_vlan, True, blocked_ip=device.ip_address)
+        if device.ip_address:
+            kea.force_lease_renewal(device.mac_address, device.ip_address)
+        new_ip = kea.get_lease_ip_for_mac(device.mac_address, subnet_id=device.current_vlan)
+        if new_ip and new_ip != device.ip_address:
+            device.ip_address = new_ip
+            db.session.commit()
+
+    latest_ip = get_ip_for_mac(device.mac_address, subnet_id=device.current_vlan)
+    if latest_ip and latest_ip != device.ip_address:
+        device.ip_address = latest_ip
+        db.session.commit()
+
+    if device.ip_address and device.current_vlan:
+        acl_success = manage_switch_acl('block', device.ip_address, device.current_vlan)
+        manage_dns_hijack('hijack', device.ip_address)
+        if flash_messages:
+            if acl_success:
+                flash(f'Device {device.mac_address} blocked. Internet access denied.', 'success')
+            else:
+                flash(f'Device {device.mac_address} marked as blocked, but ACL update failed.', 'warning')
+        logger.info(f"Blocked device {device.mac_address} at {device.ip_address} (acl_success={acl_success})")
+    else:
+        if flash_messages:
+            flash(f'Device {device.mac_address} marked as blocked, but no IP/VLAN found.', 'warning')
+        logger.warning(f"No IP/VLAN for device {device.mac_address}, cannot apply ACL")
+
+
+def apply_device_unblock(device, flash_messages=False):
+    """Unblock a device (DB status, Kea, ACL, DNS hijack)."""
+    device.registration_status = 'active'
+    db.session.commit()
+
+    kea = get_kea()
+    blocked_ip = None
+    if kea and device.current_vlan:
+        blocked_ip = kea.get_blocked_ip_from_reservation(device.mac_address, device.current_vlan)
+        kea.set_block_status(device.mac_address, device.current_vlan, False)
+        new_ip = kea.get_lease_ip_for_mac(device.mac_address, subnet_id=device.current_vlan)
+        if new_ip and new_ip != device.ip_address:
+            device.ip_address = new_ip
+            db.session.commit()
+
+    latest_ip = get_ip_for_mac(device.mac_address, subnet_id=device.current_vlan)
+    if latest_ip and latest_ip != device.ip_address:
+        device.ip_address = latest_ip
+        db.session.commit()
+
+    if device.ip_address and device.current_vlan:
+        acl_success = manage_switch_acl('unblock', device.ip_address, device.current_vlan)
+        manage_dns_hijack('unhijack', device.ip_address)
+        if blocked_ip and blocked_ip != device.ip_address:
+            manage_switch_acl('unblock', blocked_ip, device.current_vlan)
+            manage_dns_hijack('unhijack', blocked_ip)
+
+        if flash_messages:
+            if acl_success:
+                flash(f'Device {device.mac_address} unblocked. Internet access restored.', 'success')
+            else:
+                flash(f'Device {device.mac_address} marked as active, but ACL removal failed.', 'warning')
+        logger.info(f"Unblocked device {device.mac_address} at {device.ip_address} (acl_success={acl_success})")
+    else:
+        if flash_messages:
+            flash(f'Device {device.mac_address} marked as active, but no IP/VLAN found.', 'warning')
+        logger.warning(f"No IP/VLAN for device {device.mac_address}")
+
+
 @app.route('/')
 def index():
     """Landing page - check if device is blocked, otherwise redirect to registration"""
@@ -598,6 +677,26 @@ def register():
             
             # Check if email verification is required
             email_verification_required = Setting.get_value('email_verification_required', 'false') == 'true'
+
+            # If user is blocked, register device but keep it blocked
+            if user.blocked:
+                device.registration_status = 'blocked'
+
+                if not existing_device:
+                    db.session.add(device)
+                db.session.commit()
+
+                apply_device_block(device, flash_messages=False)
+                send_user_blocked_device_notice(
+                    to_email=email,
+                    first_name=first_name,
+                    mac_address=mac_address,
+                    device_name=device_type
+                )
+
+                flash('Device registered, but your account is blocked. Please contact the administrator.', 'warning')
+                logger.info(f"Blocked user {email} registered device {mac_address} (kept blocked)")
+                return redirect(url_for('status'))
             
             if email_verification_required:
                 # Generate verification token
@@ -1386,6 +1485,40 @@ def admin_edit_user(user_id):
     return render_template('admin_edit_user.html', user=user, vlan_map=get_vlan_map())
 
 
+@app.route('/admin/users/<int:user_id>/block', methods=['POST'])
+@login_required
+def admin_block_user(user_id):
+    """Block all devices for a user"""
+    user = User.query.get_or_404(user_id)
+    user.blocked = True
+    db.session.commit()
+
+    devices = Device.query.filter_by(user_id=user.id).all()
+    for device in devices:
+        apply_device_block(device, flash_messages=False)
+
+    flash(f'User {user.email} blocked. {len(devices)} device(s) blocked.', 'success')
+    logger.info(f"Admin blocked user {user.email} ({len(devices)} devices)")
+    return redirect(url_for('admin_dashboard'))
+
+
+@app.route('/admin/users/<int:user_id>/unblock', methods=['POST'])
+@login_required
+def admin_unblock_user(user_id):
+    """Unblock all devices for a user"""
+    user = User.query.get_or_404(user_id)
+    user.blocked = False
+    db.session.commit()
+
+    devices = Device.query.filter_by(user_id=user.id).all()
+    for device in devices:
+        apply_device_unblock(device, flash_messages=False)
+
+    flash(f'User {user.email} unblocked. {len(devices)} device(s) unblocked.', 'success')
+    logger.info(f"Admin unblocked user {user.email} ({len(devices)} devices)")
+    return redirect(url_for('admin_dashboard'))
+
+
 @app.route('/admin/approve/<token>')
 @login_required
 def admin_approve_request(token):
@@ -1544,42 +1677,8 @@ def admin_disconnect_device(device_id):
 def admin_block_device(device_id):
     """Block a device via HP5130 ACL for immediate effect"""
     device = Device.query.get_or_404(device_id)
-    
-    device.registration_status = 'blocked'
-    db.session.commit()
 
-    # Mark device as blocked in Kea so next lease comes from blocked pool
-    kea = get_kea()
-    if kea and device.current_vlan:
-        kea.set_block_status(device.mac_address, device.current_vlan, True, blocked_ip=device.ip_address)
-        if device.ip_address:
-            kea.force_lease_renewal(device.mac_address, device.ip_address)
-        # Refresh IP from Kea lease so dashboard stays accurate
-        new_ip = kea.get_lease_ip_for_mac(device.mac_address, subnet_id=device.current_vlan)
-        if new_ip and new_ip != device.ip_address:
-            device.ip_address = new_ip
-            db.session.commit()
-    
-    # Refresh IP from Kea lease before ACL changes
-    latest_ip = get_ip_for_mac(device.mac_address, subnet_id=device.current_vlan)
-    if latest_ip and latest_ip != device.ip_address:
-        device.ip_address = latest_ip
-        db.session.commit()
-
-    # Apply ACL block on HP5130 switch for immediate effect (bypasses DoH)
-    if device.ip_address and device.current_vlan:
-        acl_success = manage_switch_acl('block', device.ip_address, device.current_vlan)
-        if acl_success:
-            flash(f'Device {device.mac_address} blocked immediately via switch ACL. Internet access denied.', 'success')
-            logger.info(f"Admin blocked device {device.mac_address} at {device.ip_address} via switch ACL")
-        else:
-            flash(f'Device {device.mac_address} marked as blocked, but ACL update failed. Check switch credentials.', 'warning')
-            logger.error(f"ACL block failed for {device.mac_address} at {device.ip_address}")
-
-        manage_dns_hijack('hijack', device.ip_address)
-    else:
-        flash(f'Device {device.mac_address} marked as blocked, but no IP/VLAN found. Cannot apply ACL.', 'warning')
-        logger.warning(f"No IP/VLAN for device {device.mac_address}, cannot apply ACL")
+    apply_device_block(device, flash_messages=True)
     
     return redirect(url_for('admin_dashboard'))
 
@@ -1589,45 +1688,8 @@ def admin_block_device(device_id):
 def admin_unblock_device(device_id):
     """Unblock a device by removing switch ACL rule"""
     device = Device.query.get_or_404(device_id)
-    
-    device.registration_status = 'active'
-    db.session.commit()
 
-    # Clear blocked flag in Kea so next lease comes from unblocked pool
-    kea = get_kea()
-    blocked_ip = None
-    if kea and device.current_vlan:
-        blocked_ip = kea.get_blocked_ip_from_reservation(device.mac_address, device.current_vlan)
-        kea.set_block_status(device.mac_address, device.current_vlan, False)
-        # Refresh IP from Kea lease so dashboard stays accurate
-        new_ip = kea.get_lease_ip_for_mac(device.mac_address, subnet_id=device.current_vlan)
-        if new_ip and new_ip != device.ip_address:
-            device.ip_address = new_ip
-            db.session.commit()
-    
-    # Refresh IP from Kea lease before ACL changes
-    latest_ip = get_ip_for_mac(device.mac_address, subnet_id=device.current_vlan)
-    if latest_ip and latest_ip != device.ip_address:
-        device.ip_address = latest_ip
-        db.session.commit()
-
-    # Remove ACL block on HP5130 switch
-    if device.ip_address and device.current_vlan:
-        acl_success = manage_switch_acl('unblock', device.ip_address, device.current_vlan)
-        if acl_success:
-            flash(f'Device {device.mac_address} unblocked. Internet access restored.', 'success')
-            logger.info(f"Admin unblocked device {device.mac_address} at {device.ip_address} via switch ACL")
-        else:
-            flash(f'Device {device.mac_address} marked as active, but ACL removal failed.', 'warning')
-            logger.error(f"ACL unblock failed for {device.mac_address}")
-
-        manage_dns_hijack('unhijack', device.ip_address)
-        if blocked_ip and blocked_ip != device.ip_address:
-            manage_switch_acl('unblock', blocked_ip, device.current_vlan)
-            manage_dns_hijack('unhijack', blocked_ip)
-    else:
-        flash(f'Device {device.mac_address} marked as active, but no IP/VLAN found.', 'warning')
-        logger.warning(f"No IP/VLAN for device {device.mac_address}")
+    apply_device_unblock(device, flash_messages=True)
     
     return redirect(url_for('admin_dashboard'))
 
@@ -1639,7 +1701,13 @@ def admin_delete_device(device_id):
     device = Device.query.get_or_404(device_id)
     mac_address = device.mac_address
     ip_address = device.ip_address
+    vlan_id = device.current_vlan
     
+    # Remove any ACL/DNS hijack tied to the device IP before deletion
+    if ip_address and vlan_id:
+        manage_switch_acl('unblock', ip_address, vlan_id)
+        manage_dns_hijack('unhijack', ip_address)
+
     # Unregister from network first
     if device.connection_type == 'wifi':
         kea = get_kea()

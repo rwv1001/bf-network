@@ -24,6 +24,7 @@ class User(db.Model):
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     created_by = db.Column(db.String(100), default='admin')
     notes = db.Column(db.Text)
+    blocked = db.Column(db.Boolean, default=False, nullable=False, index=True)
     
     # Relationships
     devices = db.relationship('Device', backref='user', lazy=True, cascade='all, delete-orphan')

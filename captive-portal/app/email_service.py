@@ -187,6 +187,42 @@ def send_verification_email(to_email, first_name, verification_url, timeout_minu
     return send_email(to_email, subject, html_body, text_body)
 
 
+def send_user_blocked_device_notice(to_email, first_name, mac_address, device_name=None):
+    """
+    Notify a user that their device was registered but access is blocked.
+    """
+    subject = "Device Registered but Access Blocked"
+
+    device_label = device_name or "your device"
+    admin_email = ADMIN_EMAIL or "the administrator"
+
+    html_body = f"""
+    <html>
+    <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+        <h2>Hello {first_name},</h2>
+        <p>We have registered {device_label} (MAC: <strong>{mac_address}</strong>).</p>
+        <p>However, your account is currently <strong>blocked</strong>, so this device cannot access the internet.</p>
+        <p>Please contact the administrator to request unblocking.</p>
+        <p style="margin: 20px 0;">Administrator contact: <strong>{admin_email}</strong></p>
+        <hr style="margin: 30px 0; border: none; border-top: 1px solid #ddd;">
+        <p style="color: #666; font-size: 12px;">This is an automated message from the Network Access Portal.</p>
+    </body>
+    </html>
+    """
+
+    text_body = f"""
+    Hello {first_name},
+
+    We have registered {device_label} (MAC: {mac_address}).
+    However, your account is currently blocked, so this device cannot access the internet.
+
+    Please contact the administrator to request unblocking.
+    Administrator contact: {admin_email}
+    """
+
+    return send_email(to_email, subject, html_body, text_body)
+
+
 def send_admin_notification(registration_request, approval_url):
     """
     Send notification to admin about new registration request
