@@ -157,3 +157,17 @@ class Setting(db.Model):
             setting = Setting(key=key, value=value)
             db.session.add(setting)
         db.session.commit()
+
+
+class UnregisteredLease(db.Model):
+    """Track unregistered devices with temporary lease/IP mappings."""
+    __tablename__ = 'unregistered_leases'
+
+    mac_address = db.Column(db.String(17), primary_key=True)
+    ip_address = db.Column(db.String(45), nullable=False)
+    expires_at = db.Column(db.DateTime, nullable=False, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self):
+        return f'<UnregisteredLease {self.mac_address} {self.ip_address}>'

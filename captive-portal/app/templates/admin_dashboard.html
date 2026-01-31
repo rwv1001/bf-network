@@ -332,8 +332,36 @@ function searchTable(tableType, searchValue) {
     {% endif %}
 </div>
 {% endif %}
-</div>
 {% endif %}
+
+<div id="unregistered-table-section">
+<h2 style="margin-top: 30px; color: #e67e22;">🛑 Unregistered Devices ({{ unregistered_total }})</h2>
+
+{% if unregistered_total > 0 %}
+<div class="table-responsive">
+<table>
+    <thead>
+        <tr>
+            <th>MAC Address</th>
+            <th>IP Address</th>
+            <th>Lease Expires</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for lease in unregistered_leases %}
+        <tr>
+            <td style="font-family: monospace;">{{ lease.mac_address }}</td>
+            <td>{{ lease.ip_address }}</td>
+            <td>{{ lease.expires_at }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+</div>
+{% else %}
+<div style="margin: 10px 0 20px; color: #666;">No unregistered devices currently detected.</div>
+{% endif %}
+</div>
 
 <div id="users-table-section">
 <h2 style="margin-top: 40px; color: #667eea;">👥 Authorized Users ({{ users_total }})</h2>

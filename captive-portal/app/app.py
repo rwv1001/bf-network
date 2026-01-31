@@ -7,13 +7,16 @@ import os
 import logging
 import subprocess
 import time
+import re
+import shlex
+import shutil
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime, timedelta
 import secrets
 
-from models import db, User, Device, RegistrationRequest, VlanMapping, Setting
+from models import db, User, Device, RegistrationRequest, VlanMapping, Setting, UnregisteredLease
 from radius_coa import send_coa_disconnect, send_coa_change
 from email_service import (
     send_verification_email,
@@ -336,6 +339,145 @@ def manage_dns_hijack(action, ip_address):
         return False
 
 
+def get_lease_expiry_for_mac(mac_address, subnet_id=None):
+    kea = get_kea()
+    if not kea:
+        return None
+
+    lease = kea.get_lease_by_mac(mac_address, subnet_id=subnet_id)
+    if not lease:
+        return None
+
+    try:
+        if lease.get("expire"):
+            return datetime.utcfromtimestamp(int(lease["expire"]))
+        cltt = lease.get("cltt")
+        valid_lft = lease.get("valid-lft")
+        if cltt and valid_lft:
+            return datetime.utcfromtimestamp(int(cltt) + int(valid_lft))
+    except Exception:
+        return None
+
+    return None
+
+
+def upsert_unregistered_lease(mac_address, ip_address, expires_at):
+    if not mac_address or not ip_address or not expires_at:
+        return
+
+    lease = UnregisteredLease.query.filter_by(mac_address=mac_address).first()
+    if lease:
+        lease.ip_address = ip_address
+        lease.expires_at = expires_at
+    else:
+        lease = UnregisteredLease(
+            mac_address=mac_address,
+            ip_address=ip_address,
+            expires_at=expires_at
+        )
+        db.session.add(lease)
+    db.session.commit()
+
+
+def clear_unregistered_lease(mac_address):
+    if not mac_address:
+        return
+    lease = UnregisteredLease.query.filter_by(mac_address=mac_address).first()
+    if lease:
+        db.session.delete(lease)
+        db.session.commit()
+
+
+def _get_iptables_base_cmd():
+    if os.geteuid() == 0:
+        return ["iptables"]
+    if shutil.which("sudo"):
+        return ["sudo", "iptables"]
+    return ["iptables"]
+
+
+def _is_blocked_pool_ip(ip_address):
+    try:
+        parts = [int(p) for p in ip_address.split(".")]
+        if len(parts) != 4:
+            return False
+        if parts[0] != 192 or parts[1] != 168:
+            return False
+        if parts[2] not in {10, 20, 30, 40, 50, 60, 70, 90}:
+            return False
+        return 214 <= parts[3] <= 254
+    except Exception:
+        return False
+
+
+def cleanup_orphan_hijack_rules():
+    """Remove DNS/portal DNAT rules for IPs not assigned to any device."""
+    try:
+        active_ips = {
+            d.ip_address
+            for d in Device.query.filter(Device.ip_address.isnot(None)).all()
+            if d.ip_address
+        }
+    except Exception as e:
+        logger.error(f"Failed to load device IPs for cleanup: {e}")
+        return 0
+
+    base_cmd = _get_iptables_base_cmd()
+    result = subprocess.run(
+        base_cmd + ["-t", "nat", "-S", "PREROUTING"],
+        capture_output=True,
+        text=True,
+        timeout=5
+    )
+    if result.returncode != 0:
+        logger.error(f"Failed to read iptables rules: {result.stderr.strip()}")
+        return 0
+
+    removed = 0
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("-A PREROUTING"):
+            continue
+        if "DNAT" not in line:
+            continue
+        if (
+            "--to-destination 192.168.99.5:53" not in line
+            and "--to-destination 192.168.99.4:8080" not in line
+        ):
+            continue
+
+        match = re.search(r"-s (\d+\.\d+\.\d+\.\d+)/32", line)
+        if not match:
+            continue
+
+        ip_address = match.group(1)
+        if ip_address in active_ips:
+            continue
+        if _is_blocked_pool_ip(ip_address):
+            continue
+
+        delete_parts = shlex.split(line)
+        delete_parts[0] = "-D"
+        delete_cmd = base_cmd + ["-t", "nat"] + delete_parts
+        delete_result = subprocess.run(
+            delete_cmd,
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if delete_result.returncode == 0:
+            removed += 1
+            logger.info(f"Removed orphan DNAT rule for {ip_address}")
+        else:
+            logger.warning(
+                "Failed to remove orphan DNAT rule for %s: %s",
+                ip_address,
+                delete_result.stderr.strip()
+            )
+
+    return removed
+
+
 def manage_switch_acl(action, ip_address, vlan_id):
     """
     Manage HP5130 ACL rules for blocking/unblocking specific IPs using SSH.
@@ -456,6 +598,7 @@ def apply_device_block(device, flash_messages=False):
     """Block a device (DB status, Kea, ACL, DNS hijack)."""
     device.registration_status = 'blocked'
     db.session.commit()
+    clear_unregistered_lease(device.mac_address)
 
     kea = get_kea()
     if kea and device.current_vlan:
@@ -486,11 +629,14 @@ def apply_device_block(device, flash_messages=False):
             flash(f'Device {device.mac_address} marked as blocked, but no IP/VLAN found.', 'warning')
         logger.warning(f"No IP/VLAN for device {device.mac_address}, cannot apply ACL")
 
+    cleanup_orphan_hijack_rules()
+
 
 def apply_device_unblock(device, flash_messages=False):
     """Unblock a device (DB status, Kea, ACL, DNS hijack)."""
     device.registration_status = 'active'
     db.session.commit()
+    clear_unregistered_lease(device.mac_address)
 
     kea = get_kea()
     blocked_ip = None
@@ -524,6 +670,8 @@ def apply_device_unblock(device, flash_messages=False):
         if flash_messages:
             flash(f'Device {device.mac_address} marked as active, but no IP/VLAN found.', 'warning')
         logger.warning(f"No IP/VLAN for device {device.mac_address}")
+
+    cleanup_orphan_hijack_rules()
 
 
 @app.route('/')
@@ -779,6 +927,8 @@ def register():
                         flash('Registration saved, but there was an issue updating your network access. Please contact support.', 'warning')
                 else:
                     flash('Registration saved, but connection type could not be determined. Please contact support.', 'warning')
+
+                clear_unregistered_lease(mac_address)
             
             db.session.commit()
             return redirect(url_for('status'))
@@ -875,6 +1025,8 @@ def register():
                         logger.info(f"Auto-approved wired device {mac_address} for {email} on VLAN {vlan_id}")
                     else:
                         flash('Registration saved, but there was an issue updating network access. Please contact support.', 'warning')
+
+                clear_unregistered_lease(mac_address)
                 
                 return redirect(url_for('status'))
             
@@ -955,6 +1107,8 @@ def verify():
             logger.info(f"Device {device.mac_address} verified and moved to VLAN {target_vlan}")
         else:
             flash('Verification successful, but there was an issue updating network access. Please contact support.', 'warning')
+
+        clear_unregistered_lease(device.mac_address)
     
     return redirect(url_for('status'))
 
@@ -1344,7 +1498,11 @@ def admin_dashboard():
                 ip_updated = True
     if ip_updated:
         db.session.commit()
+        cleanup_orphan_hijack_rules()
     devices_pages = (devices_total + devices_per_page - 1) // devices_per_page if devices_per_page > 0 else 0
+
+    unregistered_leases = UnregisteredLease.query.order_by(UnregisteredLease.expires_at.asc()).all()
+    unregistered_total = len(unregistered_leases)
     
     # Check if this is an AJAX request
     is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
@@ -1375,6 +1533,8 @@ def admin_dashboard():
         pending_search=pending_search,
         pending_sort=pending_sort,
         pending_order=pending_order,
+        unregistered_leases=unregistered_leases,
+        unregistered_total=unregistered_total,
         vlan_map=get_vlan_map(),
         auto_approve_vlans=get_auto_approve_vlans(),
         admin_approval_vlans=get_admin_approval_vlans()
@@ -1634,6 +1794,8 @@ def admin_process_request(request_id):
             # Remove DNS hijacking for wired devices too
             if device.ip_address:
                 manage_dns_hijack('unhijack', device.ip_address)
+
+        clear_unregistered_lease(device.mac_address)
         
         flash(f'Request approved and user {user.email} created', 'success')
         logger.info(f"Admin approved registration request for {user.email}")
@@ -1713,16 +1875,29 @@ def admin_delete_device(device_id):
         kea = get_kea()
         if kea:
             kea.unregister_mac(device.mac_address, device.current_vlan)
-        
-        # Add DNS hijacking so they see registration page again
-        if ip_address:
-            manage_dns_hijack('hijack', ip_address)
-            logger.info(f"DNS hijacked for deleted device {mac_address} at {ip_address}")
     elif device.connection_type == 'wired':
         send_coa_disconnect(device.mac_address)
+
+    # For deleted devices, keep DNS hijack + ACL while lease is active
+    if ip_address and not _is_blocked_pool_ip(ip_address):
+        lease_expiry = get_lease_expiry_for_mac(mac_address, subnet_id=vlan_id)
+        if not lease_expiry:
+            lease_expiry = datetime.utcnow() + timedelta(minutes=5)
+
+        upsert_unregistered_lease(mac_address, ip_address, lease_expiry)
+
+        if vlan_id:
+            manage_switch_acl('block', ip_address, vlan_id)
+
+        manage_dns_hijack('hijack', ip_address)
+        logger.info(
+            f"DNS hijacked/ACL blocked for deleted device {mac_address} at {ip_address} until {lease_expiry}"
+        )
     
     db.session.delete(device)
     db.session.commit()
+
+    cleanup_orphan_hijack_rules()
     
     flash(f'Device {mac_address} has been deleted', 'success')
     logger.info(f"Admin deleted device {mac_address}")

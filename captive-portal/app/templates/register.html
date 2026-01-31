@@ -24,6 +24,20 @@
         cursor: not-allowed;
         pointer-events: none;
     }
+    .validation-box {
+        margin: 20px 0;
+        padding: 15px;
+        border-radius: 8px;
+        background: #fff3cd;
+        color: #856404;
+        border: 1px solid #ffeeba;
+    }
+    .validation-box ul {
+        margin: 8px 0 0 20px;
+    }
+    .validation-box.hidden {
+        display: none;
+    }
 </style>
 <form method="POST" action="{{ url_for('register') }}">
     <div class="form-group">
@@ -67,7 +81,12 @@
             What type of device are you registering?
         </small>
     </div>
-    
+
+    <div id="validationBox" class="validation-box">
+        <strong>Please complete the following:</strong>
+        <ul id="validationList"></ul>
+    </div>
+
     <div class="info-box">
         <strong>What happens next?</strong>
         <ul style="margin: 10px 0 0 20px;">
@@ -76,7 +95,7 @@
         </ul>
     </div>
     
-    <button type="submit" class="btn" id="registerBtn">Register Device</button>
+    <button type="submit" class="btn" id="registerBtn" disabled>Register Device</button>
 </form>
 
 <div id="statusMessage" style="display: none; margin-top: 20px; padding: 15px; border-radius: 8px; text-align: center;"></div>
@@ -92,8 +111,62 @@ document.addEventListener('DOMContentLoaded', function() {
     const form = document.querySelector('form');
     const registerBtn = document.getElementById('registerBtn');
     const statusMessage = document.getElementById('statusMessage');
+    const validationBox = document.getElementById('validationBox');
+    const validationList = document.getElementById('validationList');
     let pollInterval = null;
     let registrationSubmitted = false;
+
+    const fieldValidators = [
+        {
+            id: 'email',
+            message: 'Email address is required and must be valid.',
+            isValid: () => document.getElementById('email').checkValidity()
+        },
+        {
+            id: 'first_name',
+            message: 'First name is required.',
+            isValid: () => document.getElementById('first_name').checkValidity()
+        },
+        {
+            id: 'last_name',
+            message: 'Last name is required.',
+            isValid: () => document.getElementById('last_name').checkValidity()
+        },
+        {
+            id: 'device_type',
+            message: 'Device type must be selected.',
+            isValid: () => document.getElementById('device_type').value.trim() !== ''
+        }
+    ];
+
+    function updateValidationState() {
+        const warnings = fieldValidators
+            .filter(({ isValid }) => !isValid())
+            .map(({ message }) => message);
+
+        validationList.innerHTML = '';
+        warnings.forEach((warning) => {
+            const li = document.createElement('li');
+            li.textContent = warning;
+            validationList.appendChild(li);
+        });
+
+        const allValid = warnings.length === 0;
+        registerBtn.disabled = !allValid;
+
+        if (allValid) {
+            validationBox.classList.add('hidden');
+        } else {
+            validationBox.classList.remove('hidden');
+        }
+    }
+
+    ['input', 'change'].forEach((evt) => {
+        form.addEventListener(evt, updateValidationState);
+    });
+
+    // Initialize validation on load
+    updateValidationState();
     
     form.addEventListener('submit', function() {
         if (!form.checkValidity()) {

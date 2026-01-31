@@ -144,6 +144,36 @@ void manage_acl(const std::string& action, const std::string& ip_address) {
     }
 }
 
+// Helper function to track unregistered leases in DB
+void manage_unregistered_lease(const std::string& action,
+                               const std::string& mac_address,
+                               const std::string& ip_address,
+                               int lease_seconds) {
+    std::stringstream cmd;
+    if (action == "cleanup") {
+        cmd << "/scripts/unregistered-lease.sh cleanup >/dev/null 2>&1";
+    } else if (action == "upsert") {
+        cmd << "/scripts/unregistered-lease.sh upsert " << mac_address
+            << " " << ip_address << " " << lease_seconds << " >/dev/null 2>&1";
+    } else if (action == "remove" || action == "expire") {
+        cmd << "/scripts/unregistered-lease.sh remove " << mac_address
+            << " " << ip_address << " >/dev/null 2>&1";
+    } else {
+        return;
+    }
+
+    int status = system(cmd.str().c_str());
+    if (status == -1) {
+        std::cerr << "DNS Hijack Hook WARNING: unregistered-lease script launch failed errno="
+                  << errno << " (" << std::strerror(errno) << ")" << std::endl;
+        std::cerr.flush();
+    } else if (status != 0) {
+        std::cerr << "DNS Hijack Hook WARNING: unregistered-lease script exit status "
+                  << status << std::endl;
+        std::cerr.flush();
+    }
+}
+
 // Helper: extract "blocked-ip" from reservation user-context if present
 std::string get_blocked_ip_from_reservation(const ConstHostPtr& host) {
     if (!host) {
@@ -232,10 +262,14 @@ int lease4_select(CalloutHandle& handle) {
         // Get the allocated IP address
         std::string ip_address = lease->addr_.toText();
         std::string mac_address = hwaddr->toText();
+        int lease_seconds = static_cast<int>(lease->valid_lft_);
         
         std::cout << "DNS Hijack Hook: Lease allocated - MAC: " << mac_address 
                   << " IP: " << ip_address << std::endl;
         
+        // Cleanup expired unregistered leases on every allocation
+        manage_unregistered_lease("cleanup", "", "", 0);
+
         // Check if device has a reservation (is registered)
         ConstHostPtr host;
         
@@ -280,7 +314,10 @@ int lease4_select(CalloutHandle& handle) {
                 std::cout << "DNS Hijack Hook: Device " << mac_address
                           << " is REGISTERED - removing DNS hijack" << std::endl;
                 manage_dns_hijack("unhijack", ip_address);
+                manage_acl("unblock", ip_address);
             }
+
+            manage_unregistered_lease("remove", mac_address, ip_address, 0);
 
             if (!blocked_ip.empty() && blocked_ip != ip_address) {
                 std::cout << "DNS Hijack Hook: [DEBUG] Removing ACL for blocked IP: "
@@ -295,6 +332,8 @@ int lease4_select(CalloutHandle& handle) {
             std::cout << "DNS Hijack Hook: Device " << mac_address 
                       << " is UNREGISTERED - enabling DNS hijack" << std::endl;
             manage_dns_hijack("hijack", ip_address);
+            manage_acl("block", ip_address);
+            manage_unregistered_lease("upsert", mac_address, ip_address, lease_seconds);
         }
         
         handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
@@ -349,6 +388,7 @@ int lease4_renew(CalloutHandle& handle) {
         std::cout.flush();
         
         std::string ip_address = lease->addr_.toText();
+        int lease_seconds = static_cast<int>(lease->valid_lft_);
         
         std::cout << "DNS Hijack Hook: [DEBUG] IP: " << ip_address << std::endl;
         std::cout.flush();
@@ -368,6 +408,9 @@ int lease4_renew(CalloutHandle& handle) {
         std::cout << "DNS Hijack Hook: [DEBUG] Checking for reservation" << std::endl;
         std::cout.flush();
         
+        // Cleanup expired unregistered leases on every renewal
+        manage_unregistered_lease("cleanup", "", "", 0);
+
         // Check if device has a reservation (is registered)
         ConstHostPtr host;
         
@@ -445,7 +488,10 @@ int lease4_renew(CalloutHandle& handle) {
                 std::cout.flush();
 
                 manage_dns_hijack("unhijack", ip_address);
+                manage_acl("unblock", ip_address);
             }
+
+            manage_unregistered_lease("remove", mac_address, ip_address, 0);
 
             if (!blocked_ip.empty() && blocked_ip != ip_address) {
                 std::cout << "DNS Hijack Hook: [DEBUG] Removing ACL for blocked IP: "
@@ -467,6 +513,8 @@ int lease4_renew(CalloutHandle& handle) {
             std::cout.flush();
             
             manage_dns_hijack("hijack", ip_address);
+            manage_acl("block", ip_address);
+            manage_unregistered_lease("upsert", mac_address, ip_address, lease_seconds);
             
             std::cout << "DNS Hijack Hook: [DEBUG] manage_dns_hijack(hijack) returned" << std::endl;
             std::cout.flush();
@@ -500,10 +548,19 @@ int lease4_expire(CalloutHandle& handle) {
         }
 
         std::string ip_address = lease->addr_.toText();
+        std::string mac_address;
+        HWAddrPtr hwaddr = lease->hwaddr_;
+        if (hwaddr) {
+            mac_address = hwaddr->toText(false);
+        }
         std::cout << "DNS Hijack Hook: Lease expired - removing ACL for IP: " << ip_address << std::endl;
         std::cout.flush();
 
         manage_acl("unblock", ip_address);
+        manage_dns_hijack("unhijack", ip_address);
+        if (!mac_address.empty()) {
+            manage_unregistered_lease("expire", mac_address, ip_address, 0);
+        }
 
         handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
         return 0;
