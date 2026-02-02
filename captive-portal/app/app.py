@@ -26,6 +26,7 @@ from email_service import (
     send_user_blocked_device_notice
 )
 from kea_integration import get_kea_client
+from urllib.parse import urlparse
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -977,7 +978,13 @@ def register():
             )
             db.session.add(reg_request)
             db.session.commit()
-            approval_url = url_for('admin_approve_request', token=reg_request.approval_token, _external=True)
+            portal_url = os.getenv('PORTAL_URL')
+            if portal_url:
+                parsed = urlparse(portal_url)
+                approval_url = f"{parsed.scheme}://{parsed.netloc}{url_for('admin_approve_request', token=reg_request.approval_token)}"
+            else:
+                approval_url = url_for('admin_approve_request', token=reg_request.approval_token, _external=True)
+            
             send_admin_notification(reg_request, approval_url)
             
 
