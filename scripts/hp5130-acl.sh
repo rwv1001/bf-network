@@ -9,12 +9,37 @@ if [ -z "$ACTION" ] || [ -z "$IP_ADDRESS" ]; then
   exit 1
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BASE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+DEFAULT_KEY_PATH="/keys/id_rsa"
+if [ -f "/home/admin/.ssh/id_rsa" ]; then
+  DEFAULT_KEY_PATH="/home/admin/.ssh/id_rsa"
+elif [ -f "$BASE_DIR/keys/hp5130_id_rsa" ]; then
+  DEFAULT_KEY_PATH="$BASE_DIR/keys/hp5130_id_rsa"
+fi
+
 SWITCH_HOST="${SWITCH_HOST:-192.168.1.3}"
 SWITCH_USER="${SWITCH_USER:-robert}"
 SWITCH_SSH_PORT="${SWITCH_SSH_PORT:-22}"
-SWITCH_KEY_PATH="${SWITCH_KEY_PATH:-/keys/id_rsa}"
+SWITCH_KEY_PATH="${SWITCH_KEY_PATH:-$DEFAULT_KEY_PATH}"
 
-LOG_FILE="${ACL_LOG_FILE:-/var/log/hp5130-acl.log}"
+QUEUE_BASE="${ACL_QUEUE_DIR:-}"
+if [ -z "$QUEUE_BASE" ]; then
+  if [ -d "/acl-queue" ]; then
+    QUEUE_BASE="/acl-queue"
+  else
+    QUEUE_BASE="$BASE_DIR/shared/acl-queue"
+  fi
+fi
+
+LOG_FILE="${ACL_LOG_FILE:-$QUEUE_BASE/hp5130-acl.log}"
+QUEUE_FILE="${ACL_QUEUE_FILE:-$QUEUE_BASE/hp5130-acl.queue}"
+QUEUE_PID_FILE="${ACL_QUEUE_PID:-$QUEUE_BASE/hp5130-acl.pid}"
+QUEUE_INTERVAL="${ACL_QUEUE_INTERVAL:-3}"
+QUEUE_DISABLE="${ACL_QUEUE_DISABLE:-0}"
+QUEUE_WORKER="${ACL_QUEUE_WORKER:-$SCRIPT_DIR/hp5130-acl-queue.sh}"
+DEDUP_WINDOW="${ACL_DEDUP_WINDOW:-3}"
+mkdir -p "$QUEUE_BASE" 2>/dev/null || true
 timestamp() {
   date '+%Y-%m-%dT%H:%M:%S%z'
 }
@@ -22,13 +47,58 @@ log() {
   printf '%s %s\n' "$(timestamp)" "$*" >> "$LOG_FILE" 2>/dev/null || true
 }
 
+is_valid_ip() {
+  echo "$1" | awk -F. 'NF==4 && $1>=0 && $1<=255 && $2>=0 && $2<=255 && $3>=0 && $3<=255 && $4>=0 && $4<=255 {exit 0} {exit 1}'
+}
+
+if ! is_valid_ip "$IP_ADDRESS"; then
+  log "SKIP_INVALID action=$ACTION ip=$IP_ADDRESS"
+  exit 0
+fi
+
+SAFE_IP="$(echo "$IP_ADDRESS" | tr '.' '_')"
+DEDUP_FILE="$QUEUE_BASE/.dedup-${ACTION}-${SAFE_IP}"
+now=$(date +%s)
+if [ -f "$DEDUP_FILE" ]; then
+  last=$(cat "$DEDUP_FILE" 2>/dev/null || echo 0)
+  if [ $((now - last)) -lt "$DEDUP_WINDOW" ]; then
+    log "SKIP_DUP action=$ACTION ip=$IP_ADDRESS age_sec=$((now - last))"
+    exit 0
+  fi
+fi
+printf '%s' "$now" > "$DEDUP_FILE" 2>/dev/null || true
+
 # Extract VLAN and host octet from IP (192.168.<vlan>.<host>)
 VLAN_ID="$(echo "$IP_ADDRESS" | awk -F. '{print $3}')"
 HOST_OCTET="$(echo "$IP_ADDRESS" | awk -F. '{print $4}')"
 ACL_NUM=$((3000 + VLAN_ID * 10))
 RULE_NUM=$((1000 + HOST_OCTET))
 
-SSH_OPTS="-i $SWITCH_KEY_PATH -p $SWITCH_SSH_PORT -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3"
+SSH_TTY_FLAG="${SSH_TTY_FLAG:--T}"
+SSH_TTY_FALLBACK="${SSH_TTY_FALLBACK:-1}"
+SSH_HOSTKEY_OPTS="${SSH_HOSTKEY_OPTS:--o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa}"
+SSH_OPTS="-i $SWITCH_KEY_PATH -p $SWITCH_SSH_PORT $SSH_HOSTKEY_OPTS -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3"
+
+run_ssh() {
+  phase="$1"
+  cmds="$2"
+  tty_flag="$SSH_TTY_FLAG"
+
+  set +e
+  printf "%s\n" "$cmds" | ssh $tty_flag $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}"
+  status=$?
+  set -e
+
+  if [ $status -ne 0 ] && [ "$SSH_TTY_FALLBACK" = "1" ] && [ "$tty_flag" != "-tt" ]; then
+    log "WARN action=$ACTION phase=$phase reason=ssh_failed status=$status retry_tty=-tt"
+    set +e
+    printf "%s\n" "$cmds" | ssh -tt $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}"
+    status=$?
+    set -e
+  fi
+
+  return $status
+}
 
 if [ "$ACTION" = "block" ]; then
   CMDS_APPLY="system-view
@@ -49,21 +119,41 @@ else
   exit 1
 fi
 
-# Execute commands via SSH (force TTY for Comware)
-apply_start=$(date +%s)
-log "START action=$ACTION phase=apply ip=$IP_ADDRESS vlan=$VLAN_ID acl=$ACL_NUM rule=$RULE_NUM host=$SWITCH_HOST"
-printf "%s\n" "$CMDS_APPLY" | ssh -tt $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}"
-apply_status=$?
-apply_end=$(date +%s)
-apply_duration=$((apply_end - apply_start))
-log "END action=$ACTION phase=apply ip=$IP_ADDRESS status=$apply_status duration_sec=$apply_duration"
+if [ "$QUEUE_DISABLE" = "1" ]; then
+  # Execute commands via SSH (force TTY for Comware)
+  apply_start=$(date +%s)
+  log "START action=$ACTION phase=apply ip=$IP_ADDRESS vlan=$VLAN_ID acl=$ACL_NUM rule=$RULE_NUM host=$SWITCH_HOST"
+  run_ssh "apply" "$CMDS_APPLY"
+  apply_status=$?
+  apply_end=$(date +%s)
+  apply_duration=$((apply_end - apply_start))
+  log "END action=$ACTION phase=apply ip=$IP_ADDRESS status=$apply_status duration_sec=$apply_duration"
 
-save_start=$(date +%s)
-log "START action=$ACTION phase=save ip=$IP_ADDRESS vlan=$VLAN_ID acl=$ACL_NUM rule=$RULE_NUM host=$SWITCH_HOST"
-printf "%s\n" "$CMDS_SAVE" | ssh -tt $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}"
-save_status=$?
-save_end=$(date +%s)
-save_duration=$((save_end - save_start))
-log "END action=$ACTION phase=save ip=$IP_ADDRESS status=$save_status duration_sec=$save_duration"
+  save_start=$(date +%s)
+  log "START action=$ACTION phase=save ip=$IP_ADDRESS vlan=$VLAN_ID acl=$ACL_NUM rule=$RULE_NUM host=$SWITCH_HOST"
+  run_ssh "save" "$CMDS_SAVE"
+  save_status=$?
+  save_end=$(date +%s)
+  save_duration=$((save_end - save_start))
+  log "END action=$ACTION phase=save ip=$IP_ADDRESS status=$save_status duration_sec=$save_duration"
 
-exit $save_status
+  exit $save_status
+fi
+
+# Queue mode (default)
+log "QUEUE action=$ACTION ip=$IP_ADDRESS vlan=$VLAN_ID acl=$ACL_NUM rule=$RULE_NUM"
+mkdir -p "$(dirname "$QUEUE_FILE")" 2>/dev/null || true
+printf '%s|%s|%s\n' "$(timestamp)" "$ACTION" "$IP_ADDRESS" >> "$QUEUE_FILE"
+
+if [ -f "$QUEUE_PID_FILE" ] && kill -0 "$(cat "$QUEUE_PID_FILE" 2>/dev/null)" 2>/dev/null; then
+  exit 0
+fi
+
+if [ -x "$QUEUE_WORKER" ]; then
+  nohup "$QUEUE_WORKER" >/dev/null 2>&1 &
+  echo $! > "$QUEUE_PID_FILE" 2>/dev/null || true
+  log "QUEUE_WORKER_STARTED pid=$(cat "$QUEUE_PID_FILE" 2>/dev/null) interval_sec=$QUEUE_INTERVAL"
+else
+  log "QUEUE_WORKER_MISSING path=$QUEUE_WORKER"
+fi
+exit 0

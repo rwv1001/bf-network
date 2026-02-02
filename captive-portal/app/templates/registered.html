@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+
+{% block title %}Registration Successful - Blackfriars Captive Portal{% endblock %}
+
+{% block header %}Registration Successful{% endblock %}
+
+{% block subheader %}
+<p style="margin-top: 10px; opacity: 0.9;">You now have full internet access.</p>
+{% endblock %}
+
+{% block content %}
+<div style="background: #d4edda; color: #155724; border: 1px solid #c3e6cb; border-radius: 10px; padding: 18px; margin-bottom: 20px;">
+    <strong>✓ You're registered!</strong>
+    <div style="margin-top: 8px;">Your device is registered and internet access is enabled.</div>
+</div>
+
+<div class="info-box">
+    <strong>Registration details</strong>
+    <ul style="margin: 10px 0 0 20px;">
+        <li><strong>MAC:</strong> {{ mac_address or (device.mac_address if device else 'Unknown') }}</li>
+        <li><strong>IP:</strong> {{ device.ip_address or ip_address or 'Unknown' }}</li>
+        {% if device %}
+        <li><strong>Status:</strong> {{ device.registration_status }}</li>
+        <li><strong>Connection:</strong> {{ device.connection_type or 'Unknown' }}</li>
+        <li><strong>SSID:</strong> {{ device.ssid or 'Unknown' }}</li>
+        <li><strong>VLAN:</strong> {{ device.current_vlan or 'Unknown' }}</li>
+        <li><strong>Device Type:</strong> {{ device.device_name or 'Unknown' }}</li>
+        {% endif %}
+    </ul>
+</div>
+
+<div style="margin-top: 20px; text-align: center;">
+    <a href="{{ url_for('status') }}" class="btn">View Status</a>
+</div>
+{% endblock %}

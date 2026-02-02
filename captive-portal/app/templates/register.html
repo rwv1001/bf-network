@@ -42,7 +42,7 @@
 <form method="POST" action="{{ url_for('register') }}">
     <div class="form-group">
         <label for="email">Email Address <span class="required">*</span></label>
-        <input type="email" id="email" name="email" required placeholder="your.email@example.com">
+        <input type="email" id="email" name="email" required placeholder="your.email@example.com" value="{{ prefill.email if prefill else '' }}">
         <small style="color: #666; display: block; margin-top: 5px;">
             Use the email address registered with the network administrator
         </small>
@@ -50,17 +50,17 @@
     
     <div class="form-group">
         <label for="first_name">First Name <span class="required">*</span></label>
-        <input type="text" id="first_name" name="first_name" required placeholder="John">
+        <input type="text" id="first_name" name="first_name" required placeholder="John" value="{{ prefill.first_name if prefill else '' }}">
     </div>
     
     <div class="form-group">
         <label for="last_name">Last Name <span class="required">*</span></label>
-        <input type="text" id="last_name" name="last_name" required placeholder="Smith">
+        <input type="text" id="last_name" name="last_name" required placeholder="Smith" value="{{ prefill.last_name if prefill else '' }}">
     </div>
     
     <div class="form-group">
         <label for="phone_number">Phone Number</label>
-        <input type="tel" id="phone_number" name="phone_number" placeholder="+44 1234 567890">
+        <input type="tel" id="phone_number" name="phone_number" placeholder="+44 1234 567890" value="{{ prefill.phone_number if prefill else '' }}">
         <small style="color: #666; display: block; margin-top: 5px;">
             Optional - helps us contact you if needed
         </small>
@@ -70,12 +70,12 @@
         <label for="device_type">Device Type <span class="required">*</span></label>
         <select id="device_type" name="device_type" required>
             <option value="">-- Select Device Type --</option>
-            <option value="laptop">Laptop</option>
-            <option value="phone">Phone</option>
-            <option value="tablet">Tablet</option>
-            <option value="desktop">Desktop Computer</option>
-            <option value="iot">IoT Device</option>
-            <option value="other">Other</option>
+            <option value="laptop" {% if prefill and prefill.device_type == 'laptop' %}selected{% endif %}>Laptop</option>
+            <option value="phone" {% if prefill and prefill.device_type == 'phone' %}selected{% endif %}>Phone</option>
+            <option value="tablet" {% if prefill and prefill.device_type == 'tablet' %}selected{% endif %}>Tablet</option>
+            <option value="desktop" {% if prefill and prefill.device_type == 'desktop' %}selected{% endif %}>Desktop Computer</option>
+            <option value="iot" {% if prefill and prefill.device_type == 'iot' %}selected{% endif %}>IoT Device</option>
+            <option value="other" {% if prefill and prefill.device_type == 'other' %}selected{% endif %}>Other</option>
         </select>
         <small style="color: #666; display: block; margin-top: 5px;">
             What type of device are you registering?
@@ -114,7 +114,12 @@ document.addEventListener('DOMContentLoaded', function() {
     const validationBox = document.getElementById('validationBox');
     const validationList = document.getElementById('validationList');
     let pollInterval = null;
+    let accessInterval = null;
     let registrationSubmitted = false;
+    let pollingStarted = false;
+    let currentPrefill = null;  // To store submitted data for resubmit
+
+    // Remove applyPendingPage and loadPendingPage - not needed anymore
 
     const fieldValidators = [
         {
@@ -165,61 +170,168 @@ document.addEventListener('DOMContentLoaded', function() {
         form.addEventListener(evt, updateValidationState);
     });
 
-    // Initialize validation on load
     updateValidationState();
     
-    form.addEventListener('submit', function() {
+    form.addEventListener('submit', function(event) {
+        event.preventDefault();
         if (!form.checkValidity()) {
             return;
         }
 
-        // Defer disabling to avoid blocking the submit in some browsers
         setTimeout(() => {
             registerBtn.disabled = true;
             registerBtn.textContent = 'Registering...';
         }, 0);
         registrationSubmitted = true;
         showStatus('Submitting registration...', 'info');
+
+        const formData = new FormData(form);
+        fetch(form.action, {
+            method: 'POST',
+            body: formData,
+            credentials: 'same-origin',
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest',
+                'Accept': 'application/json'
+            }
+        })
+        .then(async response => {
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.message || 'Registration failed');
+            }
+
+            const status = data.status || 'pending';
+            const message = data.message || 'Registration request submitted. Waiting for approval...';
+
+            if (status === 'registered') {
+                showStatus(message + ' Checking access...', 'success');
+                form.style.display = 'none';  // Hide form on success
+                startAccessCheck();
+                return;
+            }
+
+            if (status === 'pending') {
+                showStatus(message, 'info');
+                currentPrefill = data.prefill;  // Store for resubmit
+
+                // Display submitted details and resubmit button
+                const detailsDiv = document.createElement('div');
+                detailsDiv.id = 'submittedDetails';
+                detailsDiv.innerHTML = `
+                    <p><strong>Submitted Details:</strong></p>
+                    <ul>
+                        <li>Email: ${currentPrefill.email}</li>
+                        <li>First Name: ${currentPrefill.first_name}</li>
+                        <li>Last Name: ${currentPrefill.last_name}</li>
+                        <li>Phone Number: ${currentPrefill.phone_number || 'Not provided'}</li>
+                        <li>Device Type: ${currentPrefill.device_type}</li>
+                    </ul>
+                    <button id="resubmitBtn" class="btn">Edit and Resubmit</button>
+                `;
+                statusMessage.appendChild(detailsDiv);
+
+                // Hide form while pending
+                form.style.display = 'none';
+
+                // Resubmit button logic
+                document.getElementById('resubmitBtn').addEventListener('click', function() {
+                    // Prefill form and show it
+                    document.getElementById('email').value = currentPrefill.email;
+                    document.getElementById('first_name').value = currentPrefill.first_name;
+                    document.getElementById('last_name').value = currentPrefill.last_name;
+                    document.getElementById('phone_number').value = currentPrefill.phone_number;
+                    document.getElementById('device_type').value = currentPrefill.device_type;
+                    form.style.display = 'block';
+                    registerBtn.disabled = false;
+                    registerBtn.textContent = 'Resubmit Registration';
+
+                    // Optional: Hide details on resubmit start
+                    detailsDiv.style.display = 'none';
+                });
+
+                startPolling();
+                return;
+            }
+
+            // Handle other statuses (e.g., error, rejected)
+            showStatus(message, 'info');
+        })
+        .catch((error) => {
+            showStatus(`Error: ${error.message || 'Registration failed. Please try again.'}`, 'error');
+            registerBtn.disabled = false;
+            registerBtn.textContent = 'Register Device';
+        });
     });
-    
-    // If we came back from a registration submission, start polling
-    const urlParams = new URLSearchParams(window.location.search);
-    if (urlParams.has('registered') || registrationSubmitted) {
-        startPolling();
-    }
-    
+
+    // Modified polling: Update DOM instead of redirect
     function startPolling() {
-        showStatus('Waiting for approval...', 'info');
-        
+        if (pollingStarted) return;
+        pollingStarted = true;
+
         pollInterval = setInterval(function() {
             fetch('/api/registration-status')
                 .then(response => response.json())
                 .then(data => {
-                    if (data.status === 'approved' || data.status === 'active') {
+                    if (data.status === 'registered') {
                         clearInterval(pollInterval);
-                        showStatus('✓ Registration approved! You now have internet access.', 'success');
-                        
-                        // Try to redirect after 3 seconds to confirm internet works
-                        setTimeout(function() {
-                            showStatus('✓ Testing internet connection...', 'success');
-                            window.location.href = 'http://captive.apple.com/hotspot-detect.html';
-                        }, 3000);
-                    } else if (data.status === 'pending') {
-                        showStatus('⏳ Your registration request is pending admin approval...', 'info');
+                        showStatus('Request approved! Checking internet access...', 'success');
+                        // Optional: Hide pending details/form
+                        const details = document.getElementById('submittedDetails');
+                        if (details) details.remove();
+                        form.style.display = 'none';
+                        startAccessCheck();
                     } else if (data.status === 'rejected') {
                         clearInterval(pollInterval);
-                        showStatus('✗ Registration request was rejected. Please contact administrator.', 'error');
+                        showStatus(`Request rejected: ${data.reason || 'Please contact admin.'}`, 'error');
+                        // Show resubmit button again if needed
+                        const resubmitBtn = document.getElementById('resubmitBtn');
+                        if (resubmitBtn) resubmitBtn.style.display = 'block';
+                    } else if (data.status === 'pending') {
+                        // Do nothing, keep polling
                     }
                 })
                 .catch(error => {
                     console.error('Status check failed:', error);
                 });
-        }, 2000); // Poll every 2 seconds
+        }, 2000);  // Poll every 2 seconds
     }
-    
+
+    // Your existing startAccessCheck and showStatus functions (unchanged)
+    function startAccessCheck() {
+        if (accessInterval) {
+            return;
+        }
+
+        let attempts = 0;
+        const maxAttempts = 30;
+
+        const checkAccess = () => {
+            attempts += 1;
+            fetch('https://connectivitycheck.gstatic.com/generate_204', {
+                method: 'GET',
+                mode: 'no-cors',
+                cache: 'no-store'
+            })
+            .then(() => {
+                clearInterval(accessInterval);
+                accessInterval = null;
+                showStatus('You now have full internet access.', 'success');
+            })
+            .catch(() => {
+                if (attempts >= maxAttempts) {
+                    clearInterval(accessInterval);
+                    accessInterval = null;
+                }
+            });
+        };
+
+        accessInterval = setInterval(checkAccess, 2000);
+        checkAccess();
+    }
     function showStatus(message, type) {
         statusMessage.style.display = 'block';
-        statusMessage.textContent = message;
+        statusMessage.textContent = message;  // Note: Changed to textContent for simplicity; use innerHTML if needed for HTML
         
         if (type === 'success') {
             statusMessage.style.backgroundColor = '#d4edda';
@@ -235,6 +347,26 @@ document.addEventListener('DOMContentLoaded', function() {
             statusMessage.style.border = '1px solid #bee5eb';
         }
     }
+
+    // Your checkInitialStatus - modify to avoid redirects if needed
+    const checkInitialStatus = () => {
+        fetch('/api/registration-status')
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'registered') {
+                    showStatus('Device already registered. Checking access...', 'success');
+                    startAccessCheck();
+                } else if (data.status === 'rejected') {
+                    showStatus(`Request rejected: ${data.reason || ''}`, 'error');
+                } else if (data.status === 'pending') {
+                    showStatus('Awaiting approval...', 'info');
+                    startPolling();
+                }
+            })
+            .catch(() => {});
+    };
+
+    checkInitialStatus();
 });
 </script>
 {% endblock %}

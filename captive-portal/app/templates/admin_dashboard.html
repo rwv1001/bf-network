@@ -205,6 +205,12 @@ function searchTable(tableType, searchValue) {
     <a href="{{ url_for('admin_add_user') }}" class="btn">+ Add New User</a>
     <a href="{{ url_for('admin_vlan_config') }}" class="btn" style="background: #764ba2; margin-left: 10px;">⚙️ VLAN Configuration</a>
     <a href="{{ url_for('admin_logout') }}" class="btn" style="background: #999; margin-left: 10px;">Logout</a>
+    {% if test_env %}
+    <form method="post" action="{{ url_for('admin_reset_test') }}" style="display: inline-block; margin-left: 10px;"
+          onsubmit="return confirm('Reset test environment? This deletes all users, devices, and requests, clears ACL/DNS hijack rules, and reapplies the baseline ACLs.');">
+        <button type="submit" class="btn" style="background: #c0392b;">Reset Test Environment</button>
+    </form>
+    {% endif %}
 </div>
 
 {% if pending_total > 0 %}
@@ -619,7 +625,7 @@ function searchTable(tableType, searchValue) {
             </td>
             <td>
                 <span class="badge 
-                    {% if device.registration_status == 'active' %}badge-active
+                    {% if device.registration_status == 'registered' %}badge-active
                     {% elif device.registration_status == 'pending' %}badge-pending
                     {% elif device.registration_status == 'blocked' %}badge-restricted
                     {% else %}badge-restricted{% endif %}">
@@ -652,7 +658,7 @@ function searchTable(tableType, searchValue) {
             </td>
             <td>VLAN {{ device.current_vlan }}</td>
             <td>
-                {% if device.registration_status == 'active' %}
+                {% if device.registration_status == 'registered' %}
                 <form method="POST" action="{{ url_for('admin_block_device', device_id=device.id) }}" style="display: inline;">
                     <button type="submit" class="btn btn-danger btn-small" 
                             onclick="return confirm('Block this device? It will be moved to restricted VLAN.')">

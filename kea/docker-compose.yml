@@ -12,13 +12,17 @@ services:
       - ./leases:/kea/leases
       - ./sockets:/kea/sockets
       - ../scripts:/scripts:ro
+      - ../shared/acl-queue:/acl-queue
       - ../kea-hooks/dynamic_subnet/dhcp_dns_hijack.so:/usr/local/lib/kea/hooks/dhcp_dns_hijack.so:ro
       - /home/admin/.ssh:/keys:ro
     environment:
       SWITCH_HOST: ${SWITCH_HOST:-192.168.1.3}
       SWITCH_USER: ${SWITCH_USER:-robert}
       SWITCH_SSH_PORT: ${SWITCH_SSH_PORT:-22}
-      SWITCH_KEY_PATH: /keys/id_rsa
+      SWITCH_KEY_PATH: ${SWITCH_KEY_PATH:-/keys/id_rsa}
+      ACL_QUEUE_DISABLE: "1"
+      ACL_QUEUE_DIR: /acl-queue
+      ACL_QUEUE_INTERVAL: "3"
       DB_HOST: ${DB_HOST:-127.0.0.1}
       DB_PORT: ${DB_PORT:-5432}
       DB_NAME: ${DB_NAME:-captive_portal}

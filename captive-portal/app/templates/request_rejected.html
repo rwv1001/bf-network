@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+
+{% block title %}Request Blocked - Network Access Portal{% endblock %}
+
+{% block header %}Request Blocked{% endblock %}
+
+{% block subheader %}
+<p style="margin-top: 10px; opacity: 0.9;">Unfortunately your request was blocked.</p>
+{% endblock %}
+
+{% block content %}
+<div class="alert alert-error">
+    <strong>✗ Request blocked</strong>
+    <div style="margin-top: 6px;">Unfortunately your request was blocked for the following reason:</div>
+    <div style="margin-top: 8px; font-weight: 600;">{{ reason or 'No reason was provided.' }}</div>
+</div>
+
+<div class="info-box">
+    <strong>Submitted details</strong>
+    <ul style="margin: 10px 0 0 20px;">
+        <li><strong>Email:</strong> {{ prefill.email or 'Unknown' }}</li>
+        <li><strong>Name:</strong> {{ prefill.first_name }} {{ prefill.last_name }}</li>
+        <li><strong>Phone:</strong> {{ prefill.phone_number or 'Not provided' }}</li>
+        <li><strong>Device type:</strong> {{ prefill.device_type or 'Unknown' }}</li>
+        <li><strong>MAC:</strong> {{ mac_address or 'Unknown' }}</li>
+        <li><strong>IP:</strong> {{ ip_address or 'Unknown' }}</li>
+    </ul>
+</div>
+
+<div style="margin-top: 20px; text-align: center;">
+    <a class="btn" href="{{ url_for('register', **prefill) }}">Resubmit Request</a>
+</div>
+{% endblock %}

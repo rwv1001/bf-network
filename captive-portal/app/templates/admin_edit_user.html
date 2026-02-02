@@ -95,8 +95,9 @@
             <td style="font-family: monospace;">{{ device.mac_address }}</td>
             <td>
                 <span class="badge 
-                    {% if device.registration_status == 'active' %}badge-active
+                    {% if device.registration_status == 'registered' %}badge-active
                     {% elif device.registration_status == 'pending' %}badge-pending
+                    {% elif device.registration_status == 'blocked' %}badge-restricted
                     {% else %}badge-restricted{% endif %}">
                     {{ device.registration_status }}
                 </span>

@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+
+{% block title %}Awaiting Approval - Network Access Portal{% endblock %}
+
+{% block header %}Request Submitted{% endblock %}
+
+{% block subheader %}
+<p style="margin-top: 10px; opacity: 0.9;">Please wait for an administrator to approve your request.</p>
+{% endblock %}
+
+{% block content %}
+<div class="alert alert-info">
+    <strong>⏳ Awaiting approval</strong>
+    <div style="margin-top: 6px;">Your request has been sent to the administrator.</div>
+</div>
+
+<div class="info-box">
+    <strong>Submitted details</strong>
+    <ul style="margin: 10px 0 0 20px;">
+        <li><strong>Email:</strong> {{ prefill.email or 'Unknown' }}</li>
+        <li><strong>Name:</strong> {{ prefill.first_name }} {{ prefill.last_name }}</li>
+        <li><strong>Phone:</strong> {{ prefill.phone_number or 'Not provided' }}</li>
+        <li><strong>Device type:</strong> {{ prefill.device_type or 'Unknown' }}</li>
+        <li><strong>MAC:</strong> {{ mac_address or 'Unknown' }}</li>
+        <li><strong>IP:</strong> {{ ip_address or 'Unknown' }}</li>
+    </ul>
+</div>
+
+<div style="margin-top: 20px; text-align: center;">
+    <a class="btn" href="{{ url_for('register', **prefill) }}">Resubmit Request</a>
+</div>
+
+<script>
+(() => {
+    const pollInterval = 3000;
+    let timer = null;
+
+    const checkStatus = () => {
+        fetch('/api/registration-status')
+            .then(res => res.json())
+            .then(data => {
+                if (data.status === 'registered') {
+                    window.location.href = '/registered';
+                    return;
+                }
+                if (data.status === 'rejected') {
+                    const reason = data.reason ? encodeURIComponent(data.reason) : '';
+                    const qs = reason ? `?reason=${reason}` : '';
+                    window.location.href = `/request-rejected${qs}`;
+                }
+            })
+            .catch(() => {
+                // keep polling quietly
+            });
+    };
+
+    timer = setInterval(checkStatus, pollInterval);
+    checkStatus();
+})();
+</script>
+{% endblock %}

@@ -10,10 +10,11 @@ import time
 import re
 import shlex
 import shutil
-from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
+from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, abort
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime, timedelta
+from sqlalchemy import text
 import secrets
 
 from models import db, User, Device, RegistrationRequest, VlanMapping, Setting, UnregisteredLease
@@ -81,6 +82,10 @@ def get_admin_approval_vlans():
 # Admin user (simple single admin - extend for multiple admins)
 ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'admin')
 ADMIN_PASSWORD_HASH = os.getenv('ADMIN_PASSWORD_HASH', generate_password_hash('admin123'))
+
+
+def is_test_env():
+    return os.getenv('TEST_ENV', 'false').strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
 class AdminUser:
@@ -245,6 +250,34 @@ def get_client_ip():
     return request.remote_addr
 
 
+def _build_prefill_from_request():
+    return {
+        'email': request.args.get('email', '').strip(),
+        'first_name': request.args.get('first_name', '').strip(),
+        'last_name': request.args.get('last_name', '').strip(),
+        'phone_number': request.args.get('phone_number', '').strip(),
+        'device_type': request.args.get('device_type', '').strip(),
+    }
+
+
+def normalize_device_status(device):
+    if not device:
+        return device
+
+    updated = False
+    if device.registration_status in {'active', 'approved'}:
+        device.registration_status = 'registered'
+        updated = True
+    elif device.registration_status == 'restricted':
+        device.registration_status = 'blocked'
+        updated = True
+
+    if updated:
+        db.session.commit()
+
+    return device
+
+
 def detect_connection_type(ip_address):
     """
     Detect if connection is WiFi or wired based on source IP/VLAN.
@@ -359,6 +392,91 @@ def get_lease_expiry_for_mac(mac_address, subnet_id=None):
         return None
 
     return None
+
+
+def reset_dns_hijack_rules():
+    """Remove all per-IP hijack rules and restore blocked pool ranges."""
+    base_cmd = _get_iptables_base_cmd()
+    result = subprocess.run(
+        base_cmd + ["-t", "nat", "-S", "PREROUTING"],
+        capture_output=True,
+        text=True,
+        timeout=5
+    )
+    if result.returncode != 0:
+        logger.error("Failed to read iptables rules: %s", result.stderr.strip())
+        return False
+
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("-A PREROUTING"):
+            continue
+        if "DNAT" not in line:
+            continue
+        if (
+            "--to-destination 192.168.99.5:53" not in line
+            and "--to-destination 192.168.99.4:8080" not in line
+        ):
+            continue
+
+        delete_parts = shlex.split(line)
+        delete_parts[0] = "-D"
+        delete_cmd = base_cmd + ["-t", "nat"] + delete_parts
+        subprocess.run(delete_cmd, capture_output=True, text=True, timeout=5)
+
+    # Re-add blocked pool DNS hijack ranges
+    script_path = '/home/admin/bf-network/scripts/dns-hijack.sh'
+    subprocess.run([script_path, "hijack-blocked-pools"], capture_output=True, text=True, timeout=10)
+    return True
+
+
+def reset_acl_baseline():
+    """Re-apply baseline ACLs on the switch."""
+    script_path = '/home/admin/bf-network/scripts/hp5130-acl-baseline.sh'
+    if not os.path.isfile(script_path):
+        logger.error("ACL baseline script not found: %s", script_path)
+        return False
+
+    env = os.environ.copy()
+    if not env.get("SWITCH_KEY_PATH"):
+        env["SWITCH_KEY_PATH"] = "/keys/id_rsa"
+
+    result = subprocess.run([script_path], capture_output=True, text=True, timeout=120, env=env)
+    if result.returncode != 0:
+        logger.error("ACL baseline failed: %s", (result.stderr or result.stdout).strip())
+        return False
+    return True
+
+
+def reset_acl_queue_files():
+    queue_base = os.getenv('ACL_QUEUE_DIR') or ('/acl-queue' if os.path.isdir('/acl-queue') else '/home/admin/bf-network/shared/acl-queue')
+    try:
+        if os.path.isdir(queue_base):
+            for name in os.listdir(queue_base):
+                if name.startswith(".dedup-") or name in {"hp5130-acl.queue", "hp5130-acl.pid", "hp5130-acl.lock"}:
+                    path = os.path.join(queue_base, name)
+                    if os.path.isdir(path):
+                        shutil.rmtree(path, ignore_errors=True)
+                    else:
+                        try:
+                            os.remove(path)
+                        except FileNotFoundError:
+                            pass
+    except Exception as exc:
+        logger.warning("Failed to clear ACL queue files: %s", exc)
+
+
+def reset_test_data():
+    """Remove all users/devices/requests and Kea host/lease data."""
+    db.session.query(RegistrationRequest).delete(synchronize_session=False)
+    db.session.query(Device).delete(synchronize_session=False)
+    db.session.query(User).delete(synchronize_session=False)
+    db.session.query(UnregisteredLease).delete(synchronize_session=False)
+    db.session.commit()
+
+    db.session.execute(text("DELETE FROM hosts"))
+    db.session.execute(text("DELETE FROM lease4"))
+    db.session.commit()
 
 
 def upsert_unregistered_lease(mac_address, ip_address, expires_at):
@@ -490,6 +608,28 @@ def manage_switch_acl(action, ip_address, vlan_id):
     Returns:
         bool: True if successful, False otherwise
     """
+    acl_script = os.getenv('ACL_QUEUE_SCRIPT', '/home/admin/bf-network/scripts/hp5130-acl.sh')
+    use_acl_script = os.getenv('USE_ACL_QUEUE', '1') != '0'
+
+    if use_acl_script and os.path.isfile(acl_script):
+        try:
+            result = subprocess.run(
+                [acl_script, action, ip_address],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                logger.info("ACL %s queued for %s via %s", action, ip_address, acl_script)
+                return True
+            logger.warning(
+                "ACL queue script failed for %s: %s",
+                ip_address,
+                (result.stderr or result.stdout).strip()
+            )
+        except Exception as exc:
+            logger.warning("ACL queue script error for %s: %s", ip_address, exc)
+
     try:
         import paramiko
     except ImportError:
@@ -634,7 +774,7 @@ def apply_device_block(device, flash_messages=False):
 
 def apply_device_unblock(device, flash_messages=False):
     """Unblock a device (DB status, Kea, ACL, DNS hijack)."""
-    device.registration_status = 'active'
+    device.registration_status = 'registered'
     db.session.commit()
     clear_unregistered_lease(device.mac_address)
 
@@ -664,11 +804,11 @@ def apply_device_unblock(device, flash_messages=False):
             if acl_success:
                 flash(f'Device {device.mac_address} unblocked. Internet access restored.', 'success')
             else:
-                flash(f'Device {device.mac_address} marked as active, but ACL removal failed.', 'warning')
+                flash(f'Device {device.mac_address} marked as registered, but ACL removal failed.', 'warning')
         logger.info(f"Unblocked device {device.mac_address} at {device.ip_address} (acl_success={acl_success})")
     else:
         if flash_messages:
-            flash(f'Device {device.mac_address} marked as active, but no IP/VLAN found.', 'warning')
+            flash(f'Device {device.mac_address} marked as registered, but no IP/VLAN found.', 'warning')
         logger.warning(f"No IP/VLAN for device {device.mac_address}")
 
     cleanup_orphan_hijack_rules()
@@ -722,9 +862,8 @@ def ios_captive_portal_detection():
     # Check if device is already registered
     if mac_address:
         device = Device.query.filter_by(mac_address=mac_address).first()
-        if device and device.registration_status == 'active':
-            # Device is registered - return Success to bypass portal
-            return "<HTML><BODY>Success</BODY></HTML>", 200
+        if device and device.registration_status == 'registered':
+            return redirect(url_for('status')), 302
         elif device and device.registration_status == 'blocked':
             # Device is blocked - show blocked page
             return redirect(url_for('blocked_page')), 302
@@ -735,7 +874,7 @@ def ios_captive_portal_detection():
 @app.route('/library/test/success.html')
 def ios_captive_success():
     """iOS success check after authentication"""
-    return "<HTML><BODY>Success</BODY></HTML>", 200
+    return redirect(url_for('status')), 302
 
 @app.route('/ncsi.txt')
 @app.route('/connecttest.txt')
@@ -750,316 +889,117 @@ def windows_captive_portal_detection():
 
 
 @app.route('/portal')
+
 @app.route('/register', methods=['GET', 'POST'])
 def register():
-    """User registration form"""
     mac_address = get_client_mac()
     ip_address = get_client_ip()
-    
-    logger.info(f"Registration page accessed from IP: {ip_address}, MAC: {mac_address}")
-    
-    # Check if device is blocked first
-    if mac_address:
-        device = Device.query.filter_by(mac_address=mac_address).first()
-        if device and device.registration_status == 'blocked':
-            return redirect(url_for('blocked_page'))
-    
+    detected_mac = mac_address
+    detected_ip = ip_address
+    is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+
+    prefill = _build_prefill_from_request()  # Use your existing function for GET prefill
+
     if request.method == 'POST':
-        email = request.form.get('email', '').strip().lower()
-        first_name = request.form.get('first_name', '').strip()
-        last_name = request.form.get('last_name', '').strip()
-        phone_number = request.form.get('phone_number', '').strip()
-        device_type = request.form.get('device_type', '').strip()
-        
-        if not email or not first_name or not last_name or not device_type:
-            flash('Please fill in all required fields', 'error')
-            return render_template('register.html', detected_mac=mac_address, detected_ip=ip_address)
-        
-        if not mac_address:
-            flash('Could not detect your device MAC address. Please contact the administrator.', 'error')
-            return render_template('register.html')
-        
-        # Check if this device is already registered
-        existing_device = Device.query.filter_by(mac_address=mac_address).first()
-        if existing_device and existing_device.registration_status == 'active':
-            flash('This device is already registered and active.', 'info')
-            return redirect(url_for('status'))
-        
-        # Check if user exists in pre-authorized list
+        email = request.form.get('email').strip().lower()
+        first_name = request.form.get('first_name').strip()
+        last_name = request.form.get('last_name').strip()
+        phone_number = request.form.get('phone_number').strip()
+        device_type = request.form.get('device_type').strip()
+
+        # Validate required fields (your existing logic)
+        if not all([email, first_name, last_name, device_type]):
+            if is_ajax:
+                return jsonify({'status': 'error', 'message': 'All required fields must be filled'})
+            else:
+                flash('All required fields must be filled', 'error')
+                prefill = {
+                    'email': email,
+                    'first_name': first_name,
+                    'last_name': last_name,
+                    'phone_number': phone_number,
+                    'device_type': device_type
+                }
+                return render_template('register.html', prefill=prefill, detected_mac=detected_mac, detected_ip=detected_ip)
+
+        # Check if user exists (your existing logic)
         user = User.query.filter_by(email=email).first()
-        
+
         if user:
-            # Scenario 1: User is pre-authorized
-            today = datetime.now().date()
-            
-            if user.begin_date > today:
-                flash(f'Your access begins on {user.begin_date}. Please try again after that date.', 'warning')
-                return render_template('register.html')
-            
-            if user.expiry_date and user.expiry_date < today:
-                flash('Your access has expired. Please contact the administrator.', 'error')
-                return render_template('register.html')
-            
-            # Update user info if provided
-            if phone_number and not user.phone_number:
-                user.phone_number = phone_number
-            if first_name:
-                user.first_name = first_name
-            if last_name:
-                user.last_name = last_name
-            
-            # Create or update device record
-            device = existing_device or Device(mac_address=mac_address)
-            device.user_id = user.id
-            device.device_name = device_type
-            device.ip_address = ip_address
-            device.last_seen = datetime.now()
-            
-            # Detect connection type
-            connection_type, vlan_id, ssid = detect_connection_type(ip_address)
-            device.connection_type = connection_type
-            device.ssid = ssid
-            device.current_vlan = vlan_id
-            
-            logger.info(f"Connection type: {connection_type}, VLAN: {vlan_id}, SSID: {ssid}")
-            
-            # Check if email verification is required
-            email_verification_required = Setting.get_value('email_verification_required', 'false') == 'true'
-
-            # If user is blocked, register device but keep it blocked
-            if user.blocked:
-                device.registration_status = 'blocked'
-
-                if not existing_device:
-                    db.session.add(device)
-                db.session.commit()
-
-                apply_device_block(device, flash_messages=False)
-                send_user_blocked_device_notice(
-                    to_email=email,
-                    first_name=first_name,
-                    mac_address=mac_address,
-                    device_name=device_type
-                )
-
-                flash('Device registered, but your account is blocked. Please contact the administrator.', 'warning')
-                logger.info(f"Blocked user {email} registered device {mac_address} (kept blocked)")
-                return redirect(url_for('status'))
-            
-            if email_verification_required:
-                # Generate verification token
-                device.verification_token = secrets.token_urlsafe(32)
-                timeout_minutes = int(Setting.get_value('verification_timeout_minutes', '15'))
-                device.verification_expires_at = datetime.now() + timedelta(minutes=timeout_minutes)
-                device.registration_status = 'pending'
-                
-                # Send verification email
-                verification_url = f"{os.getenv('PORTAL_URL')}/verify?token={device.verification_token}"
-                send_verification_email(email, first_name, verification_url, timeout_minutes)
-                
-                if not existing_device:
-                    db.session.add(device)
-                db.session.commit()
-                
-                flash(f'A verification email has been sent to {email}. Please click the link within {timeout_minutes} minutes to complete registration.', 'info')
-            else:
-                # Immediately activate
-                device.registration_status = 'active'
-                
-                # Generate unregister token for WiFi devices
-                if connection_type == 'wifi':
-                    device.unregister_token = secrets.token_urlsafe(32)
-                
-                if not existing_device:
-                    db.session.add(device)
-                db.session.commit()
-                
-                # Handle registration based on connection type
-                if connection_type == 'wifi':
-                    # WiFi: Register in Kea DHCP
-                    kea = get_kea()
-                    if kea:
-                        success = kea.register_mac(
-                            mac=mac_address,
-                            vlan=vlan_id,
-                            hostname=f"{first_name.lower()}-{last_name.lower()}-device"
-                        )
-                        
-                        if success:
-                            # Remove DNS hijacking now that device is registered
-                            manage_dns_hijack('unhijack', ip_address)
-                            
-                            # Send WiFi confirmation email with unregister link
-                            unregister_url = f"{os.getenv('PORTAL_URL')}/unregister/{device.unregister_token}"
-                            send_wifi_registration_confirmation(
-                                user_email=email,
-                                first_name=first_name,
-                                ssid=ssid,
-                                mac_address=mac_address,
-                                unregister_url=unregister_url
-                            )
-                            
-                            flash(f'Registration successful! Connecting you to {ssid}... (wait 30 seconds)', 'success')
-                            logger.info(f"WiFi device {mac_address} registered for {email} on VLAN {vlan_id}")
-                        else:
-                            # Kea registration failed, but still unhijack (device might already be registered)
-                            manage_dns_hijack('unhijack', ip_address)
-                            flash('Registration saved, but there was an issue with DHCP setup. Please contact support.', 'warning')
-                    else:
-                        flash('DHCP service unavailable. Please contact support.', 'error')
-                        
-                elif connection_type == 'wired':
-                    # Wired: Use RADIUS CoA
-                    vlan_map = get_vlan_map()
-                    target_vlan = vlan_map.get(user.status, vlan_map['guests'])
-                    device.current_vlan = target_vlan
-                    db.session.commit()
-                    
-                    success = send_coa_change(mac_address, target_vlan)
-                    
-                    if success:
-                        # Remove DNS hijacking now that device is registered
-                        manage_dns_hijack('unhijack', ip_address)
-                        
-                        flash(f'Registration successful! You now have {user.status} access.', 'success')
-                        logger.info(f"Wired device {mac_address} registered for {email} on VLAN {target_vlan}")
-                    else:
-                        flash('Registration saved, but there was an issue updating your network access. Please contact support.', 'warning')
-                else:
-                    flash('Registration saved, but connection type could not be determined. Please contact support.', 'warning')
-
-                clear_unregistered_lease(mac_address)
-            
+            # Existing user - register device immediately (your existing logic)
+            vlan_map = get_vlan_map()
+            target_vlan = vlan_map.get(user.status, vlan_map['guests'])
+            connection_type, detected_vlan, ssid = detect_connection_type(ip_address)
+            device = Device(
+                mac_address=mac_address,
+                user_id=user.id,
+                device_name=device_type,
+                ip_address=ip_address,
+                registration_status='registered',
+                current_vlan=target_vlan,
+                connection_type=connection_type,
+                ssid=ssid
+            )
+            db.session.add(device)
             db.session.commit()
-            return redirect(url_for('status'))
-            
-        else:
-            # Scenario 2: User not pre-authorized - create registration request OR auto-approve
-            connection_type, vlan_id, ssid = detect_connection_type(ip_address)
-            
-            # Check if this VLAN allows auto-approval
-            auto_approve_vlans = get_auto_approve_vlans()
-            if vlan_id in auto_approve_vlans:
-                # Auto-approve: Create user and device immediately
-                logger.info(f"Auto-approving registration for {email} on VLAN {vlan_id} (auto-approve VLAN)")
-                
-                # Determine user status from VLAN
-                vlan_map = get_vlan_map()
-                user_status = 'guests'  # Default fallback
-                for status, vid in vlan_map.items():
-                    if vid == vlan_id and status not in ['restricted', 'unregistered']:
-                        user_status = status
-                        break
-                
-                # Create new user with status based on VLAN
-                user = User(
-                    email=email,
-                    first_name=first_name,
-                    last_name=last_name,
-                    phone_number=phone_number,
-                    status=user_status,
-                    begin_date=datetime.now().date(),
-                    expiry_date=datetime.now().date() + timedelta(days=30)  # 30 days access
-                )
-                db.session.add(user)
-                db.session.flush()  # Get user.id
-                
-                # Create device
-                device = Device(
-                    mac_address=mac_address,
-                    user_id=user.id,
-                    device_name=device_type,
-                    ip_address=ip_address,
-                    registration_status='active',
-                    current_vlan=vlan_id,
-                    connection_type=connection_type,
-                    ssid=ssid,
-                    last_seen=datetime.now()
-                )
-                
-                # Generate unregister token for WiFi
-                if connection_type == 'wifi':
-                    device.unregister_token = secrets.token_urlsafe(32)
-                
-                db.session.add(device)
-                db.session.commit()
-                
-                # Register in Kea DHCP for WiFi
-                if connection_type == 'wifi':
-                    kea = get_kea()
-                    if kea:
-                        success = kea.register_mac(
-                            mac=mac_address,
-                            vlan=vlan_id,
-                            hostname=f"{first_name.lower()}-{last_name.lower()}-device"
-                        )
-                        
-                        if success:
-                            # Remove DNS hijacking now that device is registered
-                            manage_dns_hijack('unhijack', ip_address)
-                            
-                            # Send WiFi confirmation email
-                            unregister_url = f"{os.getenv('PORTAL_URL')}/unregister/{device.unregister_token}"
-                            send_wifi_registration_confirmation(
-                                user_email=email,
-                                first_name=first_name,
-                                ssid=ssid,
-                                mac_address=mac_address,
-                                unregister_url=unregister_url
-                            )
-                            
-                            flash(f'Registration successful! You now have guest access. Reconnecting... (wait 30 seconds)', 'success')
-                            logger.info(f"Auto-approved WiFi device {mac_address} for {email} on VLAN {vlan_id}")
-                        else:
-                            flash('Registration saved, but there was an issue with DHCP setup. Please contact support.', 'warning')
-                    else:
-                        flash('DHCP service unavailable. Please contact support.', 'error')
-                else:
-                    # Wired connection - use RADIUS CoA
-                    success = send_coa_change(mac_address, vlan_id)
-                    if success:
-                        # Remove DNS hijacking now that device is registered
-                        manage_dns_hijack('unhijack', ip_address)
-                        
-                        flash(f'Registration successful! You now have guest access.', 'success')
-                        logger.info(f"Auto-approved wired device {mac_address} for {email} on VLAN {vlan_id}")
-                    else:
-                        flash('Registration saved, but there was an issue updating network access. Please contact support.', 'warning')
 
-                clear_unregistered_lease(mac_address)
-                
-                return redirect(url_for('status'))
-            
+            # Register in network (your existing logic)
+            if connection_type == 'wifi':
+                kea = get_kea()
+                if kea:
+                    kea.register_mac(mac=mac_address, vlan=target_vlan, hostname=f"{first_name.lower()}-{last_name.lower()}-{device_type}", ip_address=None)
+                    if ip_address:
+                        kea.force_lease_renewal(mac_address, ip_address)
             else:
-                # Admin approval required
-                logger.info(f"Creating registration request for {email} on VLAN {vlan_id} (admin approval required)")
-                
-                reg_request = RegistrationRequest(
-                    mac_address=mac_address,
-                    email=email,
-                    first_name=first_name,
-                    last_name=last_name,
-                    phone_number=phone_number,
-                    device_type=device_type,
-                    ip_address=ip_address,
-                    user_agent=request.headers.get('User-Agent', ''),
-                    approval_token=secrets.token_urlsafe(32)
-                )
-                
-                db.session.add(reg_request)
-                db.session.commit()
-                
-                # Send notification to admin
-                approval_url = f"{os.getenv('PORTAL_URL')}/admin/approve/{reg_request.approval_token}"
-                send_admin_notification(reg_request, approval_url)
-                
-                flash('Your registration request has been submitted. Waiting for approval...', 'info')
-                logger.info(f"Registration request submitted for {email} from MAC {mac_address}")
-                
-                return redirect(url_for('register', registered='true'))
-    
-    return render_template('register.html', detected_mac=mac_address, detected_ip=ip_address)
+                send_coa_change(mac_address, target_vlan)
 
+            if ip_address:
+                manage_dns_hijack('unhijack', ip_address)
+            clear_unregistered_lease(mac_address)
+
+            if is_ajax:
+                return jsonify({'status': 'registered', 'message': 'Device registered successfully'})
+            else:
+                return redirect(url_for('registered'))
+
+        else:
+            # New user - create pending request (your existing logic)
+            reg_request = RegistrationRequest(
+                mac_address=mac_address,
+                ip_address=ip_address,
+                email=email,
+                first_name=first_name,
+                last_name=last_name,
+                phone_number=phone_number,
+                device_type=device_type,
+                status='pending',
+                approval_token=secrets.token_urlsafe(32)
+            )
+            db.session.add(reg_request)
+            db.session.commit()
+            approval_url = url_for('admin_approve_request', token=reg_request.approval_token, _external=True)
+            send_admin_notification(reg_request, approval_url)
+            
+
+            prefill_data = {
+                'email': email,
+                'first_name': first_name,
+                'last_name': last_name,
+                'phone_number': phone_number,
+                'device_type': device_type
+            }
+
+            if is_ajax:
+                return jsonify({
+                    'status': 'pending',
+                    'message': 'Registration request submitted. Waiting for approval...',
+                    'prefill': prefill_data  # Send back for client to display/prefill on resubmit
+                })
+            else:
+                return redirect(url_for('pending_approval'))
+
+    # GET request (your existing logic)
+    return render_template('register.html', prefill=prefill, detected_mac=detected_mac, detected_ip=detected_ip)
 
 @app.route('/verify')
 def verify():
@@ -1079,13 +1019,13 @@ def verify():
     if device.verification_expires_at < datetime.now():
         # Token expired - move to restricted VLAN
         vlan_map = get_vlan_map()
-        device.registration_status = 'restricted'
+        device.registration_status = 'blocked'
         device.current_vlan = vlan_map['restricted']
         db.session.commit()
         
         send_coa_change(device.mac_address, vlan_map['restricted'])
         
-        flash('Verification link has expired. Your device has been placed on a restricted network. Please contact the administrator.', 'error')
+        flash('Verification link has expired. Your device has been blocked. Please contact the administrator.', 'error')
         return redirect(url_for('status'))
     
     # Verification successful
@@ -1093,7 +1033,7 @@ def verify():
     if user:
         vlan_map = get_vlan_map()
         target_vlan = vlan_map.get(user.status, vlan_map['guests'])
-        device.registration_status = 'active'
+        device.registration_status = 'registered'
         device.current_vlan = target_vlan
         device.verification_token = None
         device.verification_expires_at = None
@@ -1122,7 +1062,101 @@ def status():
         return render_template('status.html', device=None)
     
     device = Device.query.filter_by(mac_address=mac_address).first()
+    device = normalize_device_status(device)
     return render_template('status.html', device=device)
+
+
+@app.route('/pending-approval')
+def pending_approval():
+    """Pending approval page for registrations requiring admin review."""
+    mac_address = get_client_mac()
+    ip_address = get_client_ip()
+    prefill = _build_prefill_from_request()
+    if mac_address:
+        reg_request = RegistrationRequest.query.filter_by(
+            mac_address=mac_address,
+            status='pending'
+        ).order_by(RegistrationRequest.submitted_at.desc()).first()
+        if reg_request:
+            prefill = {
+                'email': reg_request.email or '',
+                'first_name': reg_request.first_name or '',
+                'last_name': reg_request.last_name or '',
+                'phone_number': reg_request.phone_number or '',
+                'device_type': reg_request.device_type or ''
+            }
+
+    wants_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.args.get('ajax') == '1'
+    if wants_ajax:
+        html = render_template(
+            'partials/pending_approval_content.html',
+            prefill=prefill,
+            mac_address=mac_address,
+            ip_address=ip_address
+        )
+        return jsonify({
+            'header': 'Request Submitted',
+            'subheader': 'Please wait for an administrator to approve your request.',
+            'html': html
+        })
+    return render_template(
+        'pending_approval.html',
+        prefill=prefill,
+        mac_address=mac_address,
+        ip_address=ip_address,
+    )
+
+
+@app.route('/request-rejected')
+def request_rejected():
+    """Rejected request page with optional reason."""
+    mac_address = get_client_mac()
+    ip_address = get_client_ip()
+    reason = request.args.get('reason', '').strip()
+    prefill = _build_prefill_from_request()
+    return render_template(
+        'request_rejected.html',
+        reason=reason,
+        prefill=prefill,
+        mac_address=mac_address,
+        ip_address=ip_address,
+    )
+
+
+@app.route('/registered')
+def registered_success():
+    """Registration success page."""
+    mac_address = get_client_mac()
+    ip_address = get_client_ip()
+    device = None
+    if mac_address:
+        device = Device.query.filter_by(mac_address=mac_address).first()
+        device = normalize_device_status(device)
+    if device and device.registration_status == 'registered':
+        return render_template('registered.html', device=device, ip_address=ip_address, mac_address=mac_address)
+
+    reg_request = None
+    if mac_address:
+        reg_request = (
+            RegistrationRequest.query.filter_by(mac_address=mac_address)
+            .order_by(RegistrationRequest.submitted_at.desc())
+            .first()
+        )
+    if reg_request:
+        if reg_request.status == 'pending':
+            return redirect(url_for(
+                'pending_approval',
+                email=reg_request.email,
+                first_name=reg_request.first_name,
+                last_name=reg_request.last_name,
+                phone_number=reg_request.phone_number or '',
+                device_type=reg_request.device_type or ''
+            ))
+        if reg_request.status == 'rejected':
+            reason = reg_request.notes or ''
+            return redirect(url_for('request_rejected', reason=reason))
+
+    return redirect(url_for('register'))
 
 
 @app.route('/api/registration-status')
@@ -1135,6 +1169,7 @@ def api_registration_status():
     
     # Check if device is registered
     device = Device.query.filter_by(mac_address=mac_address).first()
+    device = normalize_device_status(device)
     if device:
         return jsonify({
             'status': device.registration_status,
@@ -1144,10 +1179,13 @@ def api_registration_status():
     # Check if there's a pending registration request
     reg_request = RegistrationRequest.query.filter_by(mac_address=mac_address).order_by(RegistrationRequest.submitted_at.desc()).first()
     if reg_request:
-        return jsonify({
+        payload = {
             'status': reg_request.status,
             'message': f'Registration request is {reg_request.status}'
-        })
+        }
+        if reg_request.status == 'rejected' and reg_request.notes:
+            payload['reason'] = reg_request.notes
+        return jsonify(payload)
     
     return jsonify({'status': 'unregistered', 'message': 'Not registered'})
 
@@ -1247,6 +1285,32 @@ def admin_logout():
     """Admin logout"""
     logout_user()
     return redirect(url_for('index'))
+
+
+@app.route('/admin/reset-test', methods=['POST'])
+@login_required
+def admin_reset_test():
+    """Reset test environment data and network rules."""
+    if not is_test_env():
+        abort(404)
+
+    try:
+        reset_test_data()
+    except Exception as exc:
+        logger.error("Test reset DB cleanup failed: %s", exc)
+        flash('Reset failed while clearing database records.', 'error')
+        return redirect(url_for('admin_dashboard'))
+
+    reset_acl_queue_files()
+    reset_dns_hijack_rules()
+    acl_ok = reset_acl_baseline()
+
+    if acl_ok:
+        flash('Test reset complete. ACL baseline and blocked-pool DNS hijack rules restored.', 'success')
+    else:
+        flash('Test reset complete, but ACL baseline update failed.', 'warning')
+
+    return redirect(url_for('admin_dashboard'))
 
 
 @app.route('/admin/vlan-config', methods=['GET', 'POST'])
@@ -1537,7 +1601,8 @@ def admin_dashboard():
         unregistered_total=unregistered_total,
         vlan_map=get_vlan_map(),
         auto_approve_vlans=get_auto_approve_vlans(),
-        admin_approval_vlans=get_admin_approval_vlans()
+        admin_approval_vlans=get_admin_approval_vlans(),
+        test_env=is_test_env()
     )
     
     # For AJAX requests, determine which table section to render
@@ -1629,7 +1694,7 @@ def admin_edit_user(user_id):
         # Update all active devices for this user
         vlan_map = get_vlan_map()
         target_vlan = vlan_map.get(user.status, vlan_map['guests'])
-        devices = Device.query.filter_by(user_id=user.id, registration_status='active').all()
+        devices = Device.query.filter_by(user_id=user.id, registration_status='registered').all()
         
         for device in devices:
             device.current_vlan = target_vlan
@@ -1737,7 +1802,7 @@ def admin_process_request(request_id):
             user_id=user.id,
             device_name=reg_request.device_type or 'unknown',
             ip_address=reg_request.ip_address,
-            registration_status='active',
+            registration_status='registered',
             current_vlan=target_vlan,
             connection_type=connection_type,
             ssid=ssid
@@ -1801,10 +1866,15 @@ def admin_process_request(request_id):
         logger.info(f"Admin approved registration request for {user.email}")
         
     elif action == 'reject':
+        notes = request.form.get('notes', '').strip()
+        if not notes:
+            flash('Rejection reason is required.', 'error')
+            return redirect(url_for('admin_approve_request', token=reg_request.approval_token))
+
         reg_request.status = 'rejected'
         reg_request.processed_at = datetime.now()
         reg_request.processed_by = current_user.username
-        reg_request.notes = request.form.get('notes', '').strip()
+        reg_request.notes = notes
         
         db.session.commit()
         

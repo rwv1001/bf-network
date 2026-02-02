@@ -6,15 +6,15 @@
 
 {% block content %}
 {% if device %}
-    {% if device.registration_status == 'active' %}
-        <div class="alert alert-success">
-            <strong>✓ Your device is registered and active!</strong>
+    {% if device.registration_status == 'registered' %}
+        <div class="alert alert-success" id="access-status-message">
+            <strong>✓ Registration successful! Connecting you to {{ device.ssid or 'the network' }}... (wait 30 seconds)</strong>
         </div>
         
         <table>
             <tr>
                 <th>Status</th>
-                <td><span class="badge badge-active">Active</span></td>
+                <td><span class="badge badge-active">Registered</span></td>
             </tr>
             <tr>
                 <th>Access Level</th>
@@ -55,17 +55,17 @@
             {% endif %}
             
             <p style="margin-top: 10px; color: #856404;">
-                <strong>Important:</strong> If you don't verify in time, your device will be placed on a restricted network.
+                <strong>Important:</strong> If you don't verify in time, your device will be blocked.
             </p>
         </div>
         
-    {% elif device.registration_status == 'restricted' %}
+    {% elif device.registration_status == 'blocked' %}
         <div class="alert alert-error">
-            <strong>⚠ Restricted Access</strong>
+            <strong>⚠ Access Blocked</strong>
         </div>
         
         <div class="info-box">
-            <p>Your device has been placed on a restricted network because:</p>
+            <p>Your device has been blocked because:</p>
             <ul style="margin: 10px 0 0 20px;">
                 <li>Your verification link expired, or</li>
                 <li>There was an issue with your registration</li>
@@ -76,12 +76,17 @@
             </p>
         </div>
         
+    {% elif device.registration_status == 'unregistered' %}
+        <div class="alert alert-info">
+            <strong>ℹ Device Unregistered</strong>
+        </div>
+        <p>Your device is not registered yet. Please submit the registration form.</p>
     {% else %}
         <div class="alert alert-info">
             <strong>ℹ Registration Status: {{ device.registration_status.title() }}</strong>
         </div>
         
-        <p>Your device is registered but not yet active. An administrator will review your request shortly.</p>
+        <p>Your device is pending review. An administrator will review your request shortly.</p>
     {% endif %}
     
     <table style="margin-top: 30px;">
@@ -119,6 +124,49 @@
     </div>
     
     <a href="{{ url_for('register') }}" class="btn" style="margin-top: 20px;">Register Now</a>
+{% endif %}
+
+{% if device and device.registration_status == 'registered' %}
+<script>
+(() => {
+    const statusEl = document.getElementById('access-status-message');
+    const flashSuccess = document.querySelector('.alert[data-flash-category="success"]');
+
+    const targetEl = flashSuccess || statusEl;
+    if (!targetEl) {
+        return;
+    }
+
+    const maxAttempts = 30;
+    let attempts = 0;
+    let pollTimer = null;
+
+    const updateMessage = (text) => {
+        targetEl.textContent = text;
+    };
+
+    const checkAccess = () => {
+        attempts += 1;
+        fetch('https://connectivitycheck.gstatic.com/generate_204', {
+            method: 'GET',
+            mode: 'no-cors',
+            cache: 'no-store'
+        })
+        .then(() => {
+            clearInterval(pollTimer);
+            updateMessage('✓ You now have full internet access.');
+        })
+        .catch(() => {
+            if (attempts >= maxAttempts) {
+                clearInterval(pollTimer);
+            }
+        });
+    };
+
+    pollTimer = setInterval(checkAccess, 2000);
+    checkAccess();
+})();
+</script>
 {% endif %}
 
 <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e0e0e0; text-align: center;">

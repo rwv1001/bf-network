@@ -44,6 +44,7 @@ for VLAN_ID in $VLAN_LIST; do
 done
 CMDS="${CMDS}save force
 quit
+quit
 "
 
 printf "%s" "$CMDS" | ssh -tt $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}"

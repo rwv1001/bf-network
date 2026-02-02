@@ -1,6 +1,7 @@
 #!/bin/sh
 # Manage unregistered lease tracking and cleanup
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ACTION="$1"
 MAC_ADDRESS="$2"
 IP_ADDRESS="$3"
@@ -56,8 +57,8 @@ cleanup_expired() {
     echo "$rows" | while IFS='|' read -r mac ip; do
         [ -z "$mac" ] && continue
         if [ -n "$ip" ] && ! is_blocked_pool_ip "$ip"; then
-            (/scripts/dns-hijack.sh unhijack "$ip" >/dev/null 2>&1 &) 
-            (/scripts/hp5130-acl.sh unblock "$ip" >/dev/null 2>&1 &) 
+            ("$SCRIPT_DIR/dns-hijack.sh" unhijack "$ip" >/dev/null 2>&1 &) 
+            ("$SCRIPT_DIR/hp5130-acl.sh" unblock "$ip" >/dev/null 2>&1 &) 
         fi
         echo "DELETE FROM unregistered_leases WHERE mac_address='"$mac"';" | $PSQL >/dev/null 2>&1
     done
@@ -79,16 +80,16 @@ case "$ACTION" in
         existing_ip=$(echo "SELECT ip_address FROM unregistered_leases WHERE mac_address='"$MAC_ADDRESS"'" | $PSQL)
         if [ -n "$existing_ip" ] && [ "$existing_ip" != "$IP_ADDRESS" ]; then
             if ! is_blocked_pool_ip "$existing_ip"; then
-                /scripts/dns-hijack.sh unhijack "$existing_ip" >/dev/null 2>&1
-                /scripts/hp5130-acl.sh unblock "$existing_ip" >/dev/null 2>&1
+                "$SCRIPT_DIR/dns-hijack.sh" unhijack "$existing_ip" >/dev/null 2>&1
+                "$SCRIPT_DIR/hp5130-acl.sh" unblock "$existing_ip" >/dev/null 2>&1
             fi
         fi
 
         echo "INSERT INTO unregistered_leases (mac_address, ip_address, expires_at) VALUES ('"$MAC_ADDRESS"', '"$IP_ADDRESS"', NOW() + ("$LEASE_SECONDS" || ' seconds')::interval) ON CONFLICT (mac_address) DO UPDATE SET ip_address=EXCLUDED.ip_address, expires_at=EXCLUDED.expires_at, updated_at=NOW();" | $PSQL >/dev/null 2>&1
 
         if ! is_blocked_pool_ip "$IP_ADDRESS"; then
-            (/scripts/hp5130-acl.sh block "$IP_ADDRESS" >/dev/null 2>&1 &)
-            (/scripts/dns-hijack.sh hijack "$IP_ADDRESS" >/dev/null 2>&1 &)
+            ("$SCRIPT_DIR/hp5130-acl.sh" block "$IP_ADDRESS" >/dev/null 2>&1 &)
+            ("$SCRIPT_DIR/dns-hijack.sh" hijack "$IP_ADDRESS" >/dev/null 2>&1 &)
         fi
         exit 0
         ;;
@@ -99,8 +100,8 @@ case "$ACTION" in
         fi
 
         if [ -n "$IP_ADDRESS" ] && ! is_blocked_pool_ip "$IP_ADDRESS"; then
-            (/scripts/dns-hijack.sh unhijack "$IP_ADDRESS" >/dev/null 2>&1 &)
-            (/scripts/hp5130-acl.sh unblock "$IP_ADDRESS" >/dev/null 2>&1 &)
+            ("$SCRIPT_DIR/dns-hijack.sh" unhijack "$IP_ADDRESS" >/dev/null 2>&1 &)
+            ("$SCRIPT_DIR/hp5130-acl.sh" unblock "$IP_ADDRESS" >/dev/null 2>&1 &)
         fi
 
         echo "DELETE FROM unregistered_leases WHERE mac_address='"$MAC_ADDRESS"';" | $PSQL >/dev/null 2>&1

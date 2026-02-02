@@ -77,7 +77,7 @@ class Device(db.Model):
         Returns:
             str: 'registered', 'newly_unregistered', or 'old_unregistered'
         """
-        if self.registration_status == 'approved':
+        if self.registration_status == 'registered':
             return 'registered'
         
         # Check how long ago device was first seen

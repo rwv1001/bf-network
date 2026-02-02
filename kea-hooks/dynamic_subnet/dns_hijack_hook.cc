@@ -54,7 +54,7 @@ void manage_dns_hijack(const std::string& action, const std::string& ip_address)
     std::cout.flush();
     
     // Run inline (quick iptables updates) to avoid fork failures
-    cmd << "/scripts/dns-hijack.sh " << action << " " << ip_address << " >/dev/null 2>&1";
+    cmd << "/home/admin/bf-network/scripts/dns-hijack.sh " << action << " " << ip_address << " >/dev/null 2>&1";
     
     std::cout << "DNS Hijack Hook: [DEBUG] Command: " << cmd.str() << std::endl;
     std::cout.flush();
@@ -87,7 +87,7 @@ void manage_dns_hijack_pools(const std::string& action) {
     std::cout.flush();
 
     std::stringstream cmd;
-    cmd << "/scripts/dns-hijack.sh " << action << " >/dev/null 2>&1";
+    cmd << "/home/admin/bf-network/scripts/dns-hijack.sh " << action << " >/dev/null 2>&1";
 
     std::cout << "DNS Hijack Hook: [DEBUG] Pools Command: " << cmd.str() << std::endl;
     std::cout.flush();
@@ -126,7 +126,7 @@ void manage_acl(const std::string& action, const std::string& ip_address) {
     std::cout.flush();
 
     std::stringstream cmd;
-    cmd << "/scripts/hp5130-acl.sh " << action << " " << ip_address << " >/dev/null 2>&1 &";
+    cmd << "/home/admin/bf-network/scripts/hp5130-acl.sh " << action << " " << ip_address << " >/dev/null 2>&1 &";
 
     std::cout << "DNS Hijack Hook: [DEBUG] ACL Command: " << cmd.str() << std::endl;
     std::cout.flush();
