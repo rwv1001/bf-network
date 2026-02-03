@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-ROOT_DIR="/home/admin/bf-network"
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 NPM_DIR="$ROOT_DIR/npm"
 
 mkdir -p "$NPM_DIR/data" "$NPM_DIR/letsencrypt"

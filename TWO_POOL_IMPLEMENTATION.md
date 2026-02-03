@@ -61,7 +61,6 @@ This is the **simplified** blocked device implementation using DNS hijacking for
 - ✅ [kea/config/dhcp4-two-pool-blocked.json](kea/config/dhcp4-two-pool-blocked.json) - Two-pool Kea config
 - ✅ [captive-portal/app/switch_acl_manager.py](captive-portal/app/switch_acl_manager.py) - SSH-based ACL management
 - ✅ [kea/scripts/acl-cleanup-hook.sh](kea/scripts/acl-cleanup-hook.sh) - Auto-remove ACL rules on lease expiry
-- ✅ [test-switch-connection.py](test-switch-connection.py) - Test switch connectivity
 
 **Updated:**
 - ✅ [captive-portal/app/app.py](captive-portal/app/app.py) - Added Kea pool assignment functions
@@ -126,12 +125,7 @@ def register():
    SWITCH_SSH_PORT=22
    ```
 
-4. **Test switch connection:**
-   ```bash
-   python3 test-switch-connection.py
-   ```
-
-5. **Rebuild and restart:**
+4. **Rebuild and restart:**
    ```bash
    cd captive-portal
    docker compose down

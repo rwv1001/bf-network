@@ -57,14 +57,14 @@ services:
       SWITCH_PASS: ${SWITCH_PASS}
       SWITCH_NETCONF_PORT: ${SWITCH_NETCONF_PORT:-830}
       SWITCH_KEY_PATH: ${SWITCH_KEY_PATH:-/keys/id_rsa}
-      ACL_QUEUE_DISABLE: "1"
+      ACL_QUEUE_DISABLE: "0"
       ACL_QUEUE_DIR: /acl-queue
       ACL_QUEUE_INTERVAL: "3"
     volumes:
       - ./app:/app
       - ../kea/leases:/kea/leases:ro  # Access to Kea lease database
       - ../kea/sockets:/kea/sockets  # Access to Kea control socket
-      - ../scripts:/home/admin/bf-network/scripts:ro  # Access to dns-hijack.sh
+      - ../scripts:/scripts:ro  # Access to dns-hijack.sh
       - ../shared/acl-queue:/acl-queue
       - /home/admin/.ssh:/keys:ro  # SSH keys for switch access
     network_mode: host

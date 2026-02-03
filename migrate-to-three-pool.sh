@@ -21,9 +21,10 @@ echo -e "${GREEN}========================================${NC}"
 echo ""
 
 # Configuration
-CAPTIVE_PORTAL_DIR="/home/admin/bf-network/captive-portal"
-KEA_DIR="/home/admin/bf-network/kea"
-BACKUP_DIR="/home/admin/bf-network-backup-$(date +%Y%m%d-%H%M%S)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CAPTIVE_PORTAL_DIR="$ROOT_DIR/captive-portal"
+KEA_DIR="$ROOT_DIR/kea"
+BACKUP_DIR="$ROOT_DIR-backup-$(date +%Y%m%d-%H%M%S)"
 
 # Functions
 log_info() {
@@ -279,8 +280,8 @@ show_status() {
     echo ""
     echo "Documentation:"
     echo "  Implementation Guide:  $KEA_DIR/KEA_THREE_POOL_GUIDE.md"
-    echo "  Quick Reference:       /home/admin/bf-network/QUICK_REFERENCE.md"
-    echo "  Full Summary:          /home/admin/bf-network/WIFI_THREE_POOL_IMPLEMENTATION.md"
+    echo "  Quick Reference:       $ROOT_DIR/QUICK_REFERENCE.md"
+    echo "  Full Summary:          $ROOT_DIR/WIFI_THREE_POOL_IMPLEMENTATION.md"
     echo ""
     echo -e "${GREEN}Migration completed successfully!${NC}"
     echo ""

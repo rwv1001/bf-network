@@ -159,7 +159,7 @@ def get_client_mac():
                     # Use the LAST matching MAC (most recent entry)
                     if matching_macs:
                         mac = matching_macs[-1]
-                        logger.info(f"Found MAC {mac} for IP {ip_address} in Kea lease file {lease_file}")
+                        
                             
                 except FileNotFoundError:
                     logger.debug(f"Kea lease file not found: {lease_file}")
@@ -348,14 +348,14 @@ def manage_dns_hijack(action, ip_address):
     Returns:
         bool: True if successful, False otherwise
     """
-    script_path = '/home/admin/bf-network/scripts/dns-hijack.sh'
+    script_path = '/scripts/dns-hijack.sh'
     
     try:
         result = subprocess.run(
             [script_path, action, ip_address],
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=15
         )
         
         if result.returncode == 0:
@@ -402,7 +402,7 @@ def reset_dns_hijack_rules():
         base_cmd + ["-t", "nat", "-S", "PREROUTING"],
         capture_output=True,
         text=True,
-        timeout=5
+        timeout=15
     )
     if result.returncode != 0:
         logger.error("Failed to read iptables rules: %s", result.stderr.strip())
@@ -423,17 +423,17 @@ def reset_dns_hijack_rules():
         delete_parts = shlex.split(line)
         delete_parts[0] = "-D"
         delete_cmd = base_cmd + ["-t", "nat"] + delete_parts
-        subprocess.run(delete_cmd, capture_output=True, text=True, timeout=5)
+        subprocess.run(delete_cmd, capture_output=True, text=True, timeout=15)
 
     # Re-add blocked pool DNS hijack ranges
-    script_path = '/home/admin/bf-network/scripts/dns-hijack.sh'
-    subprocess.run([script_path, "hijack-blocked-pools"], capture_output=True, text=True, timeout=10)
+    script_path = '/scripts/dns-hijack.sh'
+    subprocess.run([script_path, "hijack-blocked-pools"], capture_output=True, text=True, timeout=15)
     return True
 
 
 def reset_acl_baseline():
     """Re-apply baseline ACLs on the switch."""
-    script_path = '/home/admin/bf-network/scripts/hp5130-acl-baseline.sh'
+    script_path = os.getenv('ACL_BASELINE_SCRIPT', '/scripts/hp5130-acl-baseline.sh')
     if not os.path.isfile(script_path):
         logger.error("ACL baseline script not found: %s", script_path)
         return False
@@ -450,7 +450,7 @@ def reset_acl_baseline():
 
 
 def reset_acl_queue_files():
-    queue_base = os.getenv('ACL_QUEUE_DIR') or ('/acl-queue' if os.path.isdir('/acl-queue') else '/home/admin/bf-network/shared/acl-queue')
+    queue_base = os.getenv('ACL_QUEUE_DIR') or ('/acl-queue' if os.path.isdir('/acl-queue') else '/shared/acl-queue')
     try:
         if os.path.isdir(queue_base):
             for name in os.listdir(queue_base):
@@ -461,6 +461,7 @@ def reset_acl_queue_files():
                     else:
                         try:
                             os.remove(path)
+                            logger.info("ACL queue file cleared successfully: %s", path)
                         except FileNotFoundError:
                             pass
     except Exception as exc:
@@ -546,7 +547,7 @@ def cleanup_orphan_hijack_rules():
         base_cmd + ["-t", "nat", "-S", "PREROUTING"],
         capture_output=True,
         text=True,
-        timeout=5
+        timeout=15
     )
     if result.returncode != 0:
         logger.error(f"Failed to read iptables rules: {result.stderr.strip()}")
@@ -582,7 +583,7 @@ def cleanup_orphan_hijack_rules():
             delete_cmd,
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=15
         )
         if delete_result.returncode == 0:
             removed += 1
@@ -609,7 +610,7 @@ def manage_switch_acl(action, ip_address, vlan_id):
     Returns:
         bool: True if successful, False otherwise
     """
-    acl_script = os.getenv('ACL_QUEUE_SCRIPT', '/home/admin/bf-network/scripts/hp5130-acl.sh')
+    acl_script = os.getenv('ACL_QUEUE_SCRIPT', '/scripts/hp5130-acl.sh')
     use_acl_script = os.getenv('USE_ACL_QUEUE', '1') != '0'
 
     if use_acl_script and os.path.isfile(acl_script):
@@ -618,7 +619,7 @@ def manage_switch_acl(action, ip_address, vlan_id):
                 [acl_script, action, ip_address],
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=15
             )
             if result.returncode == 0:
                 logger.info("ACL %s queued for %s via %s", action, ip_address, acl_script)

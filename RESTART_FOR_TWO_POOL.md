@@ -65,24 +65,18 @@ docker logs captive-portal-web-1 | tail -20
 
 ## Test After Restart
 
-1. **Test switch connection:**
-   ```bash
-   cd /home/admin/bf-network
-   python3 test-switch-connection.py
-   ```
-
-2. **Check Kea pools:**
+1. **Check Kea pools:**
    ```bash
    docker exec kea cat /kea/leases/kea-leases4.csv | head -10
    ```
 
-3. **Test blocked IP detection:**
+2. **Test blocked IP detection:**
    - Manually assign a device to blocked pool via admin panel
    - Wait for lease to expire or force release
    - Device should get IP in .216-.254 range
    - Visiting portal should show "blocked" message
 
-4. **Check ACL cleanup hook:**
+3. **Check ACL cleanup hook:**
    ```bash
    docker exec kea ls -la /kea/scripts/
    docker exec kea cat /kea/scripts/acl-cleanup-hook.sh | head -20

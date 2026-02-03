@@ -12,15 +12,17 @@ Quick test to verify:
 import os
 import sys
 from getpass import getpass
+from pathlib import Path
 
 # Add captive-portal/app to path
-sys.path.insert(0, '/home/admin/bf-network/captive-portal/app')
+repo_root = Path(__file__).resolve().parent
+sys.path.insert(0, str(repo_root / 'captive-portal' / 'app'))
 
 try:
     from switch_acl_manager import SwitchACLManager
 except ImportError:
     print("Error: Cannot import switch_acl_manager")
-    print("Run this script from /home/admin/bf-network")
+    print("Run this script from the repository root")
     sys.exit(1)
 
 
