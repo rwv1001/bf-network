@@ -99,6 +99,7 @@
 </form>
 
 <div id="statusMessage" style="display: none; margin-top: 20px; padding: 15px; border-radius: 8px; text-align: center;"></div>
+<div id="institutionLink" style="display: none; margin-top: 8px; text-align: center;"></div>
 
 <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e0e0e0; text-align: center;">
     <a href="{{ url_for('status') }}" style="color: #667eea; text-decoration: none;">
@@ -113,6 +114,8 @@ document.addEventListener('DOMContentLoaded', function() {
     const statusMessage = document.getElementById('statusMessage');
     const validationBox = document.getElementById('validationBox');
     const validationList = document.getElementById('validationList');
+    const institutionLink = document.getElementById('institutionLink');
+    const institutionUrl = "{{ institution_url|e }}";
     let pollInterval = null;
     let accessInterval = null;
     let registrationSubmitted = false;
@@ -332,6 +335,14 @@ document.addEventListener('DOMContentLoaded', function() {
     function showStatus(message, type) {
         statusMessage.style.display = 'block';
         statusMessage.textContent = message;  // Note: Changed to textContent for simplicity; use innerHTML if needed for HTML
+
+        if (type === 'success' && institutionUrl) {
+            institutionLink.innerHTML = `<a href="${institutionUrl}" target="_blank" rel="noopener" style="color: #667eea; text-decoration: underline;">${institutionUrl}</a>`;
+            institutionLink.style.display = 'block';
+        } else {
+            institutionLink.style.display = 'none';
+            institutionLink.textContent = '';
+        }
         
         if (type === 'success') {
             statusMessage.style.backgroundColor = '#d4edda';

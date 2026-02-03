@@ -38,6 +38,13 @@ app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-pro
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'postgresql://portal_user:password@db:5432/captive_portal')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
+
+@app.context_processor
+def inject_institution_url():
+    return {
+        'institution_url': os.getenv('INSTITUTION_URL', '').strip()
+    }
+
 # Initialize database
 db.init_app(app)
 
