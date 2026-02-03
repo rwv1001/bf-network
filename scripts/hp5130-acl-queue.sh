@@ -21,6 +21,14 @@ QUEUE_PID_FILE="${ACL_QUEUE_PID:-$QUEUE_BASE/hp5130-acl.pid}"
 INTERVAL="${ACL_QUEUE_INTERVAL:-3}"
 IDLE_MAX="${ACL_QUEUE_IDLE_MAX:-12}"
 LOG_FILE="${ACL_LOG_FILE:-$QUEUE_BASE/hp5130-acl.log}"
+QUEUE_UMASK="${ACL_QUEUE_UMASK:-0002}"
+QUEUE_GID="${ACL_QUEUE_GID:-}"
+
+umask "$QUEUE_UMASK" 2>/dev/null || true
+if [ -n "$QUEUE_GID" ]; then
+  chgrp "$QUEUE_GID" "$QUEUE_BASE" 2>/dev/null || true
+fi
+chmod 2775 "$QUEUE_BASE" 2>/dev/null || true
 DEFAULT_KEY_PATH="/keys/id_rsa"
 if [ -f "/home/admin/.ssh/id_rsa" ]; then
   DEFAULT_KEY_PATH="/home/admin/.ssh/id_rsa"

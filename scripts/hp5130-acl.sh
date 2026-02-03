@@ -39,7 +39,15 @@ QUEUE_INTERVAL="${ACL_QUEUE_INTERVAL:-3}"
 QUEUE_DISABLE="${ACL_QUEUE_DISABLE:-0}"  # Corrected: Use ACL_QUEUE_DISABLE (was QUEUE_DISABLE in your command, but script checks this)
 QUEUE_WORKER="${ACL_QUEUE_WORKER:-$SCRIPT_DIR/hp5130-acl-queue.sh}"
 DEDUP_WINDOW="${ACL_DEDUP_WINDOW:-3}"
+QUEUE_UMASK="${ACL_QUEUE_UMASK:-0002}"
+QUEUE_GID="${ACL_QUEUE_GID:-}"
+
+umask "$QUEUE_UMASK" 2>/dev/null || true
 mkdir -p "$QUEUE_BASE" 2>/dev/null || true
+if [ -n "$QUEUE_GID" ]; then
+  chgrp "$QUEUE_GID" "$QUEUE_BASE" 2>/dev/null || true
+fi
+chmod 2775 "$QUEUE_BASE" 2>/dev/null || true
 timestamp() {
   date '+%Y-%m-%dT%H:%M:%S%z'
 }

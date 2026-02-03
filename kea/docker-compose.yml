@@ -23,6 +23,8 @@ services:
       ACL_QUEUE_DISABLE: "1"
       ACL_QUEUE_DIR: /acl-queue
       ACL_QUEUE_INTERVAL: "3"
+      ACL_QUEUE_UMASK: "0002"
+      ACL_QUEUE_GID: ${PORTAL_GID:-1000}
       DB_HOST: ${DB_HOST:-127.0.0.1}
       DB_PORT: ${DB_PORT:-5432}
       DB_NAME: ${DB_NAME:-captive_portal}
@@ -35,6 +37,9 @@ services:
       chown -R 0:1000 /kea/sockets || true
       chmod 750 /kea/sockets || true
       mkdir -p /kea/leases
+      mkdir -p /acl-queue
+      chgrp -R ${PORTAL_GID:-1000} /acl-queue || true
+      chmod 2775 /acl-queue || true
       chmod 755 /kea/leases || true
       umask 022
       kea-dhcp4 -c /kea/config/dhcp4.json &
