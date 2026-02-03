@@ -33,8 +33,8 @@ SWITCH_USER="${SWITCH_USER:-robert}"
 SWITCH_SSH_PORT="${SWITCH_SSH_PORT:-22}"
 SWITCH_KEY_PATH="${SWITCH_KEY_PATH:-$DEFAULT_KEY_PATH}"
 
-SSH_TTY_FLAG="${SSH_TTY_FLAG:--T}"
-SSH_TTY_FALLBACK="${SSH_TTY_FALLBACK:-1}"
+SSH_TTY_FLAG="${SSH_TTY_FLAG:--tt}"  # Changed: Default to -tt for Comware compatibility
+SSH_TTY_FALLBACK="${SSH_TTY_FALLBACK:-0}"  # Changed: Disable fallback, as -tt is reliable
 SSH_HOSTKEY_OPTS="${SSH_HOSTKEY_OPTS:--o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa}"
 SSH_OPTS="-i $SWITCH_KEY_PATH -p $SWITCH_SSH_PORT $SSH_HOSTKEY_OPTS -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3"
 
@@ -50,18 +50,35 @@ run_ssh_cmdfile() {
   phase="$1"
   cmd_file="$2"
   tty_flag="$SSH_TTY_FLAG"
+  temp_out=$(mktemp /tmp/ssh_out.XXXXXX)
+  temp_err=$(mktemp /tmp/ssh_err.XXXXXX)
 
   set +e
-  cat "$cmd_file" | ssh $tty_flag $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}"
+  cat "$cmd_file" | ssh $tty_flag $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}" > "$temp_out" 2> "$temp_err"
   status=$?
   set -e
 
+  if [ $status -ne 0 ]; then
+    log "ERROR phase=$phase status=$status stdout=$(cat "$temp_out") stderr=$(cat "$temp_err")"
+  else
+    log "SUCCESS phase=$phase stdout=$(cat "$temp_out")"
+  fi
+  rm -f "$temp_out" "$temp_err"
+
   if [ $status -ne 0 ] && [ "$SSH_TTY_FALLBACK" = "1" ] && [ "$tty_flag" != "-tt" ]; then
     log "WARN phase=$phase reason=ssh_failed status=$status retry_tty=-tt"
+    temp_out=$(mktemp /tmp/ssh_out.XXXXXX)
+    temp_err=$(mktemp /tmp/ssh_err.XXXXXX)
     set +e
-    cat "$cmd_file" | ssh -tt $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}"
+    cat "$cmd_file" | ssh -tt $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}" > "$temp_out" 2> "$temp_err"
     status=$?
     set -e
+    if [ $status -ne 0 ]; then
+      log "ERROR_RETRY phase=$phase status=$status stdout=$(cat "$temp_out") stderr=$(cat "$temp_err")"
+    else
+      log "SUCCESS_RETRY phase=$phase stdout=$(cat "$temp_out")"
+    fi
+    rm -f "$temp_out" "$temp_err"
   fi
 
   return $status
@@ -154,6 +171,7 @@ process_queue() {
       done < "$vlan_file"
       echo "quit"
       echo "quit"
+      echo "quit"  # Added: Extra quit to log out from user-view and close session
     } > "$cmd_file"
     run_ssh_cmdfile "apply" "$cmd_file"
     apply_status=$?
@@ -163,7 +181,10 @@ process_queue() {
 
     save_start=$(date +%s)
     log "BATCH_START phase=save vlan=$vlan host=$SWITCH_HOST"
-    echo "save force" > "$cmd_file"
+    {
+      echo "save force"
+      echo "quit"  # Added: Quit to close session after save
+    } > "$cmd_file"
     run_ssh_cmdfile "save" "$cmd_file"
     save_status=$?
     save_end=$(date +%s)

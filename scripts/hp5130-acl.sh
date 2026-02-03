@@ -36,7 +36,7 @@ LOG_FILE="${ACL_LOG_FILE:-$QUEUE_BASE/hp5130-acl.log}"
 QUEUE_FILE="${ACL_QUEUE_FILE:-$QUEUE_BASE/hp5130-acl.queue}"
 QUEUE_PID_FILE="${ACL_QUEUE_PID:-$QUEUE_BASE/hp5130-acl.pid}"
 QUEUE_INTERVAL="${ACL_QUEUE_INTERVAL:-3}"
-QUEUE_DISABLE="${ACL_QUEUE_DISABLE:-0}"
+QUEUE_DISABLE="${ACL_QUEUE_DISABLE:-0}"  # Corrected: Use ACL_QUEUE_DISABLE (was QUEUE_DISABLE in your command, but script checks this)
 QUEUE_WORKER="${ACL_QUEUE_WORKER:-$SCRIPT_DIR/hp5130-acl-queue.sh}"
 DEDUP_WINDOW="${ACL_DEDUP_WINDOW:-3}"
 mkdir -p "$QUEUE_BASE" 2>/dev/null || true
@@ -74,8 +74,8 @@ HOST_OCTET="$(echo "$IP_ADDRESS" | awk -F. '{print $4}')"
 ACL_NUM=$((3000 + VLAN_ID * 10))
 RULE_NUM=$((1000 + HOST_OCTET))
 
-SSH_TTY_FLAG="${SSH_TTY_FLAG:--T}"
-SSH_TTY_FALLBACK="${SSH_TTY_FALLBACK:-1}"
+SSH_TTY_FLAG="${SSH_TTY_FLAG:--tt}"  # Changed: Default to -tt for Comware
+SSH_TTY_FALLBACK="${SSH_TTY_FALLBACK:-0}"  # Changed: Disable fallback
 SSH_HOSTKEY_OPTS="${SSH_HOSTKEY_OPTS:--o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa}"
 SSH_OPTS="-i $SWITCH_KEY_PATH -p $SWITCH_SSH_PORT $SSH_HOSTKEY_OPTS -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3"
 
@@ -83,37 +83,70 @@ run_ssh() {
   phase="$1"
   cmds="$2"
   tty_flag="$SSH_TTY_FLAG"
+  temp_out=$(mktemp /tmp/ssh_out.XXXXXX)
+  temp_err=$(mktemp /tmp/ssh_err.XXXXXX)
 
   set +e
-  printf "%s\n" "$cmds" | ssh $tty_flag $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}"
+  printf "%s\n" "$cmds" | ssh $tty_flag $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}" > "$temp_out" 2> "$temp_err"
   status=$?
   set -e
 
+  if [ $status -ne 0 ]; then
+    log "ERROR action=$ACTION phase=$phase status=$status stdout=$(cat "$temp_out") stderr=$(cat "$temp_err")"
+  else
+    log "SUCCESS action=$ACTION phase=$phase stdout=$(cat "$temp_out")"
+  fi
+  rm -f "$temp_out" "$temp_err"
+
   if [ $status -ne 0 ] && [ "$SSH_TTY_FALLBACK" = "1" ] && [ "$tty_flag" != "-tt" ]; then
     log "WARN action=$ACTION phase=$phase reason=ssh_failed status=$status retry_tty=-tt"
+    temp_out=$(mktemp /tmp/ssh_out.XXXXXX)
+    temp_err=$(mktemp /tmp/ssh_err.XXXXXX)
     set +e
-    printf "%s\n" "$cmds" | ssh -tt $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}"
+    printf "%s\n" "$cmds" | ssh -tt $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}" > "$temp_out" 2> "$temp_err"
     status=$?
     set -e
+    if [ $status -ne 0 ]; then
+      log "ERROR_RETRY action=$ACTION phase=$phase status=$status stdout=$(cat "$temp_out") stderr=$(cat "$temp_err")"
+    else
+      log "SUCCESS_RETRY action=$ACTION phase=$phase stdout=$(cat "$temp_out")"
+    fi
+    rm -f "$temp_out" "$temp_err"
   fi
 
   return $status
 }
 
 if [ "$ACTION" = "block" ]; then
-  CMDS_APPLY="system-view
+  CMDS_APPLY=$(cat <<EOF
+system-view
 acl advanced $ACL_NUM
 rule $RULE_NUM deny ip source $IP_ADDRESS 0
 quit
-quit"
-  CMDS_SAVE="save force"
+quit  
+quit
+EOF
+)
+  CMDS_SAVE=$(cat <<EOF
+save force
+quit  
+EOF
+)
 elif [ "$ACTION" = "unblock" ]; then
-  CMDS_APPLY="system-view
+  CMDS_APPLY=$(cat <<EOF
+system-view
 acl advanced $ACL_NUM
 undo rule $RULE_NUM
 quit
-quit"
-  CMDS_SAVE="save force"
+quit
+quit  
+EOF
+)
+  CMDS_SAVE=$(cat <<EOF
+save force
+quit  
+EOF
+)
 else
   echo "Invalid action: $ACTION" >&2
   exit 1

@@ -957,6 +957,8 @@ def register():
             if ip_address:
                 manage_dns_hijack('unhijack', ip_address)
             clear_unregistered_lease(mac_address)
+            if ip_address and detected_vlan:
+                manage_switch_acl('unblock', ip_address, detected_vlan)
 
             if is_ajax:
                 return jsonify({'status': 'registered', 'message': 'Device registered successfully'})
@@ -1869,6 +1871,9 @@ def admin_process_request(request_id):
 
         clear_unregistered_lease(device.mac_address)
         
+        # NEW: Unblock the original IP address from the unregistered VLAN
+        manage_switch_acl('unblock', reg_request.ip_address, detected_vlan)
+        
         flash(f'Request approved and user {user.email} created', 'success')
         logger.info(f"Admin approved registration request for {user.email}")
         
@@ -1889,7 +1894,6 @@ def admin_process_request(request_id):
         logger.info(f"Admin rejected registration request for {reg_request.email}")
     
     return redirect(url_for('admin_dashboard'))
-
 
 @app.route('/admin/devices/<int:device_id>/disconnect', methods=['POST'])
 @login_required
