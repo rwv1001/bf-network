@@ -960,6 +960,7 @@ def register():
             if ip_address and detected_vlan:
                 manage_switch_acl('unblock', ip_address, detected_vlan)
 
+
             if is_ajax:
                 return jsonify({'status': 'registered', 'message': 'Device registered successfully'})
             else:
