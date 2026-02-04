@@ -82,6 +82,15 @@
         </small>
     </div>
 
+    {% if usage_policy_text %}
+    <div class="form-group" style="margin-top: 10px;">
+        <label style="display: flex; align-items: flex-start; gap: 10px; cursor: pointer;">
+            <input type="checkbox" id="usage_policy" name="usage_policy" required>
+            <span>{{ usage_policy_text }}</span>
+        </label>
+    </div>
+    {% endif %}
+
     <div id="validationBox" class="validation-box">
         <strong>Please complete the following:</strong>
         <ul id="validationList"></ul>
@@ -117,6 +126,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const institutionLink = document.getElementById('institutionLink');
     const institutionUrl = "{{ institution_url|e }}";
     const institutionButtonText = "{{ institution_button_text|e }}";
+    const usagePolicyText = "{{ usage_policy_text|e }}";
     let pollInterval = null;
     let accessInterval = null;
     let registrationSubmitted = false;
@@ -145,6 +155,17 @@ document.addEventListener('DOMContentLoaded', function() {
             id: 'device_type',
             message: 'Device type must be selected.',
             isValid: () => document.getElementById('device_type').value.trim() !== ''
+        },
+        {
+            id: 'usage_policy',
+            message: 'You must agree to the usage policy to continue.',
+            isValid: () => {
+                if (!usagePolicyText) {
+                    return true;
+                }
+                const checkbox = document.getElementById('usage_policy');
+                return checkbox ? checkbox.checked : false;
+            }
         }
     ];
 

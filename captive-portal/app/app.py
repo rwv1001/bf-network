@@ -44,7 +44,8 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 def inject_institution_url():
     return {
         'institution_url': os.getenv('INSTITUTION_URL', '').strip(),
-        'institution_button_text': os.getenv('INSTITUTION_BUTTON_TEXT', '').strip()
+        'institution_button_text': os.getenv('INSTITUTION_BUTTON_TEXT', '').strip(),
+        'usage_policy_text': os.getenv('USAGE_POLICY_TEXT', '').strip()
     }
 
 # Initialize database
