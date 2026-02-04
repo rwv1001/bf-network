@@ -546,6 +546,13 @@ def cleanup_orphan_hijack_rules():
             for d in Device.query.filter(Device.ip_address.isnot(None)).all()
             if d.ip_address
         }
+        now = datetime.utcnow()
+        active_unregistered_ips = {
+            lease.ip_address
+            for lease in UnregisteredLease.query.filter(UnregisteredLease.ip_address.isnot(None)).all()
+            if lease.ip_address and (not lease.expires_at or lease.expires_at >= now)
+        }
+        active_ips |= active_unregistered_ips
     except Exception as e:
         logger.error(f"Failed to load device IPs for cleanup: {e}")
         return 0
