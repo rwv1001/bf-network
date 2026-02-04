@@ -66,6 +66,7 @@ class Device(db.Model):
     connection_type = db.Column(db.String(10), default='unknown')  # 'wifi' or 'wired'
     ssid = db.Column(db.String(100))  # WiFi SSID (e.g., 'Blackfriars-Guests')
     unregister_token = db.Column(db.String(255), unique=True, index=True)  # For email unregister link
+    profile_snapshot = db.Column(db.Text)  # JSON: previous/new user profile details
     
     def __repr__(self):
         return f'<Device {self.mac_address}>'

@@ -361,7 +361,7 @@ def send_approval_notification(user_email, first_name, status):
     return send_email(user_email, subject, html_body, text_body)
 
 
-def send_wifi_registration_confirmation(user_email, first_name, ssid, mac_address, unregister_url):
+def send_wifi_registration_confirmation(user_email, first_name, ssid, mac_address, unregister_url, registration_details=None):
     """
     Send WiFi registration confirmation with unregister link
     
@@ -374,6 +374,49 @@ def send_wifi_registration_confirmation(user_email, first_name, ssid, mac_addres
     """
     subject = f"WiFi Registration Confirmed - {ssid}"
     
+    admin_contact_html = (
+        f"If you did not register this device, click the unregister button above or email "
+        f"<a href=\"mailto:{ADMIN_EMAIL}\">{ADMIN_EMAIL}</a>."
+        if ADMIN_EMAIL else
+        "If you did not register this device, click the unregister button above or contact the administrator."
+    )
+    admin_contact_text = (
+        f"If you did not register this device, click the unregister link above or email {ADMIN_EMAIL}."
+        if ADMIN_EMAIL else
+        "If you did not register this device, click the unregister link above or contact the administrator."
+    )
+
+    registration_details = registration_details or {}
+    details_name = " ".join([
+        registration_details.get("first_name", ""),
+        registration_details.get("last_name", "")
+    ]).strip() or first_name or "Unknown"
+    details_phone = registration_details.get("phone_number") or "Not provided"
+    details_device_type = registration_details.get("device_type") or "Unknown"
+    details_email = registration_details.get("email") or user_email
+    details_ip = registration_details.get("ip_address") or "Unknown"
+    details_ssid = registration_details.get("ssid") or ssid
+
+    details_html = "".join([
+        f"<li><strong>Name:</strong> {details_name}</li>",
+        f"<li><strong>Email:</strong> {details_email}</li>",
+        f"<li><strong>Phone:</strong> {details_phone}</li>",
+        f"<li><strong>Device Type:</strong> {details_device_type}</li>",
+        f"<li><strong>MAC Address:</strong> {mac_address}</li>",
+        f"<li><strong>IP Address:</strong> {details_ip}</li>",
+        f"<li><strong>Network:</strong> {details_ssid}</li>",
+    ])
+
+    details_text = "\n".join([
+        f"Name: {details_name}",
+        f"Email: {details_email}",
+        f"Phone: {details_phone}",
+        f"Device Type: {details_device_type}",
+        f"MAC Address: {mac_address}",
+        f"IP Address: {details_ip}",
+        f"Network: {details_ssid}",
+    ])
+
     html_body = f"""
     <html>
     <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
@@ -397,9 +440,20 @@ def send_wifi_registration_confirmation(user_email, first_name, ssid, mac_addres
                     <p style="margin: 10px 0 0; font-size: 14px;">Please wait up to 30 seconds for your device to renew its connection and gain full internet access.</p>
                 </div>
                 
-                <h3 style="color: #263326; margin-top: 30px;">Need to Remove This Device?</h3>
+                <h3 style="color: #263326; margin-top: 30px;">Registration Responsibility</h3>
                 
-                <p>If you no longer use this device or need to unregister it for any reason, you can do so at any time:</p>
+                <p>
+                    By registering this device, you are taking responsibility for its internet usage.
+                    If you do not recognize this device, please deregister it by clicking the button below
+                    or by emailing the administrator.
+                </p>
+
+                <div style="background-color: white; border-left: 4px solid #263326; padding: 15px; margin: 20px 0;">
+                    <p style="margin: 0;"><strong>Registration details:</strong></p>
+                    <ul style="margin: 10px 0 0 18px; padding: 0;">
+                        {details_html}
+                    </ul>
+                </div>
                 
                 <p style="text-align: center; margin: 25px 0;">
                     <a href="{unregister_url}" 
@@ -412,6 +466,8 @@ def send_wifi_registration_confirmation(user_email, first_name, ssid, mac_addres
                     <strong>Important:</strong> Clicking the unregister link will immediately revoke network access for this device. 
                     This prevents someone else from impersonating your device using its MAC address.
                 </p>
+
+                <p style="font-size: 13px; color: #666;">{admin_contact_html}</p>
                 
                 <p style="font-size: 13px; color: #666;">
                     If you experience any connection issues, please contact the network administrator.
@@ -442,14 +498,21 @@ def send_wifi_registration_confirmation(user_email, first_name, ssid, mac_addres
     Please wait up to 30 seconds for your device to renew its connection and gain full internet access.
     
     
-    NEED TO REMOVE THIS DEVICE?
-    
-    If you no longer use this device or need to unregister it for any reason, visit:
+    REGISTRATION RESPONSIBILITY
+
+    By registering this device, you are taking responsibility for its internet usage.
+    If you do not recognize this device, please deregister it using the link below
+    or by emailing the administrator.
+
+    Registration details:
+    {details_text}
     
     {unregister_url}
     
     Important: Clicking the unregister link will immediately revoke network access for this device.
     This prevents someone else from impersonating your device using its MAC address.
+
+    {admin_contact_text}
     
     If you experience any connection issues, please contact the network administrator.
     

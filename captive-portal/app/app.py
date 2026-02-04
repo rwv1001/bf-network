@@ -10,6 +10,7 @@ import time
 import re
 import shlex
 import shutil
+import json
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, abort
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -947,17 +948,53 @@ def register():
             vlan_map = get_vlan_map()
             target_vlan = vlan_map.get(user.status, vlan_map['guests'])
             connection_type, detected_vlan, ssid = detect_connection_type(ip_address)
-            device = Device(
-                mac_address=mac_address,
-                user_id=user.id,
-                device_name=device_type,
-                ip_address=ip_address,
-                registration_status='registered',
-                current_vlan=target_vlan,
-                connection_type=connection_type,
-                ssid=ssid
-            )
-            db.session.add(device)
+            existing_device = Device.query.filter_by(mac_address=mac_address).first()
+            previous_profile = {
+                "first_name": user.first_name or "",
+                "last_name": user.last_name or "",
+                "phone_number": user.phone_number or ""
+            }
+            new_profile = {
+                "first_name": first_name or user.first_name or "",
+                "last_name": last_name or user.last_name or "",
+                "phone_number": phone_number or user.phone_number or ""
+            }
+            profile_changed = previous_profile != new_profile
+            if profile_changed:
+                user.first_name = new_profile["first_name"] or None
+                user.last_name = new_profile["last_name"] or None
+                user.phone_number = new_profile["phone_number"] or None
+            profile_snapshot = json.dumps({
+                "previous": previous_profile,
+                "new": new_profile
+            }) if profile_changed else None
+
+            if existing_device:
+                existing_device.user_id = user.id
+                existing_device.device_name = device_type
+                existing_device.ip_address = ip_address
+                existing_device.registration_status = 'registered'
+                existing_device.current_vlan = target_vlan
+                existing_device.connection_type = connection_type
+                existing_device.ssid = ssid
+                existing_device.unregister_token = existing_device.unregister_token or secrets.token_urlsafe(32)
+                existing_device.profile_snapshot = profile_snapshot
+                device = existing_device
+            else:
+                device = Device(
+                    mac_address=mac_address,
+                    user_id=user.id,
+                    device_name=device_type,
+                    ip_address=ip_address,
+                    registration_status='registered',
+                    current_vlan=target_vlan,
+                    connection_type=connection_type,
+                    ssid=ssid,
+                    unregister_token=secrets.token_urlsafe(32),
+                    profile_snapshot=profile_snapshot
+                )
+                db.session.add(device)
+
             db.session.commit()
 
             # Register in network (your existing logic)
@@ -975,6 +1012,31 @@ def register():
             clear_unregistered_lease(mac_address)
             if ip_address and detected_vlan:
                 manage_switch_acl('unblock', ip_address, detected_vlan)
+
+            portal_url = os.getenv('PORTAL_URL')
+            if portal_url:
+                parsed = urlparse(portal_url)
+                unregister_url = f"{parsed.scheme}://{parsed.netloc}{url_for('unregister', token=device.unregister_token)}"
+            else:
+                unregister_url = url_for('unregister', token=device.unregister_token, _external=True)
+
+            ssid_display = ssid or "Wired Network"
+            send_wifi_registration_confirmation(
+                user.email,
+                user.first_name or first_name,
+                ssid_display,
+                mac_address,
+                unregister_url,
+                registration_details={
+                    "email": user.email,
+                    "first_name": new_profile["first_name"],
+                    "last_name": new_profile["last_name"],
+                    "phone_number": new_profile["phone_number"],
+                    "device_type": device_type,
+                    "ip_address": ip_address,
+                    "ssid": ssid_display
+                }
+            )
 
 
             if is_ajax:
@@ -1254,7 +1316,33 @@ def unregister(token):
     mac_address = device.mac_address
     connection_type = device.connection_type
     vlan_id = device.current_vlan
-    user_email = device.user.email if device.user else 'Unknown'
+    user = device.user
+    user_email = user.email if user else 'Unknown'
+
+    if user and device.profile_snapshot:
+        try:
+            snapshot = json.loads(device.profile_snapshot)
+        except Exception:
+            snapshot = None
+
+        if snapshot:
+            previous = snapshot.get("previous") or {}
+            new = snapshot.get("new") or {}
+
+            current_profile = {
+                "first_name": user.first_name or "",
+                "last_name": user.last_name or "",
+                "phone_number": user.phone_number or ""
+            }
+
+            if current_profile == {
+                "first_name": new.get("first_name", ""),
+                "last_name": new.get("last_name", ""),
+                "phone_number": new.get("phone_number", "")
+            }:
+                user.first_name = previous.get("first_name") or None
+                user.last_name = previous.get("last_name") or None
+                user.phone_number = previous.get("phone_number") or None
     
     # Remove device registration
     if connection_type == 'wifi':
@@ -1280,6 +1368,7 @@ def unregister(token):
     device.registration_status = 'unregistered'
     device.unregister_token = None  # Invalidate token
     device.user_id = None  # Remove user association
+    device.profile_snapshot = None
     db.session.commit()
     
     flash(f'Device {mac_address} has been unregistered successfully. Access has been restricted.', 'success')
@@ -1831,7 +1920,8 @@ def admin_process_request(request_id):
             registration_status='registered',
             current_vlan=target_vlan,
             connection_type=connection_type,
-            ssid=ssid
+            ssid=ssid,
+            unregister_token=secrets.token_urlsafe(32)
         )
         db.session.add(device)
         
