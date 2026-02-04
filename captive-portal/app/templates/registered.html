@@ -6,10 +6,10 @@
 
 {% block subheader %}
 <p style="margin-top: 10px; opacity: 0.9;">You now have full internet access.</p>
-{% if institution_url %}
-<p style="margin-top: 6px;">
-    <a href="{{ institution_url }}" target="_blank" rel="noopener" style="color: #fff; text-decoration: underline;">
-        {{ institution_url }}
+{% if institution_url and institution_button_text %}
+<p style="margin-top: 10px;">
+    <a href="{{ institution_url }}" target="_blank" rel="noopener" class="btn" style="display: inline-block;">
+        {{ institution_button_text }}
     </a>
 </p>
 {% endif %}

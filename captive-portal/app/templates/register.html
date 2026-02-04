@@ -116,6 +116,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const validationList = document.getElementById('validationList');
     const institutionLink = document.getElementById('institutionLink');
     const institutionUrl = "{{ institution_url|e }}";
+    const institutionButtonText = "{{ institution_button_text|e }}";
     let pollInterval = null;
     let accessInterval = null;
     let registrationSubmitted = false;
@@ -336,8 +337,8 @@ document.addEventListener('DOMContentLoaded', function() {
         statusMessage.style.display = 'block';
         statusMessage.textContent = message;  // Note: Changed to textContent for simplicity; use innerHTML if needed for HTML
 
-        if (type === 'success' && institutionUrl) {
-            institutionLink.innerHTML = `<a href="${institutionUrl}" target="_blank" rel="noopener" style="color: #667eea; text-decoration: underline;">${institutionUrl}</a>`;
+        if (type === 'success' && institutionUrl && institutionButtonText) {
+            institutionLink.innerHTML = `<a href="${institutionUrl}" target="_blank" rel="noopener" class="btn" style="display: inline-block;">${institutionButtonText}</a>`;
             institutionLink.style.display = 'block';
         } else {
             institutionLink.style.display = 'none';
