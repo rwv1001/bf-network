@@ -13,6 +13,7 @@ import json
 import socket
 import requests
 import logging
+import os
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 
@@ -106,6 +107,25 @@ class KeaIntegration:
             return self._send_command_socket(command)
         else:
             return self._send_command_http(command)
+
+    def _resolve_subnet_id(self, vlan_or_subnet_id: int) -> int:
+        """Map VLAN to Kea subnet-id via VLAN_SUBNET_ID_MAP env if provided."""
+        raw = os.getenv('VLAN_SUBNET_ID_MAP', '').strip()
+        if not raw:
+            return vlan_or_subnet_id
+        mapping = {}
+        for entry in raw.split(','):
+            entry = entry.strip()
+            if not entry or ':' not in entry:
+                continue
+            vlan_str, subnet_str = entry.split(':', 1)
+            try:
+                vlan_id = int(vlan_str.strip())
+                subnet_id = int(subnet_str.strip())
+            except ValueError:
+                continue
+            mapping[vlan_id] = subnet_id
+        return mapping.get(vlan_or_subnet_id, vlan_or_subnet_id)
     
     def register_mac(
         self,
@@ -135,7 +155,7 @@ class KeaIntegration:
             mac = mac.lower().replace('-', ':')
             
             # Build subnet identifier
-            subnet_id = vlan  # Assuming subnet ID matches VLAN
+            subnet_id = self._resolve_subnet_id(vlan)
             
             # Build reservation with user-context for client class evaluation
             reservation = {
@@ -218,7 +238,7 @@ class KeaIntegration:
             # Normalize MAC address
             mac = mac.lower().replace('-', ':')
             
-            subnet_id = vlan
+            subnet_id = self._resolve_subnet_id(vlan)
             
             # Build command
             command = {
@@ -258,7 +278,7 @@ class KeaIntegration:
         """
         try:
             mac = mac.lower().replace('-', ':')
-            subnet_id = vlan
+            subnet_id = self._resolve_subnet_id(vlan)
             
             command = {
                 "command": "reservation-get",
@@ -308,7 +328,7 @@ class KeaIntegration:
             List of reservation dictionaries
         """
         try:
-            subnet_id = vlan
+            subnet_id = self._resolve_subnet_id(vlan)
             
             command = {
                 "command": "reservation-get-all",
@@ -344,7 +364,7 @@ class KeaIntegration:
         """
         try:
             mac = mac.lower().replace('-', ':')
-            subnet_id = vlan
+            subnet_id = self._resolve_subnet_id(vlan)
 
             existing = self.get_reservation(mac, vlan)
             reservation = {
@@ -371,7 +391,7 @@ class KeaIntegration:
                 if blocked_ip:
                     reservation["user-context"]["blocked-ip"] = blocked_ip
 
-                blocked_pool_ip = self._find_available_blocked_ip(subnet_id)
+                blocked_pool_ip = self._find_available_blocked_ip(vlan, subnet_id)
                 if blocked_pool_ip:
                     reservation["ip-address"] = blocked_pool_ip
                 else:
@@ -417,7 +437,7 @@ class KeaIntegration:
             logger.error(f"Error setting blocked status for MAC {mac}: {e}")
             return False
     
-    def _find_available_registered_ip(self, subnet_id: int) -> Optional[str]:
+    def _find_available_registered_ip(self, vlan: int, subnet_id: int) -> Optional[str]:
         """
         Find an available IP in the registered pool (.5-.127) for the subnet.
         
@@ -428,8 +448,8 @@ class KeaIntegration:
             Available IP address or None if pool is full
         """
         try:
-            # Build base IP from subnet_id (assumes 192.168.X.0/24 format)
-            base_ip = f"192.168.{subnet_id}"
+            # Build base IP from VLAN (assumes 192.168.X.0/24 format)
+            base_ip = f"192.168.{vlan}"
             
             # Get all current leases and reservations
             command = {
@@ -449,7 +469,7 @@ class KeaIntegration:
                     used_ips.add(lease.get("ip-address"))
             
             # Get all reservations for this subnet
-            reservations = self.get_all_reservations(subnet_id)
+            reservations = self.get_all_reservations(vlan)
             for res in reservations:
                 if "ip-address" in res:
                     used_ips.add(res["ip-address"])
@@ -466,12 +486,12 @@ class KeaIntegration:
             logger.error(f"Error finding available IP: {e}")
             return None
 
-    def _find_available_blocked_ip(self, subnet_id: int) -> Optional[str]:
+    def _find_available_blocked_ip(self, vlan: int, subnet_id: int) -> Optional[str]:
         """
         Find an available IP in the blocked pool (.214-.254) for the subnet.
         """
         try:
-            base_ip = f"192.168.{subnet_id}"
+            base_ip = f"192.168.{vlan}"
 
             command = {
                 "command": "lease4-get-all",
@@ -489,7 +509,7 @@ class KeaIntegration:
                 for lease in leases:
                     used_ips.add(lease.get("ip-address"))
 
-            reservations = self.get_all_reservations(subnet_id)
+            reservations = self.get_all_reservations(vlan)
             for res in reservations:
                 if "ip-address" in res:
                     used_ips.add(res["ip-address"])
@@ -554,7 +574,7 @@ class KeaIntegration:
             }
 
             if subnet_id is not None:
-                arguments["subnet-id"] = subnet_id
+                arguments["subnet-id"] = self._resolve_subnet_id(subnet_id)
 
             command = {
                 "command": "lease4-get",
@@ -607,8 +627,9 @@ class KeaIntegration:
                 return False
             
             # Delete the lease by IP (with subnet-id for memfile backend)
-            # Extract subnet ID from IP's third octet (e.g., 192.168.10.x -> subnet 10)
-            subnet_id = int(ip_address.split('.')[2])
+            # Extract VLAN from IP's third octet and map to Kea subnet-id
+            vlan_id = int(ip_address.split('.')[2])
+            subnet_id = self._resolve_subnet_id(vlan_id)
             
             command = {
                 "command": "lease4-del",

@@ -45,11 +45,95 @@ def inject_institution_url():
     return {
         'institution_url': os.getenv('INSTITUTION_URL', '').strip(),
         'institution_button_text': os.getenv('INSTITUTION_BUTTON_TEXT', '').strip(),
-        'usage_policy_text': os.getenv('USAGE_POLICY_TEXT', '').strip()
+        'usage_policy_text': os.getenv('USAGE_POLICY_TEXT', '').strip(),
+        'portal_url': os.getenv('PORTAL_URL', '').strip(),
+        'portal_poll_url': os.getenv('PORTAL_POLL_URL', '').strip()
     }
+
+
+def _get_portal_base_url():
+    portal_url = os.getenv('PORTAL_URL', '').strip()
+    return portal_url.rstrip('/') if portal_url else ''
+
+
+def _build_portal_url(path):
+    base = _get_portal_base_url()
+    if base:
+        return f"{base}{path}"
+    return path
+
+
+def _portal_host_mismatch():
+    portal_url = _get_portal_base_url()
+    if not portal_url:
+        return False
+    try:
+        portal_host = urlparse(portal_url).netloc
+    except Exception:
+        return False
+    return portal_host and portal_host != request.host
+
+
+def get_vlan_ssid_map():
+    """Parse VLAN->SSID map from VLAN_SSID_MAP env (e.g. 10:SSID,20:SSID)."""
+    mapping = {}
+    raw = os.getenv('VLAN_SSID_MAP', '').strip()
+    if not raw:
+        return mapping
+    for entry in raw.split(','):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if ':' not in entry:
+            continue
+        vlan_str, ssid = entry.split(':', 1)
+        try:
+            vlan_id = int(vlan_str.strip())
+        except ValueError:
+            continue
+        ssid = ssid.strip()
+        if ssid:
+            mapping[vlan_id] = ssid
+    return mapping
+
+
+def get_ssid_for_vlan(vlan_id):
+    return get_vlan_ssid_map().get(vlan_id)
 
 # Initialize database
 db.init_app(app)
+
+
+@app.after_request
+def add_cors_headers(response):
+    # List of paths needing CORS (add more as needed)
+    cors_paths = ['/api/registration-status', '/register']  # e.g., add '/api/other' if exists
+    
+    if request.path in cors_paths:
+        origin = request.headers.get('Origin', '')
+        logger.info(f"Request Origin: {origin}")
+        
+        # Whitelist: Add expected origins (e.g., connectivity checks)
+        allowed_origins = [
+            'http://www.msftconnecttest.com',
+            'http://connectivitycheck.gstatic.com',
+            'http://captive.apple.com',
+            'http://detectportal.firefox.com',
+            # Add your portal's domain if self-calls occur: 'http://bf-network.duckdns.org'
+        ]
+        
+        if origin in allowed_origins:
+            response.headers['Access-Control-Allow-Origin'] = origin
+        else:
+            # Fallback: Deny or log unexpected origins
+            logger.warning(f"Unexpected Origin: {origin}")
+            # Optionally return 403 or omit header to block
+        
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-Requested-With'
+        response.headers['Vary'] = 'Origin'  # For caching
+        
+    return response
 
 # Initialize Kea client for WiFi registrations
 KEA_SOCKET = os.getenv('KEA_CONTROL_SOCKET', '/kea/leases/kea4-ctrl-socket')
@@ -833,8 +917,32 @@ def apply_device_unblock(device, flash_messages=False):
     cleanup_orphan_hijack_rules()
 
 
-@app.route('/')
+@app.route('/', methods=['GET', 'POST', 'OPTIONS'])
 def index():
+    origin = request.headers.get('Origin', '')  # Get the request's Origin
+    logger.info(f"Request Origin: {origin}")
+    
+    # Optional: Validate against a whitelist (add expected origins)
+    allowed_origins = [
+        'http://www.msftconnecttest.com',
+        'http://connectivitycheck.gstatic.com',
+        'http://captive.apple.com',
+        # Add others as needed
+    ]
+    if origin and origin not in allowed_origins:
+        origin = ''  # Deny if not allowed; fallback to no ACAO or '*'
+    
+    if request.method == 'OPTIONS':
+        response = app.make_response('')
+        if origin:
+            response.headers['Access-Control-Allow-Origin'] = origin
+        else:
+            response.headers['Access-Control-Allow-Origin'] = '*'  # Fallback
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-Requested-With'
+        response.headers['Vary'] = 'Origin'
+        return response, 200
+
     """Landing page - check if device is blocked, otherwise redirect to registration"""
     ip_address = request.remote_addr
     mac_address = get_client_mac()
@@ -843,18 +951,45 @@ def index():
     if mac_address:
         device = Device.query.filter_by(mac_address=mac_address).first()
         if device and device.registration_status == 'blocked':
-            return redirect(url_for('blocked_page'))
+            return redirect(_build_portal_url(url_for('blocked_page')))
     
-    return redirect(url_for('register'))
+    return redirect(_build_portal_url(url_for('register')))
 
 
-@app.route('/blocked')
+@app.route('/blocked', methods=['GET', 'POST', 'OPTIONS'])
 def blocked_page():
+    origin = request.headers.get('Origin', '')  # Get the request's Origin
+    logger.info(f"Request Origin: {origin}")
+    
+    # Optional: Validate against a whitelist (add expected origins)
+    allowed_origins = [
+        'http://www.msftconnecttest.com',
+        'http://connectivitycheck.gstatic.com',
+        'http://captive.apple.com',
+        # Add others as needed
+    ]
+    if origin and origin not in allowed_origins:
+        origin = ''  # Deny if not allowed; fallback to no ACAO or '*'
+    
+    if request.method == 'OPTIONS':
+        response = app.make_response('')
+        if origin:
+            response.headers['Access-Control-Allow-Origin'] = origin
+        else:
+            response.headers['Access-Control-Allow-Origin'] = '*'  # Fallback
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-Requested-With'
+        response.headers['Vary'] = 'Origin'
+        return response, 200
+
     """Show blocked device page"""
     ip_address = get_client_ip()
     mac_address = get_client_mac()
     admin_email = os.getenv('ADMIN_EMAIL', 'admin@example.com')
     
+    if request.method == 'GET' and _portal_host_mismatch():
+        return redirect(_build_portal_url(url_for('blocked_page')))
+
     return render_template('blocked.html', 
                          ip_address=ip_address,
                          mac_address=mac_address,
@@ -870,8 +1005,8 @@ def android_captive_portal_detection():
     if mac_address:
         device = Device.query.filter_by(mac_address=mac_address).first()
         if device and device.registration_status == 'blocked':
-            return redirect(url_for('blocked_page')), 302
-    return redirect(url_for('register')), 302
+            return redirect(_build_portal_url(url_for('blocked_page'))), 302
+    return redirect(_build_portal_url(url_for('register'))), 302
 
 @app.route('/hotspot-detect.html')
 def ios_captive_portal_detection():
@@ -882,35 +1017,93 @@ def ios_captive_portal_detection():
     if mac_address:
         device = Device.query.filter_by(mac_address=mac_address).first()
         if device and device.registration_status == 'registered':
-            return redirect(url_for('status')), 302
+            return redirect(_build_portal_url(url_for('status'))), 302
         elif device and device.registration_status == 'blocked':
             # Device is blocked - show blocked page
-            return redirect(url_for('blocked_page')), 302
+            return redirect(_build_portal_url(url_for('blocked_page'))), 302
     
     # Device not registered - redirect to portal (triggers iOS captive portal UI)
-    return redirect(url_for('register')), 302
+    return redirect(_build_portal_url(url_for('register'))), 302
 
 @app.route('/library/test/success.html')
 def ios_captive_success():
     """iOS success check after authentication"""
-    return redirect(url_for('status')), 302
+    return redirect(_build_portal_url(url_for('status'))), 302
 
 @app.route('/ncsi.txt')
 @app.route('/connecttest.txt')
+@app.route('/redirect', methods=['GET', 'POST', 'OPTIONS'])
 def windows_captive_portal_detection():
+    origin = request.headers.get('Origin', '')  # Get the request's Origin
+
+    logger.info(f"Request Origin: {origin}")
+    
+    # Optional: Validate against a whitelist (add expected origins)
+    allowed_origins = [
+        'http://www.msftconnecttest.com',
+        'http://connectivitycheck.gstatic.com',
+        'http://captive.apple.com',
+        # Add others as needed
+    ]
+    if origin and origin not in allowed_origins:
+        origin = ''  # Deny if not allowed; fallback to no ACAO or '*'
+    
+    if request.method == 'OPTIONS':
+        response = app.make_response('')
+        if origin:
+            response.headers['Access-Control-Allow-Origin'] = origin
+        else:
+            response.headers['Access-Control-Allow-Origin'] = '*'  # Fallback
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-Requested-With'
+        response.headers['Vary'] = 'Origin'
+        return response, 200
+
     """Windows captive portal detection"""
     mac_address = get_client_mac()
     if mac_address:
         device = Device.query.filter_by(mac_address=mac_address).first()
         if device and device.registration_status == 'blocked':
-            return redirect(url_for('blocked_page')), 302
-    return redirect(url_for('register')), 302
+            return redirect(_build_portal_url(url_for('blocked_page'))), 302
+    return redirect(_build_portal_url(url_for('register'))), 302
 
 
 @app.route('/portal')
 
-@app.route('/register', methods=['GET', 'POST'])
+@app.route('/register', methods=['GET', 'POST', 'OPTIONS'])
 def register():
+    if request.method == 'GET' and _portal_host_mismatch():
+        qs = request.query_string.decode('utf-8', errors='ignore')
+        target = _build_portal_url(url_for('register'))
+        if qs:
+            target = f"{target}?{qs}"
+        return redirect(target)
+
+    logger.info("Test message")
+    logger.warning(f"Full headers: {request.headers}")
+    origin = request.headers.get('Origin', '')  # Get the request's Origin
+    logger.info(f"Request Origin: {origin}")
+    
+    # Optional: Validate against a whitelist (add expected origins)
+    allowed_origins = [
+        'http://www.msftconnecttest.com',
+        'http://connectivitycheck.gstatic.com',
+        'http://captive.apple.com',
+        # Add others as needed
+    ]
+    if origin and origin not in allowed_origins:
+        origin = ''  # Deny if not allowed; fallback to no ACAO or '*'
+    
+    if request.method == 'OPTIONS':
+        response = app.make_response('')
+        if origin:
+            response.headers['Access-Control-Allow-Origin'] = origin
+        else:
+            response.headers['Access-Control-Allow-Origin'] = '*'  # Fallback
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-Requested-With'
+        response.headers['Vary'] = 'Origin'
+        return response, 200
     mac_address = get_client_mac()
     ip_address = get_client_ip()
     detected_mac = mac_address
@@ -949,6 +1142,9 @@ def register():
             vlan_map = get_vlan_map()
             target_vlan = vlan_map.get(user.status, vlan_map['guests'])
             connection_type, detected_vlan, ssid = detect_connection_type(ip_address)
+            expected_ssid = get_ssid_for_vlan(target_vlan)
+            current_ssid = ssid or (get_ssid_for_vlan(detected_vlan) if detected_vlan else None)
+            network_mismatch = bool(connection_type == 'wifi' and detected_vlan and target_vlan and detected_vlan != target_vlan)
             existing_device = Device.query.filter_by(mac_address=mac_address).first()
             previous_profile = {
                 "first_name": user.first_name or "",
@@ -1003,15 +1199,15 @@ def register():
                 kea = get_kea()
                 if kea:
                     kea.register_mac(mac=mac_address, vlan=target_vlan, hostname=f"{first_name.lower()}-{last_name.lower()}-{device_type}", ip_address=None)
-                    if ip_address:
+                    if ip_address and not network_mismatch:
                         kea.force_lease_renewal(mac_address, ip_address)
             else:
                 send_coa_change(mac_address, target_vlan)
 
-            if ip_address:
+            if ip_address and not network_mismatch:
                 manage_dns_hijack('unhijack', ip_address)
             clear_unregistered_lease(mac_address)
-            if ip_address and detected_vlan:
+            if ip_address and detected_vlan and not network_mismatch:
                 manage_switch_acl('unblock', ip_address, detected_vlan)
 
             portal_url = os.getenv('PORTAL_URL')
@@ -1041,7 +1237,15 @@ def register():
 
 
             if is_ajax:
-                return jsonify({'status': 'registered', 'message': 'Device registered successfully'})
+                return jsonify({
+                    'status': 'registered',
+                    'message': 'Device registered successfully',
+                    'current_vlan': detected_vlan,
+                    'current_ssid': current_ssid,
+                    'expected_vlan': target_vlan,
+                    'expected_ssid': expected_ssid,
+                    'network_mismatch': network_mismatch
+                })
             else:
                 return redirect(url_for('registered'))
 
@@ -1067,7 +1271,8 @@ def register():
             else:
                 approval_url = url_for('admin_approve_request', token=reg_request.approval_token, _external=True)
             
-            send_admin_notification(reg_request, approval_url)
+            connection_type, detected_vlan, ssid = detect_connection_type(ip_address)
+            send_admin_notification(reg_request, approval_url, detected_vlan, ssid)
             
 
             prefill_data = {
@@ -1248,22 +1453,68 @@ def registered_success():
     return redirect(url_for('register'))
 
 
-@app.route('/api/registration-status')
-def api_registration_status():
+@app.route('/api/registration-status', methods=['GET', 'OPTIONS'])
+def registration_status():
+    logger.info(f"Full headers: {request.headers}")
+    origin = request.headers.get('Origin', '')
+    logger.info(f"Request Origin: {origin}")
+    
+    # Whitelist: Add expected origins (expand based on browser Network tab if mismatch)
+    allowed_origins = [
+        'http://www.msftconnecttest.com',
+        'http://connectivitycheck.gstatic.com',
+        'http://captive.apple.com',
+        'http://detectportal.firefox.com',
+        # Variations: Add without www or with trailing / if seen in Network tab
+        'http://msftconnecttest.com',
+        'http://www.msftconnecttest.com/',
+        # Your portal if self-calls: 'http://bf-network.duckdns.org'
+    ]
+    
+    acao_value = origin if origin in allowed_origins else '*'
+    
+    if request.method == 'OPTIONS':
+        response = app.make_response('')
+        response.headers['Access-Control-Allow-Origin'] = acao_value
+        response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        response.headers['Vary'] = 'Origin'
+        return response, 200
     """API endpoint for checking registration status via AJAX"""
     mac_address = get_client_mac()
     
     if not mac_address:
-        return jsonify({'status': 'unknown', 'message': 'Could not detect MAC address'})
+        response = jsonify({'status': 'unknown', 'message': 'Could not detect MAC address'})
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        return response
     
     # Check if device is registered
     device = Device.query.filter_by(mac_address=mac_address).first()
     device = normalize_device_status(device)
     if device:
-        return jsonify({
+        current_ip = get_client_ip()
+        current_connection, current_vlan, detected_ssid = detect_connection_type(current_ip)
+        current_ssid = get_ssid_for_vlan(current_vlan) or detected_ssid
+        expected_ssid = get_ssid_for_vlan(device.current_vlan) or device.ssid
+        network_mismatch = bool(current_connection == 'wifi' and current_vlan and device.current_vlan and current_vlan != device.current_vlan)
+
+        if device.registration_status == 'registered' and not network_mismatch and current_ip:
+            if not _is_blocked_pool_ip(current_ip):
+                manage_dns_hijack('unhijack', current_ip)
+                if current_vlan:
+                    manage_switch_acl('unblock', current_ip, current_vlan)
+        response = jsonify({
             'status': device.registration_status,
-            'message': f'Device is {device.registration_status}'
+            'message': f'Device is {device.registration_status}',
+            'current_ip': current_ip,
+            'current_vlan': current_vlan,
+            'current_ssid': current_ssid,
+            'expected_vlan': device.current_vlan,
+            'expected_ssid': expected_ssid,
+            'network_mismatch': network_mismatch
         })
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        return response
     
     # Check if there's a pending registration request
     reg_request = RegistrationRequest.query.filter_by(mac_address=mac_address).order_by(RegistrationRequest.submitted_at.desc()).first()
@@ -1274,9 +1525,13 @@ def api_registration_status():
         }
         if reg_request.status == 'rejected' and reg_request.notes:
             payload['reason'] = reg_request.notes
-        return jsonify(payload)
+        response = jsonify(payload)
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        return response
     
-    return jsonify({'status': 'unregistered', 'message': 'Not registered'})
+    response = jsonify({'status': 'unregistered', 'message': 'Not registered'})
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    return response
 
 
 @app.route('/api/block-status')
@@ -1912,6 +2167,7 @@ def admin_process_request(request_id):
         
         # Detect connection type from IP address
         connection_type, detected_vlan, ssid = detect_connection_type(reg_request.ip_address)
+        network_mismatch = bool(connection_type == 'wifi' and detected_vlan and target_vlan and detected_vlan != target_vlan)
         
         device = Device(
             mac_address=reg_request.mac_address,
@@ -1953,22 +2209,23 @@ def admin_process_request(request_id):
                 if success and device.ip_address:
                     # Delete the old lease to force device to get new IP from registered pool
                     try:
-                        kea.force_lease_renewal(device.mac_address, device.ip_address)
+                        if not network_mismatch:
+                            kea.force_lease_renewal(device.mac_address, device.ip_address)
                     except Exception as e:
                         logger.warning(f"Could not force lease renewal: {e}")
                 if not success:
                     logger.error(f"Failed to register MAC {device.mac_address} in Kea after approval")
                     # Still unhijack even if Kea registration fails (might already be registered)
-                    if device.ip_address:
+                    if device.ip_address and not network_mismatch:
                         manage_dns_hijack('unhijack', device.ip_address)
                 else:
                     # Successfully registered, remove DNS hijacking
-                    if device.ip_address:
+                    if device.ip_address and not network_mismatch:
                         manage_dns_hijack('unhijack', device.ip_address)
             else:
                 logger.error("Kea client unavailable for WiFi device registration")
                 # Unhijack anyway if we have an IP
-                if device.ip_address:
+                if device.ip_address and not network_mismatch:
                     manage_dns_hijack('unhijack', device.ip_address)
         else:
             # Wired: Use RADIUS CoA
@@ -1980,7 +2237,8 @@ def admin_process_request(request_id):
         clear_unregistered_lease(device.mac_address)
         
         # NEW: Unblock the original IP address from the unregistered VLAN
-        manage_switch_acl('unblock', reg_request.ip_address, detected_vlan)
+        if not network_mismatch:
+            manage_switch_acl('unblock', reg_request.ip_address, detected_vlan)
         
         flash(f'Request approved and user {user.email} created', 'success')
         logger.info(f"Admin approved registration request for {user.email}")

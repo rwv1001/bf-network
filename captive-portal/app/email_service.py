@@ -223,7 +223,7 @@ def send_user_blocked_device_notice(to_email, first_name, mac_address, device_na
     return send_email(to_email, subject, html_body, text_body)
 
 
-def send_admin_notification(registration_request, approval_url):
+def send_admin_notification(registration_request, approval_url, current_vlan=None, current_ssid=None):
     """
     Send notification to admin about new registration request
     
@@ -266,6 +266,14 @@ def send_admin_notification(registration_request, approval_url):
                 <td style="padding: 8px;">{registration_request.ip_address}</td>
             </tr>
             <tr>
+                <td style="padding: 8px; font-weight: bold; background-color: #f5f5f5;">Connected VLAN:</td>
+                <td style="padding: 8px;">{current_vlan or 'Unknown'}</td>
+            </tr>
+            <tr>
+                <td style="padding: 8px; font-weight: bold; background-color: #f5f5f5;">Connected SSID:</td>
+                <td style="padding: 8px;">{current_ssid or 'Unknown'}</td>
+            </tr>
+            <tr>
                 <td style="padding: 8px; font-weight: bold; background-color: #f5f5f5;">Submitted:</td>
                 <td style="padding: 8px;">{registration_request.submitted_at.strftime('%Y-%m-%d %H:%M:%S')}</td>
             </tr>
@@ -303,6 +311,8 @@ def send_admin_notification(registration_request, approval_url):
     Phone: {registration_request.phone_number or 'Not provided'}
     MAC Address: {registration_request.mac_address}
     IP Address: {registration_request.ip_address}
+    Connected VLAN: {current_vlan or 'Unknown'}
+    Connected SSID: {current_ssid or 'Unknown'}
     Submitted: {registration_request.submitted_at.strftime('%Y-%m-%d %H:%M:%S')}
     
     To review and approve this request, visit:

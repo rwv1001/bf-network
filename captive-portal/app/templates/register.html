@@ -8,7 +8,7 @@
 <p style="margin-top: 10px; opacity: 0.9;">Please provide your information to access the network</p>
 {% if detected_mac %}
 <p style="margin-top: 10px; font-size: 0.9em; color: #4CAF50;">
-    ✓ Detected: IP {{ detected_ip }} | MAC {{ detected_mac }}
+    ✓ Detected: IP <span id="detectedIp">{{ detected_ip }}</span> | MAC {{ detected_mac }}
 </p>
 {% else %}
 <p style="margin-top: 10px; font-size: 0.9em; color: #f44336;">
@@ -127,11 +127,24 @@ document.addEventListener('DOMContentLoaded', function() {
     const institutionUrl = "{{ institution_url|e }}";
     const institutionButtonText = "{{ institution_button_text|e }}";
     const usagePolicyText = "{{ usage_policy_text|e }}";
+    const portalUrl = "{{ portal_url|e }}";
+    const portalPollUrl = "{{ portal_poll_url|e }}";
+    const portalBase = portalUrl ? portalUrl.replace(/\/$/, '') : window.location.origin;
+    const pollBase = (() => {
+        const preferred = portalPollUrl ? portalPollUrl.replace(/\/$/, '') : window.location.origin;
+        if (window.location.protocol === 'https:' && preferred.startsWith('http:')) {
+            return window.location.origin;
+        }
+        return preferred;
+    })();
+    const apiUrl = (path) => `${pollBase}${path}`;
+    const detectedIpEl = document.getElementById('detectedIp');
     let pollInterval = null;
     let accessInterval = null;
     let registrationSubmitted = false;
     let pollingStarted = false;
     let currentPrefill = null;  // To store submitted data for resubmit
+    let mismatchPolling = false;
 
     // Remove applyPendingPage and loadPendingPage - not needed anymore
 
@@ -230,9 +243,17 @@ document.addEventListener('DOMContentLoaded', function() {
             const message = data.message || 'Registration request submitted. Waiting for approval...';
 
             if (status === 'registered') {
-                showStatus(message + ' Checking access...', 'success');
+                if (data.network_mismatch && data.current_ssid && data.expected_ssid) {
+                    showStatus(
+                        `You have logged onto the wrong WiFi network. To gain full internet access, please disconnect from "${data.current_ssid}" and connect to "${data.expected_ssid}".`,
+                        'error'
+                    );
+                    startMismatchPolling();
+                } else {
+                    showStatus(message + ' Checking access...', 'success');
+                    startAccessCheck();
+                }
                 form.style.display = 'none';  // Hide form on success
-                startAccessCheck();
                 return;
             }
 
@@ -295,17 +316,25 @@ document.addEventListener('DOMContentLoaded', function() {
         pollingStarted = true;
 
         pollInterval = setInterval(function() {
-            fetch('/api/registration-status')
+            fetch(apiUrl('/api/registration-status'))
                 .then(response => response.json())
                 .then(data => {
                     if (data.status === 'registered') {
                         clearInterval(pollInterval);
-                        showStatus('Request approved! Checking internet access...', 'success');
+                        if (data.network_mismatch && data.current_ssid && data.expected_ssid) {
+                            showStatus(
+                                `You have logged onto the wrong WiFi network. To gain full internet access, please disconnect from "${data.current_ssid}" and connect to "${data.expected_ssid}".`,
+                                'error'
+                            );
+                            startMismatchPolling();
+                        } else {
+                            showStatus('Request approved! Checking internet access...', 'success');
+                            startAccessCheck();
+                        }
                         // Optional: Hide pending details/form
                         const details = document.getElementById('submittedDetails');
                         if (details) details.remove();
                         form.style.display = 'none';
-                        startAccessCheck();
                     } else if (data.status === 'rejected') {
                         clearInterval(pollInterval);
                         showStatus(`Request rejected: ${data.reason || 'Please contact admin.'}`, 'error');
@@ -383,12 +412,20 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Your checkInitialStatus - modify to avoid redirects if needed
     const checkInitialStatus = () => {
-        fetch('/api/registration-status')
+        fetch(apiUrl('/api/registration-status'))
             .then(response => response.json())
             .then(data => {
                 if (data.status === 'registered') {
-                    showStatus('Device already registered. Checking access...', 'success');
-                    startAccessCheck();
+                    if (data.network_mismatch && data.current_ssid && data.expected_ssid) {
+                        showStatus(
+                            `You have logged onto the wrong WiFi network. To gain full internet access, please disconnect from "${data.current_ssid}" and connect to "${data.expected_ssid}".`,
+                            'error'
+                        );
+                        startMismatchPolling();
+                    } else {
+                        showStatus('Device already registered. Checking access...', 'success');
+                        startAccessCheck();
+                    }
                 } else if (data.status === 'rejected') {
                     showStatus(`Request rejected: ${data.reason || ''}`, 'error');
                 } else if (data.status === 'pending') {
@@ -400,6 +437,29 @@ document.addEventListener('DOMContentLoaded', function() {
     };
 
     checkInitialStatus();
+
+    function startMismatchPolling() {
+        if (mismatchPolling) {
+            return;
+        }
+        mismatchPolling = true;
+
+        setInterval(() => {
+            fetch(apiUrl('/api/registration-status'))
+                .then(response => response.json())
+                .then(data => {
+                    if (data.current_ip && detectedIpEl) {
+                        detectedIpEl.textContent = data.current_ip;
+                    }
+
+                    if (data.status === 'registered' && !data.network_mismatch) {
+                        showStatus('Device is on the correct network. Checking access...', 'success');
+                        startAccessCheck();
+                    }
+                })
+                .catch(() => {});
+        }, 3000);
+    }
 });
 </script>
 {% endblock %}
