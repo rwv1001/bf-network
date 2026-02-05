@@ -27,15 +27,20 @@
     </div>
     
     <div class="form-group">
-        <label for="status">Access Level <span class="required">*</span></label>
-        <select id="status" name="status" required>
-            <option value="">-- Select Status --</option>
-            {% for status in vlan_map.keys() %}
+        <label>Allowed VLANs (auto-approve)</label>
+        <div style="margin-top: 8px;">
+            {% for status, vlan_id in vlan_map.items() %}
                 {% if status not in ['unregistered', 'restricted'] %}
-                <option value="{{ status }}">{{ status.title() }}</option>
+                <label style="display: inline-flex; align-items: center; gap: 6px; margin-right: 12px; margin-bottom: 6px;">
+                    <input type="checkbox" name="allowed_vlans" value="{{ vlan_id }}">
+                    <span>{{ status.title() }} (VLAN {{ vlan_id }})</span>
+                </label>
                 {% endif %}
             {% endfor %}
-        </select>
+        </div>
+        <small style="color: #666; display: block; margin-top: 5px;">
+            If none selected, VLAN {{ vlan_map['guests'] }} is allowed by default.
+        </small>
     </div>
     
     <div class="form-group">

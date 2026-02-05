@@ -50,7 +50,7 @@ def create_users(count=35):
         if User.query.filter_by(email=email).first():
             continue
         
-        status = random.choice(list(STATUSES.keys()))
+        vlan_id = random.choice(list(STATUSES.values()))
         
         # Random begin date in the past
         begin_date = fake.date_between(start_date='-2y', end_date='today')
@@ -66,11 +66,11 @@ def create_users(count=35):
             first_name=first_name,
             last_name=last_name,
             phone_number=fake.phone_number()[:20],
-            status=status,
             begin_date=begin_date,
             expiry_date=expiry_date,
             notes=fake.sentence() if random.random() < 0.3 else '',
-            created_by='test_script'
+            created_by='test_script',
+            allowed_vlans=str(vlan_id)
         )
         
         db.session.add(user)
@@ -124,7 +124,14 @@ def create_devices(count=45):
             last_seen = fake.date_time_between(start_date=first_seen, end_date='now')
         
         # Get VLAN from user status
-        current_vlan = STATUSES.get(user.status, 40)
+        current_vlan = None
+        if user.allowed_vlans:
+            try:
+                current_vlan = int(user.allowed_vlans.split(',')[0].strip())
+            except (ValueError, IndexError):
+                current_vlan = None
+        if not current_vlan:
+            current_vlan = 40
         
         device = Device(
             mac_address=mac_address,

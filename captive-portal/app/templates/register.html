@@ -145,6 +145,8 @@ document.addEventListener('DOMContentLoaded', function() {
     let pollingStarted = false;
     let currentPrefill = null;  // To store submitted data for resubmit
     let mismatchPolling = false;
+    let mismatchInterval = null;
+    let accessConfirmed = false;
 
     // Remove applyPendingPage and loadPendingPage - not needed anymore
 
@@ -312,6 +314,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Modified polling: Update DOM instead of redirect
     function startPolling() {
+        if (accessConfirmed) return;
         if (pollingStarted) return;
         pollingStarted = true;
 
@@ -353,6 +356,9 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Your existing startAccessCheck and showStatus functions (unchanged)
     function startAccessCheck() {
+        if (accessConfirmed) {
+            return;
+        }
         if (accessInterval) {
             return;
         }
@@ -370,6 +376,15 @@ document.addEventListener('DOMContentLoaded', function() {
             .then(() => {
                 clearInterval(accessInterval);
                 accessInterval = null;
+                accessConfirmed = true;
+                if (pollInterval) {
+                    clearInterval(pollInterval);
+                    pollInterval = null;
+                }
+                if (mismatchInterval) {
+                    clearInterval(mismatchInterval);
+                    mismatchInterval = null;
+                }
                 showStatus('You now have full internet access.', 'success');
             })
             .catch(() => {
@@ -412,9 +427,15 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Your checkInitialStatus - modify to avoid redirects if needed
     const checkInitialStatus = () => {
+        if (accessConfirmed) {
+            return;
+        }
         fetch(apiUrl('/api/registration-status'))
             .then(response => response.json())
             .then(data => {
+                if (accessConfirmed) {
+                    return;
+                }
                 if (data.status === 'registered') {
                     if (data.network_mismatch && data.current_ssid && data.expected_ssid) {
                         showStatus(
@@ -444,10 +465,17 @@ document.addEventListener('DOMContentLoaded', function() {
         }
         mismatchPolling = true;
 
-        setInterval(() => {
+        mismatchInterval = setInterval(() => {
             fetch(apiUrl('/api/registration-status'))
                 .then(response => response.json())
                 .then(data => {
+                    if (accessConfirmed) {
+                        if (mismatchInterval) {
+                            clearInterval(mismatchInterval);
+                            mismatchInterval = null;
+                        }
+                        return;
+                    }
                     if (data.current_ip && detectedIpEl) {
                         detectedIpEl.textContent = data.current_ip;
                     }

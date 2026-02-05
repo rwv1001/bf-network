@@ -37,16 +37,27 @@ services:
       chown -R 0:1000 /kea/sockets || true
       chmod 750 /kea/sockets || true
       mkdir -p /kea/leases
+      chgrp -R ${PORTAL_GID:-1000} /kea/leases || true
+      chmod 2775 /kea/leases || true
       mkdir -p /acl-queue
       chgrp -R ${PORTAL_GID:-1000} /acl-queue || true
       chmod 2775 /acl-queue || true
       chmod 755 /kea/leases || true
-      umask 022
+      umask 0002
       kea-dhcp4 -c /kea/config/dhcp4.json &
       KEA_PID=$!
+      (
+        while true; do
+          if [ -f /kea/leases/kea-leases4.csv ]; then
+            chgrp ${PORTAL_GID:-1000} /kea/leases/kea-leases4.csv || true
+            chmod 664 /kea/leases/kea-leases4.csv || true
+          fi
+          sleep 5
+        done
+      ) &
       sleep 3
       chown 0:1000 /kea/sockets/kea4-ctrl-socket || true
       chmod 660 /kea/sockets/kea4-ctrl-socket || true
-      chmod 644 /kea/leases/kea-leases4.csv || true
+      chmod 664 /kea/leases/kea-leases4.csv || true
       wait $$KEA_PID
       '

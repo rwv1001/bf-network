@@ -46,20 +46,49 @@
         <th>Submitted</th>
         <td>{{ request.submitted_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
     </tr>
+    {% if detected_vlan %}
+    <tr>
+        <th>Detected VLAN</th>
+        <td>{{ detected_vlan }}</td>
+    </tr>
+    {% endif %}
+    {% if detected_ssid %}
+    <tr>
+        <th>Detected SSID</th>
+        <td>{{ detected_ssid }}</td>
+    </tr>
+    {% endif %}
 </table>
 
 <h3 style="color: #667eea; margin-top: 30px;">Approve Access</h3>
+
+{% if existing_user %}
+<div class="info-box" style="margin-top: 15px;">
+    <strong>Existing User</strong>
+    <p style="margin-top: 8px;">
+        Current allowed VLANs: <strong>{{ existing_user_allowed_display or 'none' }}</strong>
+    </p>
+    <p style="margin-top: 8px;">
+        Select the VLAN to approve for this device. That VLAN will be added to the user's
+        allowed list for future auto-approvals.
+    </p>
+</div>
+{% endif %}
 
 <form method="POST" action="{{ url_for('admin_process_request', request_id=request.id) }}">
     <input type="hidden" name="action" value="approve">
     
     <div class="form-group">
-        <label for="status">Access Level <span class="required">*</span></label>
-        <select id="status" name="status" required>
-            <option value="">-- Select Status --</option>
+        <label for="vlan_id">
+            VLAN to Approve <span class="required">*</span>
+        </label>
+        <select id="vlan_id" name="vlan_id" required>
+            <option value="">-- Select VLAN --</option>
             {% for status in vlan_map.keys() %}
                 {% if status not in ['unregistered', 'restricted'] %}
-                <option value="{{ status }}">{{ status.title() }} (VLAN {{ vlan_map[status] }})</option>
+                <option value="{{ vlan_map[status] }}">
+                    VLAN {{ vlan_map[status] }} ({{ status.title() }})
+                </option>
                 {% endif %}
             {% endfor %}
         </select>
@@ -67,12 +96,12 @@
     
     <div class="form-group">
         <label for="begin_date">Begin Date <span class="required">*</span></label>
-        <input type="date" id="begin_date" name="begin_date" required value="{{ now or '2025-11-05' }}">
+        <input type="date" id="begin_date" name="begin_date" required value="{{ (existing_user.begin_date if existing_user else today) }}">
     </div>
     
     <div class="form-group">
         <label for="expiry_date">Expiry Date</label>
-        <input type="date" id="expiry_date" name="expiry_date">
+        <input type="date" id="expiry_date" name="expiry_date" value="{{ existing_user.expiry_date if existing_user and existing_user.expiry_date else '' }}">
         <small style="color: #666; font-size: 13px; display: block; margin-top: 5px;">
             Leave blank for permanent access (no expiration)
         </small>

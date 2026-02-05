@@ -30,18 +30,19 @@
     </div>
     
     <div class="form-group">
-        <label for="status">Access Level <span class="required">*</span></label>
-        <select id="status" name="status" required>
-            {% for status in vlan_map.keys() %}
+        <label>Allowed VLANs (auto-approve)</label>
+        <div style="margin-top: 8px;">
+            {% for status, vlan_id in vlan_map.items() %}
                 {% if status not in ['unregistered', 'restricted'] %}
-                <option value="{{ status }}" {% if status == user.status %}selected{% endif %}>
-                    {{ status.title() }}
-                </option>
+                <label style="display: inline-flex; align-items: center; gap: 6px; margin-right: 12px; margin-bottom: 6px;">
+                    <input type="checkbox" name="allowed_vlans" value="{{ vlan_id }}" {% if vlan_id in allowed_vlans %}checked{% endif %}>
+                    <span>{{ status.title() }} (VLAN {{ vlan_id }})</span>
+                </label>
                 {% endif %}
             {% endfor %}
-        </select>
+        </div>
         <small style="color: #666; display: block; margin-top: 5px;">
-            Changing status will update all active devices to the new VLAN
+            Devices on these VLANs register automatically; others require admin approval.
         </small>
     </div>
     

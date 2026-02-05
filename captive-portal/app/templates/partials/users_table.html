@@ -39,12 +39,7 @@
                     <span class="sort-arrow">{% if users_sort == 'first_name' %}{{ '▼' if users_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
                 </a>
             </th>
-            <th class="sortable {% if users_sort == 'status' %}active{% endif %}">
-                <a href="#" onclick="return sortTable('users', 'status');">
-                    Status
-                    <span class="sort-arrow">{% if users_sort == 'status' %}{{ '▼' if users_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
-                </a>
-            </th>
+            <th>Allowed VLANs</th>
             <th class="sortable {% if users_sort == 'begin_date' %}active{% endif %}">
                 <a href="#" onclick="return sortTable('users', 'begin_date');">
                     Dates
@@ -61,13 +56,11 @@
         <tr>
             <td>{{ user.email }}</td>
             <td>{{ user.full_name }}</td>
-            <td>
-                {% if user.blocked %}
-                <span class="badge badge-restricted">blocked</span>
+            <td style="font-size: 12px;">
+                {% if user.allowed_vlans_display %}
+                    {{ user.allowed_vlans_display }}
                 {% else %}
-                <span class="badge {% if user.is_active %}badge-active{% else %}badge-restricted{% endif %}">
-                    {{ user.status }}
-                </span>
+                    <em style="color: #999;">-</em>
                 {% endif %}
             </td>
             <td style="font-size: 12px;">

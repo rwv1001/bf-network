@@ -17,7 +17,7 @@ class User(db.Model):
     first_name = db.Column(db.String(100))
     last_name = db.Column(db.String(100))
     phone_number = db.Column(db.String(20))
-    status = db.Column(db.String(50), nullable=False)  # friars, staff, students, etc.
+    allowed_vlans = db.Column(db.Text)  # Comma-separated VLAN IDs allowed without approval
     begin_date = db.Column(db.Date, nullable=False)
     expiry_date = db.Column(db.Date, nullable=True)  # NULL means no expiration
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
