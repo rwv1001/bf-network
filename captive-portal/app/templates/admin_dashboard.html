@@ -411,6 +411,7 @@ function searchTable(tableType, searchValue) {
                 </a>
             </th>
             <th>Allowed VLANs</th>
+            <th>Adoptable VLANs</th>
             <th class="sortable {% if users_sort == 'begin_date' %}active{% endif %}">
                 <a href="#" onclick="return sortTable('users', 'begin_date');">
                     Dates
@@ -430,6 +431,13 @@ function searchTable(tableType, searchValue) {
             <td style="font-size: 12px;">
                 {% if user.allowed_vlans_display %}
                     {{ user.allowed_vlans_display }}
+                {% else %}
+                    <em style="color: #999;">-</em>
+                {% endif %}
+            </td>
+            <td style="font-size: 12px;">
+                {% if user.adoptable_vlans_display %}
+                    {{ user.adoptable_vlans_display }}
                 {% else %}
                     <em style="color: #999;">-</em>
                 {% endif %}

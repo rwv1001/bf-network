@@ -179,18 +179,33 @@ class KeaIntegration:
             # This avoids NAK issues when switching from unregistered to registered subnet.
             if ip_address:
                 # Only set IP if explicitly provided (for manual assignments)
-                # Validate IP is in registered pool range (.5-.127)
+                # Validate IP is in registered pool range (.5-.213)
                 ip_parts = ip_address.split('.')
                 if len(ip_parts) == 4:
                     last_octet = int(ip_parts[3])
-                    if not (5 <= last_octet <= 127):
-                        logger.error(f"IP {ip_address} not in registered pool range (.5-.127)")
+                    if not (5 <= last_octet <= 213):
+                        logger.error(f"IP {ip_address} not in registered pool range (.5-.213)")
                         return False
                 reservation["ip-address"] = ip_address
                 logger.info(f"Assigning specific IP {ip_address} to MAC {mac}")
             else:
                 logger.info(f"Creating reservation for MAC {mac} without specific IP - Kea will assign from pool")
             
+            if ip_address:
+                del_cmd = {
+                    "command": "reservation-del",
+                    "service": ["dhcp4"],
+                    "arguments": {
+                        "subnet-id": subnet_id,
+                        "identifier-type": "hw-address",
+                        "identifier": mac
+                    }
+                }
+                try:
+                    self._send_command(del_cmd)
+                except Exception as exc:
+                    logger.warning("Reservation delete failed for %s in VLAN %s: %s", mac, vlan, exc)
+
             # Build command
             command = {
                 "command": "reservation-add",
@@ -349,7 +364,15 @@ class KeaIntegration:
             logger.error(f"Error getting all reservations for VLAN {vlan}: {e}")
             return []
 
-    def set_block_status(self, mac: str, vlan: int, blocked: bool, blocked_ip: Optional[str] = None) -> bool:
+    def set_block_status(
+        self,
+        mac: str,
+        vlan: int,
+        blocked: bool,
+        blocked_ip: Optional[str] = None,
+        keep_ip: bool = False,
+        fixed_ip: Optional[str] = None,
+    ) -> bool:
         """
         Set blocked status for a MAC using user-context for pool assignment.
 
@@ -402,7 +425,10 @@ class KeaIntegration:
                 reservation["user-context"]["blocked"] = False
                 if "blocked-ip" in reservation["user-context"]:
                     reservation["user-context"].pop("blocked-ip", None)
-                reservation.pop("ip-address", None)
+                if keep_ip and fixed_ip:
+                    reservation["ip-address"] = fixed_ip
+                if not keep_ip:
+                    reservation.pop("ip-address", None)
 
             if existing:
                 del_cmd = {
@@ -439,7 +465,7 @@ class KeaIntegration:
     
     def _find_available_registered_ip(self, vlan: int, subnet_id: int) -> Optional[str]:
         """
-        Find an available IP in the registered pool (.5-.127) for the subnet.
+        Find an available IP in the registered pool (.5-.213) for the subnet.
         
         Args:
             subnet_id: Subnet ID (e.g., 10 for 192.168.10.0/24)
@@ -474,8 +500,8 @@ class KeaIntegration:
                 if "ip-address" in res:
                     used_ips.add(res["ip-address"])
             
-            # Find first available IP in registered pool (.5-.127)
-            for last_octet in range(5, 128):
+            # Find first available IP in registered pool (.5-.213)
+            for last_octet in range(5, 214):
                 candidate_ip = f"{base_ip}.{last_octet}"
                 if candidate_ip not in used_ips:
                     return candidate_ip
@@ -485,6 +511,11 @@ class KeaIntegration:
         except Exception as e:
             logger.error(f"Error finding available IP: {e}")
             return None
+
+    def get_available_registered_ip(self, vlan: int) -> Optional[str]:
+        """Return the next available registered-pool IP for a VLAN."""
+        subnet_id = self._resolve_subnet_id(vlan)
+        return self._find_available_registered_ip(vlan, subnet_id)
 
     def _find_available_blocked_ip(self, vlan: int, subnet_id: int) -> Optional[str]:
         """

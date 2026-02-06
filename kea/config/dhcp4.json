@@ -2,7 +2,7 @@
   "Dhcp4": {
     "authoritative": true,
     "interfaces-config": {
-      "interfaces": [ "eth0.10", "eth0.20", "eth0.30", "eth0.40", "eth0.50", "eth0.60", "eth0.99" ],
+      "interfaces": [ "eth0.10", "eth0.20", "eth0.30", "eth0.40", "eth0.50", "eth0.60", "eth0.70", "eth0.99" ],
       "dhcp-socket-type": "raw"
     },
 
@@ -200,6 +200,28 @@
           {
             "name": "routers",
             "data": "192.168.60.1"
+          }
+        ],
+        "reservations": []
+      },
+
+      {
+        "subnet": "192.168.70.0/24",
+        "id": 70,
+        "pools": [
+          {
+            "pool": "192.168.70.5 - 192.168.70.213"
+          },
+          {
+            "pool": "192.168.70.214 - 192.168.70.254",
+            "client-classes": ["BLOCKED"]
+          }
+        ],
+        "interface": "eth0.70",
+        "option-data": [
+          {
+            "name": "routers",
+            "data": "192.168.70.1"
           }
         ],
         "reservations": []

@@ -45,6 +45,23 @@
             Devices on these VLANs register automatically; others require admin approval.
         </small>
     </div>
+
+    <div class="form-group">
+        <label>Adoptable VLANs</label>
+        <div style="margin-top: 8px;">
+            {% for status, vlan_id in vlan_map.items() %}
+                {% if status not in ['unregistered', 'restricted'] %}
+                <label style="display: inline-flex; align-items: center; gap: 6px; margin-right: 12px; margin-bottom: 6px;">
+                    <input type="checkbox" name="adoptable_vlans" value="{{ vlan_id }}" {% if vlan_id in adoptable_vlans %}checked{% endif %}>
+                    <span>{{ status.title() }} (VLAN {{ vlan_id }})</span>
+                </label>
+                {% endif %}
+            {% endfor %}
+        </div>
+        <small style="color: #666; display: block; margin-top: 5px;">
+            Only VLANs also listed in ADOPTABLE_VLANS can be adopted.
+        </small>
+    </div>
     
     <div class="form-group">
         <label for="begin_date">Begin Date <span class="required">*</span></label>

@@ -1,0 +1,228 @@
+{% extends "base.html" %}
+
+{% block title %}Adopt Devices - Network Access Portal{% endblock %}
+
+{% block header %}Adopt Devices{% endblock %}
+
+{% block extra_head %}
+<style>
+    .table-responsive {
+        overflow-x: auto;
+    }
+
+    .container {
+        max-width: 1100px;
+    }
+
+    .adopt-table {
+        min-width: 880px;
+    }
+
+    .adopt-table th,
+    .adopt-table td {
+        vertical-align: top;
+    }
+
+    .adopt-form {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        margin: 0;
+    }
+
+    .adopt-form select,
+    .adopt-form input[type="text"] {
+        padding: 8px;
+        font-size: 14px;
+    }
+
+    .adopt-type {
+        min-width: 180px;
+    }
+
+    .adopt-action {
+        min-width: 140px;
+    }
+
+    .adopt-action:disabled {
+        background: #6c757d;
+        opacity: 0.55;
+        cursor: not-allowed;
+        box-shadow: none;
+        transform: none;
+    }
+
+    .adopt-other {
+        min-width: 180px;
+    }
+
+    .adopt-error {
+        color: #8B0000;
+        font-size: 12px;
+        min-height: 14px;
+    }
+
+    .adopt-fixed {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 13px;
+        color: #555;
+    }
+
+    .adopt-note {
+        font-size: 12px;
+        color: #6c757d;
+        margin-left: 22px;
+    }
+
+    .device-table {
+        min-width: 600px;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+{% if error == 'registered_device' %}
+<div class="alert alert-error">
+    <strong>Registered Device Required</strong>
+    <p>Please connect from a registered device to adopt new devices.</p>
+</div>
+{% elif error == 'no_permissions' %}
+<div class="alert alert-warning">
+    <strong>No Adoption Permissions</strong>
+    <p>Your account does not have permission to adopt devices on any VLANs.</p>
+</div>
+{% endif %}
+
+{% if user %}
+<div class="info-box">
+    <strong>Signed in as:</strong> {{ user.email }}
+</div>
+{% endif %}
+
+{% if registered_devices %}
+<div class="info-box">
+    <strong>Your registered devices</strong>
+    <div class="table-responsive">
+        <table class="device-table">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>MAC Address</th>
+                    <th>IP Address</th>
+                    <th>VLAN</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for device in registered_devices %}
+                <tr>
+                    <td>{{ device.device_name or '-' }}</td>
+                    <td style="font-family: monospace; font-size: 12px;">{{ device.mac_address }}</td>
+                    <td>{{ device.ip_address or '-' }}</td>
+                    <td>{{ device.vlan_label or device.vlan_id }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endif %}
+
+{% if devices %}
+<div class="table-responsive">
+<table class="adopt-table">
+    <thead>
+        <tr>
+            <th>MAC Address</th>
+            <th>IP Address</th>
+            <th>VLAN</th>
+            <th>First Seen</th>
+            <th>Last Seen</th>
+            <th>Age</th>
+            <th>Device Type</th>
+            <th>Action</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for device in devices %}
+        <tr>
+            <td style="font-family: monospace; font-size: 12px;">{{ device.mac_address }}</td>
+            <td>{{ device.ip_address or '-' }}</td>
+            <td>{{ device.vlan_label or device.vlan_id }}</td>
+            <td>{{ device.first_seen.strftime('%Y-%m-%d %H:%M') if device.first_seen else '-' }}</td>
+            <td>{{ device.last_seen.strftime('%Y-%m-%d %H:%M') if device.last_seen else '-' }}</td>
+            <td>{{ device.age or '-' }}</td>
+            <td>
+                <form method="POST" action="{{ url_for('adopt_device') }}" class="adopt-form" id="adopt-form-{{ loop.index }}">
+                    <input type="hidden" name="mac_address" value="{{ device.mac_address }}">
+                    <input type="hidden" name="vlan_id" value="{{ device.vlan_id }}">
+                    <select name="device_type" class="adopt-type" required>
+                        <option value="" disabled selected>Select type</option>
+                        <option value="Phone">Phone</option>
+                        <option value="Tablet">Tablet</option>
+                        <option value="Laptop">Laptop</option>
+                        <option value="Desktop">Desktop</option>
+                        <option value="Other">Other</option>
+                    </select>
+                    <input type="text" name="device_type_other" class="adopt-other" placeholder="If other, describe" maxlength="100" data-adopt-other>
+                    <div class="adopt-error" data-adopt-error>Describe the device type for Other.</div>
+                    <label class="adopt-fixed">
+                        <input type="checkbox" name="fixed_ip" value="1">
+                        Fix IP for this device
+                    </label>
+                    <div class="adopt-note">Uses the current lease IP for this device.</div>
+                </form>
+            </td>
+            <td>
+                <button type="submit" class="btn btn-success btn-small adopt-action" form="adopt-form-{{ loop.index }}">Adopt</button>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+</div>
+
+<script>
+    document.querySelectorAll('.adopt-form').forEach((form) => {
+        const select = form.querySelector('select[name="device_type"]');
+        const other = form.querySelector('[data-adopt-other]');
+        const error = form.querySelector('[data-adopt-error]');
+        const submitButton = document.querySelector(`button[form="${form.id}"]`);
+        if (!select || !other) {
+            return;
+        }
+        const update = () => {
+            const selectedValue = (select.value || '').trim();
+            const isOther = selectedValue.toLowerCase() === 'other';
+            other.required = isOther;
+            if (!isOther) {
+                other.value = '';
+            }
+            if (error) {
+                error.style.display = isOther ? 'block' : 'none';
+            }
+            if (submitButton) {
+                const hasOtherText = other.value.trim().length > 0;
+                const hasSelection = selectedValue.length > 0;
+                submitButton.disabled = !hasSelection || (isOther && !hasOtherText);
+            }
+        };
+        select.addEventListener('change', update);
+        other.addEventListener('input', update);
+        update();
+    });
+</script>
+{% else %}
+{% if not error %}
+<div class="alert alert-info">
+    <strong>No devices available</strong>
+    <p>There are no unadopted devices detected on your adoptable VLANs.</p>
+</div>
+{% endif %}
+{% endif %}
+
+<div style="margin-top: 20px; text-align: center;">
+    <a href="{{ url_for('register') }}" class="btn btn-secondary">Back to Registration</a>
+</div>
+{% endblock %}

@@ -20,6 +20,7 @@ services:
       SWITCH_USER: ${SWITCH_USER:-robert}
       SWITCH_SSH_PORT: ${SWITCH_SSH_PORT:-22}
       SWITCH_KEY_PATH: ${SWITCH_KEY_PATH:-/keys/id_rsa}
+      LFC_INTERVAL: "300"
       ACL_QUEUE_DISABLE: "1"
       ACL_QUEUE_DIR: /acl-queue
       ACL_QUEUE_INTERVAL: "3"
@@ -46,6 +47,15 @@ services:
       umask 0002
       kea-dhcp4 -c /kea/config/dhcp4.json &
       KEA_PID=$!
+      (
+        while true; do
+          if [ -f /kea/leases/kea-leases4.csv ]; then
+            echo "$(date -Iseconds) kea-lfc: running lease file cleanup" >&2
+            /usr/sbin/kea-lfc -c /kea/config/dhcp4.json || true
+          fi
+          sleep ${LFC_INTERVAL:-300}
+        done
+      ) &
       (
         while true; do
           if [ -f /kea/leases/kea-leases4.csv ]; then

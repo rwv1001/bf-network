@@ -148,6 +148,29 @@ def _allowed_vlans_display(user, vlan_map):
     return ', '.join(labels)
 
 
+def _adoptable_vlans_display(user, vlan_map):
+    adoptable = _parse_allowed_vlans(user.adoptable_vlans)
+    if not adoptable:
+        return ''
+    labels = []
+    for vlan_id in sorted(adoptable):
+        labels.append(_label_for_vlan(vlan_id, vlan_map))
+    return ', '.join(labels)
+
+
+def get_adoptable_vlans():
+    raw = os.getenv('ADOPTABLE_VLANS', '').strip()
+    return _parse_allowed_vlans(raw)
+
+
+def _should_hijack_vlan(vlan_id):
+    if not vlan_id:
+        return True
+    return vlan_id not in get_adoptable_vlans()
+
+
+
+
 # Initialize database
 db.init_app(app)
 
@@ -159,7 +182,7 @@ def add_cors_headers(response):
     
     if request.path in cors_paths:
         origin = request.headers.get('Origin', '')
-        logger.info(f"Request Origin: {origin}")
+        
         
         # Whitelist: Add expected origins (e.g., connectivity checks)
         allowed_origins = [
@@ -380,6 +403,106 @@ def get_ip_for_mac(mac_address, subnet_id=None):
         logger.error(f"Error querying Kea for MAC {normalized}: {e}")
 
     return None
+
+
+def _vlan_from_ip(ip_address):
+    if not ip_address:
+        return None
+    try:
+        parts = [int(p) for p in ip_address.split('.')]
+        if len(parts) != 4:
+            return None
+        if parts[0] != 192 or parts[1] != 168:
+            return None
+        return parts[2]
+    except Exception:
+        return None
+
+
+def _load_adoptable_leases(vlan_ids):
+    if not vlan_ids:
+        return []
+
+    lease_file = '/kea/leases/kea-leases4.csv'
+    now = datetime.utcnow()
+    adoptable_by_mac = {}
+    existing_leases = {
+        lease.mac_address: lease
+        for lease in UnregisteredLease.query.all()
+    }
+
+    try:
+        with open(lease_file, 'r') as f:
+            for line in f:
+                if line.startswith('address,'):
+                    continue
+                fields = line.strip().split(',')
+                if len(fields) < 5:
+                    continue
+                ip_address = fields[0]
+                mac_address = fields[1].lower()
+                vlan_id = _vlan_from_ip(ip_address)
+                if not vlan_id or vlan_id not in vlan_ids:
+                    continue
+
+                expire_raw = fields[4].strip() if len(fields) > 4 else ''
+                expires_at = None
+                if expire_raw:
+                    try:
+                        expires_at = datetime.utcfromtimestamp(int(expire_raw))
+                    except Exception:
+                        expires_at = None
+                if not expires_at:
+                    expires_at = now + timedelta(hours=1)
+
+                upsert_unregistered_lease(
+                    mac_address,
+                    ip_address,
+                    expires_at,
+                    commit=False,
+                )
+
+                existing = existing_leases.get(mac_address)
+                first_seen = existing.created_at if existing else now
+                last_seen = existing.updated_at if existing else now
+
+                current = adoptable_by_mac.get(mac_address)
+                if current:
+                    current['first_seen'] = min(current['first_seen'], first_seen)
+                    current['last_seen'] = max(current['last_seen'], last_seen)
+                    if expires_at and (not current['expires_at'] or expires_at > current['expires_at']):
+                        current['expires_at'] = expires_at
+                        current['ip_address'] = ip_address
+                        current['vlan_id'] = vlan_id
+                    continue
+
+                adoptable_by_mac[mac_address] = {
+                    'mac_address': mac_address,
+                    'ip_address': ip_address,
+                    'vlan_id': vlan_id,
+                    'first_seen': first_seen,
+                    'last_seen': last_seen,
+                    'expires_at': expires_at,
+                }
+    except FileNotFoundError:
+        logger.warning("Kea lease file not found for adoptable scan: %s", lease_file)
+    except Exception as exc:
+        logger.error("Failed to read adoptable leases: %s", exc)
+
+    db.session.commit()
+    return list(adoptable_by_mac.values())
+
+
+def _current_user_from_device():
+    mac_address = get_client_mac()
+    if not mac_address:
+        return None, None
+    device = Device.query.filter_by(mac_address=mac_address).first()
+    if not device or device.registration_status != 'registered':
+        return None, None
+    if not device.user or device.user.blocked or not device.user.is_active:
+        return None, None
+    return device.user, device
 
 
 def get_client_ip():
@@ -623,7 +746,7 @@ def reset_test_data():
     db.session.commit()
 
 
-def upsert_unregistered_lease(mac_address, ip_address, expires_at):
+def upsert_unregistered_lease(mac_address, ip_address, expires_at, commit=True):
     if not mac_address or not ip_address or not expires_at:
         return
 
@@ -638,7 +761,8 @@ def upsert_unregistered_lease(mac_address, ip_address, expires_at):
             expires_at=expires_at
         )
         db.session.add(lease)
-    db.session.commit()
+    if commit:
+        db.session.commit()
 
 
 def clear_unregistered_lease(mac_address):
@@ -908,7 +1032,8 @@ def apply_device_block(device, flash_messages=False):
 
     if device.ip_address and device.current_vlan:
         acl_success = manage_switch_acl('block', device.ip_address, device.current_vlan)
-        manage_dns_hijack('hijack', device.ip_address)
+        if _should_hijack_vlan(device.current_vlan):
+            manage_dns_hijack('hijack', device.ip_address)
         if flash_messages:
             if acl_success:
                 flash(f'Device {device.mac_address} blocked. Internet access denied.', 'success')
@@ -946,10 +1071,12 @@ def apply_device_unblock(device, flash_messages=False):
 
     if device.ip_address and device.current_vlan:
         acl_success = manage_switch_acl('unblock', device.ip_address, device.current_vlan)
-        manage_dns_hijack('unhijack', device.ip_address)
+        if _should_hijack_vlan(device.current_vlan):
+            manage_dns_hijack('unhijack', device.ip_address)
         if blocked_ip and blocked_ip != device.ip_address:
             manage_switch_acl('unblock', blocked_ip, device.current_vlan)
-            manage_dns_hijack('unhijack', blocked_ip)
+            if _should_hijack_vlan(device.current_vlan):
+                manage_dns_hijack('unhijack', blocked_ip)
 
         if flash_messages:
             if acl_success:
@@ -968,7 +1095,7 @@ def apply_device_unblock(device, flash_messages=False):
 @app.route('/', methods=['GET', 'POST', 'OPTIONS'])
 def index():
     origin = request.headers.get('Origin', '')  # Get the request's Origin
-    logger.info(f"Request Origin: {origin}")
+    
     
     # Optional: Validate against a whitelist (add expected origins)
     allowed_origins = [
@@ -1000,6 +1127,12 @@ def index():
         device = Device.query.filter_by(mac_address=mac_address).first()
         if device and device.registration_status == 'blocked':
             return redirect(_build_portal_url(url_for('blocked_page')))
+
+        if device and device.registration_status == 'registered' and device.user:
+            user_adoptable = _parse_allowed_vlans(device.user.adoptable_vlans)
+            adoptable_global = get_adoptable_vlans()
+            if user_adoptable & adoptable_global:
+                return redirect(_build_portal_url(url_for('adopt_devices')))
     
     return redirect(_build_portal_url(url_for('register')))
 
@@ -1007,7 +1140,7 @@ def index():
 @app.route('/blocked', methods=['GET', 'POST', 'OPTIONS'])
 def blocked_page():
     origin = request.headers.get('Origin', '')  # Get the request's Origin
-    logger.info(f"Request Origin: {origin}")
+    
     
     # Optional: Validate against a whitelist (add expected origins)
     allowed_origins = [
@@ -1084,7 +1217,7 @@ def ios_captive_success():
 def windows_captive_portal_detection():
     origin = request.headers.get('Origin', '')  # Get the request's Origin
 
-    logger.info(f"Request Origin: {origin}")
+    
     
     # Optional: Validate against a whitelist (add expected origins)
     allowed_origins = [
@@ -1130,7 +1263,7 @@ def register():
     logger.info("Test message")
     logger.warning(f"Full headers: {request.headers}")
     origin = request.headers.get('Origin', '')  # Get the request's Origin
-    logger.info(f"Request Origin: {origin}")
+    
     
     # Optional: Validate against a whitelist (add expected origins)
     allowed_origins = [
@@ -1340,7 +1473,7 @@ def register():
             else:
                 send_coa_change(mac_address, target_vlan)
 
-            if ip_address and not network_mismatch:
+            if ip_address and not network_mismatch and _should_hijack_vlan(target_vlan or detected_vlan):
                 manage_dns_hijack('unhijack', ip_address)
             clear_unregistered_lease(mac_address)
             if ip_address and detected_vlan and not network_mismatch:
@@ -1506,6 +1639,286 @@ def status():
     return render_template('status.html', device=device, access_label=access_label)
 
 
+def _format_age_delta(delta):
+    if not delta:
+        return ''
+    total_seconds = int(delta.total_seconds())
+    if total_seconds < 0:
+        total_seconds = 0
+    days = total_seconds // 86400
+    hours = (total_seconds % 86400) // 3600
+    if days:
+        return f"{days}d {hours}h"
+    return f"{hours}h"
+
+
+def _log_kea_host_reservation(mac_address, vlan_id, label):
+    if not mac_address or not vlan_id:
+        return
+    try:
+        row = db.session.execute(
+            text(
+                "SELECT ipv4_address, host(inet '0.0.0.0' + ipv4_address) AS ip "
+                "FROM hosts "
+                "WHERE dhcp4_subnet_id = :subnet_id "
+                "AND dhcp_identifier = decode(replace(:mac, ':', ''), 'hex')"
+            ),
+            {"subnet_id": vlan_id, "mac": mac_address},
+        ).fetchone()
+        if row:
+            logger.info(
+                "Kea hosts table %s for %s vlan %s: ipv4_address=%s ip=%s",
+                label,
+                mac_address,
+                vlan_id,
+                row.ipv4_address,
+                row.ip,
+            )
+        else:
+            logger.info(
+                "Kea hosts table %s for %s vlan %s: no row",
+                label,
+                mac_address,
+                vlan_id,
+            )
+    except Exception as exc:
+        logger.warning(
+            "Kea hosts table check failed for %s vlan %s: %s",
+            mac_address,
+            vlan_id,
+            exc,
+        )
+
+
+def _is_registered_pool_ip(ip_address, vlan_id):
+    if not ip_address or not vlan_id:
+        return False
+    parts = ip_address.split('.')
+    if len(parts) != 4:
+        return False
+    try:
+        return int(parts[2]) == int(vlan_id) and 5 <= int(parts[3]) <= 213
+    except ValueError:
+        return False
+
+
+@app.route('/adopt')
+def adopt_devices():
+    user, device = _current_user_from_device()
+    if not user:
+        return render_template(
+            'adopt_devices.html',
+            user=None,
+            devices=[],
+            registered_devices=[],
+            error='registered_device',
+        )
+
+    adoptable_global = get_adoptable_vlans()
+    user_adoptable = _parse_allowed_vlans(user.adoptable_vlans)
+    allowed_vlans = sorted(adoptable_global & user_adoptable)
+    if not allowed_vlans:
+        return render_template(
+            'adopt_devices.html',
+            user=user,
+            devices=[],
+            registered_devices=[],
+            error='no_permissions',
+        )
+
+    candidates = _load_adoptable_leases(set(allowed_vlans))
+
+    adoptable_devices = []
+    for entry in candidates:
+        existing = Device.query.filter_by(
+            mac_address=entry['mac_address'],
+            registration_status='registered',
+        ).first()
+        if existing:
+            continue
+
+        first_seen = entry['first_seen']
+        last_seen = entry['last_seen']
+        age = _format_age_delta(datetime.utcnow() - first_seen) if first_seen else ''
+
+        if entry.get('ip_address') and entry.get('vlan_id'):
+            manage_switch_acl('block', entry['ip_address'], entry['vlan_id'])
+
+        adoptable_devices.append({
+            'mac_address': entry['mac_address'],
+            'ip_address': entry['ip_address'],
+            'vlan_id': entry['vlan_id'],
+            'first_seen': first_seen,
+            'last_seen': last_seen,
+            'age': age,
+        })
+
+    vlan_map = get_vlan_map()
+    for item in adoptable_devices:
+        item['vlan_label'] = _label_for_vlan(item['vlan_id'], vlan_map)
+
+    registered_devices = Device.query.filter_by(
+        user_id=user.id,
+        registration_status='registered',
+    ).order_by(Device.device_name.asc(), Device.mac_address.asc()).all()
+
+    registered_device_rows = []
+    for entry in registered_devices:
+        registered_device_rows.append({
+            'device_name': entry.device_name,
+            'mac_address': entry.mac_address,
+            'ip_address': entry.ip_address,
+            'vlan_id': entry.current_vlan,
+            'vlan_label': _label_for_vlan(entry.current_vlan, vlan_map),
+        })
+
+    return render_template(
+        'adopt_devices.html',
+        user=user,
+        devices=adoptable_devices,
+        registered_devices=registered_device_rows,
+        error=None,
+    )
+
+
+@app.route('/adopt', methods=['POST'])
+def adopt_device():
+    user, device = _current_user_from_device()
+    if not user:
+        flash('Please connect from a registered device to adopt devices.', 'error')
+        return redirect(url_for('adopt_devices'))
+
+    mac_address = (request.form.get('mac_address') or '').strip().lower()
+    vlan_id_raw = (request.form.get('vlan_id') or '').strip()
+    device_type_raw = (request.form.get('device_type') or '').strip()
+    device_type_other = (request.form.get('device_type_other') or '').strip()
+    fixed_ip_requested = (request.form.get('fixed_ip') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+    try:
+        vlan_id = int(vlan_id_raw)
+    except ValueError:
+        vlan_id = None
+
+    device_label = ''
+    if device_type_raw:
+        if device_type_raw.lower() == 'other':
+            if not device_type_other:
+                flash('Please describe the device type when selecting Other.', 'error')
+                return redirect(url_for('adopt_devices'))
+            device_label = device_type_other
+        else:
+            device_label = device_type_raw
+    device_label = re.sub(r'\s+', ' ', device_label).strip()
+    if len(device_label) > 100:
+        device_label = device_label[:100]
+
+    if not mac_address or not vlan_id:
+        flash('Missing device details for adoption.', 'error')
+        return redirect(url_for('adopt_devices'))
+
+    adoptable_global = get_adoptable_vlans()
+    user_adoptable = _parse_allowed_vlans(user.adoptable_vlans)
+    if vlan_id not in adoptable_global or vlan_id not in user_adoptable:
+        flash('You do not have permission to adopt devices on that VLAN.', 'error')
+        return redirect(url_for('adopt_devices'))
+
+    lease = UnregisteredLease.query.filter_by(mac_address=mac_address).first()
+    ip_address = lease.ip_address if lease else None
+
+    existing = Device.query.filter_by(mac_address=mac_address).first()
+    if not ip_address and existing and existing.ip_address:
+        ip_address = existing.ip_address
+
+    reserved_ip = ip_address
+    if fixed_ip_requested and not ip_address:
+        kea = get_kea()
+        if kea:
+            try:
+                reserved_ip = kea.get_lease_ip_for_mac(mac_address, subnet_id=vlan_id) or \
+                    kea.get_lease_ip_for_mac(mac_address)
+            except Exception as exc:
+                logger.warning("Failed to lookup lease IP for %s: %s", mac_address, exc)
+
+    if fixed_ip_requested and reserved_ip and not _is_registered_pool_ip(reserved_ip, vlan_id):
+        kea = get_kea()
+        if kea:
+            try:
+                reserved_ip = kea.get_available_registered_ip(vlan_id)
+            except Exception as exc:
+                logger.warning("Failed to allocate registered IP for %s: %s", mac_address, exc)
+
+    if fixed_ip_requested and not reserved_ip:
+        flash('Cannot fix IP because no current lease was found.', 'error')
+        return redirect(url_for('adopt_devices'))
+    if existing and existing.registration_status == 'registered' and existing.user_id != user.id:
+        flash('That device is already adopted by another user.', 'error')
+        return redirect(url_for('adopt_devices'))
+
+    if fixed_ip_requested and reserved_ip:
+        ip_address = reserved_ip
+
+    if existing:
+        existing.user_id = user.id
+        existing.registration_status = 'registered'
+        existing.current_vlan = vlan_id
+        existing.connection_type = 'wifi'
+        existing.ssid = get_ssid_for_vlan(vlan_id)
+        if device_label:
+            existing.device_name = device_label
+        if ip_address:
+            existing.ip_address = ip_address
+        existing.unregister_token = existing.unregister_token or secrets.token_urlsafe(32)
+        db.session.commit()
+        adopted_device = existing
+    else:
+        adopted_device = Device(
+            mac_address=mac_address,
+            user_id=user.id,
+            device_name=device_label or 'adopted-device',
+            ip_address=ip_address,
+            registration_status='registered',
+            current_vlan=vlan_id,
+            connection_type='wifi',
+            ssid=get_ssid_for_vlan(vlan_id),
+            unregister_token=secrets.token_urlsafe(32),
+        )
+        db.session.add(adopted_device)
+        db.session.commit()
+
+    if ip_address:
+        manage_switch_acl('unblock', ip_address, vlan_id)
+        manage_dns_hijack('unhijack', ip_address)
+
+    kea = get_kea()
+    if kea:
+        try:
+            hostname = device_label or 'device'
+            reserved_ip = reserved_ip if fixed_ip_requested else None
+            success = kea.register_mac(mac=mac_address, vlan=vlan_id, hostname=hostname, ip_address=reserved_ip)
+            if fixed_ip_requested:
+                _log_kea_host_reservation(mac_address, vlan_id, 'after reservation-add')
+            if not success:
+                flash('Adopted device, but Kea reservation failed. Please re-try or check Kea logs.', 'warning')
+            kea.set_block_status(
+                mac_address,
+                vlan_id,
+                False,
+                keep_ip=fixed_ip_requested,
+                fixed_ip=reserved_ip if fixed_ip_requested else None,
+            )
+            if fixed_ip_requested:
+                _log_kea_host_reservation(mac_address, vlan_id, 'after unblock')
+        except Exception as exc:
+            logger.warning("Failed to clear Kea block for %s: %s", mac_address, exc)
+
+    clear_unregistered_lease(mac_address)
+
+    flash(
+        f'Device {mac_address} adopted successfully. ACL block and DNS hijack removed.',
+        'success',
+    )
+    return redirect(url_for('adopt_devices'))
+
+
 @app.route('/pending-approval')
 def pending_approval():
     """Pending approval page for registrations requiring admin review."""
@@ -1603,7 +2016,7 @@ def registered_success():
 def registration_status():
     logger.info(f"Full headers: {request.headers}")
     origin = request.headers.get('Origin', '')
-    logger.info(f"Request Origin: {origin}")
+    
     
     # Whitelist: Add expected origins (expand based on browser Network tab if mismatch)
     allowed_origins = [
@@ -1646,7 +2059,8 @@ def registration_status():
 
         if device.registration_status == 'registered' and not network_mismatch and current_ip:
             if not _is_blocked_pool_ip(current_ip):
-                manage_dns_hijack('unhijack', current_ip)
+                if _should_hijack_vlan(current_vlan):
+                    manage_dns_hijack('unhijack', current_ip)
                 if current_vlan:
                     manage_switch_acl('unblock', current_ip, current_vlan)
         response = jsonify({
@@ -1784,13 +2198,21 @@ def unregister(token):
         if vlan_id:
             manage_switch_acl('block', device.ip_address, vlan_id)
 
-        manage_dns_hijack('hijack', device.ip_address)
-        logger.info(
-            "DNS hijacked/ACL blocked for unregistered device %s at %s until %s",
-            mac_address,
-            device.ip_address,
-            lease_expiry,
-        )
+        if _should_hijack_vlan(vlan_id):
+            manage_dns_hijack('hijack', device.ip_address)
+            logger.info(
+                "DNS hijacked/ACL blocked for unregistered device %s at %s until %s",
+                mac_address,
+                device.ip_address,
+                lease_expiry,
+            )
+        else:
+            logger.info(
+                "ACL blocked for unregistered device %s at %s until %s",
+                mac_address,
+                device.ip_address,
+                lease_expiry,
+            )
     
     flash(f'Device {mac_address} has been unregistered successfully. Access has been restricted.', 'success')
     logger.info(f"Device {mac_address} (user: {user_email}) unregistered via email token")
@@ -1997,6 +2419,7 @@ def admin_dashboard():
                 User.last_name.ilike(f'%{users_search}%'),
                 User.phone_number.ilike(f'%{users_search}%'),
                 User.allowed_vlans.ilike(f'%{users_search}%'),
+                User.adoptable_vlans.ilike(f'%{users_search}%'),
                 Device.mac_address.ilike(f'%{users_search}%')
             )
         )
@@ -2024,6 +2447,7 @@ def admin_dashboard():
     vlan_map = get_vlan_map()
     for user in users:
         user.allowed_vlans_display = _allowed_vlans_display(user, vlan_map)
+        user.adoptable_vlans_display = _adoptable_vlans_display(user, vlan_map)
     
     # Get devices with their users for display with search filter
     devices_query = db.session.query(Device, User).join(User, Device.user_id == User.id, isouter=True)
@@ -2171,6 +2595,7 @@ def admin_add_user():
         phone_number = request.form.get('phone_number', '').strip()
         begin_date = datetime.strptime(request.form.get('begin_date'), '%Y-%m-%d').date()
         allowed_vlans_input = request.form.getlist('allowed_vlans')
+        adoptable_vlans_input = request.form.getlist('adoptable_vlans')
         
         # Expiry date is optional - None means no expiration
         expiry_date_str = request.form.get('expiry_date', '').strip()
@@ -2194,6 +2619,8 @@ def admin_add_user():
             if default_vlan:
                 allowed_vlans.add(default_vlan)
 
+        adoptable_vlans = _parse_allowed_vlans(','.join(adoptable_vlans_input))
+
         user = User(
             email=email,
             first_name=first_name,
@@ -2203,7 +2630,8 @@ def admin_add_user():
             expiry_date=expiry_date,
             notes=notes,
             created_by=current_user.username,
-            allowed_vlans=_format_allowed_vlans(allowed_vlans)
+            allowed_vlans=_format_allowed_vlans(allowed_vlans),
+            adoptable_vlans=_format_allowed_vlans(adoptable_vlans)
         )
         
         db.session.add(user)
@@ -2229,6 +2657,7 @@ def admin_edit_user(user_id):
         user.phone_number = request.form.get('phone_number', '').strip()
         user.begin_date = datetime.strptime(request.form.get('begin_date'), '%Y-%m-%d').date()
         allowed_vlans_input = request.form.getlist('allowed_vlans')
+        adoptable_vlans_input = request.form.getlist('adoptable_vlans')
         apply_status_to_devices = False
         
         # Expiry date is optional - None means no expiration
@@ -2243,6 +2672,9 @@ def admin_edit_user(user_id):
             if default_vlan:
                 allowed_vlans.add(default_vlan)
         user.allowed_vlans = _format_allowed_vlans(allowed_vlans)
+
+        adoptable_vlans = _parse_allowed_vlans(','.join(adoptable_vlans_input))
+        user.adoptable_vlans = _format_allowed_vlans(adoptable_vlans)
         
         db.session.commit()
         
@@ -2263,7 +2695,14 @@ def admin_edit_user(user_id):
         return redirect(url_for('admin_dashboard'))
     
     allowed_vlans = _parse_allowed_vlans(user.allowed_vlans)
-    return render_template('admin_edit_user.html', user=user, vlan_map=get_vlan_map(), allowed_vlans=allowed_vlans)
+    adoptable_vlans = _parse_allowed_vlans(user.adoptable_vlans)
+    return render_template(
+        'admin_edit_user.html',
+        user=user,
+        vlan_map=get_vlan_map(),
+        allowed_vlans=allowed_vlans,
+        adoptable_vlans=adoptable_vlans,
+    )
 
 
 @app.route('/admin/users/<int:user_id>/block', methods=['POST'])
@@ -2454,22 +2893,22 @@ def admin_process_request(request_id):
                 if not success:
                     logger.error(f"Failed to register MAC {device.mac_address} in Kea after approval")
                     # Still unhijack even if Kea registration fails (might already be registered)
-                    if device.ip_address and not network_mismatch:
+                    if device.ip_address and not network_mismatch and _should_hijack_vlan(target_vlan):
                         manage_dns_hijack('unhijack', device.ip_address)
                 else:
                     # Successfully registered, remove DNS hijacking
-                    if device.ip_address and not network_mismatch:
+                    if device.ip_address and not network_mismatch and _should_hijack_vlan(target_vlan):
                         manage_dns_hijack('unhijack', device.ip_address)
             else:
                 logger.error("Kea client unavailable for WiFi device registration")
                 # Unhijack anyway if we have an IP
-                if device.ip_address and not network_mismatch:
+                if device.ip_address and not network_mismatch and _should_hijack_vlan(target_vlan):
                     manage_dns_hijack('unhijack', device.ip_address)
         else:
             # Wired: Use RADIUS CoA
             send_coa_change(device.mac_address, target_vlan)
             # Remove DNS hijacking for wired devices too
-            if device.ip_address:
+            if device.ip_address and _should_hijack_vlan(target_vlan):
                 manage_dns_hijack('unhijack', device.ip_address)
 
         clear_unregistered_lease(device.mac_address)
@@ -2553,7 +2992,8 @@ def admin_delete_device(device_id):
     # Remove any ACL/DNS hijack tied to the device IP before deletion
     if ip_address and vlan_id:
         manage_switch_acl('unblock', ip_address, vlan_id)
-        manage_dns_hijack('unhijack', ip_address)
+        if _should_hijack_vlan(vlan_id):
+            manage_dns_hijack('unhijack', ip_address)
 
     # Unregister from network first
     if device.connection_type == 'wifi':
@@ -2574,10 +3014,21 @@ def admin_delete_device(device_id):
         if vlan_id:
             manage_switch_acl('block', ip_address, vlan_id)
 
-        manage_dns_hijack('hijack', ip_address)
-        logger.info(
-            f"DNS hijacked/ACL blocked for deleted device {mac_address} at {ip_address} until {lease_expiry}"
-        )
+        if _should_hijack_vlan(vlan_id):
+            manage_dns_hijack('hijack', ip_address)
+            logger.info(
+                "DNS hijacked/ACL blocked for deleted device %s at %s until %s",
+                mac_address,
+                ip_address,
+                lease_expiry,
+            )
+        else:
+            logger.info(
+                "ACL blocked for deleted device %s at %s until %s",
+                mac_address,
+                ip_address,
+                lease_expiry,
+            )
     
     db.session.delete(device)
     db.session.commit()
