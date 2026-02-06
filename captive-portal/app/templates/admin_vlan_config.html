@@ -216,11 +216,6 @@
             {% endif %}
         {% endwith %}
 
-        <div class="info-box">
-            <p><strong>Note:</strong> Auto-approval allows devices to be automatically approved when registering from these VLANs. 
-            Unchecked VLANs will require manual admin approval before devices can be activated.</p>
-        </div>
-
         <form method="POST" action="{{ url_for('admin_vlan_config') }}">
             <div class="config-section">
                 <h2 class="section-title">VLAN Mappings</h2>
@@ -242,16 +237,6 @@
                                    max="4094" 
                                    required>
                         </div>
-                        
-                        {% if status not in ['restricted', 'unregistered'] %}
-                        <div class="checkbox-group">
-                            <input type="checkbox" 
-                                   id="auto_approve_{{ status }}" 
-                                   name="auto_approve_{{ status }}" 
-                                   {% if vlan_map[status]|int in auto_approve_vlans %}checked{% endif %}>
-                            <label for="auto_approve_{{ status }}">Enable auto-approval</label>
-                        </div>
-                        {% endif %}
                         
                         <div class="description">
                             {% if status == 'friars' %}

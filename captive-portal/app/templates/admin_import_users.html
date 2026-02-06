@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+
+{% block title %}Import Users - Network Access Portal{% endblock %}
+
+{% block header %}Import Users and Devices{% endblock %}
+
+{% block content %}
+{% if errors %}
+<div class="form-group" style="margin-bottom: 20px;">
+    <div class="alert alert-warning">
+        <strong>Issues found:</strong>
+        <ul style="margin: 8px 0 0 20px;">
+            {% for message in errors %}
+            <li>{{ message }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+</div>
+{% endif %}
+
+<div class="form-group" style="margin-bottom: 20px;">
+    <p>Upload a CSV file to create or update users and optionally register devices.</p>
+    <p><strong>Required:</strong> Email column.</p>
+    <p><strong>Optional:</strong> MAC address, first name, second name, device type, VLAN ID, and per-VLAN flags.</p>
+    <p><strong>Per-VLAN flags:</strong> Use columns like <code>VLAN10Allowed</code>, <code>VLAN20Allowed</code>, <code>VLAN10Adoptable</code>, <code>VLAN20Adoptable</code> with values Y/N.</p>
+</div>
+
+<div class="form-group" style="margin-bottom: 25px;">
+    <h3 style="margin-bottom: 10px;">Download CSV Template</h3>
+    <p>Select which fields to include. Email is required and always included.</p>
+    <p>The template includes two example rows (lines 2 and 3) showing formats like Y/N and VLAN IDs.</p>
+    <form method="GET" action="{{ url_for('admin_import_users_template') }}">
+        <input type="hidden" name="field" value="Email">
+        <div style="display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 10px;">
+            <label style="display: inline-flex; align-items: center; gap: 6px;">
+                <input type="checkbox" checked disabled>
+                Email (required)
+            </label>
+            {% for key, label in base_fields %}
+                {% if label != 'Email' %}
+                <label style="display: inline-flex; align-items: center; gap: 6px;">
+                    <input type="checkbox" name="field" value="{{ label }}" checked>
+                    {{ label }}
+                </label>
+                {% endif %}
+            {% endfor %}
+        </div>
+        <div style="margin-top: 10px;">
+            <strong>VLAN flags (optional)</strong>
+            <div style="display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px;">
+                {% for key, label in vlan_fields %}
+                <label style="display: inline-flex; align-items: center; gap: 6px;">
+                    <input type="checkbox" name="field" value="{{ label }}">
+                    {{ label }}
+                </label>
+                {% endfor %}
+            </div>
+        </div>
+        <div style="margin-top: 12px;">
+            <button type="submit" class="btn btn-secondary">Download Template CSV</button>
+        </div>
+    </form>
+</div>
+
+<form method="POST" action="{{ url_for('admin_import_users') }}" enctype="multipart/form-data">
+    <div class="form-group">
+        <label for="csv_file">CSV File <span class="required">*</span></label>
+        <input type="file" id="csv_file" name="csv_file" accept=".csv" required>
+    </div>
+
+    <div class="form-group">
+        <label style="display: inline-flex; align-items: center; gap: 8px;">
+            <input type="checkbox" name="dry_run" value="1">
+            Dry run (validate only, do not save)
+        </label>
+    </div>
+
+    <div style="margin-top: 20px;">
+        <button type="submit" class="btn">Import CSV</button>
+        <a href="{{ url_for('admin_dashboard') }}" class="btn btn-secondary" style="margin-left: 10px;">Cancel</a>
+    </div>
+</form>
+
+{% endblock %}

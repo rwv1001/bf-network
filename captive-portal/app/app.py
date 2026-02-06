@@ -11,7 +11,9 @@ import re
 import shlex
 import shutil
 import json
-from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, abort
+import csv
+import io
+from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, abort, Response
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime, timedelta
@@ -122,6 +124,73 @@ def _parse_allowed_vlans(raw):
         except ValueError:
             continue
     return allowed
+
+
+def _normalize_mac_input(raw):
+    if not raw:
+        return None
+    cleaned = re.sub(r'[^0-9a-fA-F]', '', str(raw)).lower()
+    if len(cleaned) != 12:
+        return None
+    return ':'.join(cleaned[i:i + 2] for i in range(0, 12, 2))
+
+
+def _parse_csv_bool(value):
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    if text in {'y', 'yes', '1', 'true', 'allow', 'allowed'}:
+        return True
+    if text in {'n', 'no', '0', 'false', 'deny', 'denied'}:
+        return False
+    return None
+
+
+def _normalize_csv_header(value):
+    if value is None:
+        return ''
+    return re.sub(r'\s+', ' ', str(value)).strip().lower()
+
+
+def _csv_template_fields(vlan_map):
+    base_fields = [
+        ('email', 'Email'),
+        ('first_name', 'First Name'),
+        ('last_name', 'Second Name'),
+        ('phone_number', 'Phone Number'),
+        ('mac_address', 'MAC Address'),
+        ('device_type', 'Device Type'),
+        ('vlan_id', 'VLAN ID'),
+    ]
+    vlan_fields = []
+    for status, vlan_id in sorted(vlan_map.items(), key=lambda item: item[1]):
+        if status in {'restricted', 'unregistered'}:
+            continue
+        vlan_fields.append((f'vlan{vlan_id}_allowed', f'VLAN{vlan_id}Allowed'))
+        vlan_fields.append((f'vlan{vlan_id}_adoptable', f'VLAN{vlan_id}Adoptable'))
+    return base_fields, vlan_fields
+
+
+def _csv_template_example_value(header, row_index):
+    examples = {
+        'Email': ('robert@example.com', 'jane@example.com'),
+        'First Name': ('Robert', 'Jane'),
+        'Second Name': ('Verrill', 'Doe'),
+        'Phone Number': ('555-0100', '555-0199'),
+        'MAC Address': ('AA:BB:CC:DD:EE:FF', ''),
+        'Device Type': ('laptop', 'phone'),
+        'VLAN ID': ('20', '10'),
+    }
+    if header in examples:
+        return examples[header][row_index]
+
+    match = re.match(r'^VLAN(\d+)(Allowed|Adoptable)$', header)
+    if match:
+        return 'Y' if row_index == 0 else 'N'
+
+    return ''
 
 
 def _email_domain(email):
@@ -316,16 +385,6 @@ def get_vlan_map():
         'restricted': int(os.getenv('VLAN_RESTRICTED', 90)),
         'unregistered': int(os.getenv('VLAN_UNREGISTERED', 99)),
     }
-
-def get_auto_approve_vlans():
-    """Get list of VLANs that auto-approve from settings"""
-    auto_approve_str = Setting.get_value('auto_approve_vlans', '40,30,60')
-    return [int(v.strip()) for v in auto_approve_str.split(',') if v.strip()]
-
-def get_admin_approval_vlans():
-    """Get list of VLANs that require admin approval from settings"""
-    admin_approval_str = Setting.get_value('admin_approval_vlans', '10,20,50')
-    return [int(v.strip()) for v in admin_approval_str.split(',') if v.strip()]
 
 # Admin user (simple single admin - extend for multiple admins)
 ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'admin')
@@ -1382,6 +1441,62 @@ def register():
 
     prefill = _build_prefill_from_request()  # Use your existing function for GET prefill
 
+    if request.method == 'GET' and mac_address:
+        device = Device.query.filter_by(mac_address=mac_address).first()
+        device = normalize_device_status(device)
+        if device and device.registration_status == 'registered' and device.user:
+            if device.user.is_active and not device.user.blocked:
+                vlan_map = get_vlan_map()
+                access_label = _label_for_vlan(device.current_vlan, vlan_map) or 'network access'
+
+                current_ip = detected_ip
+                current_connection, current_vlan, _ = detect_connection_type(current_ip)
+                network_mismatch = bool(
+                    current_connection == 'wifi'
+                    and current_vlan
+                    and device.current_vlan
+                    and current_vlan != device.current_vlan
+                )
+
+                if current_ip and not network_mismatch and not _is_blocked_pool_ip(current_ip):
+                    if _should_hijack_vlan(current_vlan or device.current_vlan):
+                        manage_dns_hijack('unhijack', current_ip)
+                    if current_vlan or device.current_vlan:
+                        manage_switch_acl('unblock', current_ip, current_vlan or device.current_vlan)
+
+                if current_connection == 'wifi' and device.current_vlan:
+                    kea = get_kea()
+                    if kea:
+                        try:
+                            reservation = kea.get_reservation(device.mac_address, device.current_vlan)
+                            if not reservation:
+                                hostname = device.device_name or 'device'
+                                success = kea.register_mac(
+                                    mac=device.mac_address,
+                                    vlan=device.current_vlan,
+                                    hostname=hostname,
+                                    ip_address=None,
+                                )
+                                if success and current_ip:
+                                    kea.force_lease_renewal(device.mac_address, current_ip)
+                        except Exception as exc:
+                            logger.warning(
+                                "Kea registration check failed for %s: %s",
+                                device.mac_address,
+                                exc,
+                            )
+
+                clear_unregistered_lease(device.mac_address)
+
+                return render_template(
+                    'register.html',
+                    show_wait=True,
+                    detected_mac=detected_mac,
+                    detected_ip=detected_ip,
+                    access_label=access_label,
+                    device=device,
+                )
+
     if request.method == 'POST':
         email = request.form.get('email').strip().lower()
         first_name = request.form.get('first_name').strip()
@@ -2309,6 +2424,26 @@ def registration_status():
                     manage_dns_hijack('unhijack', current_ip)
                 if current_vlan:
                     manage_switch_acl('unblock', current_ip, current_vlan)
+
+                if current_connection == 'wifi' and device.current_vlan:
+                    kea = get_kea()
+                    if kea:
+                        try:
+                            reservation = kea.get_reservation(device.mac_address, device.current_vlan)
+                            if not reservation:
+                                hostname = device.device_name or 'device'
+                                success = kea.register_mac(
+                                    mac=device.mac_address,
+                                    vlan=device.current_vlan,
+                                    hostname=hostname,
+                                    ip_address=None,
+                                )
+                                if success:
+                                    kea.force_lease_renewal(device.mac_address, current_ip)
+                        except Exception as exc:
+                            logger.warning("Kea registration check failed for %s: %s", device.mac_address, exc)
+
+                clear_unregistered_lease(device.mac_address)
         response = jsonify({
             'status': device.registration_status,
             'message': f'Device is {device.registration_status}',
@@ -2533,26 +2668,6 @@ def admin_vlan_config():
                     mapping = VlanMapping(status=status, vlan_id=int(vlan_id))
                     db.session.add(mapping)
         
-        # Update auto-approve VLANs
-        auto_approve_vlans = []
-        for status in ['friars', 'staff', 'students', 'guests', 'contractors', 'volunteers', 'iot']:
-            if request.form.get(f'auto_approve_{status}'):
-                vlan_id = request.form.get(f'vlan_{status}')
-                if vlan_id:
-                    auto_approve_vlans.append(vlan_id)
-        
-        Setting.set_value('auto_approve_vlans', ','.join(auto_approve_vlans))
-        
-        # Update admin approval VLANs (inverse of auto-approve)
-        vlan_map = get_vlan_map()
-        admin_approval_vlans = []
-        for status in ['friars', 'staff', 'students', 'guests', 'contractors', 'volunteers', 'iot']:
-            vlan_id = str(vlan_map.get(status, ''))
-            if vlan_id and vlan_id not in auto_approve_vlans:
-                admin_approval_vlans.append(vlan_id)
-        
-        Setting.set_value('admin_approval_vlans', ','.join(admin_approval_vlans))
-        
         db.session.commit()
         
         flash('VLAN configuration updated successfully', 'success')
@@ -2562,11 +2677,8 @@ def admin_vlan_config():
     
     # Load current configuration
     vlan_map = get_vlan_map()
-    auto_approve_vlans = get_auto_approve_vlans()
-    
     return render_template('admin_vlan_config.html', 
-                         vlan_map=vlan_map,
-                         auto_approve_vlans=auto_approve_vlans)
+                         vlan_map=vlan_map)
 
 
 @app.route('/admin')
@@ -2819,8 +2931,6 @@ def admin_dashboard():
         unregistered_leases=unregistered_leases,
         unregistered_total=unregistered_total,
         vlan_map=vlan_map,
-        auto_approve_vlans=get_auto_approve_vlans(),
-        admin_approval_vlans=get_admin_approval_vlans(),
         domain_policies=domain_policies,
         test_env=is_test_env()
     )
@@ -2900,7 +3010,11 @@ def admin_add_user():
         first_name = request.form.get('first_name', '').strip()
         last_name = request.form.get('last_name', '').strip()
         phone_number = request.form.get('phone_number', '').strip()
-        begin_date = datetime.strptime(request.form.get('begin_date'), '%Y-%m-%d').date()
+        begin_date_raw = (request.form.get('begin_date') or '').strip()
+        if begin_date_raw:
+            begin_date = datetime.strptime(begin_date_raw, '%Y-%m-%d').date()
+        else:
+            begin_date = datetime.utcnow().date()
         require_approval_every_device = bool(request.form.get('require_approval_every_device'))
         
         # Expiry date is optional - None means no expiration
@@ -2911,12 +3025,12 @@ def admin_add_user():
         
         if not email:
             flash('Email is required', 'error')
-            return render_template('admin_add_user.html', vlan_map=get_vlan_map())
+            return render_template('admin_add_user.html', vlan_map=get_vlan_map(), today=datetime.utcnow().date().isoformat())
         
         existing_user = User.query.filter_by(email=email).first()
         if existing_user:
             flash('User with this email already exists', 'error')
-            return render_template('admin_add_user.html', vlan_map=get_vlan_map())
+            return render_template('admin_add_user.html', vlan_map=get_vlan_map(), today=datetime.utcnow().date().isoformat())
         
         vlan_map = get_vlan_map()
         allowed_vlans_allow, allowed_vlans_deny = _parse_vlan_override_form(vlan_map, 'allowed_vlan')
@@ -2946,7 +3060,233 @@ def admin_add_user():
         
         return redirect(url_for('admin_dashboard'))
     
-    return render_template('admin_add_user.html', vlan_map=get_vlan_map())
+    return render_template('admin_add_user.html', vlan_map=get_vlan_map(), today=datetime.utcnow().date().isoformat())
+
+
+@app.route('/admin/users/import', methods=['GET', 'POST'])
+@login_required
+def admin_import_users():
+    if request.method == 'GET':
+        vlan_map = get_vlan_map()
+        base_fields, vlan_fields = _csv_template_fields(vlan_map)
+        return render_template(
+            'admin_import_users.html',
+            vlan_map=vlan_map,
+            base_fields=base_fields,
+            vlan_fields=vlan_fields,
+        )
+
+    upload = request.files.get('csv_file')
+    if not upload or not upload.filename:
+        flash('Please select a CSV file to upload.', 'error')
+        return redirect(url_for('admin_import_users'))
+
+    content = upload.read().decode('utf-8-sig', errors='replace')
+    reader = csv.DictReader(io.StringIO(content))
+    if not reader.fieldnames:
+        flash('CSV file must include a header row.', 'error')
+        return redirect(url_for('admin_import_users'))
+
+    header_map = {
+        _normalize_csv_header(name): name
+        for name in reader.fieldnames
+        if name is not None
+    }
+
+    def get_value(row, *names):
+        for name in names:
+            key = _normalize_csv_header(name)
+            if key in header_map:
+                return row.get(header_map[key])
+        return None
+
+    vlan_flag_columns = []
+    for name in reader.fieldnames:
+        if not name:
+            continue
+        normalized = re.sub(r'\s+', '', str(name)).lower()
+        match = re.match(r'^vlan(\d+)(allowed|adoptable)$', normalized)
+        if match:
+            vlan_flag_columns.append((int(match.group(1)), match.group(2), name))
+
+    dry_run = bool(request.form.get('dry_run'))
+    today = datetime.utcnow().date()
+    vlan_map = get_vlan_map()
+    domain_policy_map = _load_domain_policy_map()
+    unregistered_vlan = vlan_map.get('unregistered')
+
+    stats = {
+        'rows': 0,
+        'users_created': 0,
+        'users_updated': 0,
+        'devices_created': 0,
+        'devices_updated': 0,
+        'rows_skipped': 0,
+    }
+    errors = []
+
+    for index, row in enumerate(reader, start=2):
+        if not row or not any((value or '').strip() for value in row.values()):
+            continue
+
+        stats['rows'] += 1
+
+        email_raw = get_value(row, 'email', 'email address', 'e-mail')
+        if not email_raw or not str(email_raw).strip():
+            errors.append(f"Row {index}: missing email address")
+            stats['rows_skipped'] += 1
+            continue
+
+        email = str(email_raw).strip().lower()
+        user = User.query.filter_by(email=email).first()
+        created = False
+        if not user:
+            user = User(email=email, begin_date=today, created_by=current_user.username)
+            created = True
+
+        first_name = get_value(row, 'first name', 'firstname')
+        last_name = get_value(row, 'second name', 'last name', 'lastname', 'surname')
+        phone_number = get_value(row, 'phone number', 'phone')
+        if first_name and str(first_name).strip():
+            user.first_name = str(first_name).strip()
+        if last_name and str(last_name).strip():
+            user.last_name = str(last_name).strip()
+        if phone_number and str(phone_number).strip():
+            user.phone_number = str(phone_number).strip()
+
+        allowed_allow = _parse_allowed_vlans(user.allowed_vlans_override)
+        allowed_deny = _parse_allowed_vlans(user.allowed_vlans_deny)
+        adopt_allow = _parse_allowed_vlans(user.adoptable_vlans_override)
+        adopt_deny = _parse_allowed_vlans(user.adoptable_vlans_deny)
+
+        for vlan_id, kind, header_name in vlan_flag_columns:
+            flag = _parse_csv_bool(row.get(header_name))
+            if flag is None:
+                continue
+            if kind == 'allowed':
+                if flag:
+                    allowed_allow.add(vlan_id)
+                    allowed_deny.discard(vlan_id)
+                else:
+                    allowed_deny.add(vlan_id)
+                    allowed_allow.discard(vlan_id)
+            else:
+                if flag:
+                    adopt_allow.add(vlan_id)
+                    adopt_deny.discard(vlan_id)
+                else:
+                    adopt_deny.add(vlan_id)
+                    adopt_allow.discard(vlan_id)
+
+        user.allowed_vlans_override = _format_allowed_vlans(allowed_allow)
+        user.allowed_vlans_deny = _format_allowed_vlans(allowed_deny)
+        user.adoptable_vlans_override = _format_allowed_vlans(adopt_allow)
+        user.adoptable_vlans_deny = _format_allowed_vlans(adopt_deny)
+
+        if created:
+            db.session.add(user)
+            db.session.flush()
+            stats['users_created'] += 1
+        else:
+            stats['users_updated'] += 1
+
+        mac_raw = get_value(row, 'mac address', 'mac', 'mac_address')
+        if mac_raw and str(mac_raw).strip():
+            mac_address = _normalize_mac_input(mac_raw)
+            if not mac_address:
+                errors.append(f"Row {index}: invalid MAC address '{mac_raw}'")
+            else:
+                device = Device.query.filter_by(mac_address=mac_address).first()
+                if device and device.user_id and device.user_id != user.id:
+                    errors.append(
+                        f"Row {index}: MAC {mac_address} already belongs to another user"
+                    )
+                else:
+                    if not device:
+                        device = Device(mac_address=mac_address)
+                        db.session.add(device)
+                        stats['devices_created'] += 1
+                    else:
+                        stats['devices_updated'] += 1
+
+                    device.user_id = user.id
+                    device_type = get_value(row, 'device type', 'device')
+                    if device_type and str(device_type).strip():
+                        device.device_name = str(device_type).strip()[:100]
+
+                    vlan_raw = get_value(row, 'vlan id', 'vlan')
+                    target_vlan = None
+                    if vlan_raw and str(vlan_raw).strip():
+                        try:
+                            vlan_id = int(str(vlan_raw).strip())
+                            target_vlan = vlan_id
+                            device.current_vlan = vlan_id
+                            device.ssid = get_ssid_for_vlan(vlan_id)
+                        except ValueError:
+                            errors.append(f"Row {index}: invalid VLAN ID '{vlan_raw}'")
+
+                    if target_vlan is None:
+                        domain_policy = _get_domain_policy_for_user(user, domain_policy_map)
+                        effective_allowed, _, _, _ = _effective_vlan_sets(user, domain_policy)
+                        default_vlan = _default_vlan_for_user(effective_allowed, vlan_map)
+                        if device.current_vlan in {None, unregistered_vlan}:
+                            target_vlan = default_vlan
+                            if target_vlan:
+                                device.current_vlan = target_vlan
+                                device.ssid = device.ssid or get_ssid_for_vlan(target_vlan)
+                        else:
+                            target_vlan = device.current_vlan
+
+                    device.registration_status = 'registered'
+
+    if dry_run:
+        db.session.rollback()
+        flash('Dry run complete. No changes were saved.', 'info')
+    else:
+        db.session.commit()
+
+    flash(
+        "CSV import complete. Rows: {rows}, Users created: {users_created}, Users updated: {users_updated}, "
+        "Devices created: {devices_created}, Devices updated: {devices_updated}, Rows skipped: {rows_skipped}.".format(**stats),
+        'success',
+    )
+
+    if errors:
+        flash(f"CSV import reported {len(errors)} issue(s).", 'warning')
+
+    vlan_map = get_vlan_map()
+    base_fields, vlan_fields = _csv_template_fields(vlan_map)
+    return render_template(
+        'admin_import_users.html',
+        errors=errors,
+        vlan_map=vlan_map,
+        base_fields=base_fields,
+        vlan_fields=vlan_fields,
+    )
+
+
+@app.route('/admin/users/import-template', methods=['GET'])
+@login_required
+def admin_import_users_template():
+    vlan_map = get_vlan_map()
+    base_fields, vlan_fields = _csv_template_fields(vlan_map)
+    allowed_headers = [header for _, header in (base_fields + vlan_fields)]
+    requested = request.args.getlist('field')
+    selected = [header for header in allowed_headers if header in requested]
+    if not selected:
+        selected = [header for _, header in base_fields]
+    if 'Email' not in selected:
+        selected.insert(0, 'Email')
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(selected)
+    writer.writerow([_csv_template_example_value(header, 0) for header in selected])
+    writer.writerow([_csv_template_example_value(header, 1) for header in selected])
+
+    response = Response(output.getvalue(), mimetype='text/csv')
+    response.headers['Content-Disposition'] = 'attachment; filename=users_import_template.csv'
+    return response
 
 
 @app.route('/admin/users/<int:user_id>/edit', methods=['GET', 'POST'])

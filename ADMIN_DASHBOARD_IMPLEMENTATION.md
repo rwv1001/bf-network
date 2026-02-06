@@ -6,13 +6,11 @@ Enhanced the captive portal admin dashboard with comprehensive device management
 ## Features Implemented
 
 ### 1. VLAN Configuration
-VLAN mappings and auto-approval settings are fully configurable through the admin interface at `/admin/vlan-config`. 
+VLAN mappings are fully configurable through the admin interface at `/admin/vlan-config`.
 
 Administrators can:
 - Set VLAN IDs for each user status (friars, staff, students, guests, contractors, volunteers, iot, restricted, unregistered)
-- Enable/disable auto-approval for each VLAN
-- VLANs with auto-approval enabled: devices are automatically registered and granted access
-- VLANs without auto-approval: registration requests require manual admin review and approval
+- Approval rules are controlled by domain policies and per-user overrides
 
 ### 2. Enhanced Device Management Table
 The admin dashboard now displays a comprehensive table of all registered devices with the following information:
@@ -65,10 +63,8 @@ Dedicated configuration page at `/admin/vlan-config` provides:
 - Editable VLAN ID for each user status
 - Input validation (VLAN IDs 1-4094)
 
-**Auto-Approval Settings:**
-- Checkbox for each status to enable/disable auto-approval
-- Visual indicators showing current configuration
-- Restricted and unregistered VLANs cannot be auto-approved (system restriction)
+**Approval Rules:**
+- Domain policies and per-user overrides determine which VLANs are allowed and adoptable
 
 ### 5. Pending Requests Section
 Enhanced to show:
@@ -84,14 +80,13 @@ Enhanced to show:
 **Database-Backed Configuration Functions:**
 ```python
 get_vlan_map()  # Loads VLAN mappings from database
-get_auto_approve_vlans()  # Loads auto-approval VLAN list from settings
-get_admin_approval_vlans()  # Loads admin-required VLAN list from settings
 ```
 
 **Modified Functions:**
-- `register()` - Auto-approval logic based on VLAN (uses get_auto_approve_vlans())
+- `register()` - Approval logic based on domain policy and user overrides
 - `admin_dashboard()` - Enhanced query to join devices with users, pass VLAN config
 - `admin_vlan_config()` - GET/POST endpoint for VLAN configuration management
+- `admin_import_users()` - CSV import endpoint for users/devices
 - `admin_block_device(device_id)` - Block device endpoint
 - `admin_unblock_device(device_id)` - Unblock device endpoint
 - `admin_delete_device(device_id)` - Delete device endpoint
@@ -132,22 +127,12 @@ get_admin_approval_vlans()  # Loads admin-required VLAN list from settings
 ### Configuring VLAN Settings
 1. Click "⚙️ VLAN Configuration" button in admin dashboard
 2. Edit VLAN IDs for each user status
-3. Check/uncheck auto-approval for each status
-4. Click "Save Configuration"
-5. Changes take effect immediately for new registrations
+3. Click "Save Configuration"
+4. Changes take effect immediately for new registrations
 
-### Understanding Auto-Approval
-- VLANs with auto-approval enabled: Users are immediately registered and granted access
-- No admin action needed for auto-approved VLANs
-- User status is automatically assigned based on VLAN
-- Admin can still block devices later if needed
-
-### Understanding Manual Approval
-- VLANs without auto-approval: Registration creates a pending request
-- User submits registration and waits
-- Admin receives email with approval link (if Microsoft Graph configured)
-- Admin reviews and approves/rejects via dashboard or email link
-- Admin can assign appropriate status during approval
+### Understanding Approval Rules
+- Approval is determined by domain policies and per-user overrides
+- Users on disallowed VLANs will be routed to approval or rejection flows
 
 ## Network Behavior
 
@@ -191,23 +176,11 @@ unregister_token VARCHAR(255)
 5. Verify changes persist after page reload
 6. Test registration on different VLANs
 
-### Test Auto-Approval (for VLANs with auto-approval enabled)
-1. Enable auto-approval for a VLAN in configuration page
-2. Connect device to that VLAN's WiFi
-3. Visit portal and submit registration form
-4. Verify immediate approval (no pending request)
-5. Check device appears in dashboard as "Active"
-6. Verify correct user status assigned based on VLAN
-7. Test network access
-
-### Test Manual Approval (for VLANs without auto-approval)
-1. Disable auto-approval for a VLAN in configuration page
-2. Connect device to that VLAN's WiFi
-3. Visit portal and submit registration
-4. Verify appears in "Pending Requests"
-5. Admin reviews and approves with appropriate status
-6. User gets access
-7. Verify device in dashboard as "Active"
+### Test Approval Rules
+1. Configure domain policy or per-user overrides
+2. Connect device to a VLAN
+3. Submit registration
+4. Verify approval/denial behavior matches policy
 
 ### Test Block/Unblock
 1. Find active device in dashboard
@@ -224,6 +197,13 @@ unregister_token VARCHAR(255)
 3. Verify device removed from table
 4. Verify device disconnected from network
 5. Verify database record deleted
+
+### Test CSV Import
+1. Use "Import CSV" -> "Download Template CSV" and select fields to include
+2. Confirm the template includes two example rows showing formats (Y/N, VLAN IDs)
+3. Upload your filled CSV via the "Import CSV" button
+4. Verify users and devices are created/updated
+5. Verify VLAN override flags applied
 
 ## Known Issues
 
@@ -285,18 +265,17 @@ All VLAN configuration is stored in the database and managed through the web int
 - Stores status → VLAN ID mappings
 - Editable through admin interface
 
-**Settings Table:**
-- `auto_approve_vlans`: Comma-separated list of VLAN IDs that auto-approve
-- `admin_approval_vlans`: Automatically calculated as inverse of auto_approve_vlans
+**Domain Policies and User Overrides:**
+- Domain policies define allowed and adoptable VLANs by email domain
+- User overrides can explicitly allow or deny VLANs
 
 **Default Fallback (if database empty):**
 ```python
 VLAN_MAP = {
-    'friars': 10, 'staff': 20, 'students': 30, 'guests': 40,
-    'contractors': 50, 'volunteers': 60, 'iot': 70,
-    'restricted': 90, 'unregistered': 99
+  'friars': 10, 'staff': 20, 'students': 30, 'guests': 40,
+  'contractors': 50, 'volunteers': 60, 'iot': 70,
+  'restricted': 90, 'unregistered': 99
 }
-auto_approve_vlans = '40,30,60'  # guests, students, volunteers
 ```
 
 ### Environment Variables (`.env`)

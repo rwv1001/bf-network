@@ -5,7 +5,11 @@
 {% block header %}Blackfriars Captive Portal{% endblock %}
 
 {% block subheader %}
+{% if show_wait %}
+<p style="margin-top: 10px; opacity: 0.9;">Please wait while we connect you to the network</p>
+{% else %}
 <p style="margin-top: 10px; opacity: 0.9;">Please provide your information to access the network</p>
+{% endif %}
 {% if detected_mac %}
 <p style="margin-top: 10px; font-size: 0.9em; color: #4CAF50;">
     ✓ Detected: IP <span id="detectedIp">{{ detected_ip }}</span> | MAC {{ detected_mac }}
@@ -39,6 +43,91 @@
         display: none;
     }
 </style>
+{% if show_wait %}
+<div class="alert alert-info" id="wait-status" style="text-align: center;">
+    <strong>Please wait while we are connecting you...</strong>
+</div>
+
+<div class="info-box" style="text-align: center;">
+    We are enabling access for your device. This can take a few seconds.
+</div>
+
+<div id="full-access" class="alert alert-success" style="display: none; text-align: center;">
+    <strong>✓ You now have full internet access.</strong>
+</div>
+
+<script>
+(() => {
+    const waitStatus = document.getElementById('wait-status');
+    const fullAccess = document.getElementById('full-access');
+    const institutionUrl = "{{ institution_url|e }}";
+    const portalPollUrl = "{{ portal_poll_url|e }}";
+    const pollBase = (() => {
+        const preferred = portalPollUrl ? portalPollUrl.replace(/\/$/, '') : window.location.origin;
+        if (window.location.protocol === 'https:' && preferred.startsWith('http:')) {
+            return window.location.origin;
+        }
+        return preferred;
+    })();
+    const apiUrl = (path) => `${pollBase}${path}`;
+    const internetCheckUrls = [
+        ...(institutionUrl ? [institutionUrl] : []),
+        'https://www.msftconnecttest.com/connecttest.txt',
+        'https://www.gstatic.com/generate_204',
+        'https://captive.apple.com/hotspot-detect.html'
+    ];
+
+    let attempts = 0;
+    const maxAttempts = 30;
+
+    const updateWait = (text) => {
+        if (waitStatus) {
+            waitStatus.textContent = text;
+        }
+    };
+
+    const checkInternet = () => {
+        attempts += 1;
+        let index = 0;
+
+        fetch(apiUrl('/api/registration-status')).catch(() => {});
+
+        const tryNext = () => {
+            const url = internetCheckUrls[index];
+            index += 1;
+            if (!url) {
+                throw new Error('All checks failed');
+            }
+            return fetch(url, {
+                method: 'GET',
+                mode: 'no-cors',
+                cache: 'no-store'
+            }).catch(() => tryNext());
+        };
+
+        Promise.resolve()
+            .then(tryNext)
+            .then(() => {
+                if (waitStatus) {
+                    waitStatus.style.display = 'none';
+                }
+                if (fullAccess) {
+                    fullAccess.style.display = 'block';
+                }
+            })
+            .catch(() => {
+                if (attempts >= maxAttempts) {
+                    updateWait('Still connecting. Please wait or reconnect if this persists.');
+                    return;
+                }
+                setTimeout(checkInternet, 2000);
+            });
+    };
+
+    checkInternet();
+})();
+</script>
+{% else %}
 <form method="POST" action="{{ url_for('register') }}">
     <div class="form-group">
         <label for="email">Email Address <span class="required">*</span></label>
@@ -508,4 +597,5 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 });
 </script>
+{% endif %}
 {% endblock %}
