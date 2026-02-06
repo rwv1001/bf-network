@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import text
 import secrets
 
-from models import db, User, Device, RegistrationRequest, VlanMapping, Setting, UnregisteredLease
+from models import db, User, Device, RegistrationRequest, VlanMapping, Setting, UnregisteredLease, DomainPolicy
 from radius_coa import send_coa_disconnect, send_coa_change
 from email_service import (
     send_verification_email,
@@ -61,6 +61,14 @@ def _build_portal_url(path):
     if base:
         return f"{base}{path}"
     return path
+
+
+def _build_unregister_url(token):
+    portal_url = _get_portal_base_url()
+    if portal_url:
+        parsed = urlparse(portal_url)
+        return f"{parsed.scheme}://{parsed.netloc}{url_for('unregister', token=token)}"
+    return url_for('unregister', token=token, _external=True)
 
 
 def _portal_host_mismatch():
@@ -116,6 +124,83 @@ def _parse_allowed_vlans(raw):
     return allowed
 
 
+def _email_domain(email):
+    if not email or '@' not in email:
+        return ''
+    return email.split('@', 1)[1].strip().lower()
+
+
+def _load_domain_policy_map():
+    policies = DomainPolicy.query.all()
+    return {policy.domain.lower(): policy for policy in policies}
+
+
+def _effective_vlan_sets(user, domain_policy):
+    domain_allowed = _parse_allowed_vlans(domain_policy.allowed_vlans) if domain_policy else set()
+    domain_adoptable = _parse_allowed_vlans(domain_policy.adoptable_vlans) if domain_policy else set()
+
+    user_allow = _parse_allowed_vlans(user.allowed_vlans_override)
+    user_deny = _parse_allowed_vlans(user.allowed_vlans_deny)
+    user_adopt_allow = _parse_allowed_vlans(user.adoptable_vlans_override)
+    user_adopt_deny = _parse_allowed_vlans(user.adoptable_vlans_deny)
+
+    effective_allowed = (domain_allowed | user_allow) - user_deny
+    effective_adoptable = (domain_adoptable | user_adopt_allow) - user_adopt_deny
+
+    domain_allowed_only = domain_allowed - user_allow - user_deny
+    domain_adoptable_only = domain_adoptable - user_adopt_allow - user_adopt_deny
+
+    return effective_allowed, effective_adoptable, domain_allowed_only, domain_adoptable_only
+
+
+def _format_vlan_display_items(vlans, domain_based, denied, user_override, vlan_map):
+    items = []
+    denied = denied or set()
+    user_override = user_override or set()
+    for vlan_id in sorted(vlans):
+        items.append({
+            'label': _label_for_vlan(vlan_id, vlan_map),
+            'domain_based': vlan_id in domain_based,
+            'denied': vlan_id in denied,
+            'user_override': vlan_id in user_override,
+        })
+    return items
+
+
+def _format_vlan_items_text(items):
+    if not items:
+        return ''
+    return ', '.join(item['label'] for item in items if not item.get('denied'))
+
+
+def _get_domain_policy_for_user(user, domain_policy_map=None):
+    if not user or not user.email:
+        return None
+    if domain_policy_map is None:
+        domain_policy_map = _load_domain_policy_map()
+    return domain_policy_map.get(_email_domain(user.email))
+
+
+def _get_effective_vlans_for_user(user, domain_policy_map=None):
+    domain_policy = _get_domain_policy_for_user(user, domain_policy_map)
+    effective_allowed, effective_adoptable, _, _ = _effective_vlan_sets(user, domain_policy)
+    return effective_allowed, effective_adoptable
+
+
+def _parse_vlan_override_form(vlan_map, prefix):
+    allow = set()
+    deny = set()
+    for status, vlan_id in vlan_map.items():
+        if status in {'unregistered', 'restricted'}:
+            continue
+        value = (request.form.get(f'{prefix}_{vlan_id}') or '').strip().lower()
+        if value == 'allow':
+            allow.add(vlan_id)
+        elif value == 'deny':
+            deny.add(vlan_id)
+    return allow, deny
+
+
 def _format_allowed_vlans(vlans):
     if not vlans:
         return ''
@@ -125,7 +210,7 @@ def _format_allowed_vlans(vlans):
 def _default_vlan_for_user(allowed_vlans, vlan_map):
     if allowed_vlans:
         return sorted(allowed_vlans)[0]
-    return vlan_map.get('guests')
+    return None
 
 
 def _label_for_vlan(vlan_id, vlan_map):
@@ -138,35 +223,32 @@ def _label_for_vlan(vlan_id, vlan_map):
     return f"VLAN {vlan_id}"
 
 
-def _allowed_vlans_display(user, vlan_map):
-    allowed = _parse_allowed_vlans(user.allowed_vlans)
-    if not allowed:
-        return ''
-    labels = []
-    for vlan_id in sorted(allowed):
-        labels.append(_label_for_vlan(vlan_id, vlan_map))
-    return ', '.join(labels)
+def _allowed_vlans_display_items(user, vlan_map, domain_policy, include_denied=False):
+    effective_allowed, _, _, _ = _effective_vlan_sets(user, domain_policy)
+    user_allow = _parse_allowed_vlans(user.allowed_vlans_override)
+    user_deny = _parse_allowed_vlans(user.allowed_vlans_deny)
+    domain_allowed = _parse_allowed_vlans(domain_policy.allowed_vlans) if domain_policy else set()
+    denied_vlans = user_deny if include_denied else set()
+    display_vlans = effective_allowed | denied_vlans
+    if not display_vlans:
+        return []
+    return _format_vlan_display_items(display_vlans, domain_allowed, denied_vlans, user_allow, vlan_map)
 
 
-def _adoptable_vlans_display(user, vlan_map):
-    adoptable = _parse_allowed_vlans(user.adoptable_vlans)
-    if not adoptable:
-        return ''
-    labels = []
-    for vlan_id in sorted(adoptable):
-        labels.append(_label_for_vlan(vlan_id, vlan_map))
-    return ', '.join(labels)
-
-
-def get_adoptable_vlans():
-    raw = os.getenv('ADOPTABLE_VLANS', '').strip()
-    return _parse_allowed_vlans(raw)
+def _adoptable_vlans_display_items(user, vlan_map, domain_policy, include_denied=False):
+    _, effective_adoptable, _, _ = _effective_vlan_sets(user, domain_policy)
+    user_allow = _parse_allowed_vlans(user.adoptable_vlans_override)
+    user_deny = _parse_allowed_vlans(user.adoptable_vlans_deny)
+    domain_adoptable = _parse_allowed_vlans(domain_policy.adoptable_vlans) if domain_policy else set()
+    denied_vlans = user_deny if include_denied else set()
+    display_vlans = effective_adoptable | denied_vlans
+    if not display_vlans:
+        return []
+    return _format_vlan_display_items(display_vlans, domain_adoptable, denied_vlans, user_allow, vlan_map)
 
 
 def _should_hijack_vlan(vlan_id):
-    if not vlan_id:
-        return True
-    return vlan_id not in get_adoptable_vlans()
+    return True
 
 
 
@@ -1129,9 +1211,7 @@ def index():
             return redirect(_build_portal_url(url_for('blocked_page')))
 
         if device and device.registration_status == 'registered' and device.user:
-            user_adoptable = _parse_allowed_vlans(device.user.adoptable_vlans)
-            adoptable_global = get_adoptable_vlans()
-            if user_adoptable & adoptable_global:
+            if not device.user.require_approval_every_device:
                 return redirect(_build_portal_url(url_for('adopt_devices')))
     
     return redirect(_build_portal_url(url_for('register')))
@@ -1333,28 +1413,31 @@ def register():
             connection_type, detected_vlan, ssid = detect_connection_type(ip_address)
             current_ssid = ssid or (get_ssid_for_vlan(detected_vlan) if detected_vlan else None)
 
-            allowed_vlans = _parse_allowed_vlans(user.allowed_vlans)
-            if not allowed_vlans:
-                default_vlan = vlan_map.get('guests')
-                if default_vlan:
-                    allowed_vlans = {default_vlan}
-                    user.allowed_vlans = _format_allowed_vlans(allowed_vlans)
-                    db.session.commit()
-
+            domain_policy_map = _load_domain_policy_map()
+            allowed_vlans, _ = _get_effective_vlans_for_user(user, domain_policy_map)
             default_vlan = _default_vlan_for_user(allowed_vlans, vlan_map)
 
+            vlan_allowed = bool(detected_vlan and detected_vlan in allowed_vlans)
+            needs_approval = bool(user.require_approval_every_device)
+
             if connection_type == 'wifi' and detected_vlan:
-                if detected_vlan not in allowed_vlans:
-                    network_mismatch = True
-                    expected_ssid = get_ssid_for_vlan(default_vlan)
-                else:
+                if not allowed_vlans:
                     network_mismatch = False
                     expected_ssid = get_ssid_for_vlan(detected_vlan)
-                target_vlan = detected_vlan if detected_vlan in allowed_vlans else None
+                    needs_approval = True
+                    target_vlan = None
+                else:
+                    network_mismatch = not vlan_allowed
+                    expected_ssid = get_ssid_for_vlan(detected_vlan if vlan_allowed else default_vlan)
+                    if not vlan_allowed:
+                        needs_approval = True
+                    target_vlan = detected_vlan if vlan_allowed and not user.require_approval_every_device else None
             else:
-                target_vlan = default_vlan
-                expected_ssid = get_ssid_for_vlan(target_vlan)
+                target_vlan = default_vlan if not user.require_approval_every_device else None
+                expected_ssid = get_ssid_for_vlan(target_vlan) if target_vlan else None
                 network_mismatch = False
+                if not target_vlan:
+                    needs_approval = True
             existing_device = Device.query.filter_by(mac_address=mac_address).first()
             previous_profile = {
                 "first_name": user.first_name or "",
@@ -1376,7 +1459,7 @@ def register():
                 "new": new_profile
             }) if profile_changed else None
 
-            if network_mismatch and connection_type == 'wifi':
+            if needs_approval:
                 pending_request = (
                     RegistrationRequest.query.filter_by(
                         mac_address=mac_address,
@@ -1408,8 +1491,10 @@ def register():
                     )
                     db.session.add(reg_request)
 
+                domain_policy = _load_domain_policy_map().get(_email_domain(user.email))
+                allowed_items = _allowed_vlans_display_items(user, vlan_map, domain_policy)
                 note_parts = [
-                    f"Existing user allowed VLANs: {_allowed_vlans_display(user, vlan_map) or 'none'}",
+                    f"Existing user allowed VLANs: {_format_vlan_items_text(allowed_items) or 'none'}",
                     f"Detected VLAN: {detected_vlan}",
                     f"Detected SSID: {current_ssid or 'unknown'}"
                 ]
@@ -1488,12 +1573,7 @@ def register():
             if ip_address and detected_vlan and not network_mismatch:
                 manage_switch_acl('unblock', ip_address, detected_vlan)
 
-            portal_url = os.getenv('PORTAL_URL')
-            if portal_url:
-                parsed = urlparse(portal_url)
-                unregister_url = f"{parsed.scheme}://{parsed.netloc}{url_for('unregister', token=device.unregister_token)}"
-            else:
-                unregister_url = url_for('unregister', token=device.unregister_token, _external=True)
+            unregister_url = _build_unregister_url(device.unregister_token)
 
             ssid_display = ssid or "Wired Network"
             send_wifi_registration_confirmation(
@@ -1528,7 +1608,96 @@ def register():
                 return redirect(url_for('registered'))
 
         else:
-            # New user - create pending request (your existing logic)
+            # New user - auto-approve if domain allows, otherwise create pending request
+            vlan_map = get_vlan_map()
+            connection_type, detected_vlan, ssid = detect_connection_type(ip_address)
+            domain_policy = _load_domain_policy_map().get(_email_domain(email))
+            allowed_vlans = _parse_allowed_vlans(domain_policy.allowed_vlans) if domain_policy else set()
+            default_vlan = _default_vlan_for_user(allowed_vlans, vlan_map)
+
+            vlan_allowed = bool(detected_vlan and detected_vlan in allowed_vlans)
+            can_auto_approve = bool(allowed_vlans) and (
+                connection_type != 'wifi' or vlan_allowed
+            )
+
+            if can_auto_approve:
+                target_vlan = detected_vlan if connection_type == 'wifi' else default_vlan
+                user = User(
+                    email=email,
+                    first_name=first_name,
+                    last_name=last_name,
+                    phone_number=phone_number,
+                    begin_date=datetime.utcnow().date(),
+                    notes='Auto-approved via domain policy',
+                    created_by='domain-policy'
+                )
+                db.session.add(user)
+                db.session.flush()
+
+                device = Device(
+                    mac_address=mac_address,
+                    user_id=user.id,
+                    device_name=device_type,
+                    ip_address=ip_address,
+                    registration_status='registered',
+                    current_vlan=target_vlan,
+                    connection_type=connection_type,
+                    ssid=ssid,
+                    unregister_token=secrets.token_urlsafe(32)
+                )
+                db.session.add(device)
+                db.session.commit()
+
+                if connection_type == 'wifi':
+                    kea = get_kea()
+                    if kea:
+                        kea.register_mac(
+                            mac=mac_address,
+                            vlan=target_vlan,
+                            hostname=f"{first_name.lower()}-{last_name.lower()}-{device_type}",
+                            ip_address=None,
+                        )
+                        if ip_address:
+                            kea.force_lease_renewal(mac_address, ip_address)
+                else:
+                    send_coa_change(mac_address, target_vlan)
+
+                if ip_address and _should_hijack_vlan(target_vlan or detected_vlan):
+                    manage_dns_hijack('unhijack', ip_address)
+                clear_unregistered_lease(mac_address)
+                if ip_address and detected_vlan:
+                    manage_switch_acl('unblock', ip_address, detected_vlan)
+
+                unregister_url = _build_unregister_url(device.unregister_token)
+                ssid_display = ssid or "Wired Network"
+                send_wifi_registration_confirmation(
+                    user.email,
+                    user.first_name or first_name or "there",
+                    ssid_display,
+                    mac_address,
+                    unregister_url,
+                    registration_details={
+                        "email": user.email,
+                        "first_name": user.first_name or first_name,
+                        "last_name": user.last_name or last_name,
+                        "phone_number": user.phone_number or phone_number,
+                        "device_type": device_type,
+                        "ip_address": ip_address,
+                        "ssid": ssid_display
+                    }
+                )
+
+                if is_ajax:
+                    return jsonify({
+                        'status': 'registered',
+                        'message': 'Device registered successfully',
+                        'current_vlan': detected_vlan,
+                        'current_ssid': ssid,
+                        'expected_vlan': target_vlan,
+                        'expected_ssid': get_ssid_for_vlan(target_vlan)
+                    })
+                return redirect(url_for('registered'))
+
             reg_request = RegistrationRequest(
                 mac_address=mac_address,
                 ip_address=ip_address,
@@ -1548,10 +1717,8 @@ def register():
                 approval_url = f"{parsed.scheme}://{parsed.netloc}{url_for('admin_approve_request', token=reg_request.approval_token)}"
             else:
                 approval_url = url_for('admin_approve_request', token=reg_request.approval_token, _external=True)
-            
-            connection_type, detected_vlan, ssid = detect_connection_type(ip_address)
+
             send_admin_notification(reg_request, approval_url, detected_vlan, ssid)
-            
 
             prefill_data = {
                 'email': email,
@@ -1604,8 +1771,8 @@ def verify():
     user = device.user
     if user:
         vlan_map = get_vlan_map()
-        allowed_vlans = _parse_allowed_vlans(user.allowed_vlans)
-        target_vlan = _default_vlan_for_user(allowed_vlans, vlan_map)
+        allowed_vlans, _ = _get_effective_vlans_for_user(user)
+        target_vlan = _default_vlan_for_user(allowed_vlans, vlan_map) or device.current_vlan
         device.registration_status = 'registered'
         device.current_vlan = target_vlan
         device.verification_token = None
@@ -1723,9 +1890,17 @@ def adopt_devices():
             error='registered_device',
         )
 
-    adoptable_global = get_adoptable_vlans()
-    user_adoptable = _parse_allowed_vlans(user.adoptable_vlans)
-    allowed_vlans = sorted(adoptable_global & user_adoptable)
+    if user.require_approval_every_device:
+        return render_template(
+            'adopt_devices.html',
+            user=user,
+            devices=[],
+            registered_devices=[],
+            error='approval_required',
+        )
+
+    _, effective_adoptable = _get_effective_vlans_for_user(user)
+    allowed_vlans = sorted(effective_adoptable)
     if not allowed_vlans:
         return render_template(
             'adopt_devices.html',
@@ -1735,7 +1910,40 @@ def adopt_devices():
             error='no_permissions',
         )
 
+    vlan_map = get_vlan_map()
     candidates = _load_adoptable_leases(set(allowed_vlans))
+
+    registered_devices = Device.query.filter_by(
+        user_id=user.id,
+        registration_status='registered',
+    ).order_by(Device.device_name.asc(), Device.mac_address.asc()).all()
+
+    registered_device_rows = []
+    for entry in registered_devices:
+        registered_device_rows.append({
+            'device_name': entry.device_name,
+            'mac_address': entry.mac_address,
+            'ip_address': entry.ip_address,
+            'vlan_id': entry.current_vlan,
+            'vlan_label': _label_for_vlan(entry.current_vlan, vlan_map),
+        })
+
+    if not candidates:
+        current_ssid = device.ssid or get_ssid_for_vlan(device.current_vlan) or 'current network'
+        adoptable_ssids = [
+            get_ssid_for_vlan(vlan_id) or f"VLAN {vlan_id}"
+            for vlan_id in allowed_vlans
+        ]
+        adoptable_ssids_display = ', '.join(adoptable_ssids) if adoptable_ssids else 'your adoptable networks'
+        return render_template(
+            'adopt_devices.html',
+            user=user,
+            devices=[],
+            registered_devices=registered_device_rows,
+            error='no_devices',
+            current_ssid=current_ssid,
+            adoptable_ssids=adoptable_ssids_display,
+        )
 
     adoptable_devices = []
     for entry in candidates:
@@ -1762,24 +1970,8 @@ def adopt_devices():
             'age': age,
         })
 
-    vlan_map = get_vlan_map()
     for item in adoptable_devices:
         item['vlan_label'] = _label_for_vlan(item['vlan_id'], vlan_map)
-
-    registered_devices = Device.query.filter_by(
-        user_id=user.id,
-        registration_status='registered',
-    ).order_by(Device.device_name.asc(), Device.mac_address.asc()).all()
-
-    registered_device_rows = []
-    for entry in registered_devices:
-        registered_device_rows.append({
-            'device_name': entry.device_name,
-            'mac_address': entry.mac_address,
-            'ip_address': entry.ip_address,
-            'vlan_id': entry.current_vlan,
-            'vlan_label': _label_for_vlan(entry.current_vlan, vlan_map),
-        })
 
     return render_template(
         'adopt_devices.html',
@@ -1824,10 +2016,36 @@ def adopt_device():
         flash('Missing device details for adoption.', 'error')
         return redirect(url_for('adopt_devices'))
 
-    adoptable_global = get_adoptable_vlans()
-    user_adoptable = _parse_allowed_vlans(user.adoptable_vlans)
-    if vlan_id not in adoptable_global or vlan_id not in user_adoptable:
+    _, effective_adoptable = _get_effective_vlans_for_user(user)
+    if vlan_id not in effective_adoptable:
         flash('You do not have permission to adopt devices on that VLAN.', 'error')
+        return redirect(url_for('adopt_devices'))
+
+    if user.require_approval_every_device:
+        pending_request = RegistrationRequest(
+            mac_address=mac_address,
+            ip_address=None,
+            email=user.email,
+            first_name=user.first_name or '',
+            last_name=user.last_name or '',
+            phone_number=user.phone_number or '',
+            device_type=device_label or 'adopted-device',
+            status='pending',
+            approval_token=secrets.token_urlsafe(32)
+        )
+        db.session.add(pending_request)
+        db.session.commit()
+
+        current_ssid = get_ssid_for_vlan(vlan_id)
+        portal_url = os.getenv('PORTAL_URL')
+        if portal_url:
+            parsed = urlparse(portal_url)
+            approval_url = f"{parsed.scheme}://{parsed.netloc}{url_for('admin_approve_request', token=pending_request.approval_token)}"
+        else:
+            approval_url = url_for('admin_approve_request', token=pending_request.approval_token, _external=True)
+
+        send_admin_notification(pending_request, approval_url, vlan_id, current_ssid)
+        flash('Adoption request submitted for approval.', 'info')
         return redirect(url_for('adopt_devices'))
 
     lease = UnregisteredLease.query.filter_by(mac_address=mac_address).first()
@@ -1920,6 +2138,25 @@ def adopt_device():
             logger.warning("Failed to clear Kea block for %s: %s", mac_address, exc)
 
     clear_unregistered_lease(mac_address)
+
+    unregister_url = _build_unregister_url(adopted_device.unregister_token)
+    ssid_display = adopted_device.ssid or get_ssid_for_vlan(vlan_id) or "WiFi Network"
+    send_wifi_registration_confirmation(
+        user.email,
+        user.first_name or "there",
+        ssid_display,
+        mac_address,
+        unregister_url,
+        registration_details={
+            "email": user.email,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "phone_number": user.phone_number,
+            "device_type": adopted_device.device_name,
+            "ip_address": ip_address,
+            "ssid": ssid_display
+        }
+    )
 
     flash(
         f'Device {mac_address} adopted successfully. ACL block and DNS hijack removed.',
@@ -2427,8 +2664,10 @@ def admin_dashboard():
                 User.first_name.ilike(f'%{users_search}%'),
                 User.last_name.ilike(f'%{users_search}%'),
                 User.phone_number.ilike(f'%{users_search}%'),
-                User.allowed_vlans.ilike(f'%{users_search}%'),
-                User.adoptable_vlans.ilike(f'%{users_search}%'),
+                User.allowed_vlans_override.ilike(f'%{users_search}%'),
+                User.allowed_vlans_deny.ilike(f'%{users_search}%'),
+                User.adoptable_vlans_override.ilike(f'%{users_search}%'),
+                User.adoptable_vlans_deny.ilike(f'%{users_search}%'),
                 Device.mac_address.ilike(f'%{users_search}%')
             )
         )
@@ -2454,9 +2693,11 @@ def admin_dashboard():
     users_pages = (users_total + users_per_page - 1) // users_per_page if users_per_page > 0 else 0
 
     vlan_map = get_vlan_map()
+    domain_policy_map = _load_domain_policy_map()
     for user in users:
-        user.allowed_vlans_display = _allowed_vlans_display(user, vlan_map)
-        user.adoptable_vlans_display = _adoptable_vlans_display(user, vlan_map)
+        domain_policy = domain_policy_map.get(_email_domain(user.email))
+        user.allowed_vlans_display_items = _allowed_vlans_display_items(user, vlan_map, domain_policy, include_denied=True)
+        user.adoptable_vlans_display_items = _adoptable_vlans_display_items(user, vlan_map, domain_policy, include_denied=True)
     
     # Get devices with their users for display with search filter
     devices_query = db.session.query(Device, User).join(User, Device.user_id == User.id, isouter=True)
@@ -2545,6 +2786,11 @@ def admin_dashboard():
     is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
     
     # Common template variables
+    domain_policies = DomainPolicy.query.order_by(DomainPolicy.domain.asc()).all()
+    for policy in domain_policies:
+        policy.allowed_vlans_set = _parse_allowed_vlans(policy.allowed_vlans)
+        policy.adoptable_vlans_set = _parse_allowed_vlans(policy.adoptable_vlans)
+
     template_vars = dict(
         devices=devices,
         devices_page=devices_page,
@@ -2575,6 +2821,7 @@ def admin_dashboard():
         vlan_map=vlan_map,
         auto_approve_vlans=get_auto_approve_vlans(),
         admin_approval_vlans=get_admin_approval_vlans(),
+        domain_policies=domain_policies,
         test_env=is_test_env()
     )
     
@@ -2593,6 +2840,57 @@ def admin_dashboard():
     return render_template('admin_dashboard.html', **template_vars)
 
 
+@app.route('/admin/domain-policies', methods=['POST'])
+@login_required
+def admin_domain_policies():
+    action = (request.form.get('action') or '').strip().lower()
+    domain = (request.form.get('domain') or '').strip().lower()
+    policy_id = request.form.get('policy_id')
+
+    if action == 'delete':
+        if policy_id:
+            policy = DomainPolicy.query.get(policy_id)
+            if policy:
+                db.session.delete(policy)
+                db.session.commit()
+                flash(f'Domain policy for {policy.domain} deleted.', 'success')
+        return redirect(url_for('admin_dashboard'))
+
+    if not domain:
+        flash('Domain is required.', 'error')
+        return redirect(url_for('admin_dashboard'))
+
+    allowed = _parse_allowed_vlans(','.join(request.form.getlist('domain_allowed_vlans')))
+    adoptable = _parse_allowed_vlans(','.join(request.form.getlist('domain_adoptable_vlans')))
+
+    if policy_id:
+        policy = DomainPolicy.query.get(policy_id)
+        if not policy:
+            flash('Domain policy not found.', 'error')
+            return redirect(url_for('admin_dashboard'))
+        policy.domain = domain
+        policy.allowed_vlans = _format_allowed_vlans(allowed)
+        policy.adoptable_vlans = _format_allowed_vlans(adoptable)
+        db.session.commit()
+        flash(f'Domain policy for {domain} updated.', 'success')
+        return redirect(url_for('admin_dashboard'))
+
+    existing = DomainPolicy.query.filter_by(domain=domain).first()
+    if existing:
+        flash('Domain policy already exists. Use edit to update it.', 'error')
+        return redirect(url_for('admin_dashboard'))
+
+    policy = DomainPolicy(
+        domain=domain,
+        allowed_vlans=_format_allowed_vlans(allowed),
+        adoptable_vlans=_format_allowed_vlans(adoptable),
+    )
+    db.session.add(policy)
+    db.session.commit()
+    flash(f'Domain policy for {domain} added.', 'success')
+    return redirect(url_for('admin_dashboard'))
+
+
 @app.route('/admin/users/add', methods=['GET', 'POST'])
 @login_required
 def admin_add_user():
@@ -2603,8 +2901,7 @@ def admin_add_user():
         last_name = request.form.get('last_name', '').strip()
         phone_number = request.form.get('phone_number', '').strip()
         begin_date = datetime.strptime(request.form.get('begin_date'), '%Y-%m-%d').date()
-        allowed_vlans_input = request.form.getlist('allowed_vlans')
-        adoptable_vlans_input = request.form.getlist('adoptable_vlans')
+        require_approval_every_device = bool(request.form.get('require_approval_every_device'))
         
         # Expiry date is optional - None means no expiration
         expiry_date_str = request.form.get('expiry_date', '').strip()
@@ -2622,13 +2919,8 @@ def admin_add_user():
             return render_template('admin_add_user.html', vlan_map=get_vlan_map())
         
         vlan_map = get_vlan_map()
-        allowed_vlans = _parse_allowed_vlans(','.join(allowed_vlans_input))
-        if not allowed_vlans:
-            default_vlan = vlan_map.get('guests')
-            if default_vlan:
-                allowed_vlans.add(default_vlan)
-
-        adoptable_vlans = _parse_allowed_vlans(','.join(adoptable_vlans_input))
+        allowed_vlans_allow, allowed_vlans_deny = _parse_vlan_override_form(vlan_map, 'allowed_vlan')
+        adoptable_allow, adoptable_deny = _parse_vlan_override_form(vlan_map, 'adoptable_vlan')
 
         user = User(
             email=email,
@@ -2639,8 +2931,11 @@ def admin_add_user():
             expiry_date=expiry_date,
             notes=notes,
             created_by=current_user.username,
-            allowed_vlans=_format_allowed_vlans(allowed_vlans),
-            adoptable_vlans=_format_allowed_vlans(adoptable_vlans)
+            allowed_vlans_override=_format_allowed_vlans(allowed_vlans_allow),
+            allowed_vlans_deny=_format_allowed_vlans(allowed_vlans_deny),
+            adoptable_vlans_override=_format_allowed_vlans(adoptable_allow),
+            adoptable_vlans_deny=_format_allowed_vlans(adoptable_deny),
+            require_approval_every_device=require_approval_every_device
         )
         
         db.session.add(user)
@@ -2665,8 +2960,7 @@ def admin_edit_user(user_id):
         user.last_name = request.form.get('last_name', '').strip()
         user.phone_number = request.form.get('phone_number', '').strip()
         user.begin_date = datetime.strptime(request.form.get('begin_date'), '%Y-%m-%d').date()
-        allowed_vlans_input = request.form.getlist('allowed_vlans')
-        adoptable_vlans_input = request.form.getlist('adoptable_vlans')
+        require_approval_every_device = bool(request.form.get('require_approval_every_device'))
         apply_status_to_devices = False
         
         # Expiry date is optional - None means no expiration
@@ -2675,21 +2969,19 @@ def admin_edit_user(user_id):
         
         user.notes = request.form.get('notes', '').strip()
 
-        allowed_vlans = _parse_allowed_vlans(','.join(allowed_vlans_input))
-        if not allowed_vlans:
-            default_vlan = get_vlan_map().get('guests')
-            if default_vlan:
-                allowed_vlans.add(default_vlan)
-        user.allowed_vlans = _format_allowed_vlans(allowed_vlans)
-
-        adoptable_vlans = _parse_allowed_vlans(','.join(adoptable_vlans_input))
-        user.adoptable_vlans = _format_allowed_vlans(adoptable_vlans)
+        vlan_map = get_vlan_map()
+        allowed_vlans_allow, allowed_vlans_deny = _parse_vlan_override_form(vlan_map, 'allowed_vlan')
+        adoptable_allow, adoptable_deny = _parse_vlan_override_form(vlan_map, 'adoptable_vlan')
+        user.allowed_vlans_override = _format_allowed_vlans(allowed_vlans_allow)
+        user.allowed_vlans_deny = _format_allowed_vlans(allowed_vlans_deny)
+        user.adoptable_vlans_override = _format_allowed_vlans(adoptable_allow)
+        user.adoptable_vlans_deny = _format_allowed_vlans(adoptable_deny)
+        user.require_approval_every_device = require_approval_every_device
         
         db.session.commit()
         
         if apply_status_to_devices:
-            vlan_map = get_vlan_map()
-            target_vlan = _default_vlan_for_user(allowed_vlans, vlan_map)
+            target_vlan = _default_vlan_for_user(allowed_vlans_allow, vlan_map)
             devices = Device.query.filter_by(user_id=user.id, registration_status='registered').all()
 
             for device in devices:
@@ -2703,14 +2995,18 @@ def admin_edit_user(user_id):
         
         return redirect(url_for('admin_dashboard'))
     
-    allowed_vlans = _parse_allowed_vlans(user.allowed_vlans)
-    adoptable_vlans = _parse_allowed_vlans(user.adoptable_vlans)
+    allowed_vlans_allow = _parse_allowed_vlans(user.allowed_vlans_override)
+    allowed_vlans_deny = _parse_allowed_vlans(user.allowed_vlans_deny)
+    adoptable_allow = _parse_allowed_vlans(user.adoptable_vlans_override)
+    adoptable_deny = _parse_allowed_vlans(user.adoptable_vlans_deny)
     return render_template(
         'admin_edit_user.html',
         user=user,
         vlan_map=get_vlan_map(),
-        allowed_vlans=allowed_vlans,
-        adoptable_vlans=adoptable_vlans,
+        allowed_vlans_allow=allowed_vlans_allow,
+        allowed_vlans_deny=allowed_vlans_deny,
+        adoptable_allow=adoptable_allow,
+        adoptable_deny=adoptable_deny,
     )
 
 
@@ -2762,7 +3058,10 @@ def admin_approve_request(token):
     detected_connection, detected_vlan, detected_ssid = detect_connection_type(reg_request.ip_address)
     existing_user_allowed_display = ''
     if existing_user:
-        existing_user_allowed_display = _allowed_vlans_display(existing_user, get_vlan_map())
+        domain_policy = _load_domain_policy_map().get(_email_domain(existing_user.email))
+        existing_user_allowed_display = _format_vlan_items_text(
+            _allowed_vlans_display_items(existing_user, get_vlan_map(), domain_policy)
+        )
     return render_template(
         'admin_approve_request.html',
         request=reg_request,
@@ -2806,11 +3105,6 @@ def admin_process_request(request_id):
             if notes:
                 user.notes = f"{user.notes}\n{notes}" if user.notes else notes
 
-            allowed_vlans = _parse_allowed_vlans(user.allowed_vlans)
-            if target_vlan:
-                allowed_vlans.add(target_vlan)
-                user.allowed_vlans = _format_allowed_vlans(allowed_vlans)
-
             device = Device.query.filter_by(mac_address=reg_request.mac_address).first()
             if device:
                 device.user_id = user.id
@@ -2849,8 +3143,7 @@ def admin_process_request(request_id):
                 begin_date=begin_date,
                 expiry_date=expiry_date,
                 notes=notes,
-                created_by=current_user.username,
-                allowed_vlans=_format_allowed_vlans({target_vlan} if target_vlan else set())
+                created_by=current_user.username
             )
             db.session.add(user)
             db.session.flush()
@@ -2925,6 +3218,28 @@ def admin_process_request(request_id):
         # NEW: Unblock the original IP address from the unregistered VLAN
         if not network_mismatch:
             manage_switch_acl('unblock', reg_request.ip_address, detected_vlan)
+
+        unregister_url = _build_unregister_url(device.unregister_token)
+        if device.connection_type == 'wired':
+            ssid_display = "Wired Network"
+        else:
+            ssid_display = device.ssid or get_ssid_for_vlan(target_vlan) or "WiFi Network"
+        send_wifi_registration_confirmation(
+            user.email,
+            user.first_name or reg_request.first_name or "there",
+            ssid_display,
+            device.mac_address,
+            unregister_url,
+            registration_details={
+                "email": user.email,
+                "first_name": user.first_name or reg_request.first_name,
+                "last_name": user.last_name or reg_request.last_name,
+                "phone_number": user.phone_number or reg_request.phone_number,
+                "device_type": device.device_name,
+                "ip_address": device.ip_address,
+                "ssid": ssid_display
+            }
+        )
         
         flash(f'Request approved and user {user.email} created', 'success')
         logger.info(f"Admin approved registration request for {user.email}")

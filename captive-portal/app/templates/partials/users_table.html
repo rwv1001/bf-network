@@ -58,15 +58,53 @@
             <td>{{ user.email }}</td>
             <td>{{ user.full_name }}</td>
             <td style="font-size: 12px;">
-                {% if user.allowed_vlans_display %}
-                    {{ user.allowed_vlans_display }}
+                {% if user.allowed_vlans_display_items %}
+                    {% for item in user.allowed_vlans_display_items %}
+                        {% if not loop.first %}, {% endif %}
+                        {% if item.denied %}
+                            {% if item.domain_based %}
+                                <em><span style="text-decoration: line-through; color: #999;">{{ item.label }}</span></em>
+                            {% else %}
+                                <span style="text-decoration: line-through; color: #999;">{{ item.label }}</span>
+                            {% endif %}
+                        {% else %}
+                            {% if item.user_override and item.domain_based %}
+                                <em><strong>{{ item.label }}</strong></em>
+                            {% elif item.user_override %}
+                                <strong>{{ item.label }}</strong>
+                            {% elif item.domain_based %}
+                                <em>{{ item.label }}</em>
+                            {% else %}
+                                {{ item.label }}
+                            {% endif %}
+                        {% endif %}
+                    {% endfor %}
                 {% else %}
                     <em style="color: #999;">-</em>
                 {% endif %}
             </td>
             <td style="font-size: 12px;">
-                {% if user.adoptable_vlans_display %}
-                    {{ user.adoptable_vlans_display }}
+                {% if user.adoptable_vlans_display_items %}
+                    {% for item in user.adoptable_vlans_display_items %}
+                        {% if not loop.first %}, {% endif %}
+                        {% if item.denied %}
+                            {% if item.domain_based %}
+                                <em><span style="text-decoration: line-through; color: #999;">{{ item.label }}</span></em>
+                            {% else %}
+                                <span style="text-decoration: line-through; color: #999;">{{ item.label }}</span>
+                            {% endif %}
+                        {% else %}
+                            {% if item.user_override and item.domain_based %}
+                                <em><strong>{{ item.label }}</strong></em>
+                            {% elif item.user_override %}
+                                <strong>{{ item.label }}</strong>
+                            {% elif item.domain_based %}
+                                <em>{{ item.label }}</em>
+                            {% else %}
+                                {{ item.label }}
+                            {% endif %}
+                        {% endif %}
+                    {% endfor %}
                 {% else %}
                     <em style="color: #999;">-</em>
                 {% endif %}

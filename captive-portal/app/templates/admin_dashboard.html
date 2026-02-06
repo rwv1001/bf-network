@@ -429,15 +429,53 @@ function searchTable(tableType, searchValue) {
             <td>{{ user.email }}</td>
             <td>{{ user.full_name }}</td>
             <td style="font-size: 12px;">
-                {% if user.allowed_vlans_display %}
-                    {{ user.allowed_vlans_display }}
+                {% if user.allowed_vlans_display_items %}
+                    {% for item in user.allowed_vlans_display_items %}
+                        {% if not loop.first %}, {% endif %}
+                        {% if item.denied %}
+                            {% if item.domain_based %}
+                                <em><span style="text-decoration: line-through; color: #999;">{{ item.label }}</span></em>
+                            {% else %}
+                                <span style="text-decoration: line-through; color: #999;">{{ item.label }}</span>
+                            {% endif %}
+                        {% else %}
+                            {% if item.user_override and item.domain_based %}
+                                <em><strong>{{ item.label }}</strong></em>
+                            {% elif item.user_override %}
+                                <strong>{{ item.label }}</strong>
+                            {% elif item.domain_based %}
+                                <em>{{ item.label }}</em>
+                            {% else %}
+                                {{ item.label }}
+                            {% endif %}
+                        {% endif %}
+                    {% endfor %}
                 {% else %}
                     <em style="color: #999;">-</em>
                 {% endif %}
             </td>
             <td style="font-size: 12px;">
-                {% if user.adoptable_vlans_display %}
-                    {{ user.adoptable_vlans_display }}
+                {% if user.adoptable_vlans_display_items %}
+                    {% for item in user.adoptable_vlans_display_items %}
+                        {% if not loop.first %}, {% endif %}
+                        {% if item.denied %}
+                            {% if item.domain_based %}
+                                <em><span style="text-decoration: line-through; color: #999;">{{ item.label }}</span></em>
+                            {% else %}
+                                <span style="text-decoration: line-through; color: #999;">{{ item.label }}</span>
+                            {% endif %}
+                        {% else %}
+                            {% if item.user_override and item.domain_based %}
+                                <em><strong>{{ item.label }}</strong></em>
+                            {% elif item.user_override %}
+                                <strong>{{ item.label }}</strong>
+                            {% elif item.domain_based %}
+                                <em>{{ item.label }}</em>
+                            {% else %}
+                                {{ item.label }}
+                            {% endif %}
+                        {% endif %}
+                    {% endfor %}
                 {% else %}
                     <em style="color: #999;">-</em>
                 {% endif %}
@@ -705,6 +743,105 @@ function searchTable(tableType, searchValue) {
 </div>
 {% endif %}
 </div>
+
+<h3 style="margin-top: 40px; color: #667eea;">📧 Domain VLAN Policies</h3>
+
+<div class="info-box" style="margin-bottom: 20px;">
+    <p><strong>Note:</strong> Domain policies grant VLAN access by email domain. Unchecked VLANs mean “not specified.”</p>
+</div>
+
+<form method="POST" action="{{ url_for('admin_domain_policies') }}" style="margin-bottom: 25px;">
+    <input type="hidden" name="action" value="add">
+    <div style="display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 10px;">
+        <label for="domain" style="font-weight: 600;">New Domain</label>
+        <input type="text" id="domain" name="domain" placeholder="example.org" required
+               style="padding: 8px 12px; border: 1px solid #ddd; border-radius: 4px; min-width: 220px;">
+    </div>
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+        <div>
+            <strong>Allowed VLANs</strong>
+            <div style="margin-top: 8px;">
+                {% for status, vlan_id in vlan_map.items() %}
+                    {% if status not in ['unregistered', 'restricted'] %}
+                    <label style="display: inline-flex; align-items: center; gap: 6px; margin-right: 12px; margin-bottom: 6px;">
+                        <input type="checkbox" name="domain_allowed_vlans" value="{{ vlan_id }}">
+                        <span>{{ status.title() }} (VLAN {{ vlan_id }})</span>
+                    </label>
+                    {% endif %}
+                {% endfor %}
+            </div>
+        </div>
+        <div>
+            <strong>Adoptable VLANs</strong>
+            <div style="margin-top: 8px;">
+                {% for status, vlan_id in vlan_map.items() %}
+                    {% if status not in ['unregistered', 'restricted'] %}
+                    <label style="display: inline-flex; align-items: center; gap: 6px; margin-right: 12px; margin-bottom: 6px;">
+                        <input type="checkbox" name="domain_adoptable_vlans" value="{{ vlan_id }}">
+                        <span>{{ status.title() }} (VLAN {{ vlan_id }})</span>
+                    </label>
+                    {% endif %}
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+    <div style="margin-top: 12px;">
+        <button type="submit" class="btn btn-small">Add Domain Policy</button>
+    </div>
+</form>
+
+{% if domain_policies %}
+<div class="table-responsive" style="margin-bottom: 30px;">
+    <table>
+        <thead>
+            <tr>
+                <th>Domain</th>
+                <th>Allowed VLANs</th>
+                <th>Adoptable VLANs</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for policy in domain_policies %}
+            <tr>
+                <td style="font-family: monospace;">{{ policy.domain }}</td>
+                <td>
+                    {% for status, vlan_id in vlan_map.items() %}
+                        {% if status not in ['unregistered', 'restricted'] %}
+                        <label style="display: inline-flex; align-items: center; gap: 6px; margin-right: 12px; margin-bottom: 6px;">
+                            <input type="checkbox" name="domain_allowed_vlans" value="{{ vlan_id }}" form="domain-form-{{ policy.id }}"
+                                   {% if vlan_id in policy.allowed_vlans_set %}checked{% endif %}>
+                            <span>{{ status.title() }} (VLAN {{ vlan_id }})</span>
+                        </label>
+                        {% endif %}
+                    {% endfor %}
+                </td>
+                <td>
+                    {% for status, vlan_id in vlan_map.items() %}
+                        {% if status not in ['unregistered', 'restricted'] %}
+                        <label style="display: inline-flex; align-items: center; gap: 6px; margin-right: 12px; margin-bottom: 6px;">
+                            <input type="checkbox" name="domain_adoptable_vlans" value="{{ vlan_id }}" form="domain-form-{{ policy.id }}"
+                                   {% if vlan_id in policy.adoptable_vlans_set %}checked{% endif %}>
+                            <span>{{ status.title() }} (VLAN {{ vlan_id }})</span>
+                        </label>
+                        {% endif %}
+                    {% endfor %}
+                </td>
+                <td style="white-space: nowrap;">
+                    <form id="domain-form-{{ policy.id }}" method="POST" action="{{ url_for('admin_domain_policies') }}" style="display: inline;">
+                        <input type="hidden" name="policy_id" value="{{ policy.id }}">
+                        <input type="hidden" name="domain" value="{{ policy.domain }}">
+                        <button type="submit" class="btn btn-small" name="action" value="update">Update</button>
+                        <button type="submit" name="action" value="delete" class="btn btn-small" style="background: #999;"
+                                onclick="return confirm('Delete domain policy for {{ policy.domain }}?')">Delete</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
 
 <h3 style="margin-top: 40px; color: #667eea;">ℹ️ VLAN Configuration</h3>
 

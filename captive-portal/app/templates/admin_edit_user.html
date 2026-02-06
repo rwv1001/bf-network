@@ -34,15 +34,29 @@
         <div style="margin-top: 8px;">
             {% for status, vlan_id in vlan_map.items() %}
                 {% if status not in ['unregistered', 'restricted'] %}
-                <label style="display: inline-flex; align-items: center; gap: 6px; margin-right: 12px; margin-bottom: 6px;">
-                    <input type="checkbox" name="allowed_vlans" value="{{ vlan_id }}" {% if vlan_id in allowed_vlans %}checked{% endif %}>
-                    <span>{{ status.title() }} (VLAN {{ vlan_id }})</span>
-                </label>
+                <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 8px;">
+                    <strong style="min-width: 180px;">{{ status.title() }} (VLAN {{ vlan_id }})</strong>
+                    <label style="display: inline-flex; align-items: center; gap: 6px;">
+                        <input type="radio" name="allowed_vlan_{{ vlan_id }}" value="unspecified"
+                               {% if vlan_id not in allowed_vlans_allow and vlan_id not in allowed_vlans_deny %}checked{% endif %}>
+                        Not specified
+                    </label>
+                    <label style="display: inline-flex; align-items: center; gap: 6px;">
+                        <input type="radio" name="allowed_vlan_{{ vlan_id }}" value="allow"
+                               {% if vlan_id in allowed_vlans_allow %}checked{% endif %}>
+                        Allowed
+                    </label>
+                    <label style="display: inline-flex; align-items: center; gap: 6px;">
+                        <input type="radio" name="allowed_vlan_{{ vlan_id }}" value="deny"
+                               {% if vlan_id in allowed_vlans_deny %}checked{% endif %}>
+                        Not allowed
+                    </label>
+                </div>
                 {% endif %}
             {% endfor %}
         </div>
         <small style="color: #666; display: block; margin-top: 5px;">
-            Devices on these VLANs register automatically; others require admin approval.
+            Not specified means domain rules apply; not allowed overrides any domain allowances.
         </small>
     </div>
 
@@ -51,15 +65,40 @@
         <div style="margin-top: 8px;">
             {% for status, vlan_id in vlan_map.items() %}
                 {% if status not in ['unregistered', 'restricted'] %}
-                <label style="display: inline-flex; align-items: center; gap: 6px; margin-right: 12px; margin-bottom: 6px;">
-                    <input type="checkbox" name="adoptable_vlans" value="{{ vlan_id }}" {% if vlan_id in adoptable_vlans %}checked{% endif %}>
-                    <span>{{ status.title() }} (VLAN {{ vlan_id }})</span>
-                </label>
+                <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 8px;">
+                    <strong style="min-width: 180px;">{{ status.title() }} (VLAN {{ vlan_id }})</strong>
+                    <label style="display: inline-flex; align-items: center; gap: 6px;">
+                        <input type="radio" name="adoptable_vlan_{{ vlan_id }}" value="unspecified"
+                               {% if vlan_id not in adoptable_allow and vlan_id not in adoptable_deny %}checked{% endif %}>
+                        Not specified
+                    </label>
+                    <label style="display: inline-flex; align-items: center; gap: 6px;">
+                        <input type="radio" name="adoptable_vlan_{{ vlan_id }}" value="allow"
+                               {% if vlan_id in adoptable_allow %}checked{% endif %}>
+                        Adoptable
+                    </label>
+                    <label style="display: inline-flex; align-items: center; gap: 6px;">
+                        <input type="radio" name="adoptable_vlan_{{ vlan_id }}" value="deny"
+                               {% if vlan_id in adoptable_deny %}checked{% endif %}>
+                        Not adoptable
+                    </label>
+                </div>
                 {% endif %}
             {% endfor %}
         </div>
         <small style="color: #666; display: block; margin-top: 5px;">
-            Only VLANs also listed in ADOPTABLE_VLANS can be adopted.
+            Not specified means domain rules apply.
+        </small>
+    </div>
+
+    <div class="form-group">
+        <label style="display: inline-flex; align-items: center; gap: 8px;">
+            <input type="checkbox" name="require_approval_every_device" value="1"
+                   {% if user.require_approval_every_device %}checked{% endif %}>
+            Require admin approval for every device
+        </label>
+        <small style="color: #666; display: block; margin-top: 5px;">
+            When enabled, this user always needs approval even if VLANs are allowed.
         </small>
     </div>
     

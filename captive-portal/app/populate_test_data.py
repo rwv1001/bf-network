@@ -70,7 +70,7 @@ def create_users(count=35):
             expiry_date=expiry_date,
             notes=fake.sentence() if random.random() < 0.3 else '',
             created_by='test_script',
-            allowed_vlans=str(vlan_id)
+            allowed_vlans_override=str(vlan_id)
         )
         
         db.session.add(user)
@@ -125,9 +125,9 @@ def create_devices(count=45):
         
         # Get VLAN from user status
         current_vlan = None
-        if user.allowed_vlans:
+        if user.allowed_vlans_override:
             try:
-                current_vlan = int(user.allowed_vlans.split(',')[0].strip())
+                current_vlan = int(user.allowed_vlans_override.split(',')[0].strip())
             except (ValueError, IndexError):
                 current_vlan = None
         if not current_vlan:

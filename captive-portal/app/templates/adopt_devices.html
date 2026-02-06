@@ -93,6 +93,16 @@
     <strong>No Adoption Permissions</strong>
     <p>Your account does not have permission to adopt devices on any VLANs.</p>
 </div>
+{% elif error == 'approval_required' %}
+<div class="alert alert-info">
+    <strong>Approval Required</strong>
+    <p>Your account requires administrator approval for every device.</p>
+</div>
+{% elif error == 'no_devices' %}
+<div class="alert alert-info">
+    <strong>No devices available to adopt</strong>
+    <p>There are no devices on {{ current_ssid }} network for you to adopt. You can only adopt devices on networks {{ adoptable_ssids }}.</p>
+</div>
 {% endif %}
 
 {% if user %}
@@ -192,6 +202,13 @@
         if (!select || !other) {
             return;
         }
+        form.addEventListener('submit', () => {
+            if (!submitButton) {
+                return;
+            }
+            submitButton.disabled = true;
+            submitButton.textContent = 'Please wait';
+        });
         const update = () => {
             const selectedValue = (select.value || '').trim();
             const isOther = selectedValue.toLowerCase() === 'other';
@@ -216,7 +233,7 @@
 {% else %}
 {% if not error %}
 <div class="alert alert-info">
-    <strong>No devices available</strong>
+    <strong>No devices available to adopt</strong>
     <p>There are no unadopted devices detected on your adoptable VLANs.</p>
 </div>
 {% endif %}

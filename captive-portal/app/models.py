@@ -19,6 +19,11 @@ class User(db.Model):
     phone_number = db.Column(db.String(20))
     allowed_vlans = db.Column(db.Text)  # Comma-separated VLAN IDs allowed without approval
     adoptable_vlans = db.Column(db.Text)  # Comma-separated VLAN IDs user can adopt
+    allowed_vlans_override = db.Column(db.Text)  # Explicitly allowed VLAN IDs
+    allowed_vlans_deny = db.Column(db.Text)  # Explicitly denied VLAN IDs
+    adoptable_vlans_override = db.Column(db.Text)  # Explicitly adoptable VLAN IDs
+    adoptable_vlans_deny = db.Column(db.Text)  # Explicitly denied adoptable VLAN IDs
+    require_approval_every_device = db.Column(db.Boolean, default=False, nullable=False)
     begin_date = db.Column(db.Date, nullable=False)
     expiry_date = db.Column(db.Date, nullable=True)  # NULL means no expiration
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -130,6 +135,21 @@ class VlanMapping(db.Model):
     
     def __repr__(self):
         return f'<VlanMapping {self.status} -> VLAN {self.vlan_id}>'
+
+
+class DomainPolicy(db.Model):
+    """Domain-based VLAN allowances and adoption rules."""
+    __tablename__ = 'domain_policies'
+
+    id = db.Column(db.Integer, primary_key=True)
+    domain = db.Column(db.String(255), unique=True, nullable=False, index=True)
+    allowed_vlans = db.Column(db.Text)
+    adoptable_vlans = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self):
+        return f'<DomainPolicy {self.domain}>'
 
 
 class Setting(db.Model):
