@@ -130,6 +130,12 @@ document.addEventListener('DOMContentLoaded', function() {
     const portalUrl = "{{ portal_url|e }}";
     const portalPollUrl = "{{ portal_poll_url|e }}";
     const portalBase = portalUrl ? portalUrl.replace(/\/$/, '') : window.location.origin;
+    const internetCheckUrls = [
+        ...(institutionUrl ? [institutionUrl] : []),
+        'https://www.msftconnecttest.com/connecttest.txt',
+        'https://www.gstatic.com/generate_204',
+        'https://captive.apple.com/hotspot-detect.html'
+    ];
     const pollBase = (() => {
         const preferred = portalPollUrl ? portalPollUrl.replace(/\/$/, '') : window.location.origin;
         if (window.location.protocol === 'https:' && preferred.startsWith('http:')) {
@@ -368,33 +374,43 @@ document.addEventListener('DOMContentLoaded', function() {
 
         const checkAccess = () => {
             attempts += 1;
-            fetch(apiUrl('/access-check'), {
-                method: 'GET',
-                cache: 'no-store'
-            })
-            .then((response) => {
-                if (response.status !== 204) {
-                    throw new Error('Access not ready');
+            let index = 0;
+
+            const tryNext = () => {
+                const url = internetCheckUrls[index];
+                index += 1;
+                if (!url) {
+                    throw new Error('All checks failed');
                 }
-                clearInterval(accessInterval);
-                accessInterval = null;
-                accessConfirmed = true;
-                if (pollInterval) {
-                    clearInterval(pollInterval);
-                    pollInterval = null;
-                }
-                if (mismatchInterval) {
-                    clearInterval(mismatchInterval);
-                    mismatchInterval = null;
-                }
-                showStatus('You now have full internet access.', 'success');
-            })
-            .catch(() => {
-                if (attempts >= maxAttempts) {
+                return fetch(url, {
+                    method: 'GET',
+                    mode: 'no-cors',
+                    cache: 'no-store'
+                }).catch(() => tryNext());
+            };
+
+            Promise.resolve()
+                .then(tryNext)
+                .then(() => {
                     clearInterval(accessInterval);
                     accessInterval = null;
-                }
-            });
+                    accessConfirmed = true;
+                    if (pollInterval) {
+                        clearInterval(pollInterval);
+                        pollInterval = null;
+                    }
+                    if (mismatchInterval) {
+                        clearInterval(mismatchInterval);
+                        mismatchInterval = null;
+                    }
+                    showStatus('You now have full internet access.', 'success');
+                })
+                .catch(() => {
+                    if (attempts >= maxAttempts) {
+                        clearInterval(accessInterval);
+                        accessInterval = null;
+                    }
+                });
         };
 
         accessInterval = setInterval(checkAccess, 2000);

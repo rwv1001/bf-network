@@ -140,6 +140,12 @@
     const maxAttempts = 30;
     let attempts = 0;
     let pollTimer = null;
+    const internetCheckUrls = [
+        ...("{{ institution_url|e }}" ? ["{{ institution_url|e }}"] : []),
+        'https://www.msftconnecttest.com/connecttest.txt',
+        'https://www.gstatic.com/generate_204',
+        'https://captive.apple.com/hotspot-detect.html'
+    ];
 
     const updateMessage = (text) => {
         targetEl.textContent = text;
@@ -147,22 +153,32 @@
 
     const checkAccess = () => {
         attempts += 1;
-        fetch('/access-check', {
-            method: 'GET',
-            cache: 'no-store'
-        })
-        .then((response) => {
-            if (response.status !== 204) {
-                throw new Error('Access not ready');
+        let index = 0;
+
+        const tryNext = () => {
+            const url = internetCheckUrls[index];
+            index += 1;
+            if (!url) {
+                throw new Error('All checks failed');
             }
-            clearInterval(pollTimer);
-            updateMessage('✓ You now have full internet access.');
-        })
-        .catch(() => {
-            if (attempts >= maxAttempts) {
+            return fetch(url, {
+                method: 'GET',
+                mode: 'no-cors',
+                cache: 'no-store'
+            }).catch(() => tryNext());
+        };
+
+        Promise.resolve()
+            .then(tryNext)
+            .then(() => {
                 clearInterval(pollTimer);
-            }
-        });
+                updateMessage('✓ You now have full internet access.');
+            })
+            .catch(() => {
+                if (attempts >= maxAttempts) {
+                    clearInterval(pollTimer);
+                }
+            });
     };
 
     pollTimer = setInterval(checkAccess, 2000);
