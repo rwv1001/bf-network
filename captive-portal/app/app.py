@@ -1189,6 +1189,15 @@ def android_captive_portal_detection():
             return redirect(_build_portal_url(url_for('blocked_page'))), 302
     return redirect(_build_portal_url(url_for('register'))), 302
 
+
+@app.route('/access-check')
+def access_check():
+    """Return 204 when a registered device should have full access."""
+    user, device = _current_user_from_device()
+    if user and device and device.registration_status == 'registered':
+        return ('', 204)
+    return ('', 409)
+
 @app.route('/hotspot-detect.html')
 def ios_captive_portal_detection():
     """iOS captive portal detection - MUST NOT return Success or iOS won't show portal"""

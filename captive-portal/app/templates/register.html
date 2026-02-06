@@ -368,12 +368,14 @@ document.addEventListener('DOMContentLoaded', function() {
 
         const checkAccess = () => {
             attempts += 1;
-            fetch('https://connectivitycheck.gstatic.com/generate_204', {
+            fetch(apiUrl('/access-check'), {
                 method: 'GET',
-                mode: 'no-cors',
                 cache: 'no-store'
             })
-            .then(() => {
+            .then((response) => {
+                if (response.status !== 204) {
+                    throw new Error('Access not ready');
+                }
                 clearInterval(accessInterval);
                 accessInterval = null;
                 accessConfirmed = true;
