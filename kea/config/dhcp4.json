@@ -2,19 +2,25 @@
   "Dhcp4": {
     "authoritative": true,
     "interfaces-config": {
-      "interfaces": [ "eth0.10", "eth0.20", "eth0.30", "eth0.40", "eth0.50", "eth0.60", "eth0.70", "eth0.99" ],
+      "interfaces": [
+        "eth0.10",
+        "eth0.20",
+        "eth0.30",
+        "eth0.40",
+        "eth0.50",
+        "eth0.60",
+        "eth0.70",
+        "eth0.99"
+      ],
       "dhcp-socket-type": "raw"
     },
-
     "multi-threading": {
       "enable-multi-threading": true
     },
-    
     "control-socket": {
       "socket-type": "unix",
       "socket-name": "/kea/sockets/kea4-ctrl-socket"
     },
-    
     "hooks-libraries": [
       {
         "library": "/usr/local/lib/kea/hooks/libdhcp_pgsql.so"
@@ -29,14 +35,12 @@
         "library": "/usr/local/lib/kea/hooks/dhcp_dns_hijack.so"
       }
     ],
-    
     "lease-database": {
       "type": "memfile",
       "persist": true,
       "name": "/kea/leases/kea-leases4.csv",
       "lfc-interval": 3600
     },
-    
     "hosts-database": {
       "type": "postgresql",
       "name": "captive_portal",
@@ -45,7 +49,6 @@
       "host": "127.0.0.1",
       "port": 5432
     },
-    
     "expired-leases-processing": {
       "reclaim-timer-wait-time": 10,
       "flush-reclaimed-timer-wait-time": 25,
@@ -54,11 +57,9 @@
       "max-reclaim-time": 250,
       "unwarned-reclaim-cycles": 5
     },
-    
     "renew-timer": 150,
     "rebind-timer": 240,
     "valid-lifetime": 300,
-    
     "option-data": [
       {
         "name": "domain-name",
@@ -69,25 +70,28 @@
         "data": "192.168.99.4"
       }
     ],
-
     "client-classes": [
       {
         "name": "BLOCKED",
         "test": "0 == 1"
       }
     ],
-    
     "subnet4": [
       {
-        "subnet": "192.168.10.0/24",
+        "subnet": "192.168.8.0/22",
         "id": 10,
         "pools": [
           {
-            "pool": "192.168.10.5 - 192.168.10.213"
+            "pool": "192.168.8.5 - 192.168.10.0"
           },
           {
-            "pool": "192.168.10.214 - 192.168.10.254",
-            "client-classes": ["BLOCKED"]
+            "pool": "192.168.10.5 - 192.168.11.95"
+          },
+          {
+            "pool": "192.168.11.96 - 192.168.11.255",
+            "client-classes": [
+              "BLOCKED"
+            ]
           }
         ],
         "interface": "eth0.10",
@@ -100,15 +104,17 @@
         "reservations": []
       },
       {
-        "subnet": "192.168.20.0/24",
+        "subnet": "192.168.20.0/22",
         "id": 20,
         "pools": [
           {
-            "pool": "192.168.20.5 - 192.168.20.213"
+            "pool": "192.168.20.5 - 192.168.23.95"
           },
           {
-            "pool": "192.168.20.214 - 192.168.20.254",
-            "client-classes": ["BLOCKED"]
+            "pool": "192.168.23.96 - 192.168.23.255",
+            "client-classes": [
+              "BLOCKED"
+            ]
           }
         ],
         "interface": "eth0.20",
@@ -121,15 +127,17 @@
         "reservations": []
       },
       {
-        "subnet": "192.168.30.0/24",
+        "subnet": "192.168.30.0/23",
         "id": 30,
         "pools": [
           {
-            "pool": "192.168.30.5 - 192.168.30.213"
+            "pool": "192.168.30.5 - 192.168.31.175"
           },
           {
-            "pool": "192.168.30.214 - 192.168.30.254",
-            "client-classes": ["BLOCKED"]
+            "pool": "192.168.31.176 - 192.168.31.255",
+            "client-classes": [
+              "BLOCKED"
+            ]
           }
         ],
         "interface": "eth0.30",
@@ -146,11 +154,13 @@
         "id": 40,
         "pools": [
           {
-            "pool": "192.168.40.5 - 192.168.40.213"
+            "pool": "192.168.40.5 - 192.168.40.215"
           },
           {
-            "pool": "192.168.40.214 - 192.168.40.254",
-            "client-classes": ["BLOCKED"]
+            "pool": "192.168.40.216 - 192.168.40.255",
+            "client-classes": [
+              "BLOCKED"
+            ]
           }
         ],
         "interface": "eth0.40",
@@ -167,11 +177,13 @@
         "id": 50,
         "pools": [
           {
-            "pool": "192.168.50.5 - 192.168.50.213"
+            "pool": "192.168.50.5 - 192.168.50.215"
           },
           {
-            "pool": "192.168.50.214 - 192.168.50.254",
-            "client-classes": ["BLOCKED"]
+            "pool": "192.168.50.216 - 192.168.50.255",
+            "client-classes": [
+              "BLOCKED"
+            ]
           }
         ],
         "interface": "eth0.50",
@@ -188,11 +200,13 @@
         "id": 60,
         "pools": [
           {
-            "pool": "192.168.60.5 - 192.168.60.213"
+            "pool": "192.168.60.5 - 192.168.60.215"
           },
           {
-            "pool": "192.168.60.214 - 192.168.60.254",
-            "client-classes": ["BLOCKED"]
+            "pool": "192.168.60.216 - 192.168.60.255",
+            "client-classes": [
+              "BLOCKED"
+            ]
           }
         ],
         "interface": "eth0.60",
@@ -204,17 +218,18 @@
         ],
         "reservations": []
       },
-
       {
         "subnet": "192.168.70.0/24",
         "id": 70,
         "pools": [
           {
-            "pool": "192.168.70.5 - 192.168.70.213"
+            "pool": "192.168.70.5 - 192.168.70.215"
           },
           {
-            "pool": "192.168.70.214 - 192.168.70.254",
-            "client-classes": ["BLOCKED"]
+            "pool": "192.168.70.216 - 192.168.70.255",
+            "client-classes": [
+              "BLOCKED"
+            ]
           }
         ],
         "interface": "eth0.70",
@@ -226,7 +241,6 @@
         ],
         "reservations": []
       },
-
       {
         "subnet": "192.168.99.0/24",
         "id": 99,
@@ -249,7 +263,6 @@
         "reservations": []
       }
     ],
-    
     "loggers": [
       {
         "name": "kea-dhcp4",

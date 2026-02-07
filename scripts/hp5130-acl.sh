@@ -22,6 +22,20 @@ SWITCH_HOST="${SWITCH_HOST:-192.168.1.3}"
 SWITCH_USER="${SWITCH_USER:-robert}"
 SWITCH_SSH_PORT="${SWITCH_SSH_PORT:-22}"
 SWITCH_KEY_PATH="${SWITCH_KEY_PATH:-$DEFAULT_KEY_PATH}"
+KEA_CONFIG_PATH="${KEA_CONFIG_PATH:-}"
+PYTHON_BIN="${PYTHON_BIN:-}"
+
+if [ -z "$KEA_CONFIG_PATH" ]; then
+  if [ -f "/kea/config/dhcp4.json" ]; then
+    KEA_CONFIG_PATH="/kea/config/dhcp4.json"
+  else
+    KEA_CONFIG_PATH="$BASE_DIR/kea/config/dhcp4.json"
+  fi
+fi
+
+if [ -z "$PYTHON_BIN" ]; then
+  PYTHON_BIN="$(command -v python3 2>/dev/null || true)"
+fi
 
 QUEUE_BASE="${ACL_QUEUE_DIR:-}"
 if [ -z "$QUEUE_BASE" ]; then
@@ -76,11 +90,52 @@ if [ -f "$DEDUP_FILE" ]; then
 fi
 printf '%s' "$now" > "$DEDUP_FILE" 2>/dev/null || true
 
-# Extract VLAN and host octet from IP (192.168.<vlan>.<host>)
-VLAN_ID="$(echo "$IP_ADDRESS" | awk -F. '{print $3}')"
-HOST_OCTET="$(echo "$IP_ADDRESS" | awk -F. '{print $4}')"
+# Resolve VLAN and host offset using Kea config
+MAP_OUT=""
+if [ -n "$PYTHON_BIN" ] && [ -f "$KEA_CONFIG_PATH" ]; then
+MAP_OUT=$($PYTHON_BIN - <<'PY' "$KEA_CONFIG_PATH" "$IP_ADDRESS"
+import ipaddress
+import json
+import sys
+
+config_path = sys.argv[1]
+ip_str = sys.argv[2]
+
+with open(config_path, 'r', encoding='utf-8') as handle:
+  data = json.load(handle)
+
+ip = ipaddress.ip_address(ip_str)
+
+for entry in data.get('Dhcp4', {}).get('subnet4', []):
+  try:
+    vlan_id = int(entry.get('id'))
+  except Exception:
+    continue
+  network = ipaddress.ip_network(entry.get('subnet'), strict=False)
+  if ip in network:
+    offset = int(ip) - int(network.network_address)
+    print(f"VLAN_ID={vlan_id}")
+    print(f"OFFSET={offset}")
+    break
+PY
+  )
+  fi
+
+VLAN_ID="$(printf '%s\n' "$MAP_OUT" | awk -F= '/^VLAN_ID=/{print $2}')"
+HOST_OFFSET="$(printf '%s\n' "$MAP_OUT" | awk -F= '/^OFFSET=/{print $2}')"
+
+if [ -z "$VLAN_ID" ] || [ -z "$HOST_OFFSET" ]; then
+  VLAN_ID="$(echo "$IP_ADDRESS" | awk -F. '{print $3}')"
+  HOST_OFFSET="$(echo "$IP_ADDRESS" | awk -F. '{print $4}')"
+fi
+
+if [ -z "$VLAN_ID" ] || [ -z "$HOST_OFFSET" ]; then
+  log "SKIP_INVALID action=$ACTION ip=$IP_ADDRESS reason=unknown_vlan"
+  exit 0
+fi
+
 ACL_NUM=$((3000 + VLAN_ID * 10))
-RULE_NUM=$((1000 + HOST_OCTET))
+RULE_NUM=$((1000 + HOST_OFFSET))
 
 SSH_TTY_FLAG="${SSH_TTY_FLAG:--tt}"  # Changed: Default to -tt for Comware
 SSH_TTY_FALLBACK="${SSH_TTY_FALLBACK:-0}"  # Changed: Disable fallback

@@ -2,14 +2,15 @@
 Kea DHCP Integration Module
 
 Manages host reservations in Kea DHCP server for three-pool MAC-based assignment:
-1. Registered pool (.5-.127, 24h lease): Devices with approved registrations
-2. Newly unregistered pool (.128-.191, 60s lease): First seen <30 min ago
-3. Old unregistered pool (.192-.254, 24h lease): First seen >30 min ago
+1. Registered pool (size depends on subnet prefix): Devices with approved registrations
+2. Newly unregistered pool (short lease): First seen <30 min ago
+3. Old unregistered pool (long lease): First seen >30 min ago
 
 Supports both control socket and HTTP API communication.
 """
 
 import json
+import ipaddress
 import socket
 import requests
 import logging
@@ -18,6 +19,64 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_vlan_prefix_map(raw: str) -> Dict[int, int]:
+    mapping: Dict[int, int] = {}
+    if not raw:
+        return mapping
+    for entry in raw.split(','):
+        entry = entry.strip()
+        if not entry or ':' not in entry:
+            continue
+        vlan_str, prefix_str = entry.split(':', 1)
+        try:
+            vlan_id = int(vlan_str.strip())
+            prefix = int(prefix_str.strip())
+        except ValueError:
+            continue
+        if prefix not in {24, 23, 22, 21}:
+            continue
+        mapping[vlan_id] = prefix
+    return mapping
+
+
+def _pool_bounds_for_prefix(prefix: int) -> Dict[str, int]:
+    total = 2 ** (32 - prefix)
+    block_size = 40 * (2 ** (24 - prefix))
+    registered_start = 5
+    registered_end = total - block_size - 1
+    blocked_start = registered_end + 1
+    blocked_end = total - 1
+    return {
+        "registered_start": registered_start,
+        "registered_end": registered_end,
+        "blocked_start": blocked_start,
+        "blocked_end": blocked_end,
+    }
+
+
+def _prefix_for_vlan(vlan_id: int) -> int:
+    env_map = _parse_vlan_prefix_map(os.getenv('VLAN_PREFIX_MAP', ''))
+    if vlan_id in env_map:
+        return env_map[vlan_id]
+
+    config_path = os.getenv('KEA_CONFIG_PATH', '/kea/config/dhcp4.json')
+    if os.path.isfile(config_path):
+        try:
+            with open(config_path, 'r', encoding='utf-8') as handle:
+                data = json.load(handle)
+            for subnet in data.get('Dhcp4', {}).get('subnet4', []):
+                try:
+                    if int(subnet.get('id')) == int(vlan_id):
+                        network = ipaddress.ip_network(subnet.get('subnet'), strict=False)
+                        return network.prefixlen
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    return 24
 
 
 class KeaIntegration:
@@ -139,13 +198,13 @@ class KeaIntegration:
         
         Creates a host reservation with user-context marking it as registered.
         Client class expressions in Kea config will evaluate this and assign
-        the device to the registered pool (.5-.127) with 24h lease and public DNS.
+        the device to the registered pool with public DNS.
         
         Args:
             mac: MAC address (format: aa:bb:cc:dd:ee:ff)
             vlan: VLAN number (e.g., 40 for 192.168.40.0/24)
             hostname: Optional hostname for the device
-            ip_address: Optional specific IP to reserve (must be in registered pool .5-.127)
+            ip_address: Optional specific IP to reserve (must be in registered pool)
             
         Returns:
             True if successful, False otherwise
@@ -179,13 +238,21 @@ class KeaIntegration:
             # This avoids NAK issues when switching from unregistered to registered subnet.
             if ip_address:
                 # Only set IP if explicitly provided (for manual assignments)
-                # Validate IP is in registered pool range (.5-.213)
-                ip_parts = ip_address.split('.')
-                if len(ip_parts) == 4:
-                    last_octet = int(ip_parts[3])
-                    if not (5 <= last_octet <= 213):
-                        logger.error(f"IP {ip_address} not in registered pool range (.5-.213)")
-                        return False
+                prefix = _prefix_for_vlan(vlan)
+                bounds = _pool_bounds_for_prefix(prefix)
+                network = ipaddress.IPv4Network(f"192.168.{vlan}.0/{prefix}", strict=False)
+                try:
+                    ip_value = ipaddress.IPv4Address(ip_address)
+                except Exception:
+                    logger.error(f"Invalid IP address: {ip_address}")
+                    return False
+                if ip_value not in network:
+                    logger.error(f"IP {ip_address} not in VLAN {vlan} subnet {network}")
+                    return False
+                offset = int(ip_value) - int(network.network_address)
+                if not (bounds["registered_start"] <= offset <= bounds["registered_end"]):
+                    logger.error(f"IP {ip_address} not in registered pool range for VLAN {vlan}")
+                    return False
                 reservation["ip-address"] = ip_address
                 logger.info(f"Assigning specific IP {ip_address} to MAC {mac}")
             else:
@@ -465,7 +532,7 @@ class KeaIntegration:
     
     def _find_available_registered_ip(self, vlan: int, subnet_id: int) -> Optional[str]:
         """
-        Find an available IP in the registered pool (.5-.213) for the subnet.
+        Find an available IP in the registered pool for the subnet.
         
         Args:
             subnet_id: Subnet ID (e.g., 10 for 192.168.10.0/24)
@@ -474,8 +541,9 @@ class KeaIntegration:
             Available IP address or None if pool is full
         """
         try:
-            # Build base IP from VLAN (assumes 192.168.X.0/24 format)
-            base_ip = f"192.168.{vlan}"
+            prefix = _prefix_for_vlan(vlan)
+            bounds = _pool_bounds_for_prefix(prefix)
+            network = ipaddress.IPv4Network(f"192.168.{vlan}.0/{prefix}", strict=False)
             
             # Get all current leases and reservations
             command = {
@@ -500,9 +568,11 @@ class KeaIntegration:
                 if "ip-address" in res:
                     used_ips.add(res["ip-address"])
             
-            # Find first available IP in registered pool (.5-.213)
-            for last_octet in range(5, 214):
-                candidate_ip = f"{base_ip}.{last_octet}"
+            start = int(network.network_address) + bounds["registered_start"]
+            end = int(network.network_address) + bounds["registered_end"]
+
+            for candidate in range(start, end + 1):
+                candidate_ip = str(ipaddress.IPv4Address(candidate))
                 if candidate_ip not in used_ips:
                     return candidate_ip
             
@@ -519,10 +589,12 @@ class KeaIntegration:
 
     def _find_available_blocked_ip(self, vlan: int, subnet_id: int) -> Optional[str]:
         """
-        Find an available IP in the blocked pool (.214-.254) for the subnet.
+        Find an available IP in the blocked pool for the subnet.
         """
         try:
-            base_ip = f"192.168.{vlan}"
+            prefix = _prefix_for_vlan(vlan)
+            bounds = _pool_bounds_for_prefix(prefix)
+            network = ipaddress.IPv4Network(f"192.168.{vlan}.0/{prefix}", strict=False)
 
             command = {
                 "command": "lease4-get-all",
@@ -545,8 +617,11 @@ class KeaIntegration:
                 if "ip-address" in res:
                     used_ips.add(res["ip-address"])
 
-            for last_octet in range(214, 255):
-                candidate_ip = f"{base_ip}.{last_octet}"
+            start = int(network.network_address) + bounds["blocked_start"]
+            end = int(network.network_address) + bounds["blocked_end"]
+
+            for candidate in range(start, end + 1):
+                candidate_ip = str(ipaddress.IPv4Address(candidate))
                 if candidate_ip not in used_ips:
                     return candidate_ip
 

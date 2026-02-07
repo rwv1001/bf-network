@@ -12,6 +12,15 @@ DB_PORT="${DB_PORT:-5432}"
 DB_NAME="${DB_NAME:-captive_portal}"
 DB_USER="${DB_USER:-portal_user}"
 DB_PASSWORD="${DB_PASSWORD:-your_secure_database_password_here}"
+CONFIG_PATH="${KEA_CONFIG_PATH:-}"
+
+if [ -z "$CONFIG_PATH" ]; then
+    if [ -f "/kea/config/dhcp4.json" ]; then
+        CONFIG_PATH="/kea/config/dhcp4.json"
+    else
+        CONFIG_PATH="/home/admin/bf-network/kea/config/dhcp4.json"
+    fi
+fi
 
 export PGPASSWORD="$DB_PASSWORD"
 PSQL="psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -t -A"
@@ -19,6 +28,61 @@ PSQL="psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -t -A"
 is_blocked_pool_ip() {
     ip="$1"
     [ -z "$ip" ] && return 1
+
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - <<'PY' "$CONFIG_PATH" "$ip"
+import json
+import ipaddress
+import sys
+
+config_path = sys.argv[1]
+ip_str = sys.argv[2]
+
+try:
+    with open(config_path, 'r', encoding='utf-8') as handle:
+        data = json.load(handle)
+except Exception:
+    sys.exit(2)
+
+try:
+    ip = ipaddress.ip_address(ip_str)
+except Exception:
+    sys.exit(2)
+
+def in_pool(pool_range, ip_addr):
+    start_str, end_str = [part.strip() for part in pool_range.split('-', 1)]
+    start_ip = ipaddress.ip_address(start_str)
+    end_ip = ipaddress.ip_address(end_str)
+    return start_ip <= ip_addr <= end_ip
+
+for subnet in data.get('Dhcp4', {}).get('subnet4', []):
+    try:
+        vlan_id = int(subnet.get('id'))
+    except Exception:
+        continue
+    if vlan_id == 99:
+        continue
+    blocked_pool = None
+    for pool in subnet.get('pools', []):
+        classes = pool.get('client-classes') or []
+        if 'BLOCKED' in classes:
+            blocked_pool = pool.get('pool')
+            break
+    if not blocked_pool:
+        network = ipaddress.ip_network(subnet.get('subnet'), strict=False)
+        block_size = 40 * (2 ** (24 - network.prefixlen))
+        blocked_start = network.broadcast_address - (block_size - 1)
+        blocked_pool = f"{blocked_start}-{network.broadcast_address}"
+    if in_pool(blocked_pool, ip):
+        sys.exit(0)
+
+sys.exit(1)
+PY
+        status=$?
+        if [ "$status" -eq 0 ] || [ "$status" -eq 1 ]; then
+            return "$status"
+        fi
+    fi
 
     old_ifs=$IFS
     IFS=.
@@ -37,7 +101,7 @@ is_blocked_pool_ip() {
     [ "$2" -eq 168 ] || return 1
 
     case "$3" in
-        10|20|30|40|50|60|70|90) ;;
+        10|20|30|40|50|60|70) ;;
         *) return 1 ;;
     esac
 

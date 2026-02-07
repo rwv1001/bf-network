@@ -12,6 +12,7 @@ import shlex
 import shutil
 import json
 import csv
+import ipaddress
 import io
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, abort, Response
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
@@ -320,6 +321,142 @@ def _should_hijack_vlan(vlan_id):
     return True
 
 
+POOL_PREFIX_CHOICES = [24, 23, 22, 21]
+POOL_PREFIX_STATUSES = ['friars', 'staff', 'students', 'guests', 'contractors', 'volunteers', 'iot']
+
+
+def _get_vlan_prefix_map():
+    prefix_map = {}
+    for status in POOL_PREFIX_STATUSES:
+        raw = Setting.get_value(f'vlan_prefix_{status}', 24)
+        try:
+            prefix = int(raw)
+        except (TypeError, ValueError):
+            prefix = 24
+        if prefix not in POOL_PREFIX_CHOICES:
+            prefix = 24
+        prefix_map[status] = prefix
+    return prefix_map
+
+
+def _ip_from_offset(network, offset):
+    return str(ipaddress.IPv4Address(int(network.network_address) + offset))
+
+
+def _build_pools_for_vlan(vlan_id, prefix):
+    network = ipaddress.IPv4Network(f"192.168.{vlan_id}.0/{prefix}", strict=False)
+    total = network.num_addresses
+    block_size = 40 * (2 ** (24 - prefix))
+    block_start = total - block_size
+    block_end = total - 1
+    registered_start = 5
+    registered_end = block_start - 1
+
+    if registered_end < registered_start:
+        raise ValueError(f"Pool size too small for VLAN {vlan_id} /{prefix}")
+
+    reserved_start_ip = ipaddress.IPv4Address(f"192.168.{vlan_id}.1")
+    reserved_end_ip = ipaddress.IPv4Address(f"192.168.{vlan_id}.4")
+    reserved_in_network = reserved_start_ip in network and reserved_end_ip in network
+    reserved_start_offset = int(reserved_start_ip) - int(network.network_address)
+    reserved_end_offset = int(reserved_end_ip) - int(network.network_address)
+
+    registered_pools = []
+    if reserved_in_network and not (reserved_end_offset < registered_start or reserved_start_offset > registered_end):
+        if reserved_start_offset > registered_start:
+            registered_pools.append(
+                f"{_ip_from_offset(network, registered_start)} - {_ip_from_offset(network, reserved_start_offset - 1)}"
+            )
+        if reserved_end_offset < registered_end:
+            registered_pools.append(
+                f"{_ip_from_offset(network, reserved_end_offset + 1)} - {_ip_from_offset(network, registered_end)}"
+            )
+    else:
+        registered_pools.append(
+            f"{_ip_from_offset(network, registered_start)} - {_ip_from_offset(network, registered_end)}"
+        )
+
+    if not registered_pools:
+        raise ValueError(f"Pool size too small for VLAN {vlan_id} /{prefix}")
+
+    blocked_pool = f"{_ip_from_offset(network, block_start)} - {_ip_from_offset(network, block_end)}"
+
+    return str(network), registered_pools, blocked_pool
+
+
+def _pool_bounds_for_prefix(prefix):
+    total = 2 ** (32 - prefix)
+    block_size = 40 * (2 ** (24 - prefix))
+    registered_start = 5
+    registered_end = total - block_size - 1
+    blocked_start = registered_end + 1
+    blocked_end = total - 1
+    return registered_start, registered_end, blocked_start, blocked_end
+
+
+def _get_vlan_prefix_by_id():
+    vlan_map = get_vlan_map()
+    prefix_map = _get_vlan_prefix_map()
+    prefix_by_id = {}
+    for status, vlan_id in vlan_map.items():
+        if status in prefix_map:
+            prefix_by_id[vlan_id] = prefix_map[status]
+        else:
+            prefix_by_id[vlan_id] = 24
+    return prefix_by_id
+
+
+def _update_kea_config(vlan_prefix_by_id):
+    config_path = os.getenv('KEA_CONFIG_PATH', '/kea/config/dhcp4.json')
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Kea config not found at {config_path}")
+
+    with open(config_path, 'r', encoding='utf-8') as handle:
+        config = json.load(handle)
+
+    subnets = config.get('Dhcp4', {}).get('subnet4', [])
+    updated = 0
+
+    for subnet in subnets:
+        vlan_id = subnet.get('id')
+        if vlan_id not in vlan_prefix_by_id:
+            continue
+        prefix = vlan_prefix_by_id[vlan_id]
+        subnet_cidr, registered_pools, blocked_pool = _build_pools_for_vlan(vlan_id, prefix)
+        subnet['subnet'] = subnet_cidr
+        subnet['pools'] = [{'pool': pool} for pool in registered_pools] + [
+            {
+                'pool': blocked_pool,
+                'client-classes': ['BLOCKED'],
+            },
+        ]
+        updated += 1
+
+    if not updated:
+        raise ValueError("No matching VLAN subnets updated in Kea config")
+
+    with open(config_path, 'w', encoding='utf-8') as handle:
+        json.dump(config, handle, indent=2)
+        handle.write('\n')
+
+
+def _restart_kea_container():
+    commands = [
+        ['sudo', 'docker', 'compose', '-f', '/kea/docker-compose.yml', 'restart', 'kea'],
+        ['sudo', 'docker-compose', '-f', '/kea/docker-compose.yml', 'restart', 'kea'],
+        ['sudo', 'docker', 'restart', 'kea'],
+    ]
+
+    for command in commands:
+        try:
+            result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=60)
+            return True, result.stdout.strip()
+        except Exception:
+            continue
+
+    return False, 'Unable to restart Kea via docker commands.'
+
+
 
 
 # Initialize database
@@ -382,7 +519,6 @@ def get_vlan_map():
         'contractors': int(os.getenv('VLAN_CONTRACTORS', 50)),
         'volunteers': int(os.getenv('VLAN_VOLUNTEERS', 60)),
         'iot': int(os.getenv('VLAN_IOT', 70)),
-        'restricted': int(os.getenv('VLAN_RESTRICTED', 90)),
         'unregistered': int(os.getenv('VLAN_UNREGISTERED', 99)),
     }
 
@@ -550,14 +686,21 @@ def _vlan_from_ip(ip_address):
     if not ip_address:
         return None
     try:
-        parts = [int(p) for p in ip_address.split('.')]
-        if len(parts) != 4:
-            return None
-        if parts[0] != 192 or parts[1] != 168:
-            return None
-        return parts[2]
+        ip = ipaddress.IPv4Address(ip_address)
     except Exception:
         return None
+
+    prefix_by_id = _get_vlan_prefix_by_id()
+    for vlan_id, prefix in prefix_by_id.items():
+        if vlan_id == 99:
+            continue
+        try:
+            network = ipaddress.IPv4Network(f"192.168.{vlan_id}.0/{prefix}", strict=False)
+        except Exception:
+            continue
+        if ip in network:
+            return vlan_id
+    return None
 
 
 def _load_adoptable_leases(vlan_ids):
@@ -690,7 +833,7 @@ def detect_connection_type(ip_address):
     Detect if connection is WiFi or wired based on source IP/VLAN.
     
     Wired connections: VLAN 99 (registration VLAN for wired MAC auth)
-    WiFi connections: All other VLANs (10, 20, 30, 40, 50, 60, 70, 90)
+    WiFi connections: All other VLANs (10, 20, 30, 40, 50, 60, 70)
     
     Args:
         ip_address: Client IP address
@@ -701,34 +844,26 @@ def detect_connection_type(ip_address):
     if not ip_address:
         return ('unknown', None, None)
     
-    # Extract VLAN from IP (192.168.XX.YYY)
-    parts = ip_address.split('.')
-    if len(parts) == 4:
-        try:
-            vlan_id = int(parts[2])
-            
-            # VLAN 99 = wired (registration VLAN)
-            if vlan_id == 99:
-                return ('wired', vlan_id, None)
-            
-            # Map VLAN to SSID (WiFi)
-            ssid_map = {
-                10: 'Blackfriars-Friars',
-                20: 'Blackfriars-Staff',
-                30: 'Blackfriars-Students',
-                40: 'Blackfriars-Guests',
-                50: 'Blackfriars-Contractors',
-                60: 'Blackfriars-Volunteers',
-                70: 'Blackfriars-IoT',
-                90: 'Blackfriars-Restricted'
-            }
-            
-            if vlan_id in ssid_map:
-                return ('wifi', vlan_id, ssid_map[vlan_id])
-        except ValueError:
-            pass
-    
-    return ('unknown', None, None)
+    vlan_id = _vlan_from_ip(ip_address)
+    if not vlan_id:
+        return ('unknown', None, None)
+
+    if vlan_id == 99:
+        return ('wired', vlan_id, None)
+
+    ssid_map = {
+        10: 'Blackfriars-Friars',
+        20: 'Blackfriars-Staff',
+        30: 'Blackfriars-Students',
+        40: 'Blackfriars-Guests',
+        50: 'Blackfriars-Contractors',
+        60: 'Blackfriars-Volunteers',
+        70: 'Blackfriars-IoT'
+    }
+
+    if vlan_id in ssid_map:
+        return ('wifi', vlan_id, ssid_map[vlan_id])
+    return ('unknown', vlan_id, None)
 
 
 def get_kea():
@@ -850,7 +985,74 @@ def reset_acl_baseline():
 
     result = subprocess.run([script_path], capture_output=True, text=True, timeout=120, env=env)
     if result.returncode != 0:
-        logger.error("ACL baseline failed: %s", (result.stderr or result.stdout).strip())
+        stderr = (result.stderr or '').strip()
+        stdout = (result.stdout or '').strip()
+        logger.error(
+            "ACL baseline failed (exit=%s). stderr=%s stdout=%s",
+            result.returncode,
+            stderr or '<empty>',
+            stdout or '<empty>',
+        )
+        return False
+    return True
+
+
+def reset_vlan_interface_masks(vlan_ids):
+    """Update HP5130 VLAN interface masks for specific VLAN IDs."""
+    vlan_ids = [str(vlan_id) for vlan_id in vlan_ids if vlan_id]
+    if not vlan_ids:
+        return True
+
+    script_path = os.getenv('VLAN_INTERFACE_SCRIPT', '/scripts/hp5130-vlan-interface.sh')
+    if not os.path.isfile(script_path):
+        logger.error("VLAN interface script not found: %s", script_path)
+        return False
+
+    env = os.environ.copy()
+    if not env.get("SWITCH_KEY_PATH"):
+        env["SWITCH_KEY_PATH"] = "/keys/id_rsa"
+    env["VLAN_LIST"] = " ".join(vlan_ids)
+
+    result = subprocess.run([script_path], capture_output=True, text=True, timeout=120, env=env)
+    if result.returncode != 0:
+        stderr = (result.stderr or '').strip()
+        stdout = (result.stdout or '').strip()
+        logger.error(
+            "VLAN interface update failed (exit=%s). stderr=%s stdout=%s",
+            result.returncode,
+            stderr or '<empty>',
+            stdout or '<empty>',
+        )
+        return False
+    return True
+
+
+def reset_pi_network_masks(vlan_ids):
+    """Update Pi VLAN interface masks for specific VLAN IDs."""
+    vlan_ids = [str(vlan_id) for vlan_id in vlan_ids if vlan_id]
+    if not vlan_ids:
+        return True
+
+    script_path = os.getenv('PI_NETWORK_SCRIPT', '/scripts/pi-network-update.sh')
+    if not os.path.isfile(script_path):
+        logger.error("Pi network script not found: %s", script_path)
+        return False
+
+    env = os.environ.copy()
+    env["VLAN_LIST"] = " ".join(vlan_ids)
+    if env.get("PI_NETWORK_DIR"):
+        env["NETWORK_DIR"] = env["PI_NETWORK_DIR"]
+
+    result = subprocess.run([script_path], capture_output=True, text=True, timeout=120, env=env)
+    if result.returncode != 0:
+        stderr = (result.stderr or '').strip()
+        stdout = (result.stdout or '').strip()
+        logger.error(
+            "Pi network update failed (exit=%s). stderr=%s stdout=%s",
+            result.returncode,
+            stderr or '<empty>',
+            stdout or '<empty>',
+        )
         return False
     return True
 
@@ -924,17 +1126,26 @@ def _get_iptables_base_cmd():
 
 
 def _is_blocked_pool_ip(ip_address):
+    if not ip_address:
+        return False
     try:
-        parts = [int(p) for p in ip_address.split(".")]
-        if len(parts) != 4:
-            return False
-        if parts[0] != 192 or parts[1] != 168:
-            return False
-        if parts[2] not in {10, 20, 30, 40, 50, 60, 70, 90}:
-            return False
-        return 214 <= parts[3] <= 254
+        ip = ipaddress.IPv4Address(ip_address)
     except Exception:
         return False
+
+    prefix_by_id = _get_vlan_prefix_by_id()
+    for vlan_id, prefix in prefix_by_id.items():
+        try:
+            network = ipaddress.IPv4Network(f"192.168.{vlan_id}.0/{prefix}", strict=False)
+        except Exception:
+            continue
+        if ip not in network:
+            continue
+        _, _, blocked_start, blocked_end = _pool_bounds_for_prefix(prefix)
+        offset = int(ip) - int(network.network_address)
+        return blocked_start <= offset <= blocked_end
+
+    return False
 
 
 def cleanup_orphan_hijack_rules():
@@ -1984,13 +2195,26 @@ def _log_kea_host_reservation(mac_address, vlan_id, label):
 def _is_registered_pool_ip(ip_address, vlan_id):
     if not ip_address or not vlan_id:
         return False
-    parts = ip_address.split('.')
-    if len(parts) != 4:
-        return False
     try:
-        return int(parts[2]) == int(vlan_id) and 5 <= int(parts[3]) <= 213
-    except ValueError:
+        ip = ipaddress.IPv4Address(ip_address)
+    except Exception:
         return False
+
+    if int(vlan_id) == 99:
+        return False
+
+    prefix_by_id = _get_vlan_prefix_by_id()
+    prefix = prefix_by_id.get(int(vlan_id), 24)
+    try:
+        network = ipaddress.IPv4Network(f"192.168.{vlan_id}.0/{prefix}", strict=False)
+    except Exception:
+        return False
+    if ip not in network:
+        return False
+
+    registered_start, registered_end, _, _ = _pool_bounds_for_prefix(prefix)
+    offset = int(ip) - int(network.network_address)
+    return registered_start <= offset <= registered_end
 
 
 @app.route('/adopt')
@@ -2667,18 +2891,92 @@ def admin_vlan_config():
                 else:
                     mapping = VlanMapping(status=status, vlan_id=int(vlan_id))
                     db.session.add(mapping)
-        
+
+        prefix_by_status = {}
+        prefix_changed = False
+        changed_statuses = []
+        for status in POOL_PREFIX_STATUSES:
+            previous_raw = Setting.get_value(f'vlan_prefix_{status}', '24')
+            try:
+                previous_prefix = int(previous_raw)
+            except (TypeError, ValueError):
+                previous_prefix = 24
+            if previous_prefix not in POOL_PREFIX_CHOICES:
+                previous_prefix = 24
+            raw = request.form.get(f'prefix_{status}', '24')
+            try:
+                prefix = int(raw)
+            except (TypeError, ValueError):
+                prefix = 24
+            if prefix not in POOL_PREFIX_CHOICES:
+                prefix = 24
+            if prefix != previous_prefix:
+                prefix_changed = True
+                changed_statuses.append(status)
+            Setting.set_value(f'vlan_prefix_{status}', str(prefix))
+            prefix_by_status[status] = prefix
+
         db.session.commit()
-        
-        flash('VLAN configuration updated successfully', 'success')
-        logger.info(f"Admin updated VLAN configuration")
-        
+
+        vlan_map = get_vlan_map()
+        vlan_prefix_by_id = {}
+        changed_vlan_ids = []
+        for status, prefix in prefix_by_status.items():
+            vlan_id = vlan_map.get(status)
+            if vlan_id:
+                vlan_prefix_by_id[vlan_id] = prefix
+                if status in changed_statuses:
+                    changed_vlan_ids.append(vlan_id)
+
+        warnings = []
+        try:
+            _update_kea_config(vlan_prefix_by_id)
+            restarted, message = _restart_kea_container()
+            if restarted:
+                flash('VLAN configuration updated and Kea restarted.', 'success')
+            else:
+                flash('VLAN configuration updated, but Kea restart failed.', 'warning')
+                warnings.append(message)
+        except Exception as exc:
+            flash('VLAN configuration updated, but Kea config update failed.', 'warning')
+            warnings.append(str(exc))
+
+        if prefix_changed:
+            acl_ok = reset_acl_baseline()
+            if acl_ok:
+                flash('Switch ACL baseline updated for new subnet sizes.', 'success')
+            else:
+                flash('Switch ACL baseline update failed.', 'warning')
+
+            iface_ok = reset_vlan_interface_masks(changed_vlan_ids)
+            if iface_ok:
+                flash('Switch VLAN interface masks updated.', 'success')
+            else:
+                flash('Switch VLAN interface mask update failed.', 'warning')
+
+            pi_ok = reset_pi_network_masks(changed_vlan_ids)
+            if pi_ok:
+                flash('Pi VLAN interface masks updated.', 'success')
+            else:
+                flash('Pi VLAN interface mask update failed.', 'warning')
+
+        for message in warnings:
+            flash(message, 'warning')
+
+        logger.info("Admin updated VLAN configuration")
+
         return redirect(url_for('admin_vlan_config'))
     
     # Load current configuration
     vlan_map = get_vlan_map()
-    return render_template('admin_vlan_config.html', 
-                         vlan_map=vlan_map)
+    prefix_map = _get_vlan_prefix_map()
+    return render_template(
+        'admin_vlan_config.html',
+        vlan_map=vlan_map,
+        prefix_map=prefix_map,
+        prefix_choices=POOL_PREFIX_CHOICES,
+        prefix_statuses=POOL_PREFIX_STATUSES,
+    )
 
 
 @app.route('/admin')

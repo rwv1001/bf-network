@@ -40,6 +40,20 @@ SWITCH_HOST="${SWITCH_HOST:-192.168.1.3}"
 SWITCH_USER="${SWITCH_USER:-robert}"
 SWITCH_SSH_PORT="${SWITCH_SSH_PORT:-22}"
 SWITCH_KEY_PATH="${SWITCH_KEY_PATH:-$DEFAULT_KEY_PATH}"
+KEA_CONFIG_PATH="${KEA_CONFIG_PATH:-}"
+PYTHON_BIN="${PYTHON_BIN:-}"
+
+if [ -z "$KEA_CONFIG_PATH" ]; then
+  if [ -f "/kea/config/dhcp4.json" ]; then
+    KEA_CONFIG_PATH="/kea/config/dhcp4.json"
+  else
+    KEA_CONFIG_PATH="$BASE_DIR/kea/config/dhcp4.json"
+  fi
+fi
+
+if [ -z "$PYTHON_BIN" ]; then
+  PYTHON_BIN="$(command -v python3 2>/dev/null || true)"
+fi
 
 SSH_TTY_FLAG="${SSH_TTY_FLAG:--tt}"  # Changed: Default to -tt for Comware compatibility
 SSH_TTY_FALLBACK="${SSH_TTY_FALLBACK:-0}"  # Changed: Disable fallback, as -tt is reliable
@@ -144,21 +158,55 @@ process_queue() {
   # Deduplicate: last action per IP wins, preserve last-seen order
   awk -F'|' 'NF>=3 {action=$2; ip=$3; if (ip!="") {last[ip]=action; order[++n]=ip}} END {for (i=1;i<=n;i++){ip=order[i]; if(!seen[ip]++){print last[ip] "|" ip}}}' "$tmp" > "$dedup"
 
-  for vlan in 10 20 30 40 50 60 70 90 99; do
+  for vlan in 10 20 30 40 50 60 70 99; do
     : > "/tmp/hp5130-acl.${vlan}.$$"
   done
 
   while IFS='|' read -r action ip; do
     [ -z "$action" ] && continue
     [ -z "$ip" ] && continue
-    vlan=$(echo "$ip" | awk -F. '{print $3}')
-    host=$(echo "$ip" | awk -F. '{print $4}')
+    map_out=""
+    if [ -n "$PYTHON_BIN" ] && [ -f "$KEA_CONFIG_PATH" ]; then
+    map_out=$($PYTHON_BIN - <<'PY' "$KEA_CONFIG_PATH" "$ip"
+import ipaddress
+import json
+import sys
+
+config_path = sys.argv[1]
+ip_str = sys.argv[2]
+
+with open(config_path, 'r', encoding='utf-8') as handle:
+    data = json.load(handle)
+
+ip = ipaddress.ip_address(ip_str)
+
+for entry in data.get('Dhcp4', {}).get('subnet4', []):
+    try:
+        vlan_id = int(entry.get('id'))
+    except Exception:
+        continue
+    network = ipaddress.ip_network(entry.get('subnet'), strict=False)
+    if ip in network:
+        offset = int(ip) - int(network.network_address)
+        print(f"VLAN_ID={vlan_id}")
+        print(f"OFFSET={offset}")
+        break
+PY
+    )
+      fi
+    vlan=$(printf '%s\n' "$map_out" | awk -F= '/^VLAN_ID=/{print $2}')
+    host=$(printf '%s\n' "$map_out" | awk -F= '/^OFFSET=/{print $2}')
+    if [ -z "$vlan" ] || [ -z "$host" ]; then
+      vlan=$(echo "$ip" | awk -F. '{print $3}')
+      host=$(echo "$ip" | awk -F. '{print $4}')
+    fi
     [ -z "$vlan" ] && continue
+    [ -z "$host" ] && continue
     echo "$action|$ip|$host" >> "/tmp/hp5130-acl.${vlan}.$$"
   done < "$dedup"
 
   fail=0
-  for vlan in 10 20 30 40 50 60 70 90 99; do
+  for vlan in 10 20 30 40 50 60 70 99; do
     vlan_file="/tmp/hp5130-acl.${vlan}.$$"
     [ -s "$vlan_file" ] || continue
     acl=$((3000 + vlan * 10))

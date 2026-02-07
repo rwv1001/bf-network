@@ -27,7 +27,7 @@ SWITCH_CONFIG = {
     'timeout': 30,
 }
 
-VLANS = [10, 20, 30, 40, 50, 60, 70, 90]
+VLANS = [10, 20, 30, 40, 50, 60, 70]
 
 
 def update_acl_for_blocked_pool(connection, vlan_id):

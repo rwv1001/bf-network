@@ -187,23 +187,6 @@
         "reservations": []
       },
       {
-        "subnet": "192.168.90.0/24",
-        "id": 90,
-        "pools": [
-          {
-            "pool": "192.168.90.6 - 192.168.90.254"
-          }
-        ],
-        "interface": "eth0.90",
-        "option-data": [
-          {
-            "name": "routers",
-            "data": "192.168.90.1"
-          }
-        ],
-        "reservations": []
-      },
-      {
         "subnet": "192.168.99.0/24",
         "id": 99,
         "pools": [

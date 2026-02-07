@@ -8,7 +8,9 @@ RUN apt-get update && apt-get install -y \
     postgresql-client \
     curl \
     iptables \
+    iproute2 \
     openssh-client \
+    docker.io \
     sudo \
     && rm -rf /var/lib/apt/lists/*
 
@@ -21,7 +23,7 @@ COPY . .
 
 # Create non-root user with sudo access for iptables
 RUN useradd -m -u 1000 portal && chown -R portal:portal /app \
-    && echo "portal ALL=(ALL) NOPASSWD: /usr/sbin/iptables" >> /etc/sudoers
+    && echo "portal ALL=(ALL) NOPASSWD: /usr/sbin/iptables, /usr/bin/docker, /usr/local/bin/python3, /usr/bin/python3, /sbin/ip, /usr/sbin/ip" >> /etc/sudoers
 USER portal
 
 # Expose port

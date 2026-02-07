@@ -31,6 +31,57 @@ case "$ACTION" in
         ;;
 esac
 
+CONFIG_PATH="${KEA_CONFIG_PATH:-}"
+if [ -z "$CONFIG_PATH" ]; then
+    if [ -f "/kea/config/dhcp4.json" ]; then
+        CONFIG_PATH="/kea/config/dhcp4.json"
+    else
+        CONFIG_PATH="/home/admin/bf-network/kea/config/dhcp4.json"
+    fi
+fi
+
+get_blocked_pool_ranges() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        return 1
+    fi
+
+    python3 - <<'PY' "$CONFIG_PATH"
+import json
+import ipaddress
+import sys
+
+config_path = sys.argv[1]
+try:
+    with open(config_path, 'r', encoding='utf-8') as handle:
+        data = json.load(handle)
+except Exception:
+    sys.exit(1)
+
+for subnet in data.get('Dhcp4', {}).get('subnet4', []):
+    try:
+        vlan_id = int(subnet.get('id'))
+    except Exception:
+        continue
+    if vlan_id == 99:
+        continue
+    blocked_pool = None
+    for pool in subnet.get('pools', []):
+        classes = pool.get('client-classes') or []
+        if 'BLOCKED' in classes:
+            blocked_pool = pool.get('pool')
+            break
+    if not blocked_pool:
+        network = ipaddress.ip_network(subnet.get('subnet'), strict=False)
+        block_size = 40 * (2 ** (24 - network.prefixlen))
+        blocked_start = network.broadcast_address - (block_size - 1)
+        blocked_pool = f"{blocked_start}-{network.broadcast_address}"
+    else:
+        start_str, end_str = [part.strip() for part in blocked_pool.split('-', 1)]
+        blocked_pool = f"{start_str}-{end_str}"
+    print(f"{vlan_id}|{blocked_pool}")
+PY
+}
+
 # Validate IP address format (POSIX-compliant)
 if [ -n "$IP_ADDRESS" ]; then
     case "$IP_ADDRESS" in
@@ -42,7 +93,26 @@ if [ -n "$IP_ADDRESS" ]; then
 fi
 
 add_blocked_pool_rules() {
-    VLANS="10 20 30 40 50 60 70 90"
+    if ranges=$(get_blocked_pool_ranges) && [ -n "$ranges" ]; then
+        echo "$ranges" | while IFS='|' read -r VLAN RANGE; do
+            [ -z "$VLAN" ] && continue
+            [ -z "$RANGE" ] && continue
+            $SUDO iptables -t nat -C PREROUTING -m iprange --src-range "$RANGE" -p udp --dport 53 -d 192.168.99.4 -j DNAT --to-destination 192.168.99.5:53 2>/dev/null
+            if [ $? -ne 0 ]; then
+                $SUDO iptables -t nat -A PREROUTING -m iprange --src-range "$RANGE" -p udp --dport 53 -d 192.168.99.4 -j DNAT --to-destination 192.168.99.5:53
+                echo "DNS hijack enabled for $RANGE (UDP)"
+            fi
+
+            $SUDO iptables -t nat -C PREROUTING -m iprange --src-range "$RANGE" -p tcp --dport 53 -d 192.168.99.4 -j DNAT --to-destination 192.168.99.5:53 2>/dev/null
+            if [ $? -ne 0 ]; then
+                $SUDO iptables -t nat -A PREROUTING -m iprange --src-range "$RANGE" -p tcp --dport 53 -d 192.168.99.4 -j DNAT --to-destination 192.168.99.5:53
+                echo "DNS hijack enabled for $RANGE (TCP)"
+            fi
+        done
+        return 0
+    fi
+
+    VLANS="10 20 30 40 50 60 70"
     for VLAN in $VLANS; do
         RANGE="192.168.$VLAN.214-192.168.$VLAN.254"
         $SUDO iptables -t nat -C PREROUTING -m iprange --src-range "$RANGE" -p udp --dport 53 -d 192.168.99.4 -j DNAT --to-destination 192.168.99.5:53 2>/dev/null
@@ -60,7 +130,24 @@ add_blocked_pool_rules() {
 }
 
 remove_blocked_pool_rules() {
-    VLANS="10 20 30 40 50 60 70 90"
+    if ranges=$(get_blocked_pool_ranges) && [ -n "$ranges" ]; then
+        echo "$ranges" | while IFS='|' read -r VLAN RANGE; do
+            [ -z "$VLAN" ] && continue
+            [ -z "$RANGE" ] && continue
+            $SUDO iptables -t nat -D PREROUTING -m iprange --src-range "$RANGE" -p udp --dport 53 -d 192.168.99.4 -j DNAT --to-destination 192.168.99.5:53 2>/dev/null
+            if [ $? -eq 0 ]; then
+                echo "DNS hijack removed for $RANGE (UDP)"
+            fi
+
+            $SUDO iptables -t nat -D PREROUTING -m iprange --src-range "$RANGE" -p tcp --dport 53 -d 192.168.99.4 -j DNAT --to-destination 192.168.99.5:53 2>/dev/null
+            if [ $? -eq 0 ]; then
+                echo "DNS hijack removed for $RANGE (TCP)"
+            fi
+        done
+        return 0
+    fi
+
+    VLANS="10 20 30 40 50 60 70"
     for VLAN in $VLANS; do
         RANGE="192.168.$VLAN.214-192.168.$VLAN.254"
         $SUDO iptables -t nat -D PREROUTING -m iprange --src-range "$RANGE" -p udp --dport 53 -d 192.168.99.4 -j DNAT --to-destination 192.168.99.5:53 2>/dev/null

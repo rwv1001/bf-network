@@ -178,6 +178,29 @@
             transform: translateY(-2px);
             box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
         }
+        .btn-save:disabled {
+            cursor: not-allowed;
+            opacity: 0.7;
+            transform: none;
+            box-shadow: none;
+        }
+        .spinner {
+            width: 14px;
+            height: 14px;
+            border: 2px solid rgba(255, 255, 255, 0.5);
+            border-top-color: #ffffff;
+            border-radius: 50%;
+            display: inline-block;
+            animation: spin 0.8s linear infinite;
+        }
+        .spinner.hidden {
+            display: none;
+        }
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
         .btn-cancel {
             background: #e0e0e0;
             color: #666;
@@ -216,9 +239,13 @@
             {% endif %}
         {% endwith %}
 
-        <form method="POST" action="{{ url_for('admin_vlan_config') }}">
+        <form id="vlan-config-form" method="POST" action="{{ url_for('admin_vlan_config') }}">
             <div class="config-section">
                 <h2 class="section-title">VLAN Mappings</h2>
+
+                <div class="info-box" style="margin-bottom: 20px;">
+                    <p><strong>Pool size warning:</strong> If you reduce a subnet size, any host reservations outside the new range will be dropped by Kea after the restart.</p>
+                </div>
                 
                 <div class="vlan-grid">
                     {% for status in ['friars', 'staff', 'students', 'guests', 'contractors', 'volunteers', 'iot', 'restricted', 'unregistered'] %}
@@ -236,6 +263,25 @@
                                    min="1" 
                                    max="4094" 
                                    required>
+                        </div>
+
+                        <div class="vlan-input-group">
+                            <label>Subnet size:</label>
+                            {% if status in prefix_statuses %}
+                                <div style="display: flex; flex-wrap: wrap; gap: 10px;">
+                                    {% for choice in prefix_choices %}
+                                    <label style="display: inline-flex; align-items: center; gap: 6px;">
+                                        <input type="radio"
+                                               name="prefix_{{ status }}"
+                                               value="{{ choice }}"
+                                               {% if prefix_map[status] == choice %}checked{% endif %}>
+                                        /{{ choice }}
+                                    </label>
+                                    {% endfor %}
+                                </div>
+                            {% else %}
+                                <span style="color: #777; font-size: 13px;">Not configurable for this VLAN</span>
+                            {% endif %}
                         </div>
                         
                         <div class="description">
@@ -266,9 +312,29 @@
 
             <div class="button-group">
                 <button type="button" class="btn-cancel" onclick="window.location.href='{{ url_for('admin_dashboard') }}'">Cancel</button>
-                <button type="submit" class="btn-save">Save Configuration</button>
+                <button id="save-config-button" type="submit" class="btn-save">
+                    <span class="spinner hidden" aria-hidden="true"></span>
+                    <span class="btn-text">Save Configuration</span>
+                </button>
             </div>
         </form>
     </div>
+    <script>
+        const form = document.getElementById('vlan-config-form');
+        const saveButton = document.getElementById('save-config-button');
+        const buttonText = saveButton ? saveButton.querySelector('.btn-text') : null;
+        const spinner = saveButton ? saveButton.querySelector('.spinner') : null;
+        if (form && saveButton) {
+            form.addEventListener('submit', () => {
+                saveButton.disabled = true;
+                if (buttonText) {
+                    buttonText.textContent = 'Updating configuration';
+                }
+                if (spinner) {
+                    spinner.classList.remove('hidden');
+                }
+            });
+        }
+    </script>
 </body>
 </html>

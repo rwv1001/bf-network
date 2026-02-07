@@ -68,13 +68,18 @@ services:
       ACL_QUEUE_INTERVAL: "3"
       ACL_QUEUE_UMASK: "0002"
       ACL_QUEUE_GID: ${PORTAL_GID:-1000}
+      PI_NETWORK_DIR: /host-systemd-network
     volumes:
       - ./app:/app
       - ../kea/leases:/kea/leases:ro  # Access to Kea lease database
       - ../kea/sockets:/kea/sockets  # Access to Kea control socket
+      - ../kea/config:/kea/config  # Access to Kea config for pool updates
+      - ../kea/docker-compose.yml:/kea/docker-compose.yml:ro  # Kea compose file for restarts
+      - /var/run/docker.sock:/var/run/docker.sock  # Allow restarting Kea container
       - ../scripts:/scripts:ro  # Access to dns-hijack.sh
       - ../shared/acl-queue:/acl-queue
       - /home/admin/.ssh:/keys:ro  # SSH keys for switch access
+      - /etc/systemd/network:/host-systemd-network
     network_mode: host
     privileged: true  # Required for iptables manipulation from non-root user
     depends_on:
