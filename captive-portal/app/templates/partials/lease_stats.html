@@ -1,0 +1,30 @@
+{% if lease_stats %}
+<div id="lease-stats-section" style="margin: 20px 0 30px;">
+    <h2 style="margin-top: 10px; color: #2c7a7b;">📊 Active Leases by VLAN</h2>
+    <div style="font-size: 13px; color: #666; margin: 6px 0 12px;">
+        Counts are based on current entries in the Kea lease file.
+    </div>
+    <div class="table-responsive">
+        <table>
+            <thead>
+                <tr>
+                    <th>VLAN</th>
+                    <th>Role</th>
+                    <th>Subnet</th>
+                    <th>Active Leases</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for stat in lease_stats %}
+                <tr>
+                    <td>{{ stat.vlan_id }}</td>
+                    <td style="text-transform: capitalize;">{{ stat.display_name }}</td>
+                    <td style="font-family: monospace;">{{ stat.subnet }}</td>
+                    <td>{{ stat.active_leases }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endif %}

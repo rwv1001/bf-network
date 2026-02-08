@@ -137,6 +137,12 @@ function updateTable(tableType, params = {}) {
         if (newSection && currentSection) {
             currentSection.innerHTML = newSection.innerHTML;
         }
+
+        const leaseStats = doc.getElementById('lease-stats-section');
+        const currentLeaseStats = document.getElementById('lease-stats-section');
+        if (leaseStats && currentLeaseStats) {
+            currentLeaseStats.innerHTML = leaseStats.innerHTML;
+        }
     })
     .catch(error => {
         console.error('Error updating table:', error);
@@ -213,6 +219,8 @@ function searchTable(tableType, searchValue) {
     </form>
     {% endif %}
 </div>
+
+{% include 'partials/lease_stats.html' %}
 
 {% if pending_total > 0 %}
 <div id="pending-table-section">

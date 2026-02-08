@@ -86,25 +86,15 @@ def _portal_host_mismatch():
 
 
 def get_vlan_ssid_map():
-    """Parse VLAN->SSID map from VLAN_SSID_MAP env (e.g. 10:SSID,20:SSID)."""
+    """Parse VLAN->SSID map from database."""
     mapping = {}
-    raw = os.getenv('VLAN_SSID_MAP', '').strip()
-    if not raw:
-        return mapping
-    for entry in raw.split(','):
-        entry = entry.strip()
-        if not entry:
-            continue
-        if ':' not in entry:
-            continue
-        vlan_str, ssid = entry.split(':', 1)
-        try:
-            vlan_id = int(vlan_str.strip())
-        except ValueError:
-            continue
-        ssid = ssid.strip()
-        if ssid:
-            mapping[vlan_id] = ssid
+    try:
+        entries = VlanMapping.query.all()
+    except Exception:
+        entries = []
+    for entry in entries:
+        if entry.vlan_id and entry.ssid:
+            mapping[entry.vlan_id] = entry.ssid.strip()
     return mapping
 
 
@@ -166,8 +156,12 @@ def _csv_template_fields(vlan_map):
         ('vlan_id', 'VLAN ID'),
     ]
     vlan_fields = []
-    for status, vlan_id in sorted(vlan_map.items(), key=lambda item: item[1]):
-        if status in {'restricted', 'unregistered'}:
+    entries = get_vlan_entries()
+    for entry in entries:
+        if entry.status in {'restricted', 'unregistered'}:
+            continue
+        vlan_id = entry.vlan_id
+        if not vlan_id:
             continue
         vlan_fields.append((f'vlan{vlan_id}_allowed', f'VLAN{vlan_id}Allowed'))
         vlan_fields.append((f'vlan{vlan_id}_adoptable', f'VLAN{vlan_id}Adoptable'))
@@ -286,10 +280,14 @@ def _default_vlan_for_user(allowed_vlans, vlan_map):
 def _label_for_vlan(vlan_id, vlan_map):
     if not vlan_id:
         return ''
-    reverse_map = {mapped_vlan: status for status, mapped_vlan in vlan_map.items()}
-    status = reverse_map.get(vlan_id)
-    if status:
-        return f"{status.title()} (VLAN {vlan_id})"
+    meta = get_vlan_meta_by_id().get(vlan_id)
+    if meta:
+        display_name = (meta.get('display_name') or '').strip()
+        status = meta.get('status')
+        if display_name:
+            return f"{display_name} (VLAN {vlan_id})"
+        if status:
+            return f"{status.title()} (VLAN {vlan_id})"
     return f"VLAN {vlan_id}"
 
 
@@ -323,6 +321,43 @@ def _should_hijack_vlan(vlan_id):
 
 POOL_PREFIX_CHOICES = [24, 23, 22, 21]
 POOL_PREFIX_STATUSES = ['friars', 'staff', 'students', 'guests', 'contractors', 'volunteers', 'iot']
+FIXED_VLAN_STATUSES = ['friars', 'staff', 'students', 'guests', 'contractors', 'volunteers', 'iot', 'restricted', 'unregistered']
+
+
+def _parse_valid_vlan_ids():
+    raw = os.getenv('VALID_VLANS', '').strip()
+    if not raw:
+        return []
+    vlan_ids = []
+    for entry in raw.split(','):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            vlan_ids.append(int(entry))
+        except ValueError:
+            continue
+    return sorted(set(vlan_ids))
+
+
+def get_vlan_entries():
+    mappings = VlanMapping.query.order_by(VlanMapping.vlan_id.asc()).all()
+    if mappings:
+        return mappings
+
+    return []
+
+
+def get_vlan_meta_by_id():
+    meta = {}
+    for entry in get_vlan_entries():
+        if entry.vlan_id:
+            meta[entry.vlan_id] = {
+                'status': entry.status,
+                'display_name': entry.display_name,
+                'ssid': entry.ssid,
+            }
+    return meta
 
 
 def _get_vlan_prefix_map():
@@ -512,14 +547,15 @@ def get_vlan_map():
     
     # Fallback to environment variables if database is empty
     return {
-        'friars': int(os.getenv('VLAN_FRIARS', 10)),
-        'staff': int(os.getenv('VLAN_STAFF', 20)),
-        'students': int(os.getenv('VLAN_STUDENTS', 30)),
-        'guests': int(os.getenv('VLAN_GUESTS', 40)),
-        'contractors': int(os.getenv('VLAN_CONTRACTORS', 50)),
-        'volunteers': int(os.getenv('VLAN_VOLUNTEERS', 60)),
-        'iot': int(os.getenv('VLAN_IOT', 70)),
-        'unregistered': int(os.getenv('VLAN_UNREGISTERED', 99)),
+        'friars': 10,
+        'staff': 20,
+        'students': 30,
+        'guests': 40,
+        'contractors': 50,
+        'volunteers': 60,
+        'iot': 70,
+        'restricted': 90,
+        'unregistered': 99,
     }
 
 # Admin user (simple single admin - extend for multiple admins)
@@ -703,6 +739,74 @@ def _vlan_from_ip(ip_address):
     return None
 
 
+def _vlan_from_ip_any(ip_address, prefix_by_id=None):
+    if not ip_address:
+        return None
+    try:
+        ip = ipaddress.IPv4Address(ip_address)
+    except Exception:
+        return None
+
+    if prefix_by_id is None:
+        prefix_by_id = _get_vlan_prefix_by_id()
+
+    for vlan_id, prefix in prefix_by_id.items():
+        try:
+            network = ipaddress.IPv4Network(f"192.168.{vlan_id}.0/{prefix}", strict=False)
+        except Exception:
+            continue
+        if ip in network:
+            return vlan_id
+    return None
+
+
+def _load_active_lease_counts():
+    lease_file = '/kea/leases/kea-leases4.csv'
+    counts = {}
+    seen_by_vlan = {}
+    now = datetime.utcnow()
+    prefix_by_id = _get_vlan_prefix_by_id()
+
+    try:
+        with open(lease_file, 'r') as f:
+            for line in f:
+                if line.startswith('address,'):
+                    continue
+                fields = line.strip().split(',')
+                if len(fields) < 5:
+                    continue
+                ip_address = fields[0]
+                expire_raw = fields[4].strip()
+                expires_at = None
+                if expire_raw:
+                    try:
+                        expires_at = datetime.utcfromtimestamp(int(expire_raw))
+                    except Exception:
+                        expires_at = None
+                if expires_at and expires_at < now:
+                    continue
+
+                vlan_id = None
+                if len(fields) > 5 and fields[5].strip().isdigit():
+                    vlan_id = int(fields[5].strip())
+                if vlan_id is None:
+                    vlan_id = _vlan_from_ip_any(ip_address, prefix_by_id)
+                if not vlan_id:
+                    continue
+
+                seen = seen_by_vlan.setdefault(vlan_id, set())
+                if ip_address in seen:
+                    continue
+                seen.add(ip_address)
+                counts[vlan_id] = counts.get(vlan_id, 0) + 1
+    except FileNotFoundError:
+        logger.warning("Kea lease file not found for lease counts: %s", lease_file)
+    except Exception as exc:
+        logger.error("Failed to read lease counts: %s", exc)
+
+    return counts
+
+
 def _load_adoptable_leases(vlan_ids):
     if not vlan_ids:
         return []
@@ -851,18 +955,9 @@ def detect_connection_type(ip_address):
     if vlan_id == 99:
         return ('wired', vlan_id, None)
 
-    ssid_map = {
-        10: 'Blackfriars-Friars',
-        20: 'Blackfriars-Staff',
-        30: 'Blackfriars-Students',
-        40: 'Blackfriars-Guests',
-        50: 'Blackfriars-Contractors',
-        60: 'Blackfriars-Volunteers',
-        70: 'Blackfriars-IoT'
-    }
-
-    if vlan_id in ssid_map:
-        return ('wifi', vlan_id, ssid_map[vlan_id])
+    ssid = get_ssid_for_vlan(vlan_id)
+    if ssid:
+        return ('wifi', vlan_id, ssid)
     return ('unknown', vlan_id, None)
 
 
@@ -2881,16 +2976,69 @@ def admin_reset_test():
 def admin_vlan_config():
     """VLAN configuration page"""
     if request.method == 'POST':
-        # Update VLAN mappings
-        for status in ['friars', 'staff', 'students', 'guests', 'contractors', 'volunteers', 'iot', 'restricted', 'unregistered']:
-            vlan_id = request.form.get(f'vlan_{status}')
-            if vlan_id:
+        valid_vlan_ids = set(_parse_valid_vlan_ids())
+        statuses = request.form.getlist('vlan_status')
+        names = request.form.getlist('vlan_name')
+        vlan_ids = request.form.getlist('vlan_id')
+        ssids = request.form.getlist('vlan_ssid')
+        remove_statuses = set(request.form.getlist('vlan_remove'))
+
+        warnings = []
+        errors = []
+        seen_statuses = set()
+        seen_vlan_ids = set()
+
+        for index, status_raw in enumerate(statuses):
+            status = (status_raw or '').strip().lower()
+            if not status:
+                continue
+
+            if status in seen_statuses:
+                warnings.append(f"Duplicate VLAN key skipped: {status}")
+                continue
+            seen_statuses.add(status)
+
+            if status in remove_statuses:
                 mapping = VlanMapping.query.filter_by(status=status).first()
                 if mapping:
-                    mapping.vlan_id = int(vlan_id)
-                else:
-                    mapping = VlanMapping(status=status, vlan_id=int(vlan_id))
-                    db.session.add(mapping)
+                    db.session.delete(mapping)
+                continue
+
+            vlan_id_raw = vlan_ids[index] if index < len(vlan_ids) else ''
+            try:
+                vlan_id = int(vlan_id_raw)
+            except (TypeError, ValueError):
+                warnings.append(f"Invalid VLAN ID for {status}: {vlan_id_raw}")
+                continue
+
+            if valid_vlan_ids and vlan_id not in valid_vlan_ids:
+                warnings.append(f"VLAN {vlan_id} not in VALID_VLANS; skipped {status}.")
+                continue
+
+            if vlan_id in seen_vlan_ids:
+                errors.append(f"Duplicate VLAN ID {vlan_id} used by {status}.")
+                continue
+            seen_vlan_ids.add(vlan_id)
+
+            display_name = (names[index] if index < len(names) else '').strip()
+            if not display_name:
+                display_name = status.title()
+
+            ssid = (ssids[index] if index < len(ssids) else '').strip() or None
+
+            mapping = VlanMapping.query.filter_by(status=status).first()
+            if mapping:
+                mapping.vlan_id = vlan_id
+                mapping.display_name = display_name
+                mapping.ssid = ssid
+            else:
+                mapping = VlanMapping(
+                    status=status,
+                    vlan_id=vlan_id,
+                    display_name=display_name,
+                    ssid=ssid,
+                )
+                db.session.add(mapping)
 
         prefix_by_status = {}
         prefix_changed = False
@@ -2916,6 +3064,12 @@ def admin_vlan_config():
             Setting.set_value(f'vlan_prefix_{status}', str(prefix))
             prefix_by_status[status] = prefix
 
+        if errors:
+            db.session.rollback()
+            for message in errors:
+                flash(message, 'error')
+            return redirect(url_for('admin_vlan_config'))
+
         db.session.commit()
 
         vlan_map = get_vlan_map()
@@ -2928,7 +3082,7 @@ def admin_vlan_config():
                 if status in changed_statuses:
                     changed_vlan_ids.append(vlan_id)
 
-        warnings = []
+        warnings = warnings or []
         try:
             _update_kea_config(vlan_prefix_by_id)
             restarted, message = _restart_kea_container()
@@ -2970,9 +3124,14 @@ def admin_vlan_config():
     # Load current configuration
     vlan_map = get_vlan_map()
     prefix_map = _get_vlan_prefix_map()
+    vlan_entries = get_vlan_entries()
+    valid_vlan_ids = _parse_valid_vlan_ids()
     return render_template(
         'admin_vlan_config.html',
         vlan_map=vlan_map,
+        vlan_entries=vlan_entries,
+        valid_vlan_ids=valid_vlan_ids,
+        fixed_statuses=FIXED_VLAN_STATUSES,
         prefix_map=prefix_map,
         prefix_choices=POOL_PREFIX_CHOICES,
         prefix_statuses=POOL_PREFIX_STATUSES,
@@ -3103,6 +3262,30 @@ def admin_dashboard():
     users_pages = (users_total + users_per_page - 1) // users_per_page if users_per_page > 0 else 0
 
     vlan_map = get_vlan_map()
+    prefix_by_id = _get_vlan_prefix_by_id()
+    lease_counts = _load_active_lease_counts()
+    lease_stats = []
+    for entry in get_vlan_entries():
+        vlan_id = entry.vlan_id
+        if not vlan_id:
+            continue
+        prefix = prefix_by_id.get(vlan_id, 24)
+        try:
+            network = ipaddress.IPv4Network(f"192.168.{vlan_id}.0/{prefix}", strict=False)
+            subnet_cidr = str(network)
+        except Exception:
+            subnet_cidr = f"192.168.{vlan_id}.0/{prefix}"
+        display_name = (entry.display_name or entry.status or '').strip()
+        if not display_name:
+            display_name = f"VLAN {vlan_id}"
+        lease_stats.append({
+            'status': entry.status,
+            'display_name': display_name,
+            'vlan_id': vlan_id,
+            'subnet': subnet_cidr,
+            'active_leases': lease_counts.get(vlan_id, 0),
+        })
+    lease_stats.sort(key=lambda entry: entry['vlan_id'])
     domain_policy_map = _load_domain_policy_map()
     for user in users:
         domain_policy = domain_policy_map.get(_email_domain(user.email))
@@ -3229,6 +3412,7 @@ def admin_dashboard():
         unregistered_leases=unregistered_leases,
         unregistered_total=unregistered_total,
         vlan_map=vlan_map,
+        lease_stats=lease_stats,
         domain_policies=domain_policies,
         test_env=is_test_env()
     )

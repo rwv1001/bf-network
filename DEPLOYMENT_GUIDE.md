@@ -509,15 +509,7 @@ Edit templates in `app/templates/` to customize:
 
 ### VLAN Mappings
 
-To change VLAN assignments, edit `.env`:
-```bash
-VLAN_STAFF=25  # Change from 20 to 25
-```
-
-Restart:
-```bash
-docker-compose restart
-```
+To change VLAN assignments, use the admin VLAN config page at `/admin/vlan-config`.
 
 ### Email Templates
 

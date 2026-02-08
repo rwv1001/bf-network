@@ -292,12 +292,7 @@ When enabled:
 
 ### VLAN Mappings
 
-Edit VLAN IDs in `.env`:
-```bash
-VLAN_FRIARS=10
-VLAN_STAFF=20
-# etc.
-```
+Manage VLAN IDs in the admin UI at `/admin/vlan-config`.
 
 ### SMTP Settings
 

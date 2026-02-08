@@ -158,7 +158,7 @@ process_queue() {
   # Deduplicate: last action per IP wins, preserve last-seen order
   awk -F'|' 'NF>=3 {action=$2; ip=$3; if (ip!="") {last[ip]=action; order[++n]=ip}} END {for (i=1;i<=n;i++){ip=order[i]; if(!seen[ip]++){print last[ip] "|" ip}}}' "$tmp" > "$dedup"
 
-  for vlan in 10 20 30 40 50 60 70 99; do
+  for vlan in 10 20 30 40 50 60 70 80 90 99; do
     : > "/tmp/hp5130-acl.${vlan}.$$"
   done
 
@@ -206,7 +206,7 @@ PY
   done < "$dedup"
 
   fail=0
-  for vlan in 10 20 30 40 50 60 70 99; do
+  for vlan in 10 20 30 40 50 60 70 80 90 99; do
     vlan_file="/tmp/hp5130-acl.${vlan}.$$"
     [ -s "$vlan_file" ] || continue
     acl=$((3000 + vlan * 10))

@@ -131,6 +131,8 @@ class VlanMapping(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     status = db.Column(db.String(50), unique=True, nullable=False)
     vlan_id = db.Column(db.Integer, nullable=False)
+    display_name = db.Column(db.String(100))
+    ssid = db.Column(db.String(100))
     description = db.Column(db.Text)
     
     def __repr__(self):

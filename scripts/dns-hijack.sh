@@ -112,7 +112,7 @@ add_blocked_pool_rules() {
         return 0
     fi
 
-    VLANS="10 20 30 40 50 60 70"
+    VLANS="10 20 30 40 50 60 70 80 90"
     for VLAN in $VLANS; do
         RANGE="192.168.$VLAN.214-192.168.$VLAN.254"
         $SUDO iptables -t nat -C PREROUTING -m iprange --src-range "$RANGE" -p udp --dport 53 -d 192.168.99.4 -j DNAT --to-destination 192.168.99.5:53 2>/dev/null
@@ -147,7 +147,7 @@ remove_blocked_pool_rules() {
         return 0
     fi
 
-    VLANS="10 20 30 40 50 60 70"
+    VLANS="10 20 30 40 50 60 70 80 90"
     for VLAN in $VLANS; do
         RANGE="192.168.$VLAN.214-192.168.$VLAN.254"
         $SUDO iptables -t nat -D PREROUTING -m iprange --src-range "$RANGE" -p udp --dport 53 -d 192.168.99.4 -j DNAT --to-destination 192.168.99.5:53 2>/dev/null

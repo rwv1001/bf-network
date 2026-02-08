@@ -37,6 +37,8 @@ VLANS = [
     {'id': 50, 'network': '192.168.50', 'name': 'VLAN50'},
     {'id': 60, 'network': '192.168.60', 'name': 'VLAN60'},
     {'id': 70, 'network': '192.168.70', 'name': 'VLAN70'},
+    {'id': 80, 'network': '192.168.80', 'name': 'VLAN80'},
+    {'id': 90, 'network': '192.168.90', 'name': 'VLAN90'},
 ]
 
 # Portal IP suffix (e.g., .4 means 192.168.X.4)
