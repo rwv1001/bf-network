@@ -58,6 +58,12 @@
         <td>{{ detected_ssid }}</td>
     </tr>
     {% endif %}
+    {% if request.requested_vlan %}
+    <tr>
+        <th>Requested VLAN</th>
+        <td>{{ request.requested_vlan }}</td>
+    </tr>
+    {% endif %}
 </table>
 
 <h3 style="color: #667eea; margin-top: 30px;">Approve Access</h3>
@@ -86,7 +92,7 @@
             <option value="">-- Select VLAN --</option>
             {% for status in vlan_map.keys() %}
                 {% if status not in ['unregistered', 'restricted'] %}
-                <option value="{{ vlan_map[status] }}">
+                <option value="{{ vlan_map[status] }}" {% if request.requested_vlan == vlan_map[status] %}selected{% endif %}>
                     VLAN {{ vlan_map[status] }} ({{ status.title() }})
                 </option>
                 {% endif %}

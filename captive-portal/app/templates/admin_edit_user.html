@@ -33,7 +33,7 @@
         <label>Allowed VLANs (auto-approve)</label>
         <div style="margin-top: 8px;">
             {% for status, vlan_id in vlan_map.items() %}
-                {% if status not in ['unregistered', 'restricted'] %}
+                {% if status not in ['unregistered', 'restricted', 'wired_unregistered'] %}
                 <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 8px;">
                     <strong style="min-width: 180px;">{{ status.title() }} (VLAN {{ vlan_id }})</strong>
                     <label style="display: inline-flex; align-items: center; gap: 6px;">

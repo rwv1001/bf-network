@@ -310,6 +310,7 @@
                                 <th>Name</th>
                                 <th>VLAN ID</th>
                                 <th>SSID</th>
+                                <th>Wired</th>
                                 <th>Subnet Size</th>
                                 <th>Remove</th>
                             </tr>
@@ -340,6 +341,16 @@
                                            name="vlan_ssid"
                                            value="{{ entry.ssid or '' }}"
                                            placeholder="Optional SSID">
+                                </td>
+                                <td>
+                                    <label style="display: inline-flex; align-items: center; gap: 6px;">
+                                        <input type="checkbox"
+                                               name="vlan_wired"
+                                               value="{{ entry.status }}"
+                                               {% if entry.wired_enabled %}checked{% endif %}
+                                               {% if entry.status in ['restricted', 'unregistered', 'wired_unregistered'] %}disabled{% endif %}>
+                                        Allow
+                                    </label>
                                 </td>
                                 <td>
                                     {% if entry.status in prefix_statuses %}
@@ -416,6 +427,12 @@
                         </select>
                     </td>
                     <td><input type="text" name="vlan_ssid" placeholder="Optional SSID"></td>
+                    <td>
+                        <label style="display: inline-flex; align-items: center; gap: 6px;">
+                            <input type="checkbox" name="vlan_wired" value="">
+                            Allow
+                        </label>
+                    </td>
                     <td><span style="color: #777; font-size: 13px;">Not configurable</span></td>
                     <td><input type="checkbox" name="vlan_remove" disabled></td>
                 `;

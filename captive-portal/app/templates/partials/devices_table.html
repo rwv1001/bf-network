@@ -1,6 +1,21 @@
 <div id="devices-table-section">
 <h2 style="margin-top: 40px; color: #667eea;">📱 All Registered Devices ({{ devices_total }})</h2>
 
+{% if wired_vlan_choices %}
+<form method="POST" action="{{ url_for('admin_change_devices_vlan') }}" style="margin: 10px 0 20px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
+    <strong>Bulk wired VLAN change:</strong>
+    <select name="target_vlan" required style="padding: 6px 8px; border: 1px solid #ddd; border-radius: 4px;">
+        <option value="">Select VLAN</option>
+        {% for vlan in wired_vlan_choices %}
+        <option value="{{ vlan.vlan_id }}">{{ vlan.label }}</option>
+        {% endfor %}
+    </select>
+    <input type="text" name="mac_addresses" placeholder="MACs comma or space separated" required
+           style="min-width: 260px; padding: 6px 8px; border: 1px solid #ddd; border-radius: 4px;">
+    <button type="submit" class="btn btn-small">Apply</button>
+</form>
+{% endif %}
+
 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 15px; flex-wrap: wrap;">
     <form onsubmit="return searchTable('devices', this.devices_search.value);" style="display: flex; gap: 10px; align-items: center; flex: 1; min-width: 300px;">
         <input type="text" name="devices_search" value="{{ devices_search }}" 
@@ -169,6 +184,18 @@
                     <button type="submit" class="btn btn-success btn-small">
                         ✅ Unblock
                     </button>
+                </form>
+                {% endif %}
+                {% if device.connection_type == 'wired' and wired_vlan_choices %}
+                <form method="POST" action="{{ url_for('admin_change_device_vlan', device_id=device.id) }}" style="display: inline; margin-left: 5px;">
+                    <select name="target_vlan" required style="padding: 4px 6px; font-size: 12px;">
+                        {% for vlan in wired_vlan_choices %}
+                        <option value="{{ vlan.vlan_id }}" {% if device.current_vlan == vlan.vlan_id %}selected{% endif %}>
+                            {{ vlan.label }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                    <button type="submit" class="btn btn-small" style="padding: 4px 8px;">Change VLAN</button>
                 </form>
                 {% endif %}
                 <form method="POST" action="{{ url_for('admin_delete_device', device_id=device.id) }}" style="display: inline; margin-left: 5px;">

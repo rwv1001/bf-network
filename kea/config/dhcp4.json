@@ -12,6 +12,7 @@
         "eth0.70",
         "eth0.80",
         "eth0.90",
+        "eth0.250",
         "eth0.99"
       ],
       "dhcp-socket-type": "raw"
@@ -282,6 +283,27 @@
           {
             "name": "routers",
             "data": "192.168.90.1"
+          }
+        ],
+        "reservations": []
+      },
+      {
+        "subnet": "192.168.250.0/24",
+        "id": 250,
+        "pools": [
+          {
+            "pool": "192.168.250.5 - 192.168.250.255"
+          }
+        ],
+        "interface": "eth0.250",
+        "option-data": [
+          {
+            "name": "routers",
+            "data": "192.168.250.1"
+          },
+          {
+            "name": "domain-name-servers",
+            "data": "192.168.99.5"
           }
         ],
         "reservations": []

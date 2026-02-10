@@ -771,7 +771,7 @@ function searchTable(tableType, searchValue) {
             <strong>Allowed VLANs</strong>
             <div style="margin-top: 8px;">
                 {% for status, vlan_id in vlan_map.items() %}
-                    {% if status not in ['unregistered', 'restricted'] %}
+                    {% if status not in ['unregistered', 'restricted', 'wired_unregistered'] %}
                     <label style="display: inline-flex; align-items: center; gap: 6px; margin-right: 12px; margin-bottom: 6px;">
                         <input type="checkbox" name="domain_allowed_vlans" value="{{ vlan_id }}">
                         <span>{{ status.title() }} (VLAN {{ vlan_id }})</span>
@@ -816,7 +816,7 @@ function searchTable(tableType, searchValue) {
                 <td style="font-family: monospace;">{{ policy.domain }}</td>
                 <td>
                     {% for status, vlan_id in vlan_map.items() %}
-                        {% if status not in ['unregistered', 'restricted'] %}
+                        {% if status not in ['unregistered', 'restricted', 'wired_unregistered'] %}
                         <label style="display: inline-flex; align-items: center; gap: 6px; margin-right: 12px; margin-bottom: 6px;">
                             <input type="checkbox" name="domain_allowed_vlans" value="{{ vlan_id }}" form="domain-form-{{ policy.id }}"
                                    {% if vlan_id in policy.allowed_vlans_set %}checked{% endif %}>

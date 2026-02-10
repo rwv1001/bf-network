@@ -71,6 +71,8 @@ class Device(db.Model):
     # WiFi-specific fields
     connection_type = db.Column(db.String(10), default='unknown')  # 'wifi' or 'wired'
     ssid = db.Column(db.String(100))  # WiFi SSID (e.g., 'Blackfriars-Guests')
+    is_wired = db.Column(db.Boolean, default=False, nullable=False)
+    wired_target_vlan = db.Column(db.Integer)
     unregister_token = db.Column(db.String(255), unique=True, index=True)  # For email unregister link
     profile_snapshot = db.Column(db.Text)  # JSON: previous/new user profile details
     
@@ -108,6 +110,7 @@ class RegistrationRequest(db.Model):
     phone_number = db.Column(db.String(20))
     device_type = db.Column(db.String(50))  # laptop, phone, tablet, etc.
     ip_address = db.Column(db.String(45))
+    requested_vlan = db.Column(db.Integer)
     user_agent = db.Column(db.Text)
     status = db.Column(db.String(50), default='pending')
     approval_token = db.Column(db.String(255))
@@ -133,6 +136,7 @@ class VlanMapping(db.Model):
     vlan_id = db.Column(db.Integer, nullable=False)
     display_name = db.Column(db.String(100))
     ssid = db.Column(db.String(100))
+    wired_enabled = db.Column(db.Boolean, default=False, nullable=False)
     description = db.Column(db.Text)
     
     def __repr__(self):

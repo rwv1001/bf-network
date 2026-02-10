@@ -79,6 +79,18 @@
     .device-table {
         min-width: 600px;
     }
+
+    .wired-vlan-form {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 0;
+    }
+
+    .wired-vlan-form select {
+        padding: 6px;
+        font-size: 13px;
+    }
 </style>
 {% endblock %}
 
@@ -122,6 +134,7 @@
                     <th>MAC Address</th>
                     <th>IP Address</th>
                     <th>VLAN</th>
+                    <th>Change VLAN</th>
                 </tr>
             </thead>
             <tbody>
@@ -131,6 +144,24 @@
                     <td style="font-family: monospace; font-size: 12px;">{{ device.mac_address }}</td>
                     <td>{{ device.ip_address or '-' }}</td>
                     <td>{{ device.vlan_label or device.vlan_id }}</td>
+                    <td>
+                        {% if device.connection_type == 'wired' %}
+                        <form method="POST" action="{{ url_for('adopt_change_vlan') }}" class="wired-vlan-form">
+                            <input type="hidden" name="device_id" value="{{ device.device_id }}">
+                            <select name="target_vlan" required>
+                                <option value="" disabled {% if not device.vlan_id %}selected{% endif %}>Select VLAN</option>
+                                {% for option in target_vlan_options %}
+                                <option value="{{ option.vlan_id }}" {% if option.vlan_id == device.vlan_id %}selected{% endif %}>
+                                    {{ option.label }}
+                                </option>
+                                {% endfor %}
+                            </select>
+                            <button type="submit" class="btn btn-small">Move</button>
+                        </form>
+                        {% else %}
+                        -
+                        {% endif %}
+                    </td>
                 </tr>
                 {% endfor %}
             </tbody>

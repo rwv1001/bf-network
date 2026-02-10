@@ -321,7 +321,19 @@ def _should_hijack_vlan(vlan_id):
 
 POOL_PREFIX_CHOICES = [24, 23, 22, 21]
 POOL_PREFIX_STATUSES = ['friars', 'staff', 'students', 'guests', 'contractors', 'volunteers', 'iot']
-FIXED_VLAN_STATUSES = ['friars', 'staff', 'students', 'guests', 'contractors', 'volunteers', 'iot', 'restricted', 'unregistered']
+WIRED_UNREGISTERED_STATUS = 'wired_unregistered'
+FIXED_VLAN_STATUSES = [
+    'friars',
+    'staff',
+    'students',
+    'guests',
+    'contractors',
+    'volunteers',
+    'iot',
+    'restricted',
+    'unregistered',
+    WIRED_UNREGISTERED_STATUS,
+]
 
 
 def _parse_valid_vlan_ids():
@@ -338,6 +350,30 @@ def _parse_valid_vlan_ids():
         except ValueError:
             continue
     return sorted(set(vlan_ids))
+
+
+def _get_wired_unregistered_vlan_id():
+    vlan_map = get_vlan_map()
+    wired_vlan = vlan_map.get(WIRED_UNREGISTERED_STATUS)
+    if wired_vlan:
+        return wired_vlan
+    return 250
+
+
+def _get_wired_assignable_entries():
+    entries = []
+    for entry in get_vlan_entries():
+        if not entry.vlan_id:
+            continue
+        if entry.status in {'restricted', 'unregistered', WIRED_UNREGISTERED_STATUS}:
+            continue
+        if entry.wired_enabled:
+            entries.append(entry)
+    return entries
+
+
+def _get_wired_assignable_vlan_ids():
+    return {entry.vlan_id for entry in _get_wired_assignable_entries()}
 
 
 def get_vlan_entries():
@@ -556,6 +592,7 @@ def get_vlan_map():
         'iot': 70,
         'restricted': 90,
         'unregistered': 99,
+        WIRED_UNREGISTERED_STATUS: 250,
     }
 
 # Admin user (simple single admin - extend for multiple admins)
@@ -952,7 +989,8 @@ def detect_connection_type(ip_address):
     if not vlan_id:
         return ('unknown', None, None)
 
-    if vlan_id == 99:
+    wired_unregistered_vlan = _get_wired_unregistered_vlan_id()
+    if vlan_id in {99, wired_unregistered_vlan}:
         return ('wired', vlan_id, None)
 
     ssid = get_ssid_for_vlan(vlan_id)
@@ -1746,6 +1784,16 @@ def register():
     is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
 
     prefill = _build_prefill_from_request()  # Use your existing function for GET prefill
+    current_connection, current_vlan, current_ssid = detect_connection_type(ip_address)
+    wired_unregistered_vlan = _get_wired_unregistered_vlan_id()
+    is_wired_unregistered = bool(current_connection == 'wired' and current_vlan == wired_unregistered_vlan)
+    wired_vlan_options = [
+        {
+            'vlan_id': entry.vlan_id,
+            'label': _label_for_vlan(entry.vlan_id, get_vlan_map()),
+        }
+        for entry in _get_wired_assignable_entries()
+    ]
 
     if request.method == 'GET' and mac_address:
         device = Device.query.filter_by(mac_address=mac_address).first()
@@ -1801,6 +1849,8 @@ def register():
                     detected_ip=detected_ip,
                     access_label=access_label,
                     device=device,
+                    wired_vlan_required=is_wired_unregistered,
+                    wired_vlan_options=wired_vlan_options,
                 )
 
     if request.method == 'POST':
@@ -1809,6 +1859,13 @@ def register():
         last_name = request.form.get('last_name').strip()
         phone_number = request.form.get('phone_number').strip()
         device_type = request.form.get('device_type').strip()
+        wired_vlan_raw = (request.form.get('wired_vlan_id') or '').strip()
+        wired_vlan_id = None
+        if wired_vlan_raw:
+            try:
+                wired_vlan_id = int(wired_vlan_raw)
+            except ValueError:
+                wired_vlan_id = None
 
         # Validate required fields (your existing logic)
         if not all([email, first_name, last_name, device_type]):
@@ -1823,7 +1880,30 @@ def register():
                     'phone_number': phone_number,
                     'device_type': device_type
                 }
-                return render_template('register.html', prefill=prefill, detected_mac=detected_mac, detected_ip=detected_ip)
+                return render_template(
+                    'register.html',
+                    prefill=prefill,
+                    detected_mac=detected_mac,
+                    detected_ip=detected_ip,
+                    wired_vlan_required=is_wired_unregistered,
+                    wired_vlan_options=wired_vlan_options,
+                )
+
+        if is_wired_unregistered:
+            wired_assignable = _get_wired_assignable_vlan_ids()
+            if not wired_vlan_id or wired_vlan_id not in wired_assignable:
+                message = 'Please select a valid wired VLAN.'
+                if is_ajax:
+                    return jsonify({'status': 'error', 'message': message})
+                flash(message, 'error')
+                return render_template(
+                    'register.html',
+                    prefill=prefill,
+                    detected_mac=detected_mac,
+                    detected_ip=detected_ip,
+                    wired_vlan_required=is_wired_unregistered,
+                    wired_vlan_options=wired_vlan_options,
+                )
 
         # Check if user exists (your existing logic)
         user = User.query.filter_by(email=email).first()
@@ -1832,6 +1912,8 @@ def register():
             # Existing user - register device immediately unless VLAN requires approval
             vlan_map = get_vlan_map()
             connection_type, detected_vlan, ssid = detect_connection_type(ip_address)
+            wired_unregistered_vlan = _get_wired_unregistered_vlan_id()
+            is_wired_unregistered = bool(connection_type == 'wired' and detected_vlan == wired_unregistered_vlan)
             current_ssid = ssid or (get_ssid_for_vlan(detected_vlan) if detected_vlan else None)
 
             domain_policy_map = _load_domain_policy_map()
@@ -1841,7 +1923,13 @@ def register():
             vlan_allowed = bool(detected_vlan and detected_vlan in allowed_vlans)
             needs_approval = bool(user.require_approval_every_device)
 
-            if connection_type == 'wifi' and detected_vlan:
+            if is_wired_unregistered:
+                target_vlan = wired_vlan_id if wired_vlan_id in allowed_vlans and not user.require_approval_every_device else None
+                expected_ssid = None
+                network_mismatch = False
+                if not target_vlan:
+                    needs_approval = True
+            elif connection_type == 'wifi' and detected_vlan:
                 if not allowed_vlans:
                     network_mismatch = False
                     expected_ssid = get_ssid_for_vlan(detected_vlan)
@@ -1896,6 +1984,8 @@ def register():
                     pending_request.phone_number = phone_number
                     pending_request.device_type = device_type
                     pending_request.ip_address = ip_address
+                    if is_wired_unregistered:
+                        pending_request.requested_vlan = wired_vlan_id
                     pending_request.submitted_at = datetime.utcnow()
                     reg_request = pending_request
                 else:
@@ -1907,6 +1997,7 @@ def register():
                         last_name=last_name,
                         phone_number=phone_number,
                         device_type=device_type,
+                        requested_vlan=wired_vlan_id if is_wired_unregistered else None,
                         status='pending',
                         approval_token=secrets.token_urlsafe(32)
                     )
@@ -1919,6 +2010,8 @@ def register():
                     f"Detected VLAN: {detected_vlan}",
                     f"Detected SSID: {current_ssid or 'unknown'}"
                 ]
+                if is_wired_unregistered and wired_vlan_id:
+                    note_parts.append(f"Requested VLAN: {wired_vlan_id}")
                 reg_request.notes = " | ".join(note_parts)
 
                 if profile_changed:
@@ -1958,6 +2051,8 @@ def register():
                 existing_device.current_vlan = target_vlan
                 existing_device.connection_type = connection_type
                 existing_device.ssid = ssid
+                existing_device.is_wired = connection_type == 'wired'
+                existing_device.wired_target_vlan = target_vlan if connection_type == 'wired' else None
                 existing_device.unregister_token = existing_device.unregister_token or secrets.token_urlsafe(32)
                 existing_device.profile_snapshot = profile_snapshot
                 device = existing_device
@@ -1971,6 +2066,8 @@ def register():
                     current_vlan=target_vlan,
                     connection_type=connection_type,
                     ssid=ssid,
+                    is_wired=connection_type == 'wired',
+                    wired_target_vlan=target_vlan if connection_type == 'wired' else None,
                     unregister_token=secrets.token_urlsafe(32),
                     profile_snapshot=profile_snapshot
                 )
@@ -2032,17 +2129,26 @@ def register():
             # New user - auto-approve if domain allows, otherwise create pending request
             vlan_map = get_vlan_map()
             connection_type, detected_vlan, ssid = detect_connection_type(ip_address)
+            wired_unregistered_vlan = _get_wired_unregistered_vlan_id()
+            is_wired_unregistered = bool(connection_type == 'wired' and detected_vlan == wired_unregistered_vlan)
             domain_policy = _load_domain_policy_map().get(_email_domain(email))
             allowed_vlans = _parse_allowed_vlans(domain_policy.allowed_vlans) if domain_policy else set()
             default_vlan = _default_vlan_for_user(allowed_vlans, vlan_map)
 
-            vlan_allowed = bool(detected_vlan and detected_vlan in allowed_vlans)
-            can_auto_approve = bool(allowed_vlans) and (
-                connection_type != 'wifi' or vlan_allowed
-            )
+            if is_wired_unregistered:
+                vlan_allowed = bool(wired_vlan_id and wired_vlan_id in allowed_vlans)
+                can_auto_approve = bool(allowed_vlans) and vlan_allowed
+            else:
+                vlan_allowed = bool(detected_vlan and detected_vlan in allowed_vlans)
+                can_auto_approve = bool(allowed_vlans) and (
+                    connection_type != 'wifi' or vlan_allowed
+                )
 
             if can_auto_approve:
-                target_vlan = detected_vlan if connection_type == 'wifi' else default_vlan
+                if is_wired_unregistered:
+                    target_vlan = wired_vlan_id
+                else:
+                    target_vlan = detected_vlan if connection_type == 'wifi' else default_vlan
                 user = User(
                     email=email,
                     first_name=first_name,
@@ -2064,6 +2170,8 @@ def register():
                     current_vlan=target_vlan,
                     connection_type=connection_type,
                     ssid=ssid,
+                    is_wired=connection_type == 'wired',
+                    wired_target_vlan=target_vlan if connection_type == 'wired' else None,
                     unregister_token=secrets.token_urlsafe(32)
                 )
                 db.session.add(device)
@@ -2127,6 +2235,7 @@ def register():
                 last_name=last_name,
                 phone_number=phone_number,
                 device_type=device_type,
+                requested_vlan=wired_vlan_id if is_wired_unregistered else None,
                 status='pending',
                 approval_token=secrets.token_urlsafe(32)
             )
@@ -2159,7 +2268,14 @@ def register():
                 return redirect(url_for('pending_approval'))
 
     # GET request (your existing logic)
-    return render_template('register.html', prefill=prefill, detected_mac=detected_mac, detected_ip=detected_ip)
+    return render_template(
+        'register.html',
+        prefill=prefill,
+        detected_mac=detected_mac,
+        detected_ip=detected_ip,
+        wired_vlan_required=is_wired_unregistered,
+        wired_vlan_options=wired_vlan_options,
+    )
 
 @app.route('/verify')
 def verify():
@@ -2321,6 +2437,8 @@ def adopt_devices():
             user=None,
             devices=[],
             registered_devices=[],
+            target_vlan_options=[],
+            wired_unregistered_vlan=_get_wired_unregistered_vlan_id(),
             error='registered_device',
         )
 
@@ -2330,21 +2448,35 @@ def adopt_devices():
             user=user,
             devices=[],
             registered_devices=[],
+            target_vlan_options=[],
+            wired_unregistered_vlan=_get_wired_unregistered_vlan_id(),
             error='approval_required',
         )
 
+    vlan_map = get_vlan_map()
+    wired_unregistered_vlan = _get_wired_unregistered_vlan_id()
+
     _, effective_adoptable = _get_effective_vlans_for_user(user)
     allowed_vlans = sorted(effective_adoptable)
+    target_vlan_ids = [vlan_id for vlan_id in allowed_vlans if vlan_id != wired_unregistered_vlan]
+    target_vlan_options = [
+        {
+            'vlan_id': vlan_id,
+            'label': _label_for_vlan(vlan_id, vlan_map),
+        }
+        for vlan_id in sorted(target_vlan_ids)
+    ]
     if not allowed_vlans:
         return render_template(
             'adopt_devices.html',
             user=user,
             devices=[],
             registered_devices=[],
+            target_vlan_options=[],
+            wired_unregistered_vlan=_get_wired_unregistered_vlan_id(),
             error='no_permissions',
         )
 
-    vlan_map = get_vlan_map()
     candidates = _load_adoptable_leases(set(allowed_vlans))
 
     registered_devices = Device.query.filter_by(
@@ -2360,6 +2492,8 @@ def adopt_devices():
             'ip_address': entry.ip_address,
             'vlan_id': entry.current_vlan,
             'vlan_label': _label_for_vlan(entry.current_vlan, vlan_map),
+            'connection_type': entry.connection_type,
+            'device_id': entry.id,
         })
 
     if not candidates:
@@ -2374,6 +2508,8 @@ def adopt_devices():
             user=user,
             devices=[],
             registered_devices=registered_device_rows,
+            target_vlan_options=target_vlan_options,
+            wired_unregistered_vlan=wired_unregistered_vlan,
             error='no_devices',
             current_ssid=current_ssid,
             adoptable_ssids=adoptable_ssids_display,
@@ -2402,6 +2538,8 @@ def adopt_devices():
             'first_seen': first_seen,
             'last_seen': last_seen,
             'age': age,
+            'requires_target_vlan': entry['vlan_id'] == wired_unregistered_vlan,
+            'target_vlan_options': target_vlan_options,
         })
 
     for item in adoptable_devices:
@@ -2412,6 +2550,8 @@ def adopt_devices():
         user=user,
         devices=adoptable_devices,
         registered_devices=registered_device_rows,
+        target_vlan_options=target_vlan_options,
+        wired_unregistered_vlan=wired_unregistered_vlan,
         error=None,
     )
 
@@ -2425,6 +2565,7 @@ def adopt_device():
 
     mac_address = (request.form.get('mac_address') or '').strip().lower()
     vlan_id_raw = (request.form.get('vlan_id') or '').strip()
+    target_vlan_raw = (request.form.get('target_vlan') or '').strip()
     device_type_raw = (request.form.get('device_type') or '').strip()
     device_type_other = (request.form.get('device_type_other') or '').strip()
     fixed_ip_requested = (request.form.get('fixed_ip') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
@@ -2432,6 +2573,10 @@ def adopt_device():
         vlan_id = int(vlan_id_raw)
     except ValueError:
         vlan_id = None
+    try:
+        target_vlan = int(target_vlan_raw) if target_vlan_raw else None
+    except ValueError:
+        target_vlan = None
 
     device_label = ''
     if device_type_raw:
@@ -2451,9 +2596,20 @@ def adopt_device():
         return redirect(url_for('adopt_devices'))
 
     _, effective_adoptable = _get_effective_vlans_for_user(user)
+    wired_unregistered_vlan = _get_wired_unregistered_vlan_id()
     if vlan_id not in effective_adoptable:
         flash('You do not have permission to adopt devices on that VLAN.', 'error')
         return redirect(url_for('adopt_devices'))
+
+    if vlan_id == wired_unregistered_vlan:
+        if not target_vlan:
+            flash('Please select a VLAN for the wired device.', 'error')
+            return redirect(url_for('adopt_devices'))
+        if target_vlan not in effective_adoptable:
+            flash('You do not have permission to assign that VLAN.', 'error')
+            return redirect(url_for('adopt_devices'))
+    else:
+        target_vlan = vlan_id
 
     if user.require_approval_every_device:
         pending_request = RegistrationRequest(
@@ -2499,11 +2655,11 @@ def adopt_device():
             except Exception as exc:
                 logger.warning("Failed to lookup lease IP for %s: %s", mac_address, exc)
 
-    if fixed_ip_requested and reserved_ip and not _is_registered_pool_ip(reserved_ip, vlan_id):
+    if fixed_ip_requested and reserved_ip and not _is_registered_pool_ip(reserved_ip, target_vlan):
         kea = get_kea()
         if kea:
             try:
-                reserved_ip = kea.get_available_registered_ip(vlan_id)
+                reserved_ip = kea.get_available_registered_ip(target_vlan)
             except Exception as exc:
                 logger.warning("Failed to allocate registered IP for %s: %s", mac_address, exc)
 
@@ -2520,9 +2676,11 @@ def adopt_device():
     if existing:
         existing.user_id = user.id
         existing.registration_status = 'registered'
-        existing.current_vlan = vlan_id
-        existing.connection_type = 'wifi'
-        existing.ssid = get_ssid_for_vlan(vlan_id)
+        existing.current_vlan = target_vlan
+        existing.connection_type = 'wired' if vlan_id == wired_unregistered_vlan else 'wifi'
+        existing.ssid = get_ssid_for_vlan(target_vlan)
+        existing.is_wired = vlan_id == wired_unregistered_vlan
+        existing.wired_target_vlan = target_vlan if vlan_id == wired_unregistered_vlan else None
         if device_label:
             existing.device_name = device_label
         if ip_address:
@@ -2537,9 +2695,11 @@ def adopt_device():
             device_name=device_label or 'adopted-device',
             ip_address=ip_address,
             registration_status='registered',
-            current_vlan=vlan_id,
-            connection_type='wifi',
-            ssid=get_ssid_for_vlan(vlan_id),
+            current_vlan=target_vlan,
+            connection_type='wired' if vlan_id == wired_unregistered_vlan else 'wifi',
+            ssid=get_ssid_for_vlan(target_vlan),
+            is_wired=vlan_id == wired_unregistered_vlan,
+            wired_target_vlan=target_vlan if vlan_id == wired_unregistered_vlan else None,
             unregister_token=secrets.token_urlsafe(32),
         )
         db.session.add(adopted_device)
@@ -2554,27 +2714,33 @@ def adopt_device():
         try:
             hostname = device_label or 'device'
             reserved_ip = reserved_ip if fixed_ip_requested else None
-            success = kea.register_mac(mac=mac_address, vlan=vlan_id, hostname=hostname, ip_address=reserved_ip)
+            success = kea.register_mac(mac=mac_address, vlan=target_vlan, hostname=hostname, ip_address=reserved_ip)
             if fixed_ip_requested:
-                _log_kea_host_reservation(mac_address, vlan_id, 'after reservation-add')
+                _log_kea_host_reservation(mac_address, target_vlan, 'after reservation-add')
             if not success:
                 flash('Adopted device, but Kea reservation failed. Please re-try or check Kea logs.', 'warning')
             kea.set_block_status(
                 mac_address,
-                vlan_id,
+                target_vlan,
                 False,
                 keep_ip=fixed_ip_requested,
                 fixed_ip=reserved_ip if fixed_ip_requested else None,
             )
             if fixed_ip_requested:
-                _log_kea_host_reservation(mac_address, vlan_id, 'after unblock')
+                _log_kea_host_reservation(mac_address, target_vlan, 'after unblock')
         except Exception as exc:
             logger.warning("Failed to clear Kea block for %s: %s", mac_address, exc)
+
+    if vlan_id == wired_unregistered_vlan:
+        send_coa_change(mac_address, target_vlan)
 
     clear_unregistered_lease(mac_address)
 
     unregister_url = _build_unregister_url(adopted_device.unregister_token)
-    ssid_display = adopted_device.ssid or get_ssid_for_vlan(vlan_id) or "WiFi Network"
+    if vlan_id == wired_unregistered_vlan:
+        ssid_display = "Wired Network"
+    else:
+        ssid_display = adopted_device.ssid or get_ssid_for_vlan(target_vlan) or "WiFi Network"
     send_wifi_registration_confirmation(
         user.email,
         user.first_name or "there",
@@ -2596,6 +2762,60 @@ def adopt_device():
         f'Device {mac_address} adopted successfully. ACL block and DNS hijack removed.',
         'success',
     )
+    return redirect(url_for('adopt_devices'))
+
+
+@app.route('/adopt/change-vlan', methods=['POST'])
+def adopt_change_vlan():
+    user, _ = _current_user_from_device()
+    if not user:
+        flash('Please connect from a registered device to manage VLANs.', 'error')
+        return redirect(url_for('adopt_devices'))
+
+    device_id_raw = (request.form.get('device_id') or '').strip()
+    target_raw = (request.form.get('target_vlan') or '').strip()
+    try:
+        device_id = int(device_id_raw)
+    except ValueError:
+        device_id = None
+    try:
+        target_vlan = int(target_raw)
+    except ValueError:
+        target_vlan = None
+
+    if not device_id or not target_vlan:
+        flash('Device and target VLAN are required.', 'error')
+        return redirect(url_for('adopt_devices'))
+
+    device = Device.query.filter_by(id=device_id, user_id=user.id).first()
+    if not device:
+        flash('Device not found.', 'error')
+        return redirect(url_for('adopt_devices'))
+
+    if device.connection_type != 'wired':
+        flash('Only wired devices can be moved to a different VLAN.', 'error')
+        return redirect(url_for('adopt_devices'))
+
+    _, effective_adoptable = _get_effective_vlans_for_user(user)
+    wired_unregistered_vlan = _get_wired_unregistered_vlan_id()
+    if target_vlan == wired_unregistered_vlan or target_vlan not in effective_adoptable:
+        flash('You do not have permission to assign that VLAN.', 'error')
+        return redirect(url_for('adopt_devices'))
+
+    device.current_vlan = target_vlan
+    device.is_wired = True
+    device.wired_target_vlan = target_vlan
+    db.session.commit()
+
+    send_coa_change(device.mac_address, target_vlan)
+    kea = get_kea()
+    if kea:
+        try:
+            kea.register_mac(mac=device.mac_address, vlan=target_vlan, hostname=device.device_name or 'device', ip_address=None)
+        except Exception as exc:
+            logger.warning("Kea registration failed for %s: %s", device.mac_address, exc)
+
+    flash(f'Device {device.mac_address} moved to VLAN {target_vlan}.', 'success')
     return redirect(url_for('adopt_devices'))
 
 
@@ -2981,6 +3201,7 @@ def admin_vlan_config():
         names = request.form.getlist('vlan_name')
         vlan_ids = request.form.getlist('vlan_id')
         ssids = request.form.getlist('vlan_ssid')
+        wired_statuses = set(request.form.getlist('vlan_wired'))
         remove_statuses = set(request.form.getlist('vlan_remove'))
 
         warnings = []
@@ -3025,18 +3246,21 @@ def admin_vlan_config():
                 display_name = status.title()
 
             ssid = (ssids[index] if index < len(ssids) else '').strip() or None
+            wired_enabled = status in wired_statuses
 
             mapping = VlanMapping.query.filter_by(status=status).first()
             if mapping:
                 mapping.vlan_id = vlan_id
                 mapping.display_name = display_name
                 mapping.ssid = ssid
+                mapping.wired_enabled = wired_enabled
             else:
                 mapping = VlanMapping(
                     status=status,
                     vlan_id=vlan_id,
                     display_name=display_name,
                     ssid=ssid,
+                    wired_enabled=wired_enabled,
                 )
                 db.session.add(mapping)
 
@@ -3412,6 +3636,13 @@ def admin_dashboard():
         unregistered_leases=unregistered_leases,
         unregistered_total=unregistered_total,
         vlan_map=vlan_map,
+        wired_vlan_choices=[
+            {
+                'vlan_id': entry.vlan_id,
+                'label': _label_for_vlan(entry.vlan_id, vlan_map),
+            }
+            for entry in _get_wired_assignable_entries()
+        ],
         lease_stats=lease_stats,
         domain_policies=domain_policies,
         test_env=is_test_env()
@@ -3915,7 +4146,7 @@ def admin_process_request(request_id):
         except ValueError:
             target_vlan = None
         if not target_vlan:
-            target_vlan = vlan_map.get('guests')
+            target_vlan = reg_request.requested_vlan or vlan_map.get('guests')
 
         # Detect connection type from IP address
         connection_type, detected_vlan, ssid = detect_connection_type(reg_request.ip_address)
@@ -3936,6 +4167,8 @@ def admin_process_request(request_id):
                 device.current_vlan = target_vlan
                 device.connection_type = connection_type
                 device.ssid = ssid
+                device.is_wired = connection_type == 'wired'
+                device.wired_target_vlan = target_vlan if connection_type == 'wired' else None
                 device.unregister_token = device.unregister_token or secrets.token_urlsafe(32)
             else:
                 device = Device(
@@ -3947,6 +4180,8 @@ def admin_process_request(request_id):
                     current_vlan=target_vlan,
                     connection_type=connection_type,
                     ssid=ssid,
+                    is_wired=connection_type == 'wired',
+                    wired_target_vlan=target_vlan if connection_type == 'wired' else None,
                     unregister_token=secrets.token_urlsafe(32)
                 )
                 db.session.add(device)
@@ -3979,6 +4214,8 @@ def admin_process_request(request_id):
                 current_vlan=target_vlan,
                 connection_type=connection_type,
                 ssid=ssid,
+                is_wired=connection_type == 'wired',
+                wired_target_vlan=target_vlan if connection_type == 'wired' else None,
                 unregister_token=secrets.token_urlsafe(32)
             )
             db.session.add(device)
@@ -4123,6 +4360,92 @@ def admin_unblock_device(device_id):
 
     apply_device_unblock(device, flash_messages=True)
     
+    return redirect(url_for('admin_dashboard'))
+
+
+@app.route('/admin/device/<int:device_id>/change-vlan', methods=['POST'])
+@login_required
+def admin_change_device_vlan(device_id):
+    device = Device.query.get_or_404(device_id)
+    target_raw = (request.form.get('target_vlan') or '').strip()
+    try:
+        target_vlan = int(target_raw)
+    except ValueError:
+        target_vlan = None
+
+    if not target_vlan:
+        flash('Target VLAN is required.', 'error')
+        return redirect(url_for('admin_dashboard'))
+
+    if device.connection_type != 'wired':
+        flash('Only wired devices can be moved with RADIUS CoA.', 'error')
+        return redirect(url_for('admin_dashboard'))
+
+    if target_vlan not in _get_wired_assignable_vlan_ids():
+        flash('Target VLAN is not enabled for wired access.', 'error')
+        return redirect(url_for('admin_dashboard'))
+
+    device.current_vlan = target_vlan
+    device.is_wired = True
+    device.wired_target_vlan = target_vlan
+    db.session.commit()
+
+    send_coa_change(device.mac_address, target_vlan)
+    kea = get_kea()
+    if kea:
+        try:
+            kea.register_mac(mac=device.mac_address, vlan=target_vlan, hostname=device.device_name or 'device', ip_address=None)
+        except Exception as exc:
+            logger.warning("Kea registration failed for %s: %s", device.mac_address, exc)
+
+    flash(f'Device {device.mac_address} moved to VLAN {target_vlan}.', 'success')
+    return redirect(url_for('admin_dashboard'))
+
+
+@app.route('/admin/devices/change-vlan', methods=['POST'])
+@login_required
+def admin_change_devices_vlan():
+    target_raw = (request.form.get('target_vlan') or '').strip()
+    macs_raw = (request.form.get('mac_addresses') or '').strip()
+    try:
+        target_vlan = int(target_raw)
+    except ValueError:
+        target_vlan = None
+
+    if not target_vlan or not macs_raw:
+        flash('Target VLAN and MAC list are required.', 'error')
+        return redirect(url_for('admin_dashboard'))
+
+    if target_vlan not in _get_wired_assignable_vlan_ids():
+        flash('Target VLAN is not enabled for wired access.', 'error')
+        return redirect(url_for('admin_dashboard'))
+
+    mac_values = re.split(r'[\s,]+', macs_raw)
+    macs = [value for value in (_normalize_mac_input(mac) for mac in mac_values) if value]
+
+    updated = 0
+    skipped = 0
+    kea = get_kea()
+    for mac in macs:
+        device = Device.query.filter_by(mac_address=mac).first()
+        if not device or device.connection_type != 'wired':
+            skipped += 1
+            continue
+        device.current_vlan = target_vlan
+        device.is_wired = True
+        device.wired_target_vlan = target_vlan
+        updated += 1
+        send_coa_change(device.mac_address, target_vlan)
+        if kea:
+            try:
+                kea.register_mac(mac=device.mac_address, vlan=target_vlan, hostname=device.device_name or 'device', ip_address=None)
+            except Exception as exc:
+                logger.warning("Kea registration failed for %s: %s", device.mac_address, exc)
+
+    if updated:
+        db.session.commit()
+
+    flash(f'Updated {updated} wired device(s). Skipped {skipped}.', 'success')
     return redirect(url_for('admin_dashboard'))
 
 

@@ -171,6 +171,21 @@
         </small>
     </div>
 
+    {% if wired_vlan_required %}
+    <div class="form-group">
+        <label for="wired_vlan_id">Wired VLAN <span class="required">*</span></label>
+        <select id="wired_vlan_id" name="wired_vlan_id" required>
+            <option value="">-- Select VLAN --</option>
+            {% for vlan in wired_vlan_options %}
+            <option value="{{ vlan.vlan_id }}">{{ vlan.label }}</option>
+            {% endfor %}
+        </select>
+        <small style="color: #666; display: block; margin-top: 5px;">
+            Choose the network you want this wired device to join.
+        </small>
+    </div>
+    {% endif %}
+
     {% if usage_policy_text %}
     <div class="form-group" style="margin-top: 10px;">
         <label style="display: flex; align-items: flex-start; gap: 10px; cursor: pointer;">
@@ -278,6 +293,15 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         }
     ];
+
+    const wiredVlanSelect = document.getElementById('wired_vlan_id');
+    if (wiredVlanSelect) {
+        fieldValidators.push({
+            id: 'wired_vlan_id',
+            message: 'Please select a VLAN for wired access.',
+            isValid: () => wiredVlanSelect.value.trim() !== ''
+        });
+    }
 
     function updateValidationState() {
         const warnings = fieldValidators

@@ -329,6 +329,47 @@ authorize {
 	#  and the 'raddb/mods-config/preprocess/huntgroups' files.
 	preprocess
 
+	#
+	# MAC authentication (MAB) for wired devices.
+	# Accept any MAC-format user and place into VLAN 250 unless
+	# another module already set a VLAN in the reply.
+	#
+	if (!EAP-Message && (&User-Name =~ /^([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$/)) {
+		update request {
+			&User-Password := "%{User-Name}"
+		}
+		update control {
+			&Cleartext-Password := "%{User-Name}"
+			&Auth-Type := PAP
+		}
+		if (!&reply:Tunnel-Private-Group-Id) {
+			update reply {
+				Tunnel-Type := VLAN
+				Tunnel-Medium-Type := IEEE-802
+				Tunnel-Private-Group-Id := "250"
+				Filter-Id := "WIRED_UNREGISTERED"
+			}
+		}
+	}
+	elsif (!EAP-Message && (&Calling-Station-Id =~ /^([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$/)) {
+		update request {
+			&User-Name := "%{Calling-Station-Id}"
+			&User-Password := "%{Calling-Station-Id}"
+		}
+		update control {
+			&Cleartext-Password := "%{Calling-Station-Id}"
+			&Auth-Type := PAP
+		}
+		if (!&reply:Tunnel-Private-Group-Id) {
+			update reply {
+				Tunnel-Type := VLAN
+				Tunnel-Medium-Type := IEEE-802
+				Tunnel-Private-Group-Id := "250"
+				Filter-Id := "WIRED_UNREGISTERED"
+			}
+		}
+	}
+
 	#  If you intend to use CUI and you require that the Operator-Name
 	#  be set for CUI generation and you want to generate CUI also
 	#  for your local clients then uncomment the operator-name
