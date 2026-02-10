@@ -1211,6 +1211,23 @@ def reset_acl_queue_files():
 
 def reset_test_data():
     """Remove all users/devices/requests and Kea host/lease data."""
+    kea = None
+    if os.path.exists(KEA_SOCKET):
+        kea = get_kea()
+    else:
+        logger.warning("Kea control socket missing, skipping reservation cleanup")
+
+    devices = Device.query.all()
+    if kea and devices:
+        for device in devices:
+            vlan_id = device.wired_target_vlan or device.current_vlan
+            if not vlan_id:
+                continue
+            try:
+                kea.unregister_mac(device.mac_address, vlan_id)
+            except Exception as exc:
+                logger.warning("Kea unregister failed for %s vlan %s: %s", device.mac_address, vlan_id, exc)
+
     db.session.query(RegistrationRequest).delete(synchronize_session=False)
     db.session.query(Device).delete(synchronize_session=False)
     db.session.query(User).delete(synchronize_session=False)

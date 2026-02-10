@@ -342,6 +342,14 @@ authorize {
 			&Cleartext-Password := "%{User-Name}"
 			&Auth-Type := PAP
 		}
+		if (!&reply:Tunnel-Private-Group-Id) {
+			update reply {
+				Tunnel-Type := VLAN
+				Tunnel-Medium-Type := IEEE-802
+				Tunnel-Private-Group-Id := "250"
+				Filter-Id := "WIRED_UNREGISTERED"
+			}
+		}
 	}
 	elsif (!EAP-Message && (&Calling-Station-Id =~ /^([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$/)) {
 		update request {
@@ -351,6 +359,14 @@ authorize {
 		update control {
 			&Cleartext-Password := "%{Calling-Station-Id}"
 			&Auth-Type := PAP
+		}
+		if (!&reply:Tunnel-Private-Group-Id) {
+			update reply {
+				Tunnel-Type := VLAN
+				Tunnel-Medium-Type := IEEE-802
+				Tunnel-Private-Group-Id := "250"
+				Filter-Id := "WIRED_UNREGISTERED"
+			}
 		}
 	}
 
@@ -387,7 +403,7 @@ authorize {
 	#
 	#  If you have a Cisco SIP server authenticating against
 	#  FreeRADIUS, uncomment the following line, and the 'digest'
-	#  line in the 'authorize' section.
+	#  line in the 'authenticate' section.
 	digest
 
 	#
@@ -840,7 +856,7 @@ session {
 post-auth {
 
     #
-    # OU ? VLAN mapping (EAP-TLS)
+    # OU → VLAN mapping (EAP-TLS)
     #
     if (&TLS-Client-Cert-Subject =~ /OU=Staff/) {
         update reply {
@@ -858,24 +874,6 @@ post-auth {
             Filter-Id := "GUEST_LIMITED"
         }
     }
-
-    # Dynamic VLAN for wired MAC auth (moved outside TLS checks)
-    if (&control:Tmp-String-0) {
-        update reply {
-            Tunnel-Type := VLAN
-            Tunnel-Medium-Type := IEEE-802
-            Tunnel-Private-Group-Id := &control:Tmp-String-0
-            Filter-Id := "WIRED_REGISTERED"
-        }
-    } else {
-        update reply {
-            Tunnel-Type := VLAN
-            Tunnel-Medium-Type := IEEE-802
-            Tunnel-Private-Group-Id := "250"
-            Filter-Id := "WIRED_UNREGISTERED"
-        }
-    }
-
 	#
 	#  If you need to have a State attribute, you can
 	#  add it here.  e.g. for later CoA-Request with
@@ -924,7 +922,7 @@ post-auth {
 		#  accounting.
 		#
 #		update reply {
-#			Class += "%{md5:%{Calling-Station-Id}%{Called-Station-Id}%{TLS-Client-Cert-Subject-Alt-Name-Email}%{TLS-Client-Cert-Common-Name}%{TLS-Client-Cert-Serial}%{NAS-IPv6-Address}%{NAS-IP-Address}%{NAS-Identifier}%{NAS-Port}}"
+#			Class += "%{md5:%{Calling-Station-Id}%{Called-Station-Id}%{TLS-Client-Cert-Subject-Alt-Name-Email}%{TLS-Client-Cert-Common-Name}%{TLS-Client-Cert-Serial}%{NAS-IPv6-Address}%{NAS-IP-Address}%{NAS-Identifier}%{NAS-Port}"
 #		}
 #
 #	}
@@ -1064,7 +1062,7 @@ post-auth {
 	#  want to send it for all EAP sessions.  Therefore, the EAP
 	#  modules put required data into the EAP-Session-Id attribute.
 	#  This attribute is never put into a request or reply packet.
-#
+	#
 	#  Uncomment the next few lines to copy the required data into
 	#  the EAP-Key-Name attribute
 #	if (&reply:EAP-Session-Id) {
@@ -1107,6 +1105,7 @@ post-auth {
 #		attr_filter.access_challenge.post-auth
 	}
 
+	#
 	#  The Client-Lost section will be run for a request when
 	#  FreeRADIUS has given up waiting for an end-users client to
 	#  respond. This is most useful for logging EAP sessions where
@@ -1192,13 +1191,13 @@ post-auth {
 #  the proxied request is first passed through the pre-proxy
 #  stage.  This stage can re-write the request, or decide to
 #  cancel the proxy.
-	#
-	#  Before this section is run, the request list is copied to the
-	#  proxy list.  The proxied packet can be edited by examining
-	#  or changing attributes in the proxy list.
-	#
-	#  Only a few modules currently have this method.
-	#
+#
+#  Before this section is run, the request list is copied to the
+#  proxy list.  The proxied packet can be edited by examining
+#  or changing attributes in the proxy list.
+#
+#  Only a few modules currently have this method.
+#
 pre-proxy {
 	#  Some supplicants will aggressively retry after an Access-Reject,
 	#  contrary to standards. You can avoid sending excessive load to home
@@ -1246,14 +1245,14 @@ pre-proxy {
 
 #
 #  When the server receives a reply to a request it proxied
-	#  to a home server, the request may be massaged here, in the
-	#  post-proxy stage.
-	#
-	#  Before this section is run, all attributes in the reply list
-	#  are deleted.  This section can then examine or edit the
-	#  proxy_reply list.  Once this section is finished, the attributes
-	#  in the proxy_reply list are copied to the reply list.
-	#
+#  to a home server, the request may be massaged here, in the
+#  post-proxy stage.
+#
+#  Before this section is run, all attributes in the reply list
+#  are deleted.  This section can then examine or edit the
+#  proxy_reply list.  Once this section is finished, the attributes
+#  in the proxy_reply list are copied to the reply list.
+#
 post-proxy {
 
 	#  If you want to have a log of replies from a home server,

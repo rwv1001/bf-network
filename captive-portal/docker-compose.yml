@@ -6,15 +6,15 @@ services:
     container_name: captive-portal-db
     restart: unless-stopped
     environment:
-      POSTGRES_DB: captive_portal
-      POSTGRES_USER: portal_user
+      POSTGRES_DB: ${DB_NAME:-captive_portal}
+      POSTGRES_USER: ${DB_USER:-portal_user}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-change_this_password}
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
       - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
     network_mode: host
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U portal_user"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-portal_user} -d ${DB_NAME:-captive_portal}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -36,7 +36,7 @@ services:
     restart: unless-stopped
     user: "${PORTAL_UID:-1000}:${PORTAL_GID:-1000}"
     environment:
-      DATABASE_URL: postgresql://portal_user:${DB_PASSWORD:-change_this_password}@127.0.0.1:5432/captive_portal
+      DATABASE_URL: postgresql://${DB_USER:-portal_user}:${DB_PASSWORD:-change_this_password}@127.0.0.1:5432/${DB_NAME:-captive_portal}
       REDIS_URL: redis://127.0.0.1:6379/0
       SECRET_KEY: ${SECRET_KEY:-change_this_secret_key_in_production}
       # Microsoft Graph API (for email via Microsoft 365)

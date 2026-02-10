@@ -1,0 +1,21 @@
+sql {
+  driver = "rlm_sql_postgresql"
+  dialect = "postgresql"
+
+  server = "${DB_HOST}"
+  port = ${DB_PORT}
+  login = "${DB_USER}"
+  password = "${DB_PASSWORD}"
+  radius_db = "${DB_NAME}"
+
+  # Use Calling-Station-Id when available (MAC), fallback to User-Name.
+  sql_user_name = "%{%{Calling-Station-Id}:-%{User-Name}}"
+
+  # Log SQL queries for debugging.
+  logfile = /var/log/freeradius/sqllog.sql
+
+  read_clients = no
+
+  # Query definitions
+  queries_config = ${modconfdir}/sql/main/postgresql/queries.conf
+}

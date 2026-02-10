@@ -20,6 +20,11 @@ server coa {
         update control {
             &Module-Failure-Message := "Received CoA request for %{Calling-Station-Id}"
         }
+
+        # Proxy the request to the switch
+        update control {
+            &Proxy-To-Realm := "hp5130"
+        }
         
         # Accept the CoA request
         ok
@@ -30,6 +35,11 @@ server coa {
         # Log the disconnect request
         update control {
             &Module-Failure-Message := "Received Disconnect request for %{Calling-Station-Id}"
+        }
+
+        # Proxy the request to the switch
+        update control {
+            &Proxy-To-Realm := "hp5130"
         }
         
         # Accept the disconnect request

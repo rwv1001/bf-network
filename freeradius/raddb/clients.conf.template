@@ -7,6 +7,8 @@ client hp5130-switch {
 	secret = ${RADIUS_SECRET}
 	shortname = hp5130
 	nas_type = other
+	require_message_authenticator = false
+	limit_proxy_state = true
 }
 
 # Captive Portal - CoA requests

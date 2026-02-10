@@ -51,7 +51,7 @@ services:
         while true; do
           if [ -f /kea/leases/kea-leases4.csv ]; then
             echo "$(date -Iseconds) kea-lfc: running lease file cleanup" >&2
-            /usr/sbin/kea-lfc -c /kea/config/dhcp4.json || true
+            /usr/sbin/kea-lfc -4 -c /kea/config/dhcp4.json || true
           fi
           sleep ${LFC_INTERVAL:-300}
         done

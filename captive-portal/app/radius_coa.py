@@ -7,7 +7,7 @@ import os
 import logging
 from pyrad.client import Client
 from pyrad.dictionary import Dictionary
-from pyrad.packet import CoARequest, Packet
+from pyrad import packet as radius_packet
 import io
 
 logger = logging.getLogger(__name__)
@@ -72,8 +72,14 @@ def send_coa_change(mac_address, vlan_id):
             logger.error("Failed to create RADIUS client")
             return False
         
-        # Create CoA request
-        req = client.CreateCoARequest()
+        # Create CoA request (support multiple pyrad versions)
+        if hasattr(client, 'CreateCoARequest'):
+            req = client.CreateCoARequest()
+        elif hasattr(client, 'CreateCoAPacket'):
+            req = client.CreateCoAPacket(code=getattr(radius_packet, 'CoARequest', 43))
+        else:
+            coa_code = getattr(radius_packet, 'CoARequest', 43)
+            req = client.CreatePacket(code=coa_code)
         
         # Add attributes
         req['Calling-Station-Id'] = mac_address.replace(':', '-').upper()
@@ -87,7 +93,7 @@ def send_coa_change(mac_address, vlan_id):
         # Send request
         reply = client.SendPacket(req)
         
-        if reply.code == Packet.CoAACK:
+        if reply.code == getattr(radius_packet, 'CoAACK', 44):
             logger.info(f"CoA successful: {mac_address} -> VLAN {vlan_id}")
             return True
         else:
@@ -116,8 +122,14 @@ def send_coa_disconnect(mac_address):
             return False
         
         # Create disconnect request
-        req = client.CreateCoARequest()
-        req.code = 40  # Disconnect-Request
+        disconnect_code = getattr(radius_packet, 'DisconnectRequest', 40)
+        if hasattr(client, 'CreateCoARequest'):
+            req = client.CreateCoARequest()
+            req.code = disconnect_code
+        elif hasattr(client, 'CreateCoAPacket'):
+            req = client.CreateCoAPacket(code=disconnect_code)
+        else:
+            req = client.CreatePacket(code=disconnect_code)
         
         # Add attributes
         req['Calling-Station-Id'] = mac_address.replace(':', '-').upper()
@@ -128,7 +140,10 @@ def send_coa_disconnect(mac_address):
         # Send request
         reply = client.SendPacket(req)
         
-        if reply.code == Packet.CoAACK:
+        if reply.code in {
+            getattr(radius_packet, 'DisconnectACK', 41),
+            getattr(radius_packet, 'CoAACK', 44),
+        }:
             logger.info(f"CoA disconnect successful: {mac_address}")
             return True
         else:
