@@ -34,6 +34,7 @@ services:
     entrypoint: |
       sh -c '
       rm -f /usr/local/var/run/kea/dhcp4.kea-dhcp4.pid
+      mkdir -p /usr/local/var/run/kea
       mkdir -p /kea/sockets
       chown -R 0:1000 /kea/sockets || true
       chmod 750 /kea/sockets || true
@@ -51,7 +52,13 @@ services:
         while true; do
           if [ -f /kea/leases/kea-leases4.csv ]; then
             echo "$(date -Iseconds) kea-lfc: running lease file cleanup" >&2
-            /usr/sbin/kea-lfc -4 -c /kea/config/dhcp4.json || true
+            /usr/sbin/kea-lfc -4 \
+              -c /kea/config/dhcp4.json \
+              -p /usr/local/var/run/kea/kea-lfc.pid \
+              -x /kea/leases/kea-leases4.csv.1 \
+              -i /kea/leases/kea-leases4.csv.2 \
+              -o /kea/leases/kea-leases4.csv.3 \
+              -f /kea/leases/kea-leases4.csv.4 || true
           fi
           sleep ${LFC_INTERVAL:-300}
         done
