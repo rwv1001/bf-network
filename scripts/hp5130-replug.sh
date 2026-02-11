@@ -176,7 +176,17 @@ if [ -z "$LOOKUP_OUT" ]; then
   log "LOOKUP_DONE mac=$MAC_NORM status=$LOOKUP_STATUS raw=$(printf '%s\nquit\n' "$LOOKUP_OUT" | tr '\n' ';')"
 fi
 
-IFACE=$(printf '%s\n' "$LOOKUP_OUT" | awk -v mac="$MAC_NORM" 'toupper($0) ~ mac {print $NF; exit}')
+MAC_NO_DASH=$(echo "$MAC_NORM" | tr -d '-')
+IFACE=$(printf '%s\n' "$LOOKUP_OUT" | awk -v mac="$MAC_NO_DASH" '
+  {
+    field = toupper($1);
+    gsub(/[-]/, "", field);
+    if (field == mac) {
+      print $4;
+      exit;
+    }
+  }
+')
 IFACE=$(expand_iface "$IFACE")
 log "LOOKUP_IFACE mac=$MAC_NORM iface=$IFACE"
 
