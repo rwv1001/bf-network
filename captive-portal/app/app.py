@@ -4317,6 +4317,7 @@ def admin_approve_request(token):
     
     existing_user = User.query.filter_by(email=reg_request.email).first()
     detected_connection, detected_vlan, detected_ssid = detect_connection_type(reg_request.ip_address)
+    default_vlan = reg_request.requested_vlan or detected_vlan
     existing_user_allowed_display = ''
     if existing_user:
         domain_policy = _load_domain_policy_map().get(_email_domain(existing_user.email))
@@ -4332,6 +4333,7 @@ def admin_approve_request(token):
         detected_vlan=detected_vlan,
         detected_ssid=detected_ssid,
         detected_connection=detected_connection,
+        default_vlan=default_vlan,
         today=datetime.utcnow().date().isoformat()
     )
 
