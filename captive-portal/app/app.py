@@ -604,6 +604,13 @@ def is_test_env():
     return os.getenv('TEST_ENV', 'false').strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
+def _env_truthy(name, default=False):
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
 class AdminUser:
     """Simple admin user class for Flask-Login"""
     def __init__(self, username):
@@ -1509,6 +1516,190 @@ def manage_switch_acl(action, ip_address, vlan_id):
         import traceback
         logger.error(traceback.format_exc())
         return False
+
+
+def _normalize_switch_mac(mac_address):
+    if not mac_address:
+        return None
+    cleaned = re.sub(r'[^0-9a-fA-F]', '', str(mac_address))
+    if len(cleaned) != 12:
+        return None
+    return '-'.join(cleaned[i:i + 2] for i in range(0, 12, 2)).upper()
+
+
+def _expand_switch_iface_name(iface):
+    if iface.startswith('GE') and not iface.startswith('GigabitEthernet'):
+        return f"GigabitEthernet{iface[2:]}"
+    if iface.startswith('XGE') and not iface.startswith('Ten-GigabitEthernet'):
+        return f"Ten-GigabitEthernet{iface[3:]}"
+    return iface
+
+
+def _switch_port_allowed(iface):
+    deny_pattern = os.getenv('SWITCH_REPLUG_DENY_PATTERN', '').strip()
+    if deny_pattern and re.search(deny_pattern, iface):
+        return False
+    allowed_raw = os.getenv('SWITCH_REPLUG_ALLOWED_PREFIXES', 'GigabitEthernet,GE')
+    allowed = [entry.strip() for entry in allowed_raw.split(',') if entry.strip()]
+    if not allowed:
+        return True
+    return any(iface.startswith(prefix) for prefix in allowed)
+
+
+def _get_switch_ssh_client():
+    try:
+        import paramiko
+    except ImportError:
+        logger.error("paramiko not installed - cannot manage switch")
+        return None
+
+    switch_host = os.getenv('SWITCH_HOST', '192.168.99.1')
+    switch_user = os.getenv('SWITCH_USER', 'admin')
+    switch_pass = os.getenv('SWITCH_PASS', '')
+    switch_key = os.getenv('SWITCH_KEY_PATH', '')
+    switch_ssh_port = int(os.getenv('SWITCH_SSH_PORT', '22'))
+
+    if not switch_pass and not switch_key:
+        logger.error("SWITCH_PASS or SWITCH_KEY_PATH must be configured")
+        return None
+
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+    connect_kwargs = {
+        "hostname": switch_host,
+        "port": switch_ssh_port,
+        "username": switch_user,
+        "allow_agent": False,
+        "look_for_keys": False,
+        "timeout": 10,
+        "disabled_algorithms": {"pubkeys": ["rsa-sha2-512", "rsa-sha2-256"]}
+    }
+
+    if switch_key:
+        connect_kwargs["key_filename"] = switch_key
+    else:
+        connect_kwargs["password"] = switch_pass
+
+    client.connect(**connect_kwargs)
+    return client
+
+
+def _find_switch_port_for_mac(client, mac_address):
+    normalized = _normalize_switch_mac(mac_address)
+    if not normalized:
+        return None
+
+    commands = [
+        f"display mac-address | include {normalized}",
+        f"display mac-address dynamic | include {normalized}",
+        "display mac-address"
+    ]
+
+    iface_pattern = re.compile(
+        r"\b(?P<iface>(?:GigabitEthernet|Ten-GigabitEthernet|GE|XGE|Ethernet|Bridge-Aggregation)\S+)\b",
+        re.IGNORECASE
+    )
+
+    for command in commands:
+        stdin, stdout, stderr = client.exec_command(command, timeout=10)
+        output = stdout.read().decode('utf-8', errors='ignore')
+        err = stderr.read().decode('utf-8', errors='ignore')
+        if err:
+            logger.debug("Switch MAC lookup error for '%s': %s", command, err.strip())
+        if not output:
+            continue
+        for line in output.splitlines():
+            if normalized not in line.upper():
+                continue
+            match = iface_pattern.search(line)
+            if match:
+                return _expand_switch_iface_name(match.group('iface'))
+
+    return None
+
+
+def replug_switch_port_for_mac(mac_address):
+    if not _env_truthy('SWITCH_REPLUG_ENABLED', False):
+        logger.info("Switch replug disabled; skipping for %s", mac_address)
+        return False
+
+    replug_script = os.getenv('SWITCH_REPLUG_SCRIPT', '/scripts/hp5130-replug.sh')
+    logger.info("Switch replug requested for %s using script=%s", mac_address, replug_script)
+    if os.path.isfile(replug_script):
+        try:
+            delay = os.getenv('SWITCH_REPLUG_DELAY_SEC', '3')
+            result = subprocess.run(
+                [replug_script, mac_address, delay],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            logger.info(
+                "Replug script finished for %s status=%s",
+                mac_address,
+                result.returncode,
+            )
+            if result.returncode == 0:
+                logger.info("Replug script succeeded for %s", mac_address)
+                return True
+            logger.warning(
+                "Replug script failed for %s: %s",
+                mac_address,
+                (result.stderr or result.stdout).strip(),
+            )
+        except Exception as exc:
+            logger.warning("Replug script error for %s: %s", mac_address, exc)
+
+    client = _get_switch_ssh_client()
+    if not client:
+        return False
+
+    try:
+        port = _find_switch_port_for_mac(client, mac_address)
+        if not port:
+            logger.warning("Unable to locate switch port for %s", mac_address)
+            return False
+        if not _switch_port_allowed(port):
+            logger.warning("Switch replug blocked for port %s", port)
+            return False
+
+        delay_raw = os.getenv('SWITCH_REPLUG_DELAY_SEC', '3')
+        try:
+            delay_sec = max(1, int(delay_raw))
+        except ValueError:
+            delay_sec = 3
+
+        logger.info("Replugging %s on port %s", mac_address, port)
+        chan = client.invoke_shell()
+        commands = [
+            "system-view",
+            f"interface {port}",
+            "shutdown",
+            "quit",
+            f"interface {port}",
+            "undo shutdown",
+            "quit",
+            "quit"
+        ]
+
+        for cmd in commands:
+            chan.send(cmd + "\n")
+            time.sleep(1)
+            if cmd == "shutdown":
+                time.sleep(delay_sec)
+
+        chan.close()
+        logger.info("Replug complete for %s on port %s", mac_address, port)
+        return True
+    except Exception as exc:
+        logger.error("Switch replug failed for %s: %s", mac_address, exc)
+        return False
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
 
 
 def apply_device_block(device, flash_messages=False):
@@ -4285,6 +4476,7 @@ def admin_process_request(request_id):
         else:
             # Wired: Use RADIUS CoA
             send_coa_change(device.mac_address, target_vlan)
+            replug_switch_port_for_mac(device.mac_address)
             # Remove DNS hijacking for wired devices too
             if device.ip_address and _should_hijack_vlan(target_vlan):
                 manage_dns_hijack('unhijack', device.ip_address)
