@@ -124,8 +124,6 @@ def _set_wifi_confirmation(device):
 def _enforce_wifi_confirmation(device):
     if not device:
         return device
-    if device.connection_type != 'wifi':
-        return device
     if device.registration_status != 'registered':
         return device
     if not device.confirmation_deadline or device.confirmation_confirmed_at:
@@ -146,7 +144,6 @@ def _sweep_expired_wifi_confirmations():
             with app.app_context():
                 now = datetime.utcnow()
                 expired = Device.query.filter(
-                    Device.connection_type == 'wifi',
                     Device.registration_status == 'registered',
                     Device.confirmation_deadline.isnot(None),
                     Device.confirmation_confirmed_at.is_(None),
@@ -2377,6 +2374,7 @@ def register():
                         kea.force_lease_renewal(mac_address, ip_address)
             else:
                 send_coa_change(mac_address, target_vlan)
+                replug_switch_port_for_mac(mac_address)
 
             if ip_address and not network_mismatch and _should_hijack_vlan(target_vlan or detected_vlan):
                 manage_dns_hijack('unhijack', ip_address)
@@ -2387,8 +2385,7 @@ def register():
             unregister_url = _build_unregister_url(device.unregister_token)
             confirm_url = None
             confirm_timeout_sec = None
-            if device.connection_type == 'wifi':
-                confirm_url, confirm_timeout_sec = _set_wifi_confirmation(device)
+            confirm_url, confirm_timeout_sec = _set_wifi_confirmation(device)
 
             ssid_display = ssid or "Wired Network"
             send_wifi_registration_confirmation(
@@ -2489,6 +2486,7 @@ def register():
                             kea.force_lease_renewal(mac_address, ip_address)
                 else:
                     send_coa_change(mac_address, target_vlan)
+                    replug_switch_port_for_mac(mac_address)
 
                 if ip_address and _should_hijack_vlan(target_vlan or detected_vlan):
                     manage_dns_hijack('unhijack', ip_address)
@@ -2499,8 +2497,7 @@ def register():
                 unregister_url = _build_unregister_url(device.unregister_token)
                 confirm_url = None
                 confirm_timeout_sec = None
-                if device.connection_type == 'wifi':
-                    confirm_url, confirm_timeout_sec = _set_wifi_confirmation(device)
+                confirm_url, confirm_timeout_sec = _set_wifi_confirmation(device)
                 ssid_display = ssid or "Wired Network"
                 send_wifi_registration_confirmation(
                     user.email,
@@ -3044,8 +3041,7 @@ def adopt_device():
     unregister_url = _build_unregister_url(adopted_device.unregister_token)
     confirm_url = None
     confirm_timeout_sec = None
-    if adopted_device.connection_type == 'wifi':
-        confirm_url, confirm_timeout_sec = _set_wifi_confirmation(adopted_device)
+    confirm_url, confirm_timeout_sec = _set_wifi_confirmation(adopted_device)
     if vlan_id == wired_unregistered_vlan:
         ssid_display = "Wired Network"
     else:
@@ -4622,8 +4618,7 @@ def admin_process_request(request_id):
         unregister_url = _build_unregister_url(device.unregister_token)
         confirm_url = None
         confirm_timeout_sec = None
-        if device.connection_type == 'wifi':
-            confirm_url, confirm_timeout_sec = _set_wifi_confirmation(device)
+        confirm_url, confirm_timeout_sec = _set_wifi_confirmation(device)
         if device.connection_type == 'wired':
             ssid_display = "Wired Network"
         else:

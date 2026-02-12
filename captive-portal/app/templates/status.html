@@ -36,7 +36,7 @@
             {% endif %}
         </table>
         
-        <div class="info-box">
+        <div class="info-box" id="access-info-box">
             You now have full network access. Enjoy!
         </div>
         
@@ -130,7 +130,18 @@
 <script>
 (() => {
     const statusEl = document.getElementById('access-status-message');
+    const infoBox = document.getElementById('access-info-box');
     const flashSuccess = document.querySelector('.alert[data-flash-category="success"]');
+
+    const isFullAccessFlash = flashSuccess && /full internet access/i.test(flashSuccess.textContent || '');
+    if (isFullAccessFlash) {
+        if (statusEl) {
+            statusEl.style.display = 'none';
+        }
+        if (infoBox) {
+            infoBox.style.display = 'none';
+        }
+    }
 
     const targetEl = flashSuccess || statusEl;
     if (!targetEl) {
@@ -149,6 +160,14 @@
 
     const updateMessage = (text) => {
         targetEl.textContent = text;
+        if (/full internet access/i.test(text)) {
+            if (statusEl && targetEl !== statusEl) {
+                statusEl.style.display = 'none';
+            }
+            if (infoBox) {
+                infoBox.style.display = 'none';
+            }
+        }
     };
 
     const checkAccess = () => {

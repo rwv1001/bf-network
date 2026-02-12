@@ -164,7 +164,13 @@ set +e
 LOOKUP_OUT=$(printf '%s\nquit\n' "$LOOKUP_CMD" | ssh $SSH_TTY_FLAG $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}" 2>&1)
 LOOKUP_STATUS=$?
 set -e
-log "LOOKUP_DONE mac=$MAC_NORM status=$LOOKUP_STATUS raw=$(printf '%s\nquit\n' "$LOOKUP_OUT" | tr '\n' ';')"
+log "LOOKUP_DONE mac=$MAC_NORM status=$LOOKUP_STATUS"
+printf '%s' "$LOOKUP_OUT" \
+  | tr '\r' '\n' \
+  | sed -E 's/;+$/;/; s/;+/\n/g' \
+  | while IFS= read -r line; do
+      [ -n "$line" ] && log "LOOKUP_OUT $line"
+    done
 
 if [ -z "$LOOKUP_OUT" ]; then
   LOOKUP_CMD="display mac-address dynamic | include $MAC_LOOKUP"
@@ -173,7 +179,13 @@ if [ -z "$LOOKUP_OUT" ]; then
   LOOKUP_OUT=$(printf '%s\nquit\n' "$LOOKUP_CMD" | ssh $SSH_TTY_FLAG $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}" 2>&1)
   LOOKUP_STATUS=$?
   set -e
-  log "LOOKUP_DONE mac=$MAC_NORM status=$LOOKUP_STATUS raw=$(printf '%s\nquit\n' "$LOOKUP_OUT" | tr '\n' ';')"
+  log "LOOKUP_DONE mac=$MAC_NORM status=$LOOKUP_STATUS"
+  printf '%s' "$LOOKUP_OUT" \
+    | tr '\r' '\n' \
+    | sed -E 's/;+$/;/; s/;+/\n/g' \
+    | while IFS= read -r line; do
+        [ -n "$line" ] && log "LOOKUP_OUT $line"
+      done
 fi
 
 MAC_NO_DASH=$(echo "$MAC_NORM" | tr -d '-')
