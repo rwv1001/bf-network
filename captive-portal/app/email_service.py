@@ -371,7 +371,16 @@ def send_approval_notification(user_email, first_name, status):
     return send_email(user_email, subject, html_body, text_body)
 
 
-def send_wifi_registration_confirmation(user_email, first_name, ssid, mac_address, unregister_url, registration_details=None):
+def send_wifi_registration_confirmation(
+    user_email,
+    first_name,
+    ssid,
+    mac_address,
+    unregister_url,
+    registration_details=None,
+    confirm_url=None,
+    confirm_timeout_sec=None,
+):
     """
     Send WiFi registration confirmation with unregister link
     
@@ -427,6 +436,46 @@ def send_wifi_registration_confirmation(user_email, first_name, ssid, mac_addres
         f"Network: {details_ssid}",
     ])
 
+    confirm_timeout_minutes = None
+    if confirm_timeout_sec:
+        confirm_timeout_minutes = max(1, int((int(confirm_timeout_sec) + 59) / 60))
+
+    confirm_html = ""
+    confirm_text = ""
+    if confirm_url:
+        timeout_note_html = ""
+        timeout_note_text = ""
+        if confirm_timeout_minutes:
+            timeout_note_html = (
+                f"<p style=\"margin-top: 10px; font-size: 14px;\">"
+                f"Please confirm within <strong>{confirm_timeout_minutes} minutes</strong> "
+                f"to keep this device active. If you do not confirm, the device will be "
+                f"automatically blocked.</p>"
+            )
+            timeout_note_text = (
+                f"Please confirm within {confirm_timeout_minutes} minutes to keep this device active. "
+                f"If you do not confirm, the device will be automatically blocked."
+            )
+        confirm_html = f"""
+                <div style=\"background-color: white; border-left: 4px solid #1b5e20; padding: 15px; margin: 20px 0;\">
+                    <p style=\"margin: 0;\"><strong>Confirm this device</strong></p>
+                    <p style=\"margin: 10px 0 0; font-size: 14px;\">Click accept if you recognize this device.</p>
+                    {timeout_note_html}
+                    <p style=\"text-align: center; margin: 15px 0 0;\">
+                        <a href=\"{confirm_url}\"
+                           style=\"background-color: #2e7d32; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: bold;\">
+                            Accept and Keep Access
+                        </a>
+                    </p>
+                </div>
+        """
+        confirm_text = f"""
+    CONFIRM THIS DEVICE
+    Click the link below if you recognize this device:
+    {confirm_url}
+    {timeout_note_text}
+    """
+
     html_body = f"""
     <html>
     <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
@@ -449,6 +498,8 @@ def send_wifi_registration_confirmation(user_email, first_name, ssid, mac_addres
                     <p style="margin: 0; color: #2e7d32;"><strong>✓ Your connection is now active</strong></p>
                     <p style="margin: 10px 0 0; font-size: 14px;">Please wait up to 30 seconds for your device to renew its connection and gain full internet access.</p>
                 </div>
+
+                {confirm_html}
                 
                 <h3 style="color: #263326; margin-top: 30px;">Registration Responsibility</h3>
                 
@@ -506,6 +557,8 @@ def send_wifi_registration_confirmation(user_email, first_name, ssid, mac_addres
     ✓ Your connection is now active
     
     Please wait up to 30 seconds for your device to renew its connection and gain full internet access.
+
+    {confirm_text}
     
     
     REGISTRATION RESPONSIBILITY

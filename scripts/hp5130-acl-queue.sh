@@ -23,6 +23,7 @@ IDLE_MAX="${ACL_QUEUE_IDLE_MAX:-12}"
 LOG_FILE="${ACL_LOG_FILE:-$QUEUE_BASE/hp5130-acl.log}"
 QUEUE_UMASK="${ACL_QUEUE_UMASK:-0002}"
 QUEUE_GID="${ACL_QUEUE_GID:-}"
+RULE_BASE="${ACL_RULE_BASE:-10000}"
 
 umask "$QUEUE_UMASK" 2>/dev/null || true
 if [ -n "$QUEUE_GID" ]; then
@@ -218,7 +219,7 @@ PY
       echo "system-view"
       echo "acl advanced $acl"
       while IFS='|' read -r action ip host; do
-        rule=$((1000 + host))
+        rule=$((RULE_BASE + host))
         if [ "$action" = "block" ]; then
           echo "rule $rule deny ip source $ip 0"
         else

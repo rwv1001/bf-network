@@ -55,6 +55,7 @@ QUEUE_WORKER="${ACL_QUEUE_WORKER:-$SCRIPT_DIR/hp5130-acl-queue.sh}"
 DEDUP_WINDOW="${ACL_DEDUP_WINDOW:-3}"
 QUEUE_UMASK="${ACL_QUEUE_UMASK:-0002}"
 QUEUE_GID="${ACL_QUEUE_GID:-}"
+RULE_BASE="${ACL_RULE_BASE:-10000}"
 
 umask "$QUEUE_UMASK" 2>/dev/null || true
 mkdir -p "$QUEUE_BASE" 2>/dev/null || true
@@ -135,7 +136,7 @@ if [ -z "$VLAN_ID" ] || [ -z "$HOST_OFFSET" ]; then
 fi
 
 ACL_NUM=$((3000 + VLAN_ID * 10))
-RULE_NUM=$((1000 + HOST_OFFSET))
+RULE_NUM=$((RULE_BASE + HOST_OFFSET))
 
 SSH_TTY_FLAG="${SSH_TTY_FLAG:--tt}"  # Changed: Default to -tt for Comware
 SSH_TTY_FALLBACK="${SSH_TTY_FALLBACK:-0}"  # Changed: Disable fallback

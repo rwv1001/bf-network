@@ -10,6 +10,8 @@ VLAN_LIST="${VLAN_LIST:-10 20 30 40 50 60 70 80 90}"
 DOH_DOT_IPS="${DOH_DOT_IPS:-1.1.1.1 1.0.0.1 8.8.8.8 8.8.4.4 9.9.9.9 149.112.112.112}"
 KEA_CONFIG_PATH="${KEA_CONFIG_PATH:-}"
 PYTHON_BIN="${PYTHON_BIN:-}"
+BLOCK_RULE_BASE="${ACL_BLOCK_RULE_BASE:-20000}"
+PERMIT_RULE_NUM="${ACL_PERMIT_RULE_NUM:-30000}"
 
 if [ -z "$KEA_CONFIG_PATH" ]; then
   if [ -f "/kea/config/dhcp4.json" ]; then
@@ -82,14 +84,14 @@ PY
 
   VLAN_NET=$(printf '%s\n' "$PY_OUT" | awk -F= '/^VLAN_NET=/{print $2}')
   VLAN_WILDCARD=$(printf '%s\n' "$PY_OUT" | awk -F= '/^VLAN_WILDCARD=/{print $2}')
-  BLOCK_RULES=$(printf '%s\n' "$PY_OUT" | awk 'BEGIN{rule=1100} $1=="BLOCK_RULE"{printf "rule %d deny ip source %s %s\n", rule, $2, $3; rule+=10}')
+  BLOCK_RULES=$(printf '%s\n' "$PY_OUT" | awk -v base="$BLOCK_RULE_BASE" 'BEGIN{rule=base} $1=="BLOCK_RULE"{printf "rule %d deny ip source %s %s\n", rule, $2, $3; rule+=10}')
 
   if [ -z "$VLAN_NET" ] || [ -z "$VLAN_WILDCARD" ] || [ -z "$BLOCK_RULES" ]; then
     VLAN_NET="192.168.${VLAN_ID}.0"
     VLAN_WILDCARD="0.0.0.255"
-    BLOCK_RULES="rule 1100 deny ip source 192.168.${VLAN_ID}.214 0.0.0.1
-rule 1101 deny ip source 192.168.${VLAN_ID}.216 0.0.0.7
-rule 1102 deny ip source 192.168.${VLAN_ID}.224 0.0.0.31
+    BLOCK_RULES="rule ${BLOCK_RULE_BASE} deny ip source 192.168.${VLAN_ID}.214 0.0.0.1
+  rule $((BLOCK_RULE_BASE + 10)) deny ip source 192.168.${VLAN_ID}.216 0.0.0.7
+  rule $((BLOCK_RULE_BASE + 20)) deny ip source 192.168.${VLAN_ID}.224 0.0.0.31
 "
   fi
 
@@ -127,7 +129,7 @@ rule 32 permit tcp source ${VLAN_NET} ${VLAN_WILDCARD} destination ${PORTAL_IP} 
 rule 40 permit icmp source ${VLAN_NET} ${VLAN_WILDCARD} destination ${PORTAL_IP} 0
 rule 50 permit udp source ${VLAN_NET} ${VLAN_WILDCARD} destination ${PORTAL_IP} 0 destination-port eq ntp
 ${DOT_DOH_RULES}${BLOCK_RULES}
-rule 2000 permit ip
+rule ${PERMIT_RULE_NUM} permit ip
 quit
 EOF
 }

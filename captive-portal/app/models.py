@@ -74,6 +74,9 @@ class Device(db.Model):
     is_wired = db.Column(db.Boolean, default=False, nullable=False)
     wired_target_vlan = db.Column(db.Integer)
     unregister_token = db.Column(db.String(255), unique=True, index=True)  # For email unregister link
+    confirmation_token = db.Column(db.String(255), unique=True, index=True)
+    confirmation_deadline = db.Column(db.DateTime)
+    confirmation_confirmed_at = db.Column(db.DateTime)
     profile_snapshot = db.Column(db.Text)  # JSON: previous/new user profile details
     
     def __repr__(self):

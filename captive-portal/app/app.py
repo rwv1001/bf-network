@@ -14,6 +14,7 @@ import json
 import csv
 import ipaddress
 import io
+import threading
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, abort, Response
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -74,6 +75,14 @@ def _build_unregister_url(token):
     return url_for('unregister', token=token, _external=True)
 
 
+def _build_confirm_url(token):
+    portal_url = _get_portal_base_url()
+    if portal_url:
+        parsed = urlparse(portal_url)
+        return f"{parsed.scheme}://{parsed.netloc}{url_for('confirm_device', token=token)}"
+    return url_for('confirm_device', token=token, _external=True)
+
+
 def _portal_host_mismatch():
     portal_url = _get_portal_base_url()
     if not portal_url:
@@ -83,6 +92,79 @@ def _portal_host_mismatch():
     except Exception:
         return False
     return portal_host and portal_host != request.host
+
+
+def _wifi_confirm_timeout_sec():
+    raw = os.getenv('WIFI_CONFIRM_TIMEOUT_SEC', '120').strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 120
+    return value if value > 0 else 120
+
+
+def _wifi_confirm_sweep_interval_sec():
+    raw = os.getenv('WIFI_CONFIRM_SWEEP_INTERVAL_SEC', '30').strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 30
+    return value if value > 0 else 30
+
+
+def _set_wifi_confirmation(device):
+    timeout_sec = _wifi_confirm_timeout_sec()
+    device.confirmation_token = secrets.token_urlsafe(32)
+    device.confirmation_confirmed_at = None
+    device.confirmation_deadline = datetime.utcnow() + timedelta(seconds=timeout_sec)
+    db.session.commit()
+    return _build_confirm_url(device.confirmation_token), timeout_sec
+
+
+def _enforce_wifi_confirmation(device):
+    if not device:
+        return device
+    if device.connection_type != 'wifi':
+        return device
+    if device.registration_status != 'registered':
+        return device
+    if not device.confirmation_deadline or device.confirmation_confirmed_at:
+        return device
+    if datetime.utcnow() < device.confirmation_deadline:
+        return device
+    logger.info("WiFi confirmation expired for %s; blocking device", device.mac_address)
+    apply_device_block(device, flash_messages=False)
+    return device
+
+
+def _sweep_expired_wifi_confirmations():
+    if not _env_truthy('WIFI_CONFIRM_SWEEP_ENABLED', True):
+        return
+    interval = _wifi_confirm_sweep_interval_sec()
+    while True:
+        try:
+            with app.app_context():
+                now = datetime.utcnow()
+                expired = Device.query.filter(
+                    Device.connection_type == 'wifi',
+                    Device.registration_status == 'registered',
+                    Device.confirmation_deadline.isnot(None),
+                    Device.confirmation_confirmed_at.is_(None),
+                    Device.confirmation_deadline <= now,
+                ).all()
+                for device in expired:
+                    logger.info("WiFi confirmation expired for %s; blocking device", device.mac_address)
+                    apply_device_block(device, flash_messages=False)
+        except Exception as exc:
+            logger.warning("WiFi confirmation sweep failed: %s", exc)
+        time.sleep(interval)
+
+
+def _start_wifi_confirmation_sweeper():
+    if not _env_truthy('WIFI_CONFIRM_SWEEP_ENABLED', True):
+        return
+    thread = threading.Thread(target=_sweep_expired_wifi_confirmations, daemon=True)
+    thread.start()
 
 
 def get_vlan_ssid_map():
@@ -609,6 +691,9 @@ def _env_truthy(name, default=False):
     if raw is None:
         return default
     return raw.strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+_start_wifi_confirmation_sweeper()
 
 
 class AdminUser:
@@ -2300,6 +2385,10 @@ def register():
                 manage_switch_acl('unblock', ip_address, detected_vlan)
 
             unregister_url = _build_unregister_url(device.unregister_token)
+            confirm_url = None
+            confirm_timeout_sec = None
+            if device.connection_type == 'wifi':
+                confirm_url, confirm_timeout_sec = _set_wifi_confirmation(device)
 
             ssid_display = ssid or "Wired Network"
             send_wifi_registration_confirmation(
@@ -2308,6 +2397,8 @@ def register():
                 ssid_display,
                 mac_address,
                 unregister_url,
+                confirm_url=confirm_url,
+                confirm_timeout_sec=confirm_timeout_sec,
                 registration_details={
                     "email": user.email,
                     "first_name": new_profile["first_name"],
@@ -2406,6 +2497,10 @@ def register():
                     manage_switch_acl('unblock', ip_address, detected_vlan)
 
                 unregister_url = _build_unregister_url(device.unregister_token)
+                confirm_url = None
+                confirm_timeout_sec = None
+                if device.connection_type == 'wifi':
+                    confirm_url, confirm_timeout_sec = _set_wifi_confirmation(device)
                 ssid_display = ssid or "Wired Network"
                 send_wifi_registration_confirmation(
                     user.email,
@@ -2413,6 +2508,8 @@ def register():
                     ssid_display,
                     mac_address,
                     unregister_url,
+                    confirm_url=confirm_url,
+                    confirm_timeout_sec=confirm_timeout_sec,
                     registration_details={
                         "email": user.email,
                         "first_name": user.first_name or first_name,
@@ -2945,6 +3042,10 @@ def adopt_device():
     clear_unregistered_lease(mac_address)
 
     unregister_url = _build_unregister_url(adopted_device.unregister_token)
+    confirm_url = None
+    confirm_timeout_sec = None
+    if adopted_device.connection_type == 'wifi':
+        confirm_url, confirm_timeout_sec = _set_wifi_confirmation(adopted_device)
     if vlan_id == wired_unregistered_vlan:
         ssid_display = "Wired Network"
     else:
@@ -2955,6 +3056,8 @@ def adopt_device():
         ssid_display,
         mac_address,
         unregister_url,
+        confirm_url=confirm_url,
+        confirm_timeout_sec=confirm_timeout_sec,
         registration_details={
             "email": user.email,
             "first_name": user.first_name,
@@ -3158,6 +3261,7 @@ def registration_status():
     # Check if device is registered
     device = Device.query.filter_by(mac_address=mac_address).first()
     device = normalize_device_status(device)
+    device = _enforce_wifi_confirmation(device)
     if device:
         current_ip = get_client_ip()
         current_connection, current_vlan, detected_ssid = detect_connection_type(current_ip)
@@ -3346,6 +3450,32 @@ def unregister(token):
     logger.info(f"Device {mac_address} (user: {user_email}) unregistered via email token")
     
     return render_template('status.html', device=device, unregistered=True)
+
+
+@app.route('/confirm/<token>')
+def confirm_device(token):
+    if not token:
+        flash('Invalid confirmation link', 'error')
+        return redirect(url_for('index'))
+
+    device = Device.query.filter_by(confirmation_token=token).first()
+    if not device:
+        flash('Invalid or expired confirmation link', 'error')
+        return redirect(url_for('index'))
+
+    if device.registration_status == 'unregistered':
+        flash('This device is unregistered. Please contact the administrator.', 'error')
+        return render_template('status.html', device=device, unregistered=True)
+
+    device.confirmation_confirmed_at = datetime.utcnow()
+    device.confirmation_deadline = None
+    db.session.commit()
+
+    if device.registration_status == 'blocked':
+        apply_device_unblock(device, flash_messages=False)
+
+    flash('Device confirmed. Access restored.', 'success')
+    return render_template('status.html', device=device)
 
 
 @app.route('/admin/login', methods=['GET', 'POST'])
@@ -4490,6 +4620,10 @@ def admin_process_request(request_id):
             manage_switch_acl('unblock', reg_request.ip_address, detected_vlan)
 
         unregister_url = _build_unregister_url(device.unregister_token)
+        confirm_url = None
+        confirm_timeout_sec = None
+        if device.connection_type == 'wifi':
+            confirm_url, confirm_timeout_sec = _set_wifi_confirmation(device)
         if device.connection_type == 'wired':
             ssid_display = "Wired Network"
         else:
@@ -4500,6 +4634,8 @@ def admin_process_request(request_id):
             ssid_display,
             device.mac_address,
             unregister_url,
+            confirm_url=confirm_url,
+            confirm_timeout_sec=confirm_timeout_sec,
             registration_details={
                 "email": user.email,
                 "first_name": user.first_name or reg_request.first_name,
