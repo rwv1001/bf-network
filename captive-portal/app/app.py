@@ -1219,6 +1219,56 @@ def reset_acl_baseline():
     return True
 
 
+def clear_mac_auth_sessions():
+    """Clear all MAC authentication sessions on the switch to force re-authentication."""
+    script_path = os.getenv('CLEAR_MAC_AUTH_SCRIPT', '/scripts/hp5130-clear-mac-auth.sh')
+    if not os.path.isfile(script_path):
+        logger.warning("MAC auth clear script not found: %s", script_path)
+        return False
+
+    env = os.environ.copy()
+    if not env.get("SWITCH_KEY_PATH"):
+        env["SWITCH_KEY_PATH"] = "/keys/id_rsa"
+
+    result = subprocess.run([script_path], capture_output=True, text=True, timeout=60, env=env)
+    if result.returncode != 0:
+        stderr = (result.stderr or '').strip()
+        stdout = (result.stdout or '').strip()
+        logger.error(
+            "MAC auth clear failed (exit=%s). stderr=%s stdout=%s",
+            result.returncode,
+            stderr or '<empty>',
+            stdout or '<empty>',
+        )
+        return False
+    return True
+
+
+def reset_user_ports():
+    """Reset and reconfigure user device ports on the switch."""
+    script_path = os.getenv('RESET_USER_PORTS_SCRIPT', '/scripts/hp5130-reset-user-ports.sh')
+    if not os.path.isfile(script_path):
+        logger.warning("Reset user ports script not found: %s", script_path)
+        return False
+
+    env = os.environ.copy()
+    if not env.get("SWITCH_KEY_PATH"):
+        env["SWITCH_KEY_PATH"] = "/keys/id_rsa"
+
+    result = subprocess.run([script_path], capture_output=True, text=True, timeout=120, env=env)
+    if result.returncode != 0:
+        stderr = (result.stderr or '').strip()
+        stdout = (result.stdout or '').strip()
+        logger.error(
+            "Reset user ports failed (exit=%s). stderr=%s stdout=%s",
+            result.returncode,
+            stderr or '<empty>',
+            stdout or '<empty>',
+        )
+        return False
+    return True
+
+
 def reset_vlan_interface_masks(vlan_ids):
     """Update HP5130 VLAN interface masks for specific VLAN IDs."""
     vlan_ids = [str(vlan_id) for vlan_id in vlan_ids if vlan_id]
@@ -3516,11 +3566,17 @@ def admin_reset_test():
     reset_acl_queue_files()
     reset_dns_hijack_rules()
     acl_ok = reset_acl_baseline()
+    mac_auth_cleared = clear_mac_auth_sessions()
+    ports_reset = reset_user_ports()
 
-    if acl_ok:
-        flash('Test reset complete. ACL baseline and blocked-pool DNS hijack rules restored.', 'success')
+    if acl_ok and mac_auth_cleared and ports_reset:
+        flash('Test reset complete. ACL baseline restored, DNS hijack rules restored, MAC auth sessions cleared, and user ports reset.', 'success')
+    elif acl_ok and mac_auth_cleared:
+        flash('Test reset complete, but user port reset failed.', 'warning')
+    elif acl_ok:
+        flash('Test reset complete, but MAC auth session clearing or port reset failed.', 'warning')
     else:
-        flash('Test reset complete, but ACL baseline update failed.', 'warning')
+        flash('Test reset complete, but ACL baseline, MAC auth clearing, or port reset failed.', 'warning')
 
     return redirect(url_for('admin_dashboard'))
 

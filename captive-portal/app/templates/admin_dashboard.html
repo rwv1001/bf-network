@@ -214,7 +214,7 @@ function searchTable(tableType, searchValue) {
     <a href="{{ url_for('admin_logout') }}" class="btn" style="background: #999; margin-left: 10px;">Logout</a>
     {% if test_env %}
     <form method="post" action="{{ url_for('admin_reset_test') }}" style="display: inline-block; margin-left: 10px;"
-          onsubmit="return confirm('Reset test environment? This deletes all users, devices, and requests, clears ACL/DNS hijack rules, and reapplies the baseline ACLs.');">
+          onsubmit="return confirm('Reset test environment? This deletes all users, devices, and requests, clears ACL/DNS hijack rules, reapplies the baseline ACLs, clears all MAC authentication sessions, and resets user device ports on the switch.');">
         <button type="submit" class="btn" style="background: #c0392b;">Reset Test Environment</button>
     </form>
     {% endif %}

@@ -1011,7 +1011,7 @@ post-auth {
 	#		&WiMAX-MSK = "%{reply:EAP-MSK}"
 	#	}
 	#
-	#  You may want to delete the MS-MPPE-*-Keys from the reply,
+	#  You may want to delete the MS-MPPE-*-Keys from theF reply,
 	#  as some WiMAX clients behave badly when those attributes
 	#  are included.  See "raddb/modules/wimax", configuration
 	#  entry "delete_mppe_keys" for more information.
