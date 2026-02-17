@@ -101,5 +101,28 @@ services:
       timeout: 10s
       retries: 3
 
+  nat-parser:
+    build: ./nat-parser
+    container_name: nat-parser
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-portal_user}:${DB_PASSWORD:-change_this_password}@127.0.0.1:5432/${DB_NAME:-captive_portal}
+      LOG_FILE: /logs/remote-syslog.log
+      UDM_HOST: ${UDM_HOST:-192.168.1.1}
+      UDM_SSH_KEY: /config/udm_key
+      UDM_INSTALL_SCRIPT: /scripts/udm-nat-logger-persist.sh
+      SESSION_GAP_SECONDS: ${NAT_SESSION_GAP_SECONDS:-60}
+      STALE_LOG_THRESHOLD_SECONDS: ${NAT_STALE_LOG_THRESHOLD_SECONDS:-3600}
+      CHECK_INTERVAL_SECONDS: ${NAT_CHECK_INTERVAL_SECONDS:-5}
+      REINSTALL_COOLDOWN_SECONDS: ${NAT_REINSTALL_COOLDOWN_SECONDS:-300}
+    volumes:
+      - ../syslog-container/logs:/logs:ro
+      - /home/admin/.ssh:/config:ro
+      - ../scripts:/scripts:ro
+    network_mode: host
+    depends_on:
+      db:
+        condition: service_healthy
+
 # Note: Using host network mode so the portal is accessible on all Pi interfaces
 # This ensures devices on VLAN 99 (192.168.99.0/24) can reach it at 192.168.99.4:8080

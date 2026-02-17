@@ -1,0 +1,33 @@
+[Unit]
+Description=NAT Log Parser Service
+After=network.target docker.service postgresql.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=admin
+Group=admin
+WorkingDirectory=/home/admin/bf-network/scripts
+ExecStart=/usr/bin/python3 /home/admin/bf-network/scripts/nat-parser.py
+Restart=always
+RestartSec=10
+
+# Environment variables (database credentials)
+Environment="DB_NAME=captive_portal"
+Environment="DB_USER=portal_user"
+Environment="DB_PASSWORD=change_this_password"
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nat-parser
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/admin/bf-network/syslog-container/logs
+
+[Install]
+WantedBy=multi-user.target
