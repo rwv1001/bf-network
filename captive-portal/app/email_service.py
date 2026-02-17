@@ -225,103 +225,143 @@ def send_user_blocked_device_notice(to_email, first_name, mac_address, device_na
 
 def send_admin_notification(registration_request, approval_url, current_vlan=None, current_ssid=None):
     """
-    Send notification to admin about new registration request
+    Send notification to all admins with manage_users permission about new registration request
     
     Args:
         registration_request: RegistrationRequest object
         approval_url: URL for admin to approve the request
+    Returns:
+        int: Number of emails sent successfully
     """
-    if not ADMIN_EMAIL:
-        logger.warning("ADMIN_EMAIL not configured, skipping admin notification")
-        return False
+    # Import Admin model here to avoid circular imports
+    from models import Admin
+    
+    # Get all admins with manage_users permission and a valid email
+    admins = Admin.query.filter(
+        Admin.can_manage_users == True,
+        Admin.email != None,
+        Admin.email != ''
+    ).all()
+    
+    if not admins:
+        logger.warning("No admins with manage_users permission and email configured, trying fallback ADMIN_EMAIL")
+        # Fallback to old ADMIN_EMAIL env var
+        if not ADMIN_EMAIL:
+            logger.warning("No admin emails configured at all, skipping admin notification")
+            return 0
+        admins_to_email = [{'email': ADMIN_EMAIL, 'username': 'Admin'}]
+    else:
+        admins_to_email = [{'email': admin.email, 'username': admin.username} for admin in admins]
     
     subject = f"New Network Access Request: {registration_request.email}"
     
-    html_body = f"""
-    <html>
-    <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-        <h2>New Network Access Request</h2>
+    emails_sent = 0
+    for admin_info in admins_to_email:
+        admin_email = admin_info['email']
+        admin_username = admin_info['username']
         
-        <p>A new user has requested network access. Please review the details below:</p>
+        html_body = f"""
+        <html>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+            <h2>New Network Access Request</h2>
+            
+            <p>Hello {admin_username},</p>
+            
+            <p>A new user has requested network access. Please review the details below:</p>
+            
+            <table style="border-collapse: collapse; margin: 20px 0;">
+                <tr>
+                    <td style="padding: 8px; font-weight: bold; background-color: #f5f5f5;">Name:</td>
+                    <td style="padding: 8px;">{registration_request.full_name}</td>
+                </tr>
+                <tr>
+                    <td style="padding: 8px; font-weight: bold; background-color: #f5f5f5;">Email:</td>
+                    <td style="padding: 8px;">{registration_request.email}</td>
+                </tr>
+                <tr>
+                    <td style="padding: 8px; font-weight: bold; background-color: #f5f5f5;">Phone:</td>
+                    <td style="padding: 8px;">{registration_request.phone_number or 'Not provided'}</td>
+                </tr>
+                <tr>
+                    <td style="padding: 8px; font-weight: bold; background-color: #f5f5f5;">MAC Address:</td>
+                    <td style="padding: 8px; font-family: monospace;">{registration_request.mac_address}</td>
+                </tr>
+                <tr>
+                    <td style="padding: 8px; font-weight: bold; background-color: #f5f5f5;">IP Address:</td>
+                    <td style="padding: 8px;">{registration_request.ip_address}</td>
+                </tr>
+                <tr>
+                    <td style="padding: 8px; font-weight: bold; background-color: #f5f5f5;">Connected VLAN:</td>
+                    <td style="padding: 8px;">{current_vlan or 'Unknown'}</td>
+                </tr>
+                <tr>
+                    <td style="padding: 8px; font-weight: bold; background-color: #f5f5f5;">Connected SSID:</td>
+                    <td style="padding: 8px;">{current_ssid or 'Unknown'}</td>
+                </tr>
+                <tr>
+                    <td style="padding: 8px; font-weight: bold; background-color: #f5f5f5;">Submitted:</td>
+                    <td style="padding: 8px;">{registration_request.submitted_at.strftime('%Y-%m-%d %H:%M:%S')}</td>
+                </tr>
+            </table>
+            
+            <p style="margin: 20px 0;">
+                <a href="{approval_url}" 
+                   style="background-color: #28a745; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">
+                    Review and Approve
+                </a>
+            </p>
+            
+            <p>Or copy and paste this link into your browser:</p>
+            <p style="background-color: #f5f5f5; padding: 10px; border-left: 3px solid #28a745; word-break: break-all;">
+                {approval_url}
+            </p>
+            
+            <p><strong>Action Required:</strong> Please contact the user to verify their identity before approving access.</p>
+            
+            <p style="color: #999; font-size: 14px; margin-top: 20px;">
+                <em>Note: This request has been sent to all admins with user management permissions. The first admin to process this request will determine the outcome.</em>
+            </p>
+            
+            <hr style="margin: 30px 0; border: none; border-top: 1px solid #ddd;">
+            <p style="color: #666; font-size: 12px;">
+                This is an automated message from the Network Access Portal.
+            </p>
+        </body>
+        </html>
+        """
         
-        <table style="border-collapse: collapse; margin: 20px 0;">
-            <tr>
-                <td style="padding: 8px; font-weight: bold; background-color: #f5f5f5;">Name:</td>
-                <td style="padding: 8px;">{registration_request.full_name}</td>
-            </tr>
-            <tr>
-                <td style="padding: 8px; font-weight: bold; background-color: #f5f5f5;">Email:</td>
-                <td style="padding: 8px;">{registration_request.email}</td>
-            </tr>
-            <tr>
-                <td style="padding: 8px; font-weight: bold; background-color: #f5f5f5;">Phone:</td>
-                <td style="padding: 8px;">{registration_request.phone_number or 'Not provided'}</td>
-            </tr>
-            <tr>
-                <td style="padding: 8px; font-weight: bold; background-color: #f5f5f5;">MAC Address:</td>
-                <td style="padding: 8px; font-family: monospace;">{registration_request.mac_address}</td>
-            </tr>
-            <tr>
-                <td style="padding: 8px; font-weight: bold; background-color: #f5f5f5;">IP Address:</td>
-                <td style="padding: 8px;">{registration_request.ip_address}</td>
-            </tr>
-            <tr>
-                <td style="padding: 8px; font-weight: bold; background-color: #f5f5f5;">Connected VLAN:</td>
-                <td style="padding: 8px;">{current_vlan or 'Unknown'}</td>
-            </tr>
-            <tr>
-                <td style="padding: 8px; font-weight: bold; background-color: #f5f5f5;">Connected SSID:</td>
-                <td style="padding: 8px;">{current_ssid or 'Unknown'}</td>
-            </tr>
-            <tr>
-                <td style="padding: 8px; font-weight: bold; background-color: #f5f5f5;">Submitted:</td>
-                <td style="padding: 8px;">{registration_request.submitted_at.strftime('%Y-%m-%d %H:%M:%S')}</td>
-            </tr>
-        </table>
+        text_body = f"""
+        New Network Access Request
         
-        <p style="margin: 20px 0;">
-            <a href="{approval_url}" 
-               style="background-color: #28a745; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">
-                Review and Approve
-            </a>
-        </p>
+        Hello {admin_username},
         
-        <p>Or copy and paste this link into your browser:</p>
-        <p style="background-color: #f5f5f5; padding: 10px; border-left: 3px solid #28a745; word-break: break-all;">
-            {approval_url}
-        </p>
+        A new user has requested network access. Please review the details below:
         
-        <p><strong>Action Required:</strong> Please contact the user to verify their identity before approving access.</p>
+        Name: {registration_request.full_name}
+        Email: {registration_request.email}
+        Phone: {registration_request.phone_number or 'Not provided'}
+        MAC Address: {registration_request.mac_address}
+        IP Address: {registration_request.ip_address}
+        Connected VLAN: {current_vlan or 'Unknown'}
+        Connected SSID: {current_ssid or 'Unknown'}
+        Submitted: {registration_request.submitted_at.strftime('%Y-%m-%d %H:%M:%S')}
         
-        <hr style="margin: 30px 0; border: none; border-top: 1px solid #ddd;">
-        <p style="color: #666; font-size: 12px;">
-            This is an automated message from the Network Access Portal.
-        </p>
-    </body>
-    </html>
-    """
+        To review and approve this request, visit:
+        {approval_url}
+        
+        Note: This request has been sent to all admins with user management permissions. 
+        The first admin to process this request will determine the outcome.
+        """
+        
+        # Send email to this admin
+        if send_email(admin_email, subject, html_body, text_body):
+            emails_sent += 1
+            logger.info(f"Sent admin notification to {admin_email} ({admin_username})")
+        else:
+            logger.error(f"Failed to send admin notification to {admin_email} ({admin_username})")
     
-    text_body = f"""
-    New Network Access Request
-    
-    A new user has requested network access. Please review the details below:
-    
-    Name: {registration_request.full_name}
-    Email: {registration_request.email}
-    Phone: {registration_request.phone_number or 'Not provided'}
-    MAC Address: {registration_request.mac_address}
-    IP Address: {registration_request.ip_address}
-    Connected VLAN: {current_vlan or 'Unknown'}
-    Connected SSID: {current_ssid or 'Unknown'}
-    Submitted: {registration_request.submitted_at.strftime('%Y-%m-%d %H:%M:%S')}
-    
-    To review and approve this request, visit:
-    {approval_url}
-    
-    Action Required: Please contact the user to verify their identity before approving access.
-    """
-    
-    return send_email(ADMIN_EMAIL, subject, html_body, text_body)
+    logger.info(f"Sent {emails_sent}/{len(admins_to_email)} admin notifications for request {registration_request.id}")
+    return emails_sent
 
 
 def send_approval_notification(user_email, first_name, status):

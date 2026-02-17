@@ -108,6 +108,7 @@ services:
     environment:
       DATABASE_URL: postgresql://${DB_USER:-portal_user}:${DB_PASSWORD:-change_this_password}@127.0.0.1:5432/${DB_NAME:-captive_portal}
       LOG_FILE: /logs/remote-syslog.log
+      KEA_LEASES_FILE: /kea/leases/kea-leases4.csv
       UDM_HOST: ${UDM_HOST:-192.168.1.1}
       UDM_SSH_KEY: /config/udm_key
       UDM_INSTALL_SCRIPT: /scripts/udm-nat-logger-persist.sh
@@ -115,10 +116,29 @@ services:
       STALE_LOG_THRESHOLD_SECONDS: ${NAT_STALE_LOG_THRESHOLD_SECONDS:-3600}
       CHECK_INTERVAL_SECONDS: ${NAT_CHECK_INTERVAL_SECONDS:-5}
       REINSTALL_COOLDOWN_SECONDS: ${NAT_REINSTALL_COOLDOWN_SECONDS:-300}
+      RETENTION_DAYS: ${NAT_RETENTION_DAYS:-90}
     volumes:
       - ../syslog-container/logs:/logs:ro
+      - ../kea/leases:/kea/leases:ro
       - /home/admin/.ssh:/config:ro
       - ../scripts:/scripts:ro
+    network_mode: host
+    depends_on:
+      db:
+        condition: service_healthy
+
+  dns-parser:
+    build: ./dns-parser
+    container_name: dns-parser
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-portal_user}:${DB_PASSWORD:-change_this_password}@127.0.0.1:5432/${DB_NAME:-captive_portal}
+      LOG_FILE: /logs/dnsmasq-queries.log
+      DNS_DEDUP_THRESHOLD_HOURS: ${DNS_DEDUP_THRESHOLD_HOURS:-12}
+      DNS_CHECK_INTERVAL_SECONDS: ${DNS_CHECK_INTERVAL_SECONDS:-5}
+      DNS_RETENTION_DAYS: ${DNS_RETENTION_DAYS:-90}
+    volumes:
+      - ../dnsmasq/logs:/logs:ro
     network_mode: host
     depends_on:
       db:

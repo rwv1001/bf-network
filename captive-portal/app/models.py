@@ -4,8 +4,43 @@ Database models for Captive Portal
 
 from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime, timedelta
+from werkzeug.security import generate_password_hash, check_password_hash
 
 db = SQLAlchemy()
+
+
+class Admin(db.Model):
+    """Admin users with role-based permissions"""
+    __tablename__ = 'admins'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(100), unique=True, nullable=False, index=True)
+    email = db.Column(db.String(255), nullable=True, index=True)
+    password_hash = db.Column(db.String(255), nullable=False)
+    can_manage_users = db.Column(db.Boolean, default=True, nullable=False)
+    can_manage_vlans = db.Column(db.Boolean, default=False, nullable=False)
+    can_view_traffic = db.Column(db.Boolean, default=False, nullable=False)
+    can_manage_admins = db.Column(db.Boolean, default=False, nullable=False)  # Super admin flag
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_by = db.Column(db.Integer, db.ForeignKey('admins.id'), nullable=True)
+    last_login = db.Column(db.DateTime)
+    traffic_viewer_settings = db.Column(db.Text, nullable=True)  # JSON string for saved filters/columns
+    
+    def set_password(self, password):
+        """Hash and set password"""
+        self.password_hash = generate_password_hash(password)
+    
+    def check_password(self, password):
+        """Check password against hash"""
+        return check_password_hash(self.password_hash, password)
+    
+    @property
+    def is_super_admin(self):
+        """Super admin = can manage admins"""
+        return self.can_manage_admins
+    
+    def __repr__(self):
+        return f'<Admin {self.username}>'
 
 
 class User(db.Model):

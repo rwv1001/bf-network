@@ -1,0 +1,611 @@
+{% extends "base.html" %}
+
+{% block title %}Traffic Viewer - Network Access Portal{% endblock %}
+
+{% block header %}Network Traffic Viewer{% endblock %}
+
+{% block extra_head %}
+<style>
+    /* Override container max-width for traffic viewer */
+    .container {
+        max-width: 98%;
+        margin: 20px auto;
+    }
+    
+    /* Navigation */
+    .admin-nav {
+        background: #2c3e2c;
+        padding: 15px 30px;
+        margin: -30px -30px 20px;
+        border-bottom: 2px solid #1a2b1a;
+    }
+    
+    .admin-nav a {
+        color: white;
+        text-decoration: none;
+        margin-right: 20px;
+        padding: 8px 16px;
+        border-radius: 4px;
+        transition: background 0.3s;
+        display: inline-block;
+    }
+    
+    .admin-nav a:hover {
+        background: rgba(255,255,255,0.1);
+    }
+    
+    .admin-nav a.active {
+        background: rgba(255,255,255,0.2);
+        font-weight: bold;
+    }
+    
+    /* Filter section */
+    .filter-section {
+        background: #f8f9fa;
+        padding: 20px;
+        border-radius: 5px;
+        margin-bottom: 20px;
+    }
+    
+    .filter-section h3 {
+        margin-bottom: 15px;
+        color: #2c3e2c;
+    }
+    
+    .column-selector {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+        gap: 10px;
+        margin-bottom: 20px;
+    }
+    
+    .column-selector label {
+        display: flex;
+        align-items: center;
+        font-weight: normal;
+        margin: 0;
+        padding: 8px;
+        background: white;
+        border-radius: 4px;
+        cursor: pointer;
+        transition: background 0.2s;
+    }
+    
+    .column-selector label:hover {
+        background: #e9ecef;
+    }
+    
+    .column-selector input[type="checkbox"] {
+        margin-right: 8px;
+        width: auto;
+    }
+    
+    .filters-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+        gap: 10px;
+        margin-bottom: 15px;
+    }
+    
+    .filter-item {
+        display: flex;
+        flex-direction: column;
+    }
+    
+    .filter-item label {
+        font-size: 12px;
+        font-weight: 600;
+        margin-bottom: 4px;
+        color: #495057;
+    }
+    
+    .filter-item input {
+        padding: 6px 10px;
+        border: 1px solid #ced4da;
+        border-radius: 4px;
+        font-size: 13px;
+    }
+    
+    .filter-help {
+        background: #e7f3ff;
+        border-left: 4px solid #0066cc;
+        padding: 12px;
+        margin-bottom: 15px;
+        font-size: 13px;
+        line-height: 1.5;
+    }
+    
+    .filter-help strong {
+        display: block;
+        margin-bottom: 5px;
+    }
+    
+    .filter-help code {
+        background: #fff;
+        padding: 2px 6px;
+        border-radius: 3px;
+        font-family: 'Courier New', monospace;
+        font-size: 12px;
+    }
+    
+    .filter-actions {
+        display: flex;
+        gap: 10px;
+        margin-top: 15px;
+    }
+    
+    /* Filter row in table */
+    tr.filter-row td {
+        padding: 4px 8px;
+        background: #f8f9fa;
+        border-bottom: 2px solid #dee2e6;
+    }
+    
+    tr.filter-row input {
+        width: 100%;
+        padding: 4px 8px;
+        border: 1px solid #ced4da;
+        border-radius: 3px;
+        font-size: 12px;
+        box-sizing: border-box;
+    }
+    
+    tr.filter-row input:focus {
+        outline: none;
+        border-color: #2c3e2c;
+        box-shadow: 0 0 0 2px rgba(44, 62, 44, 0.1);
+    }
+    
+    /* Compact table styling */
+    .table-responsive {
+        overflow-x: auto;
+        margin: 20px 0;
+        border-radius: 5px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        background: white;
+    }
+    
+    table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+    }
+    
+    th {
+        background: #2c3e2c;
+        color: white;
+        padding: 8px 12px;
+        text-align: left;
+        font-weight: 600;
+        position: sticky;
+        top: 0;
+        z-index: 11;
+        white-space: nowrap;
+    }
+    
+    /* Filter row sticky positioning */
+    tr.filter-row td {
+        position: sticky;
+        top: 37px; /* Height of th */
+        z-index: 10;
+    }
+    
+    th.sortable {
+        cursor: pointer;
+        user-select: none;
+        position: relative;
+        padding-right: 25px;
+    }
+    
+    th.sortable:hover {
+        background: #3d5a3d;
+    }
+    
+    th.sortable a {
+        color: white;
+        text-decoration: none;
+        display: block;
+    }
+    
+    th.sortable .sort-arrow {
+        position: absolute;
+        right: 8px;
+        top: 50%;
+        transform: translateY(-50%);
+        font-size: 11px;
+    }
+    
+    th.sortable.active {
+        background: #4a6f4a;
+    }
+    
+    td {
+        padding: 4px 12px;
+        border-bottom: 1px solid #e9ecef;
+        vertical-align: middle;
+    }
+    
+    tr:hover {
+        background: #f8f9fa;
+    }
+    
+    /* Truncate long text */
+    .truncate {
+        max-width: 200px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    
+    .truncate:hover {
+        overflow: visible;
+        white-space: normal;
+        word-break: break-all;
+    }
+    
+    /* Pagination */
+    .pagination-controls {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 15px;
+        background: #f8f9fa;
+        border-radius: 5px;
+        margin-top: 20px;
+    }
+    
+    .pagination-info {
+        font-size: 14px;
+        color: #495057;
+    }
+    
+    .pagination-buttons {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+    }
+    
+    .pagination-buttons a,
+    .pagination-buttons span {
+        padding: 6px 12px;
+        border-radius: 4px;
+        text-decoration: none;
+        font-size: 13px;
+    }
+    
+    .pagination-buttons a {
+        background: #2c3e2c;
+        color: white;
+        transition: background 0.3s;
+    }
+    
+    .pagination-buttons a:hover {
+        background: #3d5a3d;
+    }
+    
+    .pagination-buttons span {
+        color: #6c757d;
+    }
+    
+    .pagination-buttons select {
+        padding: 6px 10px;
+        border: 1px solid #ced4da;
+        border-radius: 4px;
+        font-size: 13px;
+    }
+    
+    /* Button styling */
+    .btn {
+        padding: 10px 20px;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        font-size: 14px;
+        font-weight: 500;
+        transition: all 0.3s;
+        text-decoration: none;
+        display: inline-block;
+    }
+    
+    .btn-primary {
+        background: #2c3e2c;
+        color: white;
+    }
+    
+    .btn-primary:hover:not(:disabled) {
+        background: #3d5a3d;
+    }
+    
+    .btn-primary:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+    
+    .btn-secondary {
+        background: #6c757d;
+        color: white;
+    }
+    
+    .btn-secondary:hover {
+        background: #5a6268;
+    }
+    
+    /* Empty state */
+    .empty-state {
+        text-align: center;
+        padding: 60px 20px;
+        color: #6c757d;
+    }
+    
+    .empty-state h3 {
+        margin-bottom: 10px;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="admin-nav">
+    {% if current_user.can_manage_users %}
+    <a href="{{ url_for('admin_dashboard') }}">Dashboard</a>
+    {% endif %}
+    <a href="{{ url_for('admin_traffic') }}" class="active">Traffic Viewer</a>
+    {% if current_user.can_manage_vlans %}
+    <a href="{{ url_for('admin_vlan_config') }}">VLAN Config</a>
+    {% endif %}
+    {% if current_user.can_manage_users %}
+    <a href="{{ url_for('admin_add_user') }}">Add User</a>
+    <a href="{{ url_for('admin_import_users') }}">Import Users</a>
+    {% endif %}
+    {% if current_user.can_manage_admins %}
+    <a href="{{ url_for('admin_manage_admins') }}">Manage Admins</a>
+    {% endif %}
+    <a href="{{ url_for('admin_logout') }}" style="float: right;">Logout</a>
+</div>
+
+<div class="filter-section">
+    <h3>Column Selection & Filters</h3>
+    
+    <form method="get" action="{{ url_for('admin_traffic') }}" id="filterForm">
+        <!-- Column Selector -->
+        <div style="margin-bottom: 20px;">
+            <label style="font-weight: 600; margin-bottom: 10px; display: block;">Select Columns to Display:</label>
+            <div class="column-selector">
+                {% for col_name, col_label in all_columns %}
+                <label>
+                    <input type="checkbox" name="columns" value="{{ col_name }}" 
+                           {% if col_name in selected_columns %}checked{% endif %}>
+                    {{ col_label }}
+                </label>
+                {% endfor %}
+            </div>
+            <div style="margin-top: 12px;">
+                <button type="submit" class="btn btn-primary" id="updateColumnsBtn" style="padding: 8px 20px;">Update Columns</button>
+            </div>
+        </div>
+        
+        <!-- Filter Help -->
+        <div class="filter-help">
+            <strong>Filter Syntax (use filters in table below):</strong>
+            <div style="margin-left: 15px;">
+                • <strong>Text columns:</strong> Use <code>%</code> as wildcard (e.g., <code>%google%</code> or just <code>google</code>)<br>
+                • <strong>Date columns:</strong> 
+                  <code>2026-02-17</code> (exact day), 
+                  <code>&gt;2026-02-15</code> (after), 
+                  <code>&lt;2026-02-20</code> (before), 
+                  <code>2026-02-15 to 2026-02-17</code> (range)<br>
+                • Leave blank to show all results
+            </div>
+        </div>
+        
+        <!-- Per Page Selector -->
+        <div class="filter-item" style="max-width: 200px;">
+            <label for="per_page">Rows per page:</label>
+            <select name="per_page" id="per_page">
+                <option value="25" {% if per_page == 25 %}selected{% endif %}>25</option>
+                <option value="50" {% if per_page == 50 %}selected{% endif %}>50</option>
+                <option value="100" {% if per_page == 100 %}selected{% endif %}>100</option>
+                <option value="250" {% if per_page == 250 %}selected{% endif %}>250</option>
+                <option value="500" {% if per_page == 500 %}selected{% endif %}>500</option>
+            </select>
+        </div>
+        
+        <!-- Hidden fields for sorting -->
+        <input type="hidden" name="sort" value="{{ sort_col }}">
+        <input type="hidden" name="order" value="{{ sort_order }}">
+        
+        <!-- Action Buttons -->
+        <div class="filter-actions">
+            <button type="submit" class="btn btn-primary">Apply Filters</button>
+            <a href="{{ url_for('admin_traffic') }}" class="btn btn-secondary">Reset</a>
+        </div>
+    </form>
+</div>
+
+<!-- Results -->
+<div class="pagination-controls">
+    <div class="pagination-info">
+        Showing {{ ((page - 1) * per_page) + 1 if total > 0 else 0 }} - {{ [page * per_page, total]|min }} of {{ total }} sessions
+    </div>
+    <div class="pagination-buttons">
+        {% if page > 1 %}
+        <a href="{{ url_for('admin_traffic', page=page-1, per_page=per_page, sort=sort_col, order=sort_order, columns=selected_columns, **filters) }}">
+            ← Previous
+        </a>
+        {% else %}
+        <span style="color: #ccc;">← Previous</span>
+        {% endif %}
+        
+        <span>Page {{ page }} of {{ total_pages }}</span>
+        
+        {% if page < total_pages %}
+        <a href="{{ url_for('admin_traffic', page=page+1, per_page=per_page, sort=sort_col, order=sort_order, columns=selected_columns, **filters) }}">
+            Next →
+        </a>
+        {% else %}
+        <span style="color: #ccc;">Next →</span>
+        {% endif %}
+    </div>
+</div>
+
+{% if rows %}
+<div class="table-responsive">
+    <table>
+        <thead>
+            <tr>
+                {% for col_name in selected_columns %}
+                {% set col_label = dict(all_columns)[col_name] %}
+                <th class="sortable {% if sort_col == col_name %}active{% endif %}">
+                    <a href="#" onclick="sortTable('{{ col_name }}'); return false;">
+                        {{ col_label }}
+                        {% if sort_col == col_name %}
+                        <span class="sort-arrow">{{ '▲' if sort_order == 'asc' else '▼' }}</span>
+                        {% endif %}
+                    </a>
+                </th>
+                {% endfor %}
+            </tr>
+            <tr class="filter-row">
+                {% for col_name in selected_columns %}
+                <td>
+                    <input type="text" 
+                           id="filter_{{ col_name }}" 
+                           name="filter_{{ col_name }}" 
+                           value="{{ filters.get(col_name, '') }}"
+                           placeholder="{% if col_name in ['session_start', 'session_end'] %}YYYY-MM-DD{% else %}filter...{% endif %}"
+                           form="filterForm">
+                </td>
+                {% endfor %}
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in rows %}
+            <tr>
+                {% for col_name in selected_columns %}
+                <td>
+                    {% if row[col_name] is none %}
+                    <span style="color: #999;">—</span>
+                    {% elif col_name in ['session_start', 'session_end'] %}
+                    {{ row[col_name].strftime('%Y-%m-%d %H:%M:%S') if row[col_name] else '—' }}
+                    {% elif col_name == 'duration_seconds' %}
+                    {{ "%.2f"|format(row[col_name]) if row[col_name] else '0.00' }}
+                    {% elif col_name == 'domain_name' %}
+                    <span class="truncate" title="{{ row[col_name] }}">{{ row[col_name] }}</span>
+                    {% else %}
+                    {{ row[col_name] }}
+                    {% endif %}
+                </td>
+                {% endfor %}
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="pagination-controls">
+    <div class="pagination-info">
+        Showing {{ ((page - 1) * per_page) + 1 if total > 0 else 0 }} - {{ [page * per_page, total]|min }} of {{ total }} sessions
+    </div>
+    <div class="pagination-buttons">
+        {% if page > 1 %}
+        <a href="{{ url_for('admin_traffic', page=page-1, per_page=per_page, sort=sort_col, order=sort_order, columns=selected_columns, **filters) }}">
+            ← Previous
+        </a>
+        {% else %}
+        <span style="color: #ccc;">← Previous</span>
+        {% endif %}
+        
+        <span>Page {{ page }} of {{ total_pages }}</span>
+        
+        {% if page < total_pages %}
+        <a href="{{ url_for('admin_traffic', page=page+1, per_page=per_page, sort=sort_col, order=sort_order, columns=selected_columns, **filters) }}">
+            Next →
+        </a>
+        {% else %}
+        <span style="color: #ccc;">Next →</span>
+        {% endif %}
+    </div>
+</div>
+
+{% else %}
+<div class="empty-state">
+    <h3>No traffic sessions found</h3>
+    <p>Try adjusting your filters or check back later.</p>
+</div>
+{% endif %}
+
+<script>
+function sortTable(column) {
+    const form = document.getElementById('filterForm');
+    const sortInput = form.querySelector('input[name="sort"]');
+    const orderInput = form.querySelector('input[name="order"]');
+    
+    // Toggle order if same column, otherwise default to desc
+    if (sortInput.value === column) {
+        orderInput.value = orderInput.value === 'asc' ? 'desc' : 'asc';
+    } else {
+        sortInput.value = column;
+        orderInput.value = 'desc';
+    }
+    
+    form.submit();
+}
+
+// Auto-submit filters when user presses Enter in any filter input
+document.addEventListener('DOMContentLoaded', function() {
+    const filterInputs = document.querySelectorAll('tr.filter-row input');
+    filterInputs.forEach(input => {
+        input.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                document.getElementById('filterForm').submit();
+            }
+        });
+    });
+    
+    // Column selection tracking
+    const initialColumns = new Set({{ selected_columns|tojson }});
+    const columnCheckboxes = document.querySelectorAll('.column-selector input[type="checkbox"]');
+    const updateColumnsBtn = document.getElementById('updateColumnsBtn');
+    
+    function checkColumnsChanged() {
+        const currentColumns = new Set();
+        columnCheckboxes.forEach(checkbox => {
+            if (checkbox.checked) {
+                currentColumns.add(checkbox.value);
+            }
+        });
+        
+        // Check if sets are equal
+        const changed = initialColumns.size !== currentColumns.size ||
+                       [...initialColumns].some(col => !currentColumns.has(col));
+        
+        updateColumnsBtn.disabled = !changed;
+        if (changed) {
+            updateColumnsBtn.style.opacity = '1';
+            updateColumnsBtn.style.cursor = 'pointer';
+        } else {
+            updateColumnsBtn.style.opacity = '0.5';
+            updateColumnsBtn.style.cursor = 'not-allowed';
+        }
+    }
+    
+    // Check initial state
+    checkColumnsChanged();
+    
+    // Listen for checkbox changes
+    columnCheckboxes.forEach(checkbox => {
+        checkbox.addEventListener('change', checkColumnsChanged);
+    });
+    
+    // Disable button on form submit to prevent double submission
+    const form = document.getElementById('filterForm');
+    form.addEventListener('submit', function() {
+        if (!updateColumnsBtn.disabled) {
+            updateColumnsBtn.disabled = true;
+            updateColumnsBtn.textContent = 'Updating...';
+            updateColumnsBtn.style.opacity = '0.6';
+        }
+    });
+});
+</script>
+{% endblock %}

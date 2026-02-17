@@ -281,7 +281,18 @@
     <div class="container">
         <div class="header">
             <h1>VLAN Configuration</h1>
-            <a href="{{ url_for('admin_dashboard') }}" class="back-link">← Back to Dashboard</a>
+            <div>
+                {% if current_user.can_manage_users %}
+                <a href="{{ url_for('admin_dashboard') }}" class="back-link" style="margin-right: 10px;">Dashboard</a>
+                {% endif %}
+                {% if current_user.can_view_traffic %}
+                <a href="{{ url_for('admin_traffic') }}" class="back-link" style="margin-right: 10px;">🔍 Traffic Viewer</a>
+                {% endif %}
+                {% if current_user.can_manage_admins %}
+                <a href="{{ url_for('admin_manage_admins') }}" class="back-link" style="margin-right: 10px;">Manage Admins</a>
+                {% endif %}
+                <a href="{{ url_for('admin_logout') }}" class="back-link">Logout</a>
+            </div>
         </div>
 
         {% with messages = get_flashed_messages(with_categories=true) %}

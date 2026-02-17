@@ -10,13 +10,13 @@ echo "=== UDM NAT Logger Persistent Installation ==="
 echo "Creating NAT logger script..."
 cat > /mnt/data/nat_logger.sh << 'NATEOF'
 #!/bin/sh
-# NAT Logger for UDM Pro - Logs only user VLANs (192.168.1-95) with timestamp + local_src + dst
+# NAT Logger for UDM Pro - Logs only user VLANs (192.168.2-67, 69-95) with timestamp + local_src + dst
 
 SYSLOG_TAG="NAT-Logger"
 REMOTE_SYSLOG="192.168.99.4"
 
-# User VLAN range (1.0/24 to 95.0/24)
-USER_VLAN_MIN="192.168.1.0"
+# User VLAN range (2-67, 69-95) - excludes VLAN 1 (mgmt) and VLAN 68 (Teltonika)
+USER_VLAN_MIN="192.168.2.0"
 USER_VLAN_MAX="192.168.95.255"
 
 # Log startup - send to both local and remote syslog
@@ -36,13 +36,9 @@ conntrack -E -o extended 2>/dev/null | while read -r line; do
     dport=$(echo "$line" | grep -o 'dport=[0-9]*' | cut -d= -f2 | head -1)
     proto=$(echo "$line" | awk '{print $1}')
 
-    # Skip if src_ip is not in user VLAN range (192.168.1.0 - 192.168.95.255)
-    if ! echo "$src_ip" | grep -qE '^192\.168\.([1-9]|[1-8][0-9]|9[0-5])\.'; then
-        continue
-    fi
-
-    # Skip UDM itself (192.168.1.1)
-    if [ "$src_ip" = "192.168.1.1" ]; then
+    # Skip if src_ip is not in user VLAN range (192.168.2-67, 69-95)
+    # Excludes VLAN 1 (management) and VLAN 68 (Teltonika WAN)
+    if ! echo "$src_ip" | grep -qE '^192\.168\.([2-9]|[1-5][0-9]|6[0-7]|69|[7-8][0-9]|9[0-5])\.'; then
         continue
     fi
 

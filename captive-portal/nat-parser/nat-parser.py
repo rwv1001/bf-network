@@ -9,16 +9,18 @@ Monitors log freshness and attempts to reinstall UDM logger if stale.
 import os
 import re
 import time
+import csv
 import logging
 import psycopg2
 import subprocess
 from datetime import datetime, timedelta
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 from pathlib import Path
 
 # Configuration from environment
 LOG_FILE = os.getenv("LOG_FILE", "/logs/remote-syslog.log")
 DB_URL = os.getenv("DATABASE_URL", "postgresql://portal_user:change_this_password@127.0.0.1:5432/captive_portal")
+KEA_LEASES_FILE = os.getenv("KEA_LEASES_FILE", "/kea/leases/kea-leases4.csv")
 
 UDM_HOST = os.getenv("UDM_HOST", "192.168.1.1")
 UDM_SSH_KEY = os.getenv("UDM_SSH_KEY", "/config/udm_key")
@@ -28,6 +30,7 @@ SESSION_GAP_SECONDS = int(os.getenv("SESSION_GAP_SECONDS", "60"))
 STALE_LOG_THRESHOLD_SECONDS = int(os.getenv("STALE_LOG_THRESHOLD_SECONDS", "3600"))
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "5"))
 REINSTALL_COOLDOWN_SECONDS = int(os.getenv("REINSTALL_COOLDOWN_SECONDS", "300"))
+RETENTION_DAYS = int(os.getenv("RETENTION_DAYS", "90"))
 
 # Logging setup
 logging.basicConfig(
@@ -43,7 +46,10 @@ class NATParser:
         self.last_position = 0
         self.last_log_timestamp = None
         self.last_reinstall_attempt = None
+        self.last_cleanup = None
+        self.last_device_ip_sync = None
         self.active_sessions = {}  # (src_ip, src_port, dst_ip, dst_port) -> session_data
+        self.seen_ips = set()  # Track IPs we've seen to trigger updates
         
     def connect_db(self):
         """Connect to PostgreSQL database"""
@@ -128,15 +134,24 @@ class NATParser:
             'last_seen': timestamp,
             'packet_count': 1
         }
+        # Track this IP for device sync
+        self.seen_ips.add(src_ip)
+        logger.debug(f"Added {src_ip} to seen_ips (total: {len(self.seen_ips)})")
     
     def _close_session(self, session_key, session):
         """Close a session and write to database"""
         try:
             with self.db_conn.cursor() as cur:
+                # Use INSERT ... ON CONFLICT to handle duplicates gracefully
+                # If the same session already exists, update it with the latest end time and packet count
                 cur.execute("""
                     INSERT INTO nat_sessions 
                     (src_ip, src_port, dst_ip, dst_port, session_start, session_end, packet_count)
                     VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (src_ip, src_port, dst_ip, dst_port, session_start)
+                    DO UPDATE SET
+                        session_end = EXCLUDED.session_end,
+                        packet_count = EXCLUDED.packet_count
                 """, (
                     session['src_ip'],
                     session['src_port'],
@@ -165,6 +180,115 @@ class NATParser:
                 self.db_conn.rollback()
             except:
                 pass
+    
+    def update_device_ips(self):
+        """
+        Update device IPs based on Kea leases for recently seen IPs.
+        This ensures the devices table stays in sync with DHCP assignments.
+        """
+        logger.debug(f"update_device_ips called, seen_ips count: {len(self.seen_ips)}")
+        
+        if not self.seen_ips:
+            return
+        
+        # Only run this check every 30 seconds to avoid excessive queries
+        if self.last_device_ip_sync:
+            time_since_sync = (datetime.now() - self.last_device_ip_sync).total_seconds()
+            if time_since_sync < 30:
+                logger.debug(f"Skipping device IP sync, last sync was {time_since_sync:.1f}s ago")
+                return
+        
+        self.last_device_ip_sync = datetime.now()
+        logger.info(f"Starting device IP sync for {len(self.seen_ips)} IPs")
+        
+        ips_to_check = list(self.seen_ips)
+        self.seen_ips.clear()  # Clear the set after processing
+        
+        if not ips_to_check:
+            return
+        
+        try:
+            # Read Kea leases CSV file to get IP -> MAC mappings
+            ip_to_mac = self._parse_kea_leases(ips_to_check)
+            
+            logger.info(f"Parsed Kea leases, found {len(ip_to_mac)} IP->MAC mappings")
+            
+            if not ip_to_mac:
+                logger.info(f"No matching leases found for {len(ips_to_check)} IPs")
+                return
+            
+            # Update devices table with new IPs
+            updated_count = 0
+            with self.db_conn.cursor() as cur:
+                for ip, mac in ip_to_mac.items():
+                    cur.execute("""
+                        UPDATE devices
+                        SET ip_address = %s
+                        WHERE mac_address = %s
+                            AND registration_status = 'registered'
+                            AND (ip_address IS NULL OR ip_address != %s)
+                    """, (ip, mac, ip))
+                    
+                    if cur.rowcount > 0:
+                        updated_count += 1
+                        logger.info(f"Updated device IP: {mac} -> {ip}")
+                
+                if updated_count > 0:
+                    self.db_conn.commit()
+                    logger.info(f"Device IP sync complete: updated {updated_count} devices")
+                else:
+                    logger.info(f"Checked {len(ips_to_check)} IPs, no device updates needed")
+                    
+        except Exception as e:
+            logger.error(f"Failed to update device IPs: {e}")
+            try:
+                self.db_conn.rollback()
+            except:
+                pass
+    
+    def _parse_kea_leases(self, ip_list: list) -> Dict[str, str]:
+        """
+        Parse Kea leases CSV file and return IP -> MAC mappings for given IPs.
+        Returns dict of {ip_address: mac_address}
+        """
+        ip_set = set(ip_list)
+        ip_to_mac = {}
+        
+        try:
+            if not os.path.exists(KEA_LEASES_FILE):
+                logger.warning(f"Kea leases file not found: {KEA_LEASES_FILE}")
+                return {}
+            
+            with open(KEA_LEASES_FILE, 'r') as f:
+                reader = csv.DictReader(f)
+                current_time = int(time.time())
+                
+                for row in reader:
+                    try:
+                        ip_address = row.get('address', '')
+                        hwaddr = row.get('hwaddr', '')
+                        expire = int(row.get('expire', 0))
+                        state = int(row.get('state', 1))
+                        
+                        # Skip expired or released leases (state 0 = default/allocated)
+                        if state != 0 or expire < current_time:
+                            continue
+                        
+                        if ip_address in ip_set and hwaddr:
+                            # Kea stores MAC as colon-separated hex (xx:xx:xx:xx:xx:xx)
+                            # Just use it directly after converting to lowercase
+                            mac_address = hwaddr.lower()
+                            ip_to_mac[ip_address] = mac_address
+                    except (ValueError, KeyError) as e:
+                        logger.debug(f"Skipping malformed lease entry: {e}")
+                        continue
+            
+            logger.debug(f"Found {len(ip_to_mac)} IP->MAC mappings from Kea leases")
+            return ip_to_mac
+            
+        except Exception as e:
+            logger.error(f"Failed to parse Kea leases file: {e}")
+            return {}
     
     def close_stale_sessions(self):
         """Close sessions that haven't seen activity recently"""
@@ -286,6 +410,81 @@ class NATParser:
         except Exception as e:
             logger.error(f"Reinstall attempt failed: {e}")
     
+    def cleanup_old_sessions(self):
+        """Delete NAT sessions older than RETENTION_DAYS"""
+        # Only run cleanup once per day
+        if self.last_cleanup:
+            time_since_cleanup = (datetime.now() - self.last_cleanup).total_seconds()
+            if time_since_cleanup < 86400:  # 24 hours
+                return
+        
+        try:
+            cutoff_date = datetime.now() - timedelta(days=RETENTION_DAYS)
+            
+            with self.db_conn.cursor() as cur:
+                cur.execute("""
+                    DELETE FROM nat_sessions 
+                    WHERE session_end < %s
+                    RETURNING COUNT(*)
+                """, (cutoff_date,))
+                
+                result = cur.fetchone()
+                deleted_count = result[0] if result else 0
+            
+            self.db_conn.commit()
+            
+            if deleted_count > 0:
+                logger.info(f"Cleaned up {deleted_count} NAT sessions older than {RETENTION_DAYS} days")
+            else:
+                logger.debug(f"No NAT sessions older than {RETENTION_DAYS} days to clean up")
+            
+            self.last_cleanup = datetime.now()
+            
+        except Exception as e:
+            logger.error(f"Failed to cleanup old sessions: {e}")
+            try:
+                self.db_conn.rollback()
+            except:
+                pass
+    
+    def check_udm_logger_running(self):
+        """Check if NAT logger is running on UDM, start if not"""
+        try:
+            # Check if SSH key exists
+            if not os.path.exists(UDM_SSH_KEY):
+                logger.warning(f"SSH key not found: {UDM_SSH_KEY} - skipping UDM check")
+                return
+            
+            logger.info(f"Checking if NAT logger is running on UDM {UDM_HOST}...")
+            
+            # Check for running nat_logger processes
+            ssh_cmd = [
+                "ssh",
+                "-i", UDM_SSH_KEY,
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "ConnectTimeout=10",
+                f"root@{UDM_HOST}",
+                "pgrep -f nat_logger.sh"
+            ]
+            
+            result = subprocess.run(ssh_cmd, capture_output=True, timeout=10)
+            
+            if result.returncode == 0:
+                pids = result.stdout.decode().strip().split('\n')
+                logger.info(f"NAT logger is running on UDM (PIDs: {', '.join(pids)})")
+                return True
+            else:
+                logger.warning("NAT logger is NOT running on UDM - attempting to start...")
+                self.attempt_udm_reinstall()
+                return False
+        
+        except subprocess.TimeoutExpired:
+            logger.error("UDM connection timed out - device may be unreachable")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to check UDM logger status: {e}")
+            return False
+    
     def run(self):
         """Main loop"""
         logger.info("NAT Parser Service starting...")
@@ -307,17 +506,27 @@ class NATParser:
         logger.info(f"Monitoring log file: {LOG_FILE}")
         logger.info(f"Session gap threshold: {SESSION_GAP_SECONDS}s")
         logger.info(f"Stale log threshold: {STALE_LOG_THRESHOLD_SECONDS}s")
+        logger.info(f"NAT retention: {RETENTION_DAYS} days")
+        
+        # Check if NAT logger is running on UDM and start if needed
+        self.check_udm_logger_running()
         
         try:
             while True:
                 # Process new log entries
                 self.process_log_file()
                 
+                # Update device IPs based on recently seen traffic
+                self.update_device_ips()
+                
                 # Close stale sessions
                 self.close_stale_sessions()
                 
                 # Check log freshness
                 self.check_log_freshness()
+                
+                # Cleanup old sessions (runs once per day)
+                self.cleanup_old_sessions()
                 
                 # Sleep before next check
                 time.sleep(CHECK_INTERVAL_SECONDS)

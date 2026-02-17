@@ -1,0 +1,317 @@
+{% extends "base.html" %}
+
+{% block title %}Manage Admins - Network Access Portal{% endblock %}
+
+{% block header %}Manage Admin Users{% endblock %}
+
+{% block extra_head %}
+<style>
+    .container {
+        max-width: 95%;
+        margin: 20px auto;
+    }
+    
+    .admin-table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 20px 0;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    
+    .admin-table th, .admin-table td {
+        padding: 12px;
+        text-align: left;
+        border: 1px solid #ddd;
+    }
+    
+    .admin-table th {
+        background: #667eea;
+        color: white;
+        font-weight: bold;
+    }
+    
+    .admin-table tr:nth-child(even) {
+        background: #f9f9f9;
+    }
+    
+    .admin-table tr:hover {
+        background: #f0f0f0;
+    }
+    
+    .checkbox-label {
+        display: inline-block;
+        margin-right: 10px;
+        font-weight: bold;
+    }
+    
+    input[type="checkbox"] {
+        margin-right: 5px;
+        transform: scale(1.2);
+    }
+    
+    input[type="checkbox"]:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+    
+    .current-user {
+        background: #e6f2ff !important;
+        font-weight: bold;
+    }
+    
+    .create-admin-form {
+        background: #f5f5f5;
+        padding: 20px;
+        border-radius: 5px;
+        margin-bottom: 30px;
+        border: 2px solid #667eea;
+    }
+    
+    .form-group {
+        margin-bottom: 15px;
+    }
+    
+    .form-group label {
+        display: block;
+        margin-bottom: 5px;
+        font-weight: bold;
+    }
+    
+    .form-group input[type="text"],
+    .form-group input[type="password"],
+    .form-group input[type="email"] {
+        width: 100%;
+        max-width: 400px;
+        padding: 8px;
+        border: 1px solid #ddd;
+        border-radius: 3px;
+    }
+    
+    .permissions-group {
+        display: flex;
+        gap: 20px;
+        flex-wrap: wrap;
+    }
+    
+    .permission-item {
+        display: flex;
+        align-items: center;
+    }
+    
+    .btn-small {
+        padding: 6px 12px;
+        font-size: 14px;
+        margin-right: 5px;
+    }
+    
+    .warning-text {
+        color: #c0392b;
+        font-size: 12px;
+        font-style: italic;
+    }
+</style>
+<script>
+function toggleCreateForm() {
+    var form = document.getElementById('createAdminForm');
+    var btn = document.getElementById('toggleFormBtn');
+    if (form.style.display === 'none') {
+        form.style.display = 'block';
+        btn.textContent = '✖ Cancel';
+    } else {
+        form.style.display = 'none';
+        btn.textContent = '+ Create New Admin';
+    }
+}
+
+function confirmDelete(username) {
+    return confirm('Are you sure you want to delete admin "' + username + '"? This action cannot be undone.');
+}
+
+function updatePermissions(adminId) {
+    document.getElementById('updateForm' + adminId).submit();
+}
+
+function changePassword(adminId, username) {
+    var newPassword = prompt('Enter new password for "' + username + '" (minimum 6 characters):');
+    if (newPassword && newPassword.length >= 6) {
+        document.getElementById('newPasswordInput' + adminId).value = newPassword;
+        document.getElementById('passwordForm' + adminId).submit();
+    } else if (newPassword) {
+        alert('Password must be at least 6 characters.');
+    }
+}
+
+function changeEmail(adminId, username, currentEmail) {
+    var emailPrompt = currentEmail ? 'Current email: ' + currentEmail + '\n\nEnter new email for "' + username + '" (or leave empty to remove):' : 'Enter email for "' + username + '" (or leave empty to skip):';
+    var newEmail = prompt(emailPrompt);
+    if (newEmail !== null) {
+        // Basic email format validation (if not empty)
+        if (newEmail === '' || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newEmail)) {
+            document.getElementById('newEmailInput' + adminId).value = newEmail;
+            document.getElementById('emailForm' + adminId).submit();
+        } else {
+            alert('Please enter a valid email address.');
+        }
+    }
+}
+</script>
+{% endblock %}
+
+{% block content %}
+<div style="margin-bottom: 30px;">
+    <button onclick="toggleCreateForm()" id="toggleFormBtn" class="btn">+ Create New Admin</button>
+    {% if current_user.can_manage_users %}
+    <a href="{{ url_for('admin_dashboard') }}" class="btn" style="background: #999; margin-left: 10px;">Dashboard</a>
+    {% endif %}
+    {% if current_user.can_view_traffic %}
+    <a href="{{ url_for('admin_traffic') }}" class="btn" style="background: #3b82f6; margin-left: 10px;">🔍 Traffic Viewer</a>
+    {% endif %}
+    {% if current_user.can_manage_vlans %}
+    <a href="{{ url_for('admin_vlan_config') }}" class="btn" style="background: #3b82f6; margin-left: 10px;">VLAN Config</a>
+    {% endif %}
+    <a href="{{ url_for('admin_logout') }}" class="btn" style="background: #999; margin-left: 10px;">Logout</a>
+</div>
+
+<div id="createAdminForm" class="create-admin-form" style="display: none;">
+    <h3 style="margin-top: 0;">Create New Admin User</h3>
+    <form method="post" action="{{ url_for('admin_create_admin') }}">
+        <div class="form-group">
+            <label for="username">Username: *</label>
+            <input type="text" id="username" name="username" required>
+        </div>
+        
+        <div class="form-group">
+            <label for="password">Password: * (minimum 6 characters)</label>
+            <input type="password" id="password" name="password" required minlength="6">
+        </div>
+        
+        <div class="form-group">
+            <label for="email">Email: (optional, for notifications and contact)</label>
+            <input type="email" id="email" name="email" placeholder="admin@example.com">
+        </div>
+        
+        <div class="form-group">
+            <label>Permissions:</label>
+            <div class="permissions-group">
+                <div class="permission-item">
+                    <input type="checkbox" id="new_can_manage_users" name="can_manage_users" value="1" checked>
+                    <label for="new_can_manage_users">Manage Users and Devices</label>
+                </div>
+                <div class="permission-item">
+                    <input type="checkbox" id="new_can_manage_vlans" name="can_manage_vlans" value="1">
+                    <label for="new_can_manage_vlans">Manage VLANs</label>
+                </div>
+                <div class="permission-item">
+                    <input type="checkbox" id="new_can_view_traffic" name="can_view_traffic" value="1">
+                    <label for="new_can_view_traffic">View Traffic</label>
+                </div>
+                <div class="permission-item">
+                    <input type="checkbox" id="new_can_manage_admins" name="can_manage_admins" value="1">
+                    <label for="new_can_manage_admins">Manage Admins (Super Admin)</label>
+                </div>
+            </div>
+        </div>
+        
+        <button type="submit" class="btn">Create Admin</button>
+    </form>
+</div>
+
+<h2>Admin Users ({{ admins|length }})</h2>
+
+<p style="font-size: 14px; color: #666; margin-bottom: 20px;">
+    <strong>Permissions Guide:</strong><br>
+    • <strong>Manage Users and Devices:</strong> Access dashboard, add/block/import users, assign devices to users<br>
+    • <strong>Manage VLANs:</strong> Access and modify VLAN configuration<br>
+    • <strong>View Traffic:</strong> Access traffic viewer for NAT sessions<br>
+    • <strong>Manage Admins:</strong> Create/modify/delete admin users (Super Admin access)
+</p>
+
+<div class="table-responsive">
+    <table class="admin-table">
+        <thead>
+            <tr>
+                <th>Username</th>
+                <th>Email</th>
+                <th style="text-align: center;">Manage Users<br>and Devices</th>
+                <th style="text-align: center;">Manage<br>VLANs</th>
+                <th style="text-align: center;">View<br>Traffic</th>
+                <th style="text-align: center;">Manage Admins<br>(Super Admin)</th>
+                <th>Created</th>
+                <th>Last Login</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for admin in admins %}
+            <tr {% if admin.is_current %}class="current-user"{% endif %}>
+                <td>
+                    {{ admin.username }}
+                    {% if admin.is_current %}<span style="color: #667eea;">(You)</span>{% endif %}
+                </td>
+                <td>
+                    {% if admin.email %}
+                        <span title="{{ admin.email }}">{{ admin.email[:30] }}{% if admin.email|length > 30 %}...{% endif %}</span>
+                    {% else %}
+                        <span style="color: #999; font-style: italic;">Not set</span>
+                    {% endif %}
+                </td>
+                <form method="post" action="{{ url_for('admin_update_admin_permissions', admin_id=admin.id) }}" id="updateForm{{ admin.id }}">
+                    <td style="text-align: center;">
+                        <input type="checkbox" name="can_manage_users" value="1" 
+                               {% if admin.can_manage_users %}checked{% endif %}
+                               onchange="updatePermissions({{ admin.id }})">
+                    </td>
+                    <td style="text-align: center;">
+                        <input type="checkbox" name="can_manage_vlans" value="1" 
+                               {% if admin.can_manage_vlans %}checked{% endif %}
+                               onchange="updatePermissions({{ admin.id }})">
+                    </td>
+                    <td style="text-align: center;">
+                        <input type="checkbox" name="can_view_traffic" value="1" 
+                               {% if admin.can_view_traffic %}checked{% endif %}
+                               onchange="updatePermissions({{ admin.id }})">
+                    </td>
+                    <td style="text-align: center;">
+                        <input type="checkbox" name="can_manage_admins" value="1" 
+                               {% if admin.can_manage_admins %}checked{% endif %}
+                               {% if admin.is_only_super %}disabled title="Cannot remove the last super admin"{% endif %}
+                               onchange="updatePermissions({{ admin.id }})">
+                        {% if admin.is_only_super %}
+                        <br><span class="warning-text">Last super admin</span>
+                        {% endif %}
+                    </td>
+                </form>
+                <td>{{ admin.created_at.strftime('%Y-%m-%d %H:%M') if admin.created_at else 'N/A' }}</td>
+                <td>{{ admin.last_login.strftime('%Y-%m-%d %H:%M') if admin.last_login else 'Never' }}</td>
+                <td>
+                    <button onclick="changePassword({{ admin.id }}, '{{ admin.username }}')" class="btn btn-small" style="background: #2c7a7b;">
+                        🔑 Password
+                    </button>
+                    <form method="post" action="{{ url_for('admin_change_admin_password', admin_id=admin.id) }}" id="passwordForm{{ admin.id }}" style="display: none;">
+                        <input type="hidden" name="new_password" id="newPasswordInput{{ admin.id }}">
+                    </form>
+                    
+                    <button onclick="changeEmail({{ admin.id }}, '{{ admin.username }}', '{{ admin.email if admin.email else '' }}')" class="btn btn-small" style="background: #3b82f6;">
+                        ✉️ Email
+                    </button>
+                    <form method="post" action="{{ url_for('admin_update_admin_email', admin_id=admin.id) }}" id="emailForm{{ admin.id }}" style="display: none;">
+                        <input type="hidden" name="email" id="newEmailInput{{ admin.id }}">
+                    </form>
+                    
+                    {% if not admin.is_current %}
+                    <form method="post" action="{{ url_for('admin_delete_admin', admin_id=admin.id) }}" style="display: inline;" onsubmit="return confirmDelete('{{ admin.username }}');">
+                        <button type="submit" class="btn btn-small" style="background: #c0392b;">🗑 Delete</button>
+                    </form>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+{% if admins|length == 0 %}
+<p style="text-align: center; color: #999; margin: 40px 0;">No admin users found.</p>
+{% endif %}
+
+{% endblock %}

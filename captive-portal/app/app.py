@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import text
 import secrets
 
-from models import db, User, Device, RegistrationRequest, VlanMapping, Setting, UnregisteredLease, DomainPolicy
+from models import db, Admin, User, Device, RegistrationRequest, VlanMapping, Setting, UnregisteredLease, DomainPolicy
 from radius_coa import send_coa_disconnect, send_coa_change
 from email_service import (
     send_verification_email,
@@ -455,6 +455,21 @@ def _get_wired_assignable_vlan_ids():
     return {entry.vlan_id for entry in _get_wired_assignable_entries()}
 
 
+def _get_admin_assignable_entries():
+    """Get all VLANs that admins with manage_users permission can assign devices to.
+    Unlike _get_wired_assignable_entries(), this doesn't require wired_enabled to be True.
+    Admins can assign devices to any VLAN except restricted/unregistered."""
+    entries = []
+    for entry in get_vlan_entries():
+        if not entry.vlan_id:
+            continue
+        # Only exclude truly restricted VLANs - admins can assign to any other VLAN
+        if entry.status in {'restricted', 'unregistered', WIRED_UNREGISTERED_STATUS}:
+            continue
+        entries.append(entry)
+    return entries
+
+
 def get_vlan_entries():
     mappings = VlanMapping.query.order_by(VlanMapping.vlan_id.asc()).all()
     if mappings:
@@ -694,10 +709,16 @@ _start_wifi_confirmation_sweeper()
 
 
 class AdminUser:
-    """Simple admin user class for Flask-Login"""
-    def __init__(self, username):
-        self.id = username
+    """Admin user class for Flask-Login with role-based permissions"""
+    def __init__(self, admin_id, username, can_manage_users=True, can_manage_vlans=False, 
+                 can_view_traffic=False, can_manage_admins=False, traffic_viewer_settings=None):
+        self.id = str(admin_id)  # Flask-Login requires string ID
         self.username = username
+        self.can_manage_users = can_manage_users
+        self.can_manage_vlans = can_manage_vlans
+        self.can_view_traffic = can_view_traffic
+        self.can_manage_admins = can_manage_admins
+        self.traffic_viewer_settings = traffic_viewer_settings
     
     def is_authenticated(self):
         return True
@@ -710,13 +731,61 @@ class AdminUser:
     
     def get_id(self):
         return self.id
+    
+    @property
+    def is_super_admin(self):
+        """Super admin = can manage admins"""
+        return self.can_manage_admins
 
 
 @login_manager.user_loader
 def load_user(user_id):
-    if user_id == ADMIN_USERNAME:
-        return AdminUser(user_id)
+    """Load admin user by ID"""
+    try:
+        admin_id = int(user_id)
+        admin = Admin.query.get(admin_id)
+        if admin:
+            return AdminUser(
+                admin.id,
+                admin.username,
+                admin.can_manage_users,
+                admin.can_manage_vlans,
+                admin.can_view_traffic,
+                admin.can_manage_admins,
+                admin.traffic_viewer_settings
+            )
+    except (ValueError, TypeError):
+        pass
     return None
+
+
+# Permission decorators for route protection
+def permission_required(permission):
+    """Decorator to check if current admin has specific permission"""
+    def decorator(f):
+        from functools import wraps
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            if not current_user.is_authenticated:
+                return redirect(url_for('admin_login'))
+            
+            # Check if user has the required permission
+            if permission == 'manage_users' and not current_user.can_manage_users:
+                flash('You do not have permission to manage users and devices.', 'error')
+                return redirect(url_for('admin_dashboard'))
+            elif permission == 'manage_vlans' and not current_user.can_manage_vlans:
+                flash('You do not have permission to manage VLANs.', 'error')
+                return redirect(url_for('admin_dashboard'))
+            elif permission == 'view_traffic' and not current_user.can_view_traffic:
+                flash('You do not have permission to view traffic.', 'error')
+                return redirect(url_for('admin_dashboard'))
+            elif permission == 'manage_admins' and not current_user.can_manage_admins:
+                flash('You do not have permission to manage admins.', 'error')
+                return redirect(url_for('admin_dashboard'))
+            
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
 
 
 def get_client_mac():
@@ -1349,7 +1418,7 @@ def reset_acl_queue_files():
 
 
 def reset_test_data():
-    """Remove all users/devices/requests and Kea host/lease data."""
+    """Remove all users/devices/requests, Kea host/lease data, and NAT/DNS logs."""
     kea = None
     if os.path.exists(KEA_SOCKET):
         kea = get_kea()
@@ -1373,8 +1442,13 @@ def reset_test_data():
     db.session.query(UnregisteredLease).delete(synchronize_session=False)
     db.session.commit()
 
+    # Clear Kea tables
     db.session.execute(text("DELETE FROM hosts"))
     db.session.execute(text("DELETE FROM lease4"))
+    
+    # Clear NAT and DNS logging tables
+    db.session.execute(text("DELETE FROM nat_sessions"))
+    db.session.execute(text("DELETE FROM dns_resolutions"))
     db.session.commit()
 
 
@@ -3531,11 +3605,46 @@ def admin_login():
         username = request.form.get('username')
         password = request.form.get('password')
         
-        if username == ADMIN_USERNAME and check_password_hash(ADMIN_PASSWORD_HASH, password):
-            user = AdminUser(username)
+        # Try to find admin in database
+        admin = Admin.query.filter_by(username=username).first()
+        
+        if admin and admin.check_password(password):
+            # Update last login time
+            admin.last_login = datetime.utcnow()
+            db.session.commit()
+            
+            # Create AdminUser object for Flask-Login
+            user = AdminUser(
+                admin.id,
+                admin.username,
+                admin.can_manage_users,
+                admin.can_manage_vlans,
+                admin.can_view_traffic,
+                admin.can_manage_admins
+            )
             login_user(user)
             return redirect(url_for('admin_dashboard'))
         else:
+            # Legacy fallback: check environment variables
+            # This allows migration from old system
+            if username == ADMIN_USERNAME and check_password_hash(ADMIN_PASSWORD_HASH, password):
+                # Create admin user in database if it doesn't exist
+                if not admin:
+                    admin = Admin(username=username)
+                    admin.set_password(password)
+                    admin.can_manage_users = True
+                    admin.can_manage_vlans = True
+                    admin.can_view_traffic = True
+                    admin.can_manage_admins = True
+                    db.session.add(admin)
+                    db.session.commit()
+                    logger.info(f"Migrated legacy admin '{username}' to database")
+                
+                # Log in with full permissions
+                user = AdminUser(admin.id, admin.username, True, True, True, True)
+                login_user(user)
+                return redirect(url_for('admin_dashboard'))
+            
             flash('Invalid credentials', 'error')
     
     return render_template('admin_login.html')
@@ -3549,8 +3658,204 @@ def admin_logout():
     return redirect(url_for('index'))
 
 
+@app.route('/admin/no-permissions')
+@login_required
+def admin_no_permissions():
+    """Page shown when admin has no permissions"""
+    # Find first super admin with email
+    super_admin = Admin.query.filter(
+        Admin.can_manage_admins == True,
+        Admin.email != None,
+        Admin.email != ''
+    ).order_by(Admin.id.asc()).first()
+    
+    contact_email = super_admin.email if super_admin else None
+    contact_name = super_admin.username if super_admin else None
+    
+    return render_template('admin_no_permissions.html', 
+                         contact_email=contact_email,
+                         contact_name=contact_name)
+
+
+@app.route('/admin/manage-admins')
+@login_required
+@permission_required('manage_admins')
+def admin_manage_admins():
+    """Super admin page for managing other admins"""
+    all_admins = Admin.query.order_by(Admin.username.asc()).all()
+    
+    # Count super admins
+    super_admin_count = sum(1 for admin in all_admins if admin.is_super_admin)
+    
+    # Prepare admin data
+    admin_list = []
+    for admin in all_admins:
+        is_current = (str(admin.id) == current_user.id)
+        is_only_super = is_current and admin.is_super_admin and super_admin_count == 1
+        
+        admin_list.append({
+            'id': admin.id,
+            'username': admin.username,
+            'email': admin.email,
+            'can_manage_users': admin.can_manage_users,
+            'can_manage_vlans': admin.can_manage_vlans,
+            'can_view_traffic': admin.can_view_traffic,
+            'can_manage_admins': admin.can_manage_admins,
+            'created_at': admin.created_at,
+            'last_login': admin.last_login,
+            'is_current': is_current,
+            'is_only_super': is_only_super
+        })
+    
+    return render_template('admin_manage_admins.html', admins=admin_list)
+
+
+@app.route('/admin/manage-admins/create', methods=['POST'])
+@login_required
+@permission_required('manage_admins')
+def admin_create_admin():
+    """Create a new admin user"""
+    username = request.form.get('username', '').strip()
+    email = request.form.get('email', '').strip().lower()
+    password = request.form.get('password', '').strip()
+    can_manage_users = bool(request.form.get('can_manage_users'))
+    can_manage_vlans = bool(request.form.get('can_manage_vlans'))
+    can_view_traffic = bool(request.form.get('can_view_traffic'))
+    can_manage_admins = bool(request.form.get('can_manage_admins'))
+    
+    if not username or not password:
+        flash('Username and password are required.', 'error')
+        return redirect(url_for('admin_manage_admins'))
+    
+    if len(password) < 6:
+        flash('Password must be at least 6 characters.', 'error')
+        return redirect(url_for('admin_manage_admins'))
+    
+    # Check if username already exists
+    existing = Admin.query.filter_by(username=username).first()
+    if existing:
+        flash(f'Username "{username}" already exists.', 'error')
+        return redirect(url_for('admin_manage_admins'))
+    
+    # Create new admin
+    admin = Admin(username=username, email=email if email else None)
+    admin.set_password(password)
+    admin.can_manage_users = can_manage_users
+    admin.can_manage_vlans = can_manage_vlans
+    admin.can_view_traffic = can_view_traffic
+    admin.can_manage_admins = can_manage_admins
+    admin.created_by = int(current_user.id)
+    db.session.add(admin)
+    db.session.commit()
+    
+    logger.info(f"Admin '{username}' created by {current_user.username}")
+    flash(f'Admin "{username}" created successfully.', 'success')
+    return redirect(url_for('admin_manage_admins'))
+
+
+@app.route('/admin/manage-admins/<int:admin_id>/update', methods=['POST'])
+@login_required
+@permission_required('manage_admins')
+def admin_update_admin_permissions(admin_id):
+    """Update admin permissions"""
+    admin = Admin.query.get_or_404(admin_id)
+    
+    can_manage_users = bool(request.form.get('can_manage_users'))
+    can_manage_vlans = bool(request.form.get('can_manage_vlans'))
+    can_view_traffic = bool(request.form.get('can_view_traffic'))
+    can_manage_admins = bool(request.form.get('can_manage_admins'))
+    
+    # Check if this would remove the last super admin
+    if admin.can_manage_admins and not can_manage_admins:
+        super_admin_count = Admin.query.filter_by(can_manage_admins=True).count()
+        if super_admin_count <= 1:
+            flash('Cannot remove the last super admin. There must always be at least one super admin.', 'error')
+            return redirect(url_for('admin_manage_admins'))
+    
+    admin.can_manage_users = can_manage_users
+    admin.can_manage_vlans = can_manage_vlans
+    admin.can_view_traffic = can_view_traffic
+    admin.can_manage_admins = can_manage_admins
+    db.session.commit()
+    
+    logger.info(f"Admin '{admin.username}' permissions updated by {current_user.username}")
+    flash(f'Permissions updated for "{admin.username}".', 'success')
+    return redirect(url_for('admin_manage_admins'))
+
+
+@app.route('/admin/manage-admins/<int:admin_id>/delete', methods=['POST'])
+@login_required
+@permission_required('manage_admins')
+def admin_delete_admin(admin_id):
+    """Delete an admin user"""
+    admin = Admin.query.get_or_404(admin_id)
+    
+    # Prevent deleting self
+    if str(admin.id) == current_user.id:
+        flash('You cannot delete your own account.', 'error')
+        return redirect(url_for('admin_manage_admins'))
+    
+    # Check if this would remove the last super admin
+    if admin.can_manage_admins:
+        super_admin_count = Admin.query.filter_by(can_manage_admins=True).count()
+        if super_admin_count <= 1:
+            flash('Cannot delete the last super admin. There must always be at least one super admin.', 'error')
+            return redirect(url_for('admin_manage_admins'))
+    
+    username = admin.username
+    db.session.delete(admin)
+    db.session.commit()
+    
+    logger.info(f"Admin '{username}' deleted by {current_user.username}")
+    flash(f'Admin "{username}" deleted successfully.', 'success')
+    return redirect(url_for('admin_manage_admins'))
+
+
+@app.route('/admin/manage-admins/<int:admin_id>/change-password', methods=['POST'])
+@login_required
+@permission_required('manage_admins')
+def admin_change_admin_password(admin_id):
+    """Change admin password"""
+    admin = Admin.query.get_or_404(admin_id)
+    
+    new_password = request.form.get('new_password', '').strip()
+    
+    if not new_password:
+        flash('Password cannot be empty.', 'error')
+        return redirect(url_for('admin_manage_admins'))
+    
+    if len(new_password) < 6:
+        flash('Password must be at least 6 characters.', 'error')
+        return redirect(url_for('admin_manage_admins'))
+    
+    admin.set_password(new_password)
+    db.session.commit()
+    
+    logger.info(f"Password changed for admin '{admin.username}' by {current_user.username}")
+    flash(f'Password updated for "{admin.username}".', 'success')
+    return redirect(url_for('admin_manage_admins'))
+
+
+@app.route('/admin/manage-admins/<int:admin_id>/update-email', methods=['POST'])
+@login_required
+@permission_required('manage_admins')
+def admin_update_admin_email(admin_id):
+    """Update admin email"""
+    admin = Admin.query.get_or_404(admin_id)
+    
+    new_email = request.form.get('email', '').strip().lower()
+    
+    admin.email = new_email if new_email else None
+    db.session.commit()
+    
+    logger.info(f"Email updated for admin '{admin.username}' by {current_user.username}")
+    flash(f'Email updated for "{admin.username}".', 'success')
+    return redirect(url_for('admin_manage_admins'))
+
+
 @app.route('/admin/reset-test', methods=['POST'])
 @login_required
+@permission_required('manage_users')
 def admin_reset_test():
     """Reset test environment data and network rules."""
     if not is_test_env():
@@ -3570,19 +3875,20 @@ def admin_reset_test():
     ports_reset = reset_user_ports()
 
     if acl_ok and mac_auth_cleared and ports_reset:
-        flash('Test reset complete. ACL baseline restored, DNS hijack rules restored, MAC auth sessions cleared, and user ports reset.', 'success')
+        flash('Test reset complete. Database cleared (users, devices, NAT sessions, DNS resolutions), ACL baseline restored, DNS hijack rules restored, MAC auth sessions cleared, and user ports reset.', 'success')
     elif acl_ok and mac_auth_cleared:
-        flash('Test reset complete, but user port reset failed.', 'warning')
+        flash('Test reset complete (including NAT/DNS logs), but user port reset failed.', 'warning')
     elif acl_ok:
-        flash('Test reset complete, but MAC auth session clearing or port reset failed.', 'warning')
+        flash('Test reset complete (including NAT/DNS logs), but MAC auth session clearing or port reset failed.', 'warning')
     else:
-        flash('Test reset complete, but ACL baseline, MAC auth clearing, or port reset failed.', 'warning')
+        flash('Test reset complete (including NAT/DNS logs), but ACL baseline, MAC auth clearing, or port reset failed.', 'warning')
 
     return redirect(url_for('admin_dashboard'))
 
 
 @app.route('/admin/vlan-config', methods=['GET', 'POST'])
 @login_required
+@permission_required('manage_vlans')
 def admin_vlan_config():
     """VLAN configuration page"""
     if request.method == 'POST':
@@ -3756,6 +4062,19 @@ def admin_vlan_config():
 @login_required
 def admin_dashboard():
     """Admin dashboard with MAC address management, pagination, and search"""
+    # Check if user has any permissions
+    if not current_user.can_manage_users and not current_user.can_manage_vlans and not current_user.can_view_traffic and not current_user.can_manage_admins:
+        return redirect(url_for('admin_no_permissions'))
+    
+    # If user doesn't have manage_users permission, redirect to appropriate page
+    if not current_user.can_manage_users:
+        if current_user.can_manage_vlans:
+            return redirect(url_for('admin_vlan_config'))
+        elif current_user.can_view_traffic:
+            return redirect(url_for('admin_traffic'))
+        elif current_user.can_manage_admins:
+            return redirect(url_for('admin_manage_admins'))
+    
     # Get pagination and search parameters
     pending_page = request.args.get('pending_page', 1, type=int)
     pending_per_page = request.args.get('pending_per_page', 25, type=int)
@@ -4031,7 +4350,7 @@ def admin_dashboard():
                 'vlan_id': entry.vlan_id,
                 'label': _label_for_vlan(entry.vlan_id, vlan_map),
             }
-            for entry in _get_wired_assignable_entries()
+            for entry in _get_admin_assignable_entries()
         ],
         lease_stats=lease_stats,
         domain_policies=domain_policies,
@@ -4053,8 +4372,209 @@ def admin_dashboard():
     return render_template('admin_dashboard.html', **template_vars)
 
 
+@app.route('/admin/traffic')
+@login_required
+@permission_required('view_traffic')
+def admin_traffic():
+    """Admin traffic viewer with NAT sessions enriched data"""
+    import json
+    
+    # Available columns in nat_sessions_enriched view
+    ALL_COLUMNS = [
+        ('session_id', 'Session ID'),
+        ('session_start', 'Start Time'),
+        ('session_end', 'End Time'),
+        ('src_ip', 'Source IP'),
+        ('src_port', 'Source Port'),
+        ('user_email', 'User Email'),
+        ('user_first_name', 'First Name'),
+        ('user_last_name', 'Last Name'),
+        ('registration_status', 'Status'),
+        ('dst_ip', 'Destination IP'),
+        ('dst_port', 'Dest Port'),
+        ('domain_name', 'Domain'),
+        ('dns_query_count', 'DNS Queries'),
+        ('packet_count', 'Packets'),
+        ('duration_seconds', 'Duration (s)'),
+    ]
+    
+    valid_column_names = {col[0] for col in ALL_COLUMNS}
+    
+    # Load saved settings for current admin
+    saved_settings = {}
+    if current_user.traffic_viewer_settings:
+        try:
+            saved_settings = json.loads(current_user.traffic_viewer_settings)
+        except Exception:
+            saved_settings = {}
+    
+    # Check if we have query parameters (user is filtering/customizing)
+    has_query_params = bool(
+        request.args.get('columns') or 
+        request.args.get('sort') or 
+        request.args.get('order') or 
+        request.args.get('per_page') or
+        any(request.args.get(f'filter_{col[0]}') for col in ALL_COLUMNS)
+    )
+    
+    # Get selected columns (priority: query params > saved settings > defaults)
+    default_columns = ['session_start', 'src_ip', 'user_email', 'user_first_name', 'dst_ip', 'domain_name', 'packet_count', 'duration_seconds']
+    if has_query_params:
+        selected_columns = request.args.getlist('columns') or default_columns
+    else:
+        selected_columns = saved_settings.get('columns', default_columns)
+    
+    # Validate selected columns
+    selected_columns = [col for col in selected_columns if col in valid_column_names]
+    if not selected_columns:
+        selected_columns = default_columns
+    
+    # Get filters for each column (priority: query params > saved settings)
+    filters = {}
+    for col_name, _ in ALL_COLUMNS:
+        if has_query_params:
+            filter_value = request.args.get(f'filter_{col_name}', '').strip()
+        else:
+            filter_value = saved_settings.get('filters', {}).get(col_name, '')
+        if filter_value:
+            filters[col_name] = filter_value
+    
+    # Pagination (priority: query params > saved settings > defaults)
+    page = request.args.get('page', 1, type=int)
+    if has_query_params and 'per_page' in request.args:
+        per_page = request.args.get('per_page', 50, type=int)
+    else:
+        per_page = saved_settings.get('per_page', 50)
+    per_page = min(max(per_page, 10), 500)  # Limit between 10 and 500
+    
+    # Sorting (priority: query params > saved settings > defaults)
+    if has_query_params and ('sort' in request.args or 'order' in request.args):
+        sort_col = request.args.get('sort', 'session_start')
+        sort_order = request.args.get('order', 'desc')
+    else:
+        sort_col = saved_settings.get('sort_col', 'session_start')
+        sort_order = saved_settings.get('sort_order', 'desc')
+    
+    if sort_col not in valid_column_names:
+        sort_col = 'session_start'
+    if sort_order not in ['asc', 'desc']:
+        sort_order = 'desc'
+    
+    # Save current settings if we have query parameters
+    if has_query_params:
+        current_settings = {
+            'columns': selected_columns,
+            'filters': filters,
+            'per_page': per_page,
+            'sort_col': sort_col,
+            'sort_order': sort_order
+        }
+        try:
+            # Update the actual Admin model in database
+            admin = Admin.query.get(int(current_user.id))
+            if admin:
+                admin.traffic_viewer_settings = json.dumps(current_settings)
+                db.session.commit()
+                # Update the current_user session object too
+                current_user.traffic_viewer_settings = admin.traffic_viewer_settings
+        except Exception as e:
+            logger.warning(f"Failed to save traffic viewer settings: {e}")
+    
+    # Build SQL query
+    # Always include session_id for uniqueness
+    select_cols = ['session_id'] + [col for col in selected_columns if col != 'session_id']
+    select_clause = ', '.join(select_cols)
+    
+    # Build WHERE clause from filters
+    where_clauses = []
+    params = {}
+    param_counter = 0
+    
+    for col_name, filter_value in filters.items():
+        # Handle date range syntax: "2024-01-01 to 2024-01-31" or ">2024-01-01" or "<2024-01-01"
+        if col_name in ['session_start', 'session_end']:
+            if ' to ' in filter_value.lower():
+                parts = filter_value.lower().split(' to ')
+                if len(parts) == 2:
+                    start_date = parts[0].strip()
+                    end_date = parts[1].strip()
+                    param_counter += 1
+                    where_clauses.append(f"{col_name} >= :date_start_{param_counter}::timestamp")
+                    params[f'date_start_{param_counter}'] = start_date
+                    param_counter += 1
+                    where_clauses.append(f"{col_name} <= :date_end_{param_counter}::timestamp + INTERVAL '1 day'")
+                    params[f'date_end_{param_counter}'] = end_date
+            elif filter_value.startswith('>'):
+                date_val = filter_value[1:].strip()
+                param_counter += 1
+                where_clauses.append(f"{col_name} > :date_{param_counter}::timestamp")
+                params[f'date_{param_counter}'] = date_val
+            elif filter_value.startswith('<'):
+                date_val = filter_value[1:].strip()
+                param_counter += 1
+                where_clauses.append(f"{col_name} < :date_{param_counter}::timestamp")
+                params[f'date_{param_counter}'] = date_val
+            else:
+                # Exact date match (includes full day)
+                param_counter += 1
+                where_clauses.append(f"{col_name}::date = :date_{param_counter}::date")
+                params[f'date_{param_counter}'] = filter_value
+        else:
+            # Text filter with % wildcard support
+            param_counter += 1
+            param_name = f'filter_{param_counter}'
+            if '%' in filter_value:
+                where_clauses.append(f"CAST({col_name} AS TEXT) ILIKE :{param_name}")
+                params[param_name] = filter_value
+            else:
+                where_clauses.append(f"CAST({col_name} AS TEXT) ILIKE :{param_name}")
+                params[param_name] = f'%{filter_value}%'
+    
+    where_clause = ' AND '.join(where_clauses) if where_clauses else '1=1'
+    
+    # Count total matching rows
+    count_query = text(f"SELECT COUNT(*) FROM nat_sessions_enriched WHERE {where_clause}")
+    total = db.session.execute(count_query, params).scalar()
+    
+    # Fetch paginated results
+    offset = (page - 1) * per_page
+    order_clause = f"{sort_col} {sort_order.upper()}"
+    
+    data_query = text(f"""
+        SELECT {select_clause}
+        FROM nat_sessions_enriched
+        WHERE {where_clause}
+        ORDER BY {order_clause}
+        LIMIT :limit OFFSET :offset
+    """)
+    
+    params['limit'] = per_page
+    params['offset'] = offset
+    
+    result = db.session.execute(data_query, params)
+    rows = [dict(row._mapping) for row in result]
+    
+    # Calculate pagination
+    total_pages = (total + per_page - 1) // per_page if per_page > 0 else 0
+    
+    return render_template(
+        'admin_traffic.html',
+        all_columns=ALL_COLUMNS,
+        selected_columns=selected_columns,
+        filters=filters,
+        rows=rows,
+        page=page,
+        per_page=per_page,
+        total=total,
+        total_pages=total_pages,
+        sort_col=sort_col,
+        sort_order=sort_order,
+    )
+
+
 @app.route('/admin/domain-policies', methods=['POST'])
 @login_required
+@permission_required('manage_users')
 def admin_domain_policies():
     action = (request.form.get('action') or '').strip().lower()
     domain = (request.form.get('domain') or '').strip().lower()
@@ -4106,6 +4626,7 @@ def admin_domain_policies():
 
 @app.route('/admin/users/add', methods=['GET', 'POST'])
 @login_required
+@permission_required('manage_users')
 def admin_add_user():
     """Add new authorized user"""
     if request.method == 'POST':
@@ -4168,6 +4689,7 @@ def admin_add_user():
 
 @app.route('/admin/users/import', methods=['GET', 'POST'])
 @login_required
+@permission_required('manage_users')
 def admin_import_users():
     if request.method == 'GET':
         vlan_map = get_vlan_map()
@@ -4370,6 +4892,7 @@ def admin_import_users():
 
 @app.route('/admin/users/import-template', methods=['GET'])
 @login_required
+@permission_required('manage_users')
 def admin_import_users_template():
     vlan_map = get_vlan_map()
     base_fields, vlan_fields = _csv_template_fields(vlan_map)
@@ -4394,6 +4917,7 @@ def admin_import_users_template():
 
 @app.route('/admin/users/<int:user_id>/edit', methods=['GET', 'POST'])
 @login_required
+@permission_required('manage_users')
 def admin_edit_user(user_id):
     """Edit existing user"""
     user = User.query.get_or_404(user_id)
@@ -4455,6 +4979,7 @@ def admin_edit_user(user_id):
 
 @app.route('/admin/users/<int:user_id>/block', methods=['POST'])
 @login_required
+@permission_required('manage_users')
 def admin_block_user(user_id):
     """Block all devices for a user"""
     user = User.query.get_or_404(user_id)
@@ -4472,6 +4997,7 @@ def admin_block_user(user_id):
 
 @app.route('/admin/users/<int:user_id>/unblock', methods=['POST'])
 @login_required
+@permission_required('manage_users')
 def admin_unblock_user(user_id):
     """Unblock all devices for a user"""
     user = User.query.get_or_404(user_id)
@@ -4487,14 +5013,117 @@ def admin_unblock_user(user_id):
     return redirect(url_for('admin_dashboard'))
 
 
+@app.route('/admin/assign-device', methods=['POST'])
+@login_required
+@permission_required('manage_users')
+def admin_assign_device():
+    """Assign an unregistered device to a specific user"""
+    mac_address = request.form.get('mac_address', '').strip().lower()
+    user_id = request.form.get('user_id', '').strip()
+    device_name = request.form.get('device_name', '').strip()
+    vlan_id = request.form.get('vlan_id', '').strip()
+    
+    if not mac_address or not user_id or not vlan_id:
+        flash('MAC address, user, and VLAN are required.', 'error')
+        return redirect(url_for('admin_dashboard'))
+    
+    try:
+        user_id = int(user_id)
+        vlan_id = int(vlan_id)
+    except ValueError:
+        flash('Invalid user ID or VLAN ID.', 'error')
+        return redirect(url_for('admin_dashboard'))
+    
+    user = User.query.get(user_id)
+    if not user:
+        flash('User not found.', 'error')
+        return redirect(url_for('admin_dashboard'))
+    
+    # Check if MAC already registered
+    existing = Device.query.filter_by(mac_address=mac_address).first()
+    if existing and existing.registration_status == 'registered':
+        flash(f'Device {mac_address} is already registered to {existing.user.email if existing.user else "another user"}.', 'error')
+        return redirect(url_for('admin_dashboard'))
+    
+    # Get current lease/IP for the MAC
+    lease = UnregisteredLease.query.filter_by(mac_address=mac_address).first()
+    ip_address = lease.ip_address if lease else None
+    
+    if not ip_address:
+        # Try to get from Kea
+        kea = get_kea()
+        if kea:
+            try:
+                ip_address = kea.get_lease_ip_for_mac(mac_address, subnet_id=vlan_id)
+            except Exception as e:
+                logger.error(f"Error querying Kea for {mac_address}: {e}")
+        
+        # Fallback to database lease table
+        if not ip_address:
+            ip_address = get_ip_for_mac(mac_address, subnet_id=vlan_id)
+    
+    # Create or update device
+    if existing:
+        existing.user_id = user.id
+        existing.registration_status = 'registered'
+        existing.current_vlan = vlan_id
+        if device_name:
+            existing.device_name = device_name
+        if ip_address:
+            existing.ip_address = ip_address
+        if not existing.unregister_token:
+            existing.unregister_token = secrets.token_urlsafe(32)
+        db.session.commit()
+        device = existing
+    else:
+        device = Device(
+            mac_address=mac_address,
+            user_id=user.id,
+            device_name=device_name or 'admin-assigned',
+            ip_address=ip_address,
+            registration_status='registered',
+            current_vlan=vlan_id,
+            connection_type='unknown',
+            unregister_token=secrets.token_urlsafe(32)
+        )
+        db.session.add(device)
+        db.session.commit()
+    
+    # Remove ACL block and DNS hijack
+    if ip_address:
+        manage_switch_acl('unblock', ip_address, vlan_id)
+        manage_dns_hijack('unhijack', ip_address)
+    
+    # Add Kea reservation
+    kea = get_kea()
+    if kea and ip_address:
+        try:
+            kea.register_mac(mac=mac_address, vlan=vlan_id, fixed_ip=ip_address)
+            logger.info(f"Admin assigned device {mac_address} to user {user.email} with IP {ip_address}")
+        except Exception as exc:
+            logger.error(f"Kea reservation failed for admin-assigned device {mac_address}: {exc}")
+    
+    # Clear unregistered lease
+    clear_unregistered_lease(mac_address)
+    
+    flash(f'Device {mac_address} successfully assigned to {user.email}.', 'success')
+    logger.info(f"Admin assigned device {mac_address} to user {user.email}")
+    return redirect(url_for('admin_dashboard'))
+
+
 @app.route('/admin/approve/<token>')
 @login_required
+@permission_required('manage_users')
 def admin_approve_request(token):
     """Approve registration request from email link"""
     reg_request = RegistrationRequest.query.filter_by(approval_token=token).first_or_404()
     
     if reg_request.status != 'pending':
-        flash('This request has already been processed', 'info')
+        # Request already processed - show who processed it
+        action = 'approved' if reg_request.status == 'approved' else 'rejected'
+        processed_info = f"by admin {reg_request.processed_by}" if reg_request.processed_by else ""
+        processed_time = f"at {reg_request.processed_at.strftime('%Y-%m-%d %H:%M:%S')}" if reg_request.processed_at else ""
+        flash(f'This request has already been {action} {processed_info} {processed_time}.', 'info')
         return redirect(url_for('admin_dashboard'))
     
     existing_user = User.query.filter_by(email=reg_request.email).first()
@@ -4522,9 +5151,18 @@ def admin_approve_request(token):
 
 @app.route('/admin/requests/<int:request_id>/process', methods=['POST'])
 @login_required
+@permission_required('manage_users')
 def admin_process_request(request_id):
     """Process (approve/reject) a registration request"""
     reg_request = RegistrationRequest.query.get_or_404(request_id)
+    
+    # Check if already processed (concurrent access protection)
+    if reg_request.status != 'pending':
+        action_word = 'approved' if reg_request.status == 'approved' else 'rejected'
+        processed_info = f"by admin {reg_request.processed_by}" if reg_request.processed_by else ""
+        processed_time = f"at {reg_request.processed_at.strftime('%Y-%m-%d %H:%M:%S')}" if reg_request.processed_at else ""
+        flash(f'This request was already {action_word} {processed_info} {processed_time}.', 'warning')
+        return redirect(url_for('admin_dashboard'))
     
     action = request.form.get('action')
     

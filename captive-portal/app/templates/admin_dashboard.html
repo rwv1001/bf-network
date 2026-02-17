@@ -208,11 +208,21 @@ function searchTable(tableType, searchValue) {
 
 {% block content %}
 <div style="margin-bottom: 30px;">
+    {% if current_user.can_manage_users %}
     <a href="{{ url_for('admin_add_user') }}" class="btn">+ Add New User</a>
     <a href="{{ url_for('admin_import_users') }}" class="btn" style="background: #2c7a7b; margin-left: 10px;">⬆ Import CSV</a>
+    {% endif %}
+    {% if current_user.can_manage_vlans %}
     <a href="{{ url_for('admin_vlan_config') }}" class="btn" style="background: #764ba2; margin-left: 10px;">⚙️ VLAN Configuration</a>
+    {% endif %}
+    {% if current_user.can_view_traffic %}
+    <a href="{{ url_for('admin_traffic') }}" class="btn" style="background: #05668d; margin-left: 10px;">🔍 Traffic Viewer</a>
+    {% endif %}
+    {% if current_user.can_manage_admins %}
+    <a href="{{ url_for('admin_manage_admins') }}" class="btn" style="background: #c0392b; margin-left: 10px;">👥 Manage Admins</a>
+    {% endif %}
     <a href="{{ url_for('admin_logout') }}" class="btn" style="background: #999; margin-left: 10px;">Logout</a>
-    {% if test_env %}
+    {% if test_env and current_user.can_manage_users %}
     <form method="post" action="{{ url_for('admin_reset_test') }}" style="display: inline-block; margin-left: 10px;"
           onsubmit="return confirm('Reset test environment? This deletes all users, devices, and requests, clears ACL/DNS hijack rules, reapplies the baseline ACLs, clears all MAC authentication sessions, and resets user device ports on the switch.');">
         <button type="submit" class="btn" style="background: #c0392b;">Reset Test Environment</button>
@@ -360,6 +370,9 @@ function searchTable(tableType, searchValue) {
             <th>MAC Address</th>
             <th>IP Address</th>
             <th>Lease Expires</th>
+            {% if current_user.can_manage_users %}
+            <th>Assign to User</th>
+            {% endif %}
         </tr>
     </thead>
     <tbody>
@@ -368,6 +381,14 @@ function searchTable(tableType, searchValue) {
             <td style="font-family: monospace;">{{ lease.mac_address }}</td>
             <td>{{ lease.ip_address }}</td>
             <td>{{ lease.expires_at }}</td>
+            {% if current_user.can_manage_users %}
+            <td>
+                <button onclick="showAssignForm('{{ lease.mac_address }}', '{{ lease.ip_address }}')" 
+                        class="btn btn-small" style="background: #2c7a7b; font-size: 12px; padding: 4px 8px;">
+                    Assign
+                </button>
+            </td>
+            {% endif %}
         </tr>
         {% endfor %}
     </tbody>
@@ -377,6 +398,102 @@ function searchTable(tableType, searchValue) {
 <div style="margin: 10px 0 20px; color: #666;">No unregistered devices currently detected.</div>
 {% endif %}
 </div>
+
+<!-- Assign Device Modal -->
+<div id="assignDeviceModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; overflow: auto;">
+    <div style="background: white; max-width: 600px; margin: 50px auto; padding: 30px; border-radius: 5px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+        <h3 style="margin-top: 0;">Assign Device to User</h3>
+        <form method="post" action="{{ url_for('admin_assign_device') }}" id="assignDeviceForm">
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: bold;">MAC Address:</label>
+                <input type="text" name="mac_address" id="assignMacAddress" readonly 
+                       style="width: 100%; padding: 8px; border: 1px solid #ddd; background: #f5f5f5;">
+            </div>
+            
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: bold;">Current IP:</label>
+                <input type="text" id="assignIpAddress" readonly 
+                       style="width: 100%; padding: 8px; border: 1px solid #ddd; background: #f5f5f5;">
+            </div>
+            
+            <div style="margin-bottom: 15px;">
+                <label for="assignUserId" style="display: block; margin-bottom: 5px; font-weight: bold;">Select User: *</label>
+                <select name="user_id" id="assignUserId" required 
+                        style="width: 100%; padding: 8px; border: 1px solid #ddd;">
+                    <option value="">-- Select a user --</option>
+                    {% for user in users %}
+                    <option value="{{ user.id }}">{{ user.email }} ({{ user.first_name }} {{ user.last_name }})</option>
+                    {% endfor %}
+                </select>
+            </div>
+            
+            <div style="margin-bottom: 15px;">
+                <label for="assignVlanId" style="display: block; margin-bottom: 5px; font-weight: bold;">VLAN: *</label>
+                <select name="vlan_id" id="assignVlanId" required 
+                        style="width: 100%; padding: 8px; border: 1px solid #ddd;">
+                    <option value="">-- Select VLAN --</option>
+                    {% for choice in wired_vlan_choices %}
+                    <option value="{{ choice.vlan_id }}">{{ choice.label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            
+            <div style="margin-bottom: 15px;">
+                <label for="assignDeviceName" style="display: block; margin-bottom: 5px; font-weight: bold;">Device Name (optional):</label>
+                <input type="text" name="device_name" id="assignDeviceName" placeholder="e.g. Work Laptop" 
+                       style="width: 100%; padding: 8px; border: 1px solid #ddd;">
+            </div>
+            
+            <div style="display: flex; gap: 10px; margin-top: 20px;">
+                <button type="submit" id="assignDeviceBtn" class="btn" disabled style="cursor: not-allowed; opacity: 0.5;">Assign Device</button>
+                <button type="button" onclick="hideAssignForm()" class="btn" style="background: #999;">Cancel</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+function validateAssignForm() {
+    const userId = document.getElementById('assignUserId').value;
+    const vlanId = document.getElementById('assignVlanId').value;
+    const submitBtn = document.getElementById('assignDeviceBtn');
+    
+    if (userId && vlanId) {
+        submitBtn.disabled = false;
+        submitBtn.style.cursor = 'pointer';
+        submitBtn.style.opacity = '1';
+    } else {
+        submitBtn.disabled = true;
+        submitBtn.style.cursor = 'not-allowed';
+        submitBtn.style.opacity = '0.5';
+    }
+}
+
+function showAssignForm(mac, ip) {
+    document.getElementById('assignMacAddress').value = mac;
+    document.getElementById('assignIpAddress').value = ip;
+    document.getElementById('assignUserId').value = '';
+    document.getElementById('assignVlanId').value = '';
+    document.getElementById('assignDeviceName').value = '';
+    document.getElementById('assignDeviceModal').style.display = 'block';
+    validateAssignForm(); // Ensure button is disabled when dialog opens
+}
+
+function hideAssignForm() {
+    document.getElementById('assignDeviceModal').style.display = 'none';
+}
+
+// Add event listeners for validation
+document.getElementById('assignUserId').addEventListener('change', validateAssignForm);
+document.getElementById('assignVlanId').addEventListener('change', validateAssignForm);
+
+// Close modal when clicking outside
+document.getElementById('assignDeviceModal').addEventListener('click', function(e) {
+    if (e.target === this) {
+        hideAssignForm();
+    }
+});
+</script>
 
 <div id="users-table-section">
 <h2 style="margin-top: 40px; color: #667eea;">👥 Authorized Users ({{ users_total }})</h2>

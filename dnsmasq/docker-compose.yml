@@ -11,6 +11,7 @@ services:
     volumes:
       - ./conf:/etc/dnsmasq.d:ro
       - ./leases:/var/lib/misc
+      - ./logs:/var/log
     command: ["-k", "--conf-file=/etc/dnsmasq.d/blac-onboarding.conf"]
 
   # Hijacking DNSmasq - serves 192.168.99.5 for unregistered devices
