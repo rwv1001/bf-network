@@ -291,6 +291,7 @@
                 {% if current_user.can_manage_admins %}
                 <a href="{{ url_for('admin_manage_admins') }}" class="back-link" style="margin-right: 10px;">Manage Admins</a>
                 {% endif %}
+                <a href="{{ url_for('admin_mfa_setup') }}" class="back-link" style="margin-right: 10px;">🔐 Two-Factor Auth</a>
                 <a href="{{ url_for('admin_logout') }}" class="back-link">Logout</a>
             </div>
         </div>

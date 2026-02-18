@@ -15,7 +15,7 @@ import csv
 import ipaddress
 import io
 import threading
-from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, abort, Response
+from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, abort, Response, session
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime, timedelta
@@ -668,6 +668,38 @@ login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'admin_login'
 
+# Enforcement: redirect admins who need MFA setup or password change
+_AUTH_EXEMPT_ENDPOINTS = {
+    'admin_login',
+    'admin_logout',
+    'admin_mfa_setup',
+    'admin_mfa_verify',
+    'admin_mfa_disable',
+    'admin_change_own_password',
+    'static',
+}
+
+@app.before_request
+def enforce_mfa_setup():
+    """Redirect authenticated admins to MFA setup or forced password change as needed."""
+    from flask_login import current_user
+    endpoint = request.endpoint
+    # Only enforce on admin endpoints
+    if not endpoint or not endpoint.startswith('admin_'):
+        return
+    # Skip exempt endpoints
+    if endpoint in _AUTH_EXEMPT_ENDPOINTS:
+        return
+    # Only enforce for authenticated users
+    if not current_user or not current_user.is_authenticated:
+        return
+    # Forced password change takes priority
+    if getattr(current_user, 'must_change_password', False):
+        return redirect(url_for('admin_change_own_password'))
+    # Redirect if MFA is not enabled
+    if not getattr(current_user, 'mfa_enabled', False):
+        return redirect(url_for('admin_mfa_setup'))
+
 # VLAN configuration - load from database with fallback to env vars
 def get_vlan_map():
     """Get VLAN mappings from database"""
@@ -711,7 +743,8 @@ _start_wifi_confirmation_sweeper()
 class AdminUser:
     """Admin user class for Flask-Login with role-based permissions"""
     def __init__(self, admin_id, username, can_manage_users=True, can_manage_vlans=False, 
-                 can_view_traffic=False, can_manage_admins=False, traffic_viewer_settings=None):
+                 can_view_traffic=False, can_manage_admins=False, traffic_viewer_settings=None, 
+                 mfa_enabled=False, must_change_password=False):
         self.id = str(admin_id)  # Flask-Login requires string ID
         self.username = username
         self.can_manage_users = can_manage_users
@@ -719,6 +752,8 @@ class AdminUser:
         self.can_view_traffic = can_view_traffic
         self.can_manage_admins = can_manage_admins
         self.traffic_viewer_settings = traffic_viewer_settings
+        self.mfa_enabled = mfa_enabled
+        self.must_change_password = must_change_password
     
     def is_authenticated(self):
         return True
@@ -752,7 +787,9 @@ def load_user(user_id):
                 admin.can_manage_vlans,
                 admin.can_view_traffic,
                 admin.can_manage_admins,
-                admin.traffic_viewer_settings
+                admin.traffic_viewer_settings,
+                admin.mfa_enabled,
+                getattr(admin, 'must_change_password', False)
             )
     except (ValueError, TypeError):
         pass
@@ -3609,6 +3646,12 @@ def admin_login():
         admin = Admin.query.filter_by(username=username).first()
         
         if admin and admin.check_password(password):
+            # If MFA is enabled, redirect to MFA verification
+            if admin.mfa_enabled and admin.mfa_secret:
+                # Store admin_id in session temporarily for MFA verification
+                session['mfa_admin_id'] = admin.id
+                return redirect(url_for('admin_mfa_verify'))
+            
             # Update last login time
             admin.last_login = datetime.utcnow()
             db.session.commit()
@@ -3620,7 +3663,9 @@ def admin_login():
                 admin.can_manage_users,
                 admin.can_manage_vlans,
                 admin.can_view_traffic,
-                admin.can_manage_admins
+                admin.can_manage_admins,
+                admin.traffic_viewer_settings,
+                admin.mfa_enabled
             )
             login_user(user)
             return redirect(url_for('admin_dashboard'))
@@ -3656,6 +3701,329 @@ def admin_logout():
     """Admin logout"""
     logout_user()
     return redirect(url_for('index'))
+
+
+@app.route('/admin/mfa/verify', methods=['GET', 'POST'])
+def admin_mfa_verify():
+    """MFA verification page during login"""
+    import pyotp
+    
+    if 'mfa_admin_id' not in session:
+        flash('Session expired. Please log in again.', 'error')
+        return redirect(url_for('admin_login'))
+    
+    admin_id = session.get('mfa_admin_id')
+    admin = Admin.query.get(admin_id)
+    
+    if not admin or not admin.mfa_enabled or not admin.mfa_secret:
+        session.pop('mfa_admin_id', None)
+        flash('MFA not configured for this account.', 'error')
+        return redirect(url_for('admin_login'))
+    
+    if request.method == 'POST':
+        code = request.form.get('code', '').strip().replace(' ', '')
+        
+        if not code:
+            flash('Please enter the verification code.', 'error')
+            return render_template('admin_mfa_verify.html')
+        
+        # Verify TOTP code
+        totp = pyotp.TOTP(admin.mfa_secret)
+        if totp.verify(code, valid_window=1):  # Allow 1 time step before/after
+            # Clear MFA session data
+            session.pop('mfa_admin_id', None)
+            
+            # Update last login time
+            admin.last_login = datetime.utcnow()
+            db.session.commit()
+            
+            # Log in the user
+            user = AdminUser(
+                admin.id,
+                admin.username,
+                admin.can_manage_users,
+                admin.can_manage_vlans,
+                admin.can_view_traffic,
+                admin.can_manage_admins,
+                admin.traffic_viewer_settings,
+                admin.mfa_enabled
+            )
+            login_user(user)
+            logger.info(f"Admin '{admin.username}' logged in with MFA")
+            return redirect(url_for('admin_dashboard'))
+        else:
+            flash('Invalid verification code. Please try again.', 'error')
+            return render_template('admin_mfa_verify.html')
+    
+    return render_template('admin_mfa_verify.html')
+
+
+@app.route('/admin/mfa/setup', methods=['GET', 'POST'])
+@login_required
+def admin_mfa_setup():
+    """MFA setup page for admins to enable MFA"""
+    import pyotp
+    import qrcode
+    import io
+    import base64
+    
+    admin = Admin.query.get(int(current_user.id))
+    
+    if request.method == 'POST':
+        action = request.form.get('action')
+        
+        if action == 'enable':
+            # Generate new secret
+            secret = pyotp.random_base32()
+            
+            # Store in session temporarily until verified
+            session['mfa_setup_secret'] = secret
+            session['mfa_setup_admin_id'] = admin.id
+            
+            # Generate QR code
+            totp = pyotp.TOTP(secret)
+            provisioning_uri = totp.provisioning_uri(
+                name=admin.username,
+                issuer_name='BF-Network Admin Portal'
+            )
+            
+            # Create QR code image
+            qr =  qrcode.QRCode(version=1, box_size=10, border=5)
+            qr.add_data(provisioning_uri)
+            qr.make(fit=True)
+            img = qr.make_image(fill_color="black", back_color="white")
+            
+            # Convert to base64 for display
+            buffer = io.BytesIO()
+            img.save(buffer, format='PNG')
+            buffer.seek(0)
+            qr_code_base64 = base64.b64encode(buffer.getvalue()).decode()
+            
+            return render_template('admin_mfa_setup.html',
+                                 admin=admin,
+                                 mfa_enabled=admin.mfa_enabled,
+                                 setup_mode='verify',
+                                 show_qr=True,
+                                 secret=secret,
+                                 qr_code=qr_code_base64)
+        
+        elif action == 'add_device':
+            # Show existing QR code so user can add another authenticator device
+            if not admin.mfa_secret:
+                flash('MFA is not fully configured. Please set up MFA first.', 'error')
+                return redirect(url_for('admin_mfa_setup'))
+            secret = admin.mfa_secret
+            totp = pyotp.TOTP(secret)
+            provisioning_uri = totp.provisioning_uri(
+                name=admin.username,
+                issuer_name='BF-Network Admin Portal'
+            )
+            qr = qrcode.QRCode(version=1, box_size=10, border=5)
+            qr.add_data(provisioning_uri)
+            qr.make(fit=True)
+            img = qr.make_image(fill_color="black", back_color="white")
+            buffer = io.BytesIO()
+            img.save(buffer, format='PNG')
+            buffer.seek(0)
+            qr_code_base64 = base64.b64encode(buffer.getvalue()).decode()
+            return render_template('admin_mfa_setup.html',
+                                 admin=admin,
+                                 mfa_enabled=True,
+                                 show_qr=True,
+                                 secret=secret,
+                                 qr_code=qr_code_base64)
+        
+        elif action == 'verify':
+            # Verify the setup code
+            code = request.form.get('code', '').strip().replace(' ', '')
+            secret = session.get('mfa_setup_secret')
+            setup_admin_id = session.get('mfa_setup_admin_id')
+            
+            if not secret or setup_admin_id != admin.id:
+                flash('Setup session expired. Please try again.', 'error')
+                session.pop('mfa_setup_secret', None)
+                session.pop('mfa_setup_admin_id', None)
+                return redirect(url_for('admin_mfa_setup'))
+            
+            if not code:
+                flash('Please enter the verification code.', 'error')
+                # Re-generate QR code with the same secret
+                import qrcode
+                totp = pyotp.TOTP(secret)
+                provisioning_uri = totp.provisioning_uri(
+                    name=admin.username,
+                    issuer_name='BF-Network Admin Portal'
+                )
+                qr = qrcode.QRCode(version=1, box_size=10, border=5)
+                qr.add_data(provisioning_uri)
+                qr.make(fit=True)
+                img = qr.make_image(fill_color="black", back_color="white")
+                buffer = io.BytesIO()
+                img.save(buffer, format='PNG')
+                buffer.seek(0)
+                qr_code_base64 = base64.b64encode(buffer.getvalue()).decode()
+                
+                return render_template('admin_mfa_setup.html',
+                                     admin=admin,
+                                     mfa_enabled=admin.mfa_enabled,
+                                     setup_mode='verify',
+                                     show_qr=True,
+                                     secret=secret,
+                                     qr_code=qr_code_base64)
+            
+            totp = pyotp.TOTP(secret)
+            if totp.verify(code, valid_window=1):
+                # Save MFA settings to database
+                admin.mfa_enabled = True
+                admin.mfa_secret = secret
+                db.session.commit()
+                
+                # Clear session data
+                session.pop('mfa_setup_secret', None)
+                session.pop('mfa_setup_admin_id', None)
+                
+                # Update current_user session
+                current_user.mfa_enabled = True
+                
+                logger.info(f"Admin '{admin.username}' enabled MFA")
+                flash('MFA has been enabled successfully! You will need to use your authenticator app for future logins.', 'success')
+                return redirect(url_for('admin_mfa_setup'))
+            else:
+                flash('Invalid verification code. Please try again.', 'error')
+                # Re-generate QR code with the same secret for retry
+                import qrcode
+                totp = pyotp.TOTP(secret)
+                provisioning_uri = totp.provisioning_uri(
+                    name=admin.username,
+                    issuer_name='BF-Network Admin Portal'
+                )
+                qr = qrcode.QRCode(version=1, box_size=10, border=5)
+                qr.add_data(provisioning_uri)
+                qr.make(fit=True)
+                img = qr.make_image(fill_color="black", back_color="white")
+                buffer = io.BytesIO()
+                img.save(buffer, format='PNG')
+                buffer.seek(0)
+                qr_code_base64 = base64.b64encode(buffer.getvalue()).decode()
+                
+                return render_template('admin_mfa_setup.html',
+                                     admin=admin,
+                                     mfa_enabled=admin.mfa_enabled,
+                                     setup_mode='verify',
+                                     show_qr=True,
+                                     secret=secret,
+                                     qr_code=qr_code_base64)
+    
+    # GET request - show current status
+    return render_template('admin_mfa_setup.html',
+                         admin=admin,
+                         mfa_enabled=admin.mfa_enabled,
+                         show_qr=False,
+                         setup_mode='status')
+
+
+@app.route('/admin/mfa/disable', methods=['POST'])
+@login_required
+def admin_mfa_disable():
+    """Disable MFA for current admin"""
+    import pyotp
+    
+    admin = Admin.query.get(int(current_user.id))
+    
+    if not admin.mfa_enabled:
+        flash('MFA is not enabled for your account.', 'info')
+        return redirect(url_for('admin_mfa_setup'))
+    
+    # Require current MFA code or password to disable
+    code_or_password = request.form.get('code', '').strip()
+    
+    if not code_or_password:
+        flash('Please enter your current MFA code or password.', 'error')
+        return redirect(url_for('admin_mfa_setup'))
+    
+    # Try as MFA code first
+    if admin.mfa_secret:
+        totp = pyotp.TOTP(admin.mfa_secret)
+        if totp.verify(code_or_password, valid_window=1):
+            admin.mfa_enabled = False
+            admin.mfa_secret = None
+            db.session.commit()
+            current_user.mfa_enabled = False
+            logger.info(f"Admin '{admin.username}' disabled MFA")
+            flash('MFA has been disabled.', 'success')
+            return redirect(url_for('admin_mfa_setup'))
+    
+    # Try as password
+    if admin.check_password(code_or_password):
+        admin.mfa_enabled = False
+        admin.mfa_secret = None
+        db.session.commit()
+        current_user.mfa_enabled = False
+        logger.info(f"Admin '{admin.username}' disabled MFA using password")
+        flash('MFA has been disabled.', 'success')
+        return redirect(url_for('admin_mfa_setup'))
+    
+    flash('Invalid code or password.', 'error')
+    return redirect(url_for('admin_mfa_setup'))
+
+
+@app.route('/admin/change-password', methods=['GET', 'POST'])
+@login_required
+def admin_change_own_password():
+    """Forced password change on first login"""
+    admin = Admin.query.get(int(current_user.id))
+
+    if request.method == 'POST':
+        new_password = request.form.get('new_password', '').strip()
+        confirm_password = request.form.get('confirm_password', '').strip()
+
+        if not new_password:
+            flash('Please enter a new password.', 'error')
+            return render_template('admin_change_own_password.html')
+
+        if len(new_password) < 6:
+            flash('Password must be at least 6 characters.', 'error')
+            return render_template('admin_change_own_password.html')
+
+        if new_password != confirm_password:
+            flash('Passwords do not match.', 'error')
+            return render_template('admin_change_own_password.html')
+
+        if admin.check_password(new_password):
+            flash('New password must be different from your current password.', 'error')
+            return render_template('admin_change_own_password.html')
+
+        admin.set_password(new_password)
+        admin.must_change_password = False
+        db.session.commit()
+        current_user.must_change_password = False
+
+        logger.info(f"Admin '{admin.username}' changed their password on first login")
+        flash('Password changed successfully. Welcome!', 'success')
+        return redirect(url_for('admin_mfa_setup'))
+
+    return render_template('admin_change_own_password.html')
+
+
+@app.route('/admin/manage-admins/<int:admin_id>/reset-mfa', methods=['POST'])
+@login_required
+@permission_required('manage_admins')
+def admin_reset_mfa(admin_id):
+    """Reset MFA for a specific admin (super admin only)"""
+    admin = Admin.query.get_or_404(admin_id)
+    
+    if not admin.mfa_enabled:
+        flash(f'MFA is not enabled for "{admin.username}".', 'info')
+        return redirect(url_for('admin_manage_admins'))
+    
+    # Reset MFA
+    admin.mfa_enabled = False
+    admin.mfa_secret = None
+    db.session.commit()
+    
+    logger.info(f"Super admin '{current_user.username}' reset MFA for admin '{admin.username}'")
+    flash(f'MFA has been reset for "{admin.username}". They will need to set it up again.', 'success')
+    return redirect(url_for('admin_manage_admins'))
 
 
 @app.route('/admin/no-permissions')
@@ -3704,7 +4072,8 @@ def admin_manage_admins():
             'created_at': admin.created_at,
             'last_login': admin.last_login,
             'is_current': is_current,
-            'is_only_super': is_only_super
+            'is_only_super': is_only_super,
+            'mfa_enabled': admin.mfa_enabled
         })
     
     return render_template('admin_manage_admins.html', admins=admin_list)
@@ -3722,6 +4091,7 @@ def admin_create_admin():
     can_manage_vlans = bool(request.form.get('can_manage_vlans'))
     can_view_traffic = bool(request.form.get('can_view_traffic'))
     can_manage_admins = bool(request.form.get('can_manage_admins'))
+    must_change_password = bool(request.form.get('must_change_password'))  # checkbox: present=True, absent=False
     
     if not username or not password:
         flash('Username and password are required.', 'error')
@@ -3744,6 +4114,7 @@ def admin_create_admin():
     admin.can_manage_vlans = can_manage_vlans
     admin.can_view_traffic = can_view_traffic
     admin.can_manage_admins = can_manage_admins
+    admin.must_change_password = must_change_password
     admin.created_by = int(current_user.id)
     db.session.add(admin)
     db.session.commit()
@@ -4058,7 +4429,7 @@ def admin_vlan_config():
     )
 
 
-@app.route('/admin')
+@app.route('/admin', strict_slashes=False)
 @login_required
 def admin_dashboard():
     """Admin dashboard with MAC address management, pagination, and search"""

@@ -25,6 +25,9 @@ class Admin(db.Model):
     created_by = db.Column(db.Integer, db.ForeignKey('admins.id'), nullable=True)
     last_login = db.Column(db.DateTime)
     traffic_viewer_settings = db.Column(db.Text, nullable=True)  # JSON string for saved filters/columns
+    mfa_enabled = db.Column(db.Boolean, default=False, nullable=False)
+    mfa_secret = db.Column(db.String(32), nullable=True)  # TOTP secret (base32 encoded)
+    must_change_password = db.Column(db.Boolean, default=False, nullable=False)
     
     def set_password(self, password):
         """Hash and set password"""

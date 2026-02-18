@@ -13,6 +13,10 @@ WTForms==3.1.1
 Flask-WTF==1.2.1
 itsdangerous==2.1.2
 
+# MFA (Multi-Factor Authentication)
+pyotp==2.9.0
+qrcode==7.4.2
+
 # Microsoft Graph API for email
 msal==1.26.0
 requests==2.31.0

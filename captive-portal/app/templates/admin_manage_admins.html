@@ -131,6 +131,17 @@ function updatePermissions(adminId) {
     document.getElementById('updateForm' + adminId).submit();
 }
 
+function togglePasswordVisibility(inputId, btn) {
+    var input = document.getElementById(inputId);
+    if (input.type === 'password') {
+        input.type = 'text';
+        btn.textContent = 'Hide';
+    } else {
+        input.type = 'password';
+        btn.textContent = 'Show';
+    }
+}
+
 function changePassword(adminId, username) {
     var newPassword = prompt('Enter new password for "' + username + '" (minimum 6 characters):');
     if (newPassword && newPassword.length >= 6) {
@@ -169,6 +180,7 @@ function changeEmail(adminId, username, currentEmail) {
     {% if current_user.can_manage_vlans %}
     <a href="{{ url_for('admin_vlan_config') }}" class="btn" style="background: #3b82f6; margin-left: 10px;">VLAN Config</a>
     {% endif %}
+    <a href="{{ url_for('admin_mfa_setup') }}" class="btn" style="background: #28a745; margin-left: 10px;">🔐 Two-Factor Auth</a>
     <a href="{{ url_for('admin_logout') }}" class="btn" style="background: #999; margin-left: 10px;">Logout</a>
 </div>
 
@@ -182,7 +194,10 @@ function changeEmail(adminId, username, currentEmail) {
         
         <div class="form-group">
             <label for="password">Password: * (minimum 6 characters)</label>
-            <input type="password" id="password" name="password" required minlength="6">
+            <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;max-width:400px;">
+                <input type="password" id="password" name="password" required minlength="6" style="width:100%;max-width:none;margin:0;">
+                <button type="button" onclick="togglePasswordVisibility('password', this)" style="padding:6px 10px;background:#4a5568;color:#fff;border:none;border-radius:4px;cursor:pointer;white-space:nowrap;font-size:0.85em;">Show</button>
+            </div>
         </div>
         
         <div class="form-group">
@@ -212,6 +227,13 @@ function changeEmail(adminId, username, currentEmail) {
             </div>
         </div>
         
+        <div class="form-group" style="margin-top: 15px;">
+            <div class="permission-item">
+                <input type="checkbox" id="new_must_change_password" name="must_change_password" value="1" checked>
+                <label for="new_must_change_password">Require password change on first login</label>
+            </div>
+        </div>
+
         <button type="submit" class="btn">Create Admin</button>
     </form>
 </div>
@@ -232,6 +254,7 @@ function changeEmail(adminId, username, currentEmail) {
             <tr>
                 <th>Username</th>
                 <th>Email</th>
+                <th style="text-align: center;">MFA</th>
                 <th style="text-align: center;">Manage Users<br>and Devices</th>
                 <th style="text-align: center;">Manage<br>VLANs</th>
                 <th style="text-align: center;">View<br>Traffic</th>
@@ -253,6 +276,13 @@ function changeEmail(adminId, username, currentEmail) {
                         <span title="{{ admin.email }}">{{ admin.email[:30] }}{% if admin.email|length > 30 %}...{% endif %}</span>
                     {% else %}
                         <span style="color: #999; font-style: italic;">Not set</span>
+                    {% endif %}
+                </td>
+                <td style="text-align: center;">
+                    {% if admin.mfa_enabled %}
+                        <span style="color: #28a745; font-weight: bold;" title="MFA Enabled">✓</span>
+                    {% else %}
+                        <span style="color: #999;" title="MFA Disabled">✗</span>
                     {% endif %}
                 </td>
                 <form method="post" action="{{ url_for('admin_update_admin_permissions', admin_id=admin.id) }}" id="updateForm{{ admin.id }}">
@@ -297,6 +327,12 @@ function changeEmail(adminId, username, currentEmail) {
                     <form method="post" action="{{ url_for('admin_update_admin_email', admin_id=admin.id) }}" id="emailForm{{ admin.id }}" style="display: none;">
                         <input type="hidden" name="email" id="newEmailInput{{ admin.id }}">
                     </form>
+                    
+                    {% if admin.mfa_enabled %}
+                    <form method="post" action="{{ url_for('admin_reset_mfa', admin_id=admin.id) }}" style="display: inline;" onsubmit="return confirm('Reset MFA for {{ admin.username }}? They will need to set it up again.');">
+                        <button type="submit" class="btn btn-small" style="background: #ff9800;" title="Reset MFA for this admin">🔓 Reset MFA</button>
+                    </form>
+                    {% endif %}
                     
                     {% if not admin.is_current %}
                     <form method="post" action="{{ url_for('admin_delete_admin', admin_id=admin.id) }}" style="display: inline;" onsubmit="return confirmDelete('{{ admin.username }}');">

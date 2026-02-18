@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Two-Factor Authentication Setup - BF-Network Admin</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
+            background: #f5f5f5;
+            padding: 20px;
+        }
+        .container {
+            max-width: 700px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            padding: 40px;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+        .status-badge {
+            display: inline-block;
+            padding: 6px 12px;
+            border-radius: 5px;
+            font-size: 14px;
+            font-weight: 600;
+            margin-left: 10px;
+        }
+        .status-badge.enabled {
+            background: #d4edda;
+            color: #155724;
+        }
+        .status-badge.disabled {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .section {
+            background: #f9f9f9;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 25px;
+            margin-bottom: 20px;
+        }
+        .section h2 {
+            color: #667eea;
+            margin-bottom: 15px;
+            font-size: 20px;
+        }
+        .info-box {
+            background: #f0f7ff;
+            border: 1px solid #b3d9ff;
+            border-radius: 5px;
+            padding: 15px;
+            margin-bottom: 20px;
+            font-size: 14px;
+            color: #004085;
+        }
+        .warning-box {
+            background: #fff3cd;
+            border: 1px solid #ffc107;
+            border-radius: 5px;
+            padding: 15px;
+            margin-bottom: 20px;
+            font-size: 14px;
+            color: #856404;
+        }
+        .qr-container {
+            text-align: center;
+            margin: 20px 0;
+        }
+        .qr-code {
+            background: white;
+            padding: 20px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            display: inline-block;
+        }
+        .manual-code {
+            background: #f5f5f5;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 15px;
+            text-align: center;
+            margin: 15px 0;
+        }
+        .manual-code strong {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+        }
+        .manual-code code {
+            font-family: monospace;
+            font-size: 16px;
+            letter-spacing: 0.2em;
+            color: #667eea;
+            background: white;
+            padding: 8px 12px;
+            border-radius: 4px;
+            display: inline-block;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: 500;
+        }
+        input[type="text"],
+        input[type="password"] {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 5px;
+            font-size: 16px;
+            transition: border-color 0.3s;
+        }
+        input[type="text"]:focus,
+        input[type="password"]:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        button {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 5px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+        .btn-primary:hover {
+            background: #5568d3;
+        }
+        .btn-danger {
+            background: #dc3545;
+            color: white;
+        }
+        .btn-danger:hover {
+            background: #c82333;
+        }
+        .btn-secondary {
+            background: #6c757d;
+            color: white;
+        }
+        .btn-secondary:hover {
+            background: #5a6268;
+        }
+        .flash-messages {
+            margin-bottom: 20px;
+        }
+        .flash {
+            padding: 12px;
+            border-radius: 5px;
+            margin-bottom: 10px;
+        }
+        .flash.error {
+            background: #fee;
+            color: #c33;
+            border: 1px solid #fcc;
+        }
+        .flash.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        ol {
+            margin-left: 20px;
+            margin-top: 10px;
+        }
+        ol li {
+            margin-bottom: 8px;
+            color: #555;
+        }
+        .back-link {
+            margin-top: 30px;
+            text-align: center;
+        }
+        .back-link a {
+            color: #667eea;
+            text-decoration: none;
+            font-size: 14px;
+        }
+        .back-link a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>
+            🔐 Two-Factor Authentication
+            {% if mfa_enabled %}
+                <span class="status-badge enabled">✓ Enabled</span>
+            {% else %}
+                <span class="status-badge disabled">✗ Disabled</span>
+            {% endif %}
+        </h1>
+        <p class="subtitle">Enhance your account security with two-factor authentication</p>
+        
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <div class="flash-messages">
+                    {% for category, message in messages %}
+                        <div class="flash {{ category }}">{{ message }}</div>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% endwith %}
+        
+        {% if not mfa_enabled %}
+            <!-- Setup MFA Section -->
+            <div class="section">
+                <h2>📲 Set Up Two-Factor Authentication</h2>
+
+                <div class="warning-box">
+                    <strong>⚠️ MFA is required.</strong>
+                    Two-factor authentication is mandatory for all admin accounts. You must complete setup before you can access the admin area.
+                </div>
+
+                <div class="info-box">
+                    <strong>What is Two-Factor Authentication?</strong>
+                    MFA adds an extra layer of security by requiring a verification code from your phone in addition to your password. This protects your account even if someone discovers your password.
+                </div>
+                
+                <form method="post" action="{{ url_for('admin_mfa_setup') }}">
+                    {% if show_qr %}
+                        <input type="hidden" name="action" value="verify">
+                    {% else %}
+                        <input type="hidden" name="action" value="enable">
+                    {% endif %}
+                    
+                    {% if show_qr %}
+                        <ol>
+                            <li><strong>Install an authenticator app</strong> on your phone (Google Authenticator, Microsoft Authenticator, Authy, etc.)</li>
+                            <li><strong>Scan this QR code</strong> with your authenticator app:</li>
+                        </ol>
+                        
+                        <div class="qr-container">
+                            <div class="qr-code">
+                                <img src="data:image/png;base64,{{ qr_code }}" alt="QR Code">
+                            </div>
+                        </div>
+                        
+                        <div class="manual-code">
+                            <strong>Can't scan? Enter this code manually:</strong>
+                            <code>{{ secret }}</code>
+                        </div>
+                        
+                        <ol start="3">
+                            <li><strong>Enter the 6-digit code</strong> from your authenticator app to verify:</li>
+                        </ol>
+                        
+                        <div class="form-group">
+                            <label for="code">Verification Code</label>
+                            <input type="text" id="code" name="code" 
+                                   placeholder="000000" 
+                                   maxlength="6" 
+                                   pattern="[0-9]{6}" 
+                                   required 
+                                   autofocus 
+                                   autocomplete="off"
+                                   style="text-align: center; letter-spacing: 0.3em; font-family: monospace; font-size: 20px;">
+                        </div>
+                        
+                        <button type="submit" class="btn-primary">✓ Verify and Enable MFA</button>
+                    {% else %}
+                        <button type="submit" class="btn-primary">Begin Setup</button>
+                    {% endif %}
+                </form>
+            </div>
+        {% else %}
+            <!-- MFA Already Enabled Section -->
+            <div class="section">
+                <h2>✅ Two-Factor Authentication is Active</h2>
+
+                <div class="info-box">
+                    Your account is protected with two-factor authentication. You'll need to enter a code from your authenticator app each time you log in.
+                </div>
+            </div>
+
+            {% if show_qr %}
+            <!-- Show existing QR for adding another device -->
+            <div class="section">
+                <h2>📲 Add Another Authenticator Device</h2>
+
+                <div class="info-box">
+                    Scan this QR code with your new authenticator app. Any device that scans this code will generate valid login codes alongside your existing authenticator.
+                </div>
+
+                <ol>
+                    <li><strong>Open your authenticator app</strong> on the new device (Google Authenticator, Microsoft Authenticator, Authy, etc.)</li>
+                    <li><strong>Scan this QR code:</strong></li>
+                </ol>
+
+                <div class="qr-container">
+                    <div class="qr-code">
+                        <img src="data:image/png;base64,{{ qr_code }}" alt="QR Code">
+                    </div>
+                </div>
+
+                <div class="manual-code">
+                    <strong>Can't scan? Enter this code manually:</strong>
+                    <code>{{ secret }}</code>
+                </div>
+
+                <p style="margin-top: 15px; color: #555; font-size: 14px;">Once your new device shows a 6-digit code that matches your existing authenticator, both devices are ready to use.</p>
+
+                <a href="{{ url_for('admin_mfa_setup') }}" class="btn-primary" style="display:inline-block; margin-top: 10px; text-decoration: none;">← Done</a>
+            </div>
+            {% else %}
+            <!-- Add Another Authenticator Section -->
+            <div class="section">
+                <h2>📱 Add Another Authenticator Device</h2>
+
+                <p style="margin-bottom: 15px; color: #555;">You can register the same account on a second phone or authenticator app. Both devices will generate valid login codes.</p>
+
+                <form method="post" action="{{ url_for('admin_mfa_setup') }}">
+                    <input type="hidden" name="action" value="add_device">
+                    <button type="submit" class="btn-primary">Show QR Code for New Device</button>
+                </form>
+            </div>
+            {% endif %}
+        {% endif %}
+        
+        <div class="back-link">
+            <a href="{{ url_for('admin_dashboard') }}">← Back to Dashboard</a>
+        </div>
+    </div>
+    
+    <script>
+        // Format MFA code input (only allow digits)
+        const codeInput = document.getElementById('code');
+        if (codeInput) {
+            codeInput.addEventListener('input', function(e) {
+                e.target.value = e.target.value.replace(/\D/g, '');
+            });
+        }
+    </script>
+</body>
+</html>
