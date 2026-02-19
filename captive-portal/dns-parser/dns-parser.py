@@ -34,6 +34,8 @@ class DNSParser:
         self.db_conn = None
         self.last_position = 0
         self.last_cleanup = None
+        # CNAME chain tracking: pid -> (original_domain, timestamp)
+        self.cname_pending = {}
         
     def connect_db(self):
         """Connect to PostgreSQL database"""
@@ -52,8 +54,12 @@ class DNSParser:
         - Query: dnsmasq[123]: query[A] example.com from 192.168.10.5
         - Reply: dnsmasq[123]: reply example.com is 93.184.216.34
         
-        Returns: (domain, ip) or None
+        Returns: ('resolve', pid, domain, ip), ('forward', pid, domain), or None
         """
+        # Extract dnsmasq process ID — same PID = same DNS query
+        pid_match = re.search(r'dnsmasq\[(\d+)\]:', line)
+        pid = pid_match.group(1) if pid_match else None
+
         # Match reply lines: "reply domain is IP" (IPv4 only)
         reply_match = re.search(r'reply\s+(\S+)\s+is\s+(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?:\s|$)', line)
         if reply_match:
@@ -66,8 +72,15 @@ class DNSParser:
             if ip.startswith('127.') or ip.startswith('0.'):
                 return None
                 
-            return (domain, ip)
-        
+            return ('resolve', pid, domain, ip)
+
+        # Match forwarded lines — this is the original (pre-CNAME) query domain
+        forward_match = re.search(r'forwarded\s+(\S+)\s+to\s+', line)
+        if forward_match and pid:
+            domain = forward_match.group(1)
+            if not domain.startswith('.'):
+                return ('forward', pid, domain)
+
         return None
     
     def store_dns_resolution(self, domain: str, ip: str):
@@ -143,8 +156,27 @@ class DNSParser:
                     
                     result = self.parse_dns_line(line)
                     if result:
-                        domain, ip = result
-                        self.store_dns_resolution(domain, ip)
+                        if result[0] == 'forward':
+                            _, pid, domain = result
+                            # Remember original query domain for this PID
+                            self.cname_pending[pid] = (domain, datetime.now())
+                        elif result[0] == 'resolve':
+                            _, pid, domain, ip = result
+                            self.store_dns_resolution(domain, ip)
+                            # If we tracked a forwarded query for this PID,
+                            # also record the original (pre-CNAME) domain → same IP
+                            if pid and pid in self.cname_pending:
+                                orig_domain, _ = self.cname_pending.pop(pid)
+                                if orig_domain != domain:
+                                    self.store_dns_resolution(orig_domain, ip)
+
+                # Purge stale pending entries (older than 60s) to avoid memory growth
+                cutoff = datetime.now()
+                self.cname_pending = {
+                    pid: (dom, ts)
+                    for pid, (dom, ts) in self.cname_pending.items()
+                    if (cutoff - ts).total_seconds() < 60
+                }
                 
                 self.last_position = f.tell()
         

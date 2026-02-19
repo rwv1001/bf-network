@@ -31,6 +31,7 @@ STALE_LOG_THRESHOLD_SECONDS = int(os.getenv("STALE_LOG_THRESHOLD_SECONDS", "3600
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "5"))
 REINSTALL_COOLDOWN_SECONDS = int(os.getenv("REINSTALL_COOLDOWN_SECONDS", "300"))
 RETENTION_DAYS = int(os.getenv("RETENTION_DAYS", "90"))
+FLUSH_INTERVAL_SECONDS = int(os.getenv("FLUSH_INTERVAL_SECONDS", "15"))
 
 # Logging setup
 logging.basicConfig(
@@ -48,6 +49,7 @@ class NATParser:
         self.last_reinstall_attempt = None
         self.last_cleanup = None
         self.last_device_ip_sync = None
+        self.last_flush = None
         self.active_sessions = {}  # (src_ip, src_port, dst_ip, dst_port) -> session_data
         self.seen_ips = set()  # Track IPs we've seen to trigger updates
         
@@ -138,20 +140,40 @@ class NATParser:
         self.seen_ips.add(src_ip)
         logger.debug(f"Added {src_ip} to seen_ips (total: {len(self.seen_ips)})")
     
+    def _get_switch_ifaces(self, src_ips):
+        """Batch-lookup current switch_iface for a set of src IPs.
+        Returns dict of {ip_str: switch_iface_or_None}."""
+        if not src_ips:
+            return {}
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT ip_address, switch_iface FROM devices "
+                    "WHERE ip_address = ANY(%s) AND switch_iface IS NOT NULL",
+                    (list(src_ips),)
+                )
+                return {row[0]: row[1] for row in cur.fetchall()}
+        except Exception as e:
+            logger.debug(f"switch_iface lookup failed: {e}")
+            return {}
+
     def _close_session(self, session_key, session):
         """Close a session and write to database"""
         try:
+            iface_map = self._get_switch_ifaces({session['src_ip']})
+            switch_iface = iface_map.get(session['src_ip'])
             with self.db_conn.cursor() as cur:
                 # Use INSERT ... ON CONFLICT to handle duplicates gracefully
                 # If the same session already exists, update it with the latest end time and packet count
                 cur.execute("""
                     INSERT INTO nat_sessions 
-                    (src_ip, src_port, dst_ip, dst_port, session_start, session_end, packet_count)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    (src_ip, src_port, dst_ip, dst_port, session_start, session_end, packet_count, switch_iface)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (src_ip, src_port, dst_ip, dst_port, session_start)
                     DO UPDATE SET
                         session_end = EXCLUDED.session_end,
-                        packet_count = EXCLUDED.packet_count
+                        packet_count = EXCLUDED.packet_count,
+                        switch_iface = COALESCE(nat_sessions.switch_iface, EXCLUDED.switch_iface)
                 """, (
                     session['src_ip'],
                     session['src_port'],
@@ -159,7 +181,8 @@ class NATParser:
                     session['dst_port'],
                     session['start'],
                     session['last_seen'],
-                    session['packet_count']
+                    session['packet_count'],
+                    switch_iface
                 ))
             self.db_conn.commit()
             
@@ -290,6 +313,40 @@ class NATParser:
             logger.error(f"Failed to parse Kea leases file: {e}")
             return {}
     
+    def flush_active_sessions(self):
+        """Upsert all in-progress sessions to DB without closing them.
+        This makes them visible in the Traffic Viewer while still ongoing."""
+        if not self.active_sessions:
+            return
+        now = datetime.now()
+        if self.last_flush and (now - self.last_flush).total_seconds() < FLUSH_INTERVAL_SECONDS:
+            return
+        self.last_flush = now
+        try:
+            iface_map = self._get_switch_ifaces({s['src_ip'] for s in self.active_sessions.values()})
+            with self.db_conn.cursor() as cur:
+                for session in self.active_sessions.values():
+                    switch_iface = iface_map.get(session['src_ip'])
+                    cur.execute("""
+                        INSERT INTO nat_sessions
+                        (src_ip, src_port, dst_ip, dst_port, session_start, session_end, packet_count, switch_iface)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (src_ip, src_port, dst_ip, dst_port, session_start)
+                        DO UPDATE SET
+                            session_end = EXCLUDED.session_end,
+                            packet_count = EXCLUDED.packet_count,
+                            switch_iface = COALESCE(nat_sessions.switch_iface, EXCLUDED.switch_iface)
+                    """, (
+                        session['src_ip'], session['src_port'],
+                        session['dst_ip'], session['dst_port'],
+                        session['start'], session['last_seen'],
+                        session['packet_count'], switch_iface
+                    ))
+            self.db_conn.commit()
+            logger.debug(f"Flushed {len(self.active_sessions)} active sessions to DB")
+        except Exception as e:
+            logger.error(f"Error flushing active sessions: {e}")
+
     def close_stale_sessions(self):
         """Close sessions that haven't seen activity recently"""
         current_time = datetime.now()
@@ -515,7 +572,10 @@ class NATParser:
             while True:
                 # Process new log entries
                 self.process_log_file()
-                
+
+                # Flush active sessions to DB so Traffic Viewer shows them live
+                self.flush_active_sessions()
+
                 # Update device IPs based on recently seen traffic
                 self.update_device_ips()
                 

@@ -16,6 +16,10 @@
 #include <sstream>
 #include <string>
 #include <map>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 
 using namespace isc::hooks;
 using namespace isc::dhcp;
@@ -237,6 +241,63 @@ bool is_blocked_host(const ConstHostPtr& host) {
     return false;
 }
 
+// Helper: fire-and-forget switch port lookup.
+// Uses a double-fork so Kea never needs to waitpid() for the grandchild,
+// and SIGCHLD is never touched - avoiding interference with system() calls
+// elsewhere in the hook.
+// Gated by SWITCH_PORT_LOOKUP_ENABLED=1 env var (default off).
+void spawn_port_lookup(const std::string& mac_colon) {
+    const char* enabled = std::getenv("SWITCH_PORT_LOOKUP_ENABLED");
+    if (!enabled || std::string(enabled) != "1") {
+        return;
+    }
+
+    std::cout << "DNS Hijack Hook: Spawning port lookup for MAC " << mac_colon << std::endl;
+    std::cout.flush();
+
+    // Double-fork: first child exits immediately so Kea can waitpid() it
+    // right away with no delay; grandchild runs the script detached.
+    pid_t pid = fork();
+    if (pid < 0) {
+        std::cerr << "DNS Hijack Hook: port lookup fork failed: " << std::strerror(errno) << std::endl;
+        return;
+    }
+    if (pid == 0) {
+        // --- First child ---
+        pid_t pid2 = fork();
+        if (pid2 != 0) {
+            // First child exits immediately (pid2 > 0) or on error (pid2 < 0).
+            _exit(0);
+        }
+        // --- Grandchild: detach and exec the script ---
+        setsid();
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) {
+            dup2(devnull, STDIN_FILENO);
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            if (devnull > STDERR_FILENO) close(devnull);
+        }
+        // Close any other inherited fds
+        for (int fd = 3; fd < 256; fd++) close(fd);
+
+        static char mac_arg[64];
+        std::strncpy(mac_arg, mac_colon.c_str(), sizeof(mac_arg) - 1);
+        mac_arg[sizeof(mac_arg) - 1] = '\0';
+        char* const args[] = {
+            const_cast<char*>("/scripts/hp5130-port-lookup.sh"),
+            mac_arg,
+            nullptr
+        };
+        execv("/scripts/hp5130-port-lookup.sh", args);
+        _exit(127);
+    }
+    // Parent: wait for first child (exits instantly), then return.
+    // This reaps the first child immediately - no zombies, no SIGCHLD games.
+    int status;
+    waitpid(pid, &status, 0);
+}
+
 int lease4_select(CalloutHandle& handle) {
     try {
         // Get the lease that was selected
@@ -258,6 +319,9 @@ int lease4_select(CalloutHandle& handle) {
             handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
             return 0;
         }
+
+        // Async switch port lookup (non-blocking; result written to mac_port_cache)
+        spawn_port_lookup(hwaddr->toText(false));
         
         // Get the allocated IP address
         std::string ip_address = lease->addr_.toText();
@@ -383,6 +447,9 @@ int lease4_renew(CalloutHandle& handle) {
             handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
             return 0;
         }
+
+        // Async switch port lookup (non-blocking; result written to mac_port_cache)
+        spawn_port_lookup(hwaddr->toText(false));
         
         std::cout << "DNS Hijack Hook: [DEBUG] Converting IP to text" << std::endl;
         std::cout.flush();

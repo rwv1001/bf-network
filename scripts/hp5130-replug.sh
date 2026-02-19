@@ -158,22 +158,27 @@ fi
 log "DIRECT_RUN mac=$MAC_NORM delay=$DELAY_SEC"
 log "SSH_LOOKUP_OPTS tty=$SSH_TTY_FLAG opts=$SSH_OPTS user=$SWITCH_USER host=$SWITCH_HOST"
 
-LOOKUP_CMD="display mac-address | include $MAC_LOOKUP"
-log "LOOKUP_BEGIN mac=$MAC_NORM cmd=$LOOKUP_CMD"
-set +e
-LOOKUP_OUT=$(printf '%s\nquit\n' "$LOOKUP_CMD" | ssh $SSH_TTY_FLAG $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}" 2>&1)
-LOOKUP_STATUS=$?
-set -e
-log "LOOKUP_DONE mac=$MAC_NORM status=$LOOKUP_STATUS"
-printf '%s' "$LOOKUP_OUT" \
-  | tr '\r' '\n' \
-  | sed -E 's/;+$/;/; s/;+/\n/g' \
-  | while IFS= read -r line; do
-      [ -n "$line" ] && log "LOOKUP_OUT $line"
-    done
+# ---- DB cache lookup (fast path) ----------------------------------------
+REPLUG_DB_CONTAINER="${REPLUG_DB_CONTAINER:-captive-portal-db}"
+REPLUG_DB_USER="${REPLUG_DB_USER:-portal_user}"
+REPLUG_DB_NAME="${REPLUG_DB_NAME:-captive_portal}"
+REPLUG_DB_CACHE_TTL="${REPLUG_DB_CACHE_TTL:-900}"  # seconds, default 15 min
+MAC_COLON="$(echo "$MAC_NORM" | tr 'A-F' 'a-f' | tr '-' ':')"
+IFACE=""
+if command -v docker >/dev/null 2>&1; then
+  CACHE_IFACE=$(docker exec "$REPLUG_DB_CONTAINER" psql -U "$REPLUG_DB_USER" -d "$REPLUG_DB_NAME" -tAc \
+    "SELECT switch_iface FROM mac_port_cache WHERE mac_address = '${MAC_COLON}' AND last_seen > NOW() - INTERVAL '${REPLUG_DB_CACHE_TTL} seconds' LIMIT 1" \
+    2>/dev/null | tr -d ' \n\r' || true)
+  if [ -n "$CACHE_IFACE" ]; then
+    IFACE="$(expand_iface "$CACHE_IFACE")"
+    log "LOOKUP_IFACE_CACHED mac=$MAC_NORM iface=$IFACE"
+  fi
+fi
+# ---- end DB cache lookup --------------------------------------------------
 
-if [ -z "$LOOKUP_OUT" ]; then
-  LOOKUP_CMD="display mac-address dynamic | include $MAC_LOOKUP"
+# Only fall through to live SSH lookup if cache did not give us an interface
+if [ -z "$IFACE" ]; then
+  LOOKUP_CMD="display mac-address | include $MAC_LOOKUP"
   log "LOOKUP_BEGIN mac=$MAC_NORM cmd=$LOOKUP_CMD"
   set +e
   LOOKUP_OUT=$(printf '%s\nquit\n' "$LOOKUP_CMD" | ssh $SSH_TTY_FLAG $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}" 2>&1)
@@ -186,25 +191,53 @@ if [ -z "$LOOKUP_OUT" ]; then
     | while IFS= read -r line; do
         [ -n "$line" ] && log "LOOKUP_OUT $line"
       done
-fi
 
-MAC_NO_DASH=$(echo "$MAC_NORM" | tr -d '-')
-IFACE=$(printf '%s\n' "$LOOKUP_OUT" | awk -v mac="$MAC_NO_DASH" '
-  {
-    field = toupper($1);
-    gsub(/[-]/, "", field);
-    if (field == mac) {
-      print $4;
-      exit;
+  if [ -z "$LOOKUP_OUT" ]; then
+    LOOKUP_CMD="display mac-address dynamic | include $MAC_LOOKUP"
+    log "LOOKUP_BEGIN mac=$MAC_NORM cmd=$LOOKUP_CMD"
+    set +e
+    LOOKUP_OUT=$(printf '%s\nquit\n' "$LOOKUP_CMD" | ssh $SSH_TTY_FLAG $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}" 2>&1)
+    LOOKUP_STATUS=$?
+    set -e
+    log "LOOKUP_DONE mac=$MAC_NORM status=$LOOKUP_STATUS"
+    printf '%s' "$LOOKUP_OUT" \
+      | tr '\r' '\n' \
+      | sed -E 's/;+$/;/; s/;+/\n/g' \
+      | while IFS= read -r line; do
+          [ -n "$line" ] && log "LOOKUP_OUT $line"
+        done
+  fi
+
+  MAC_NO_DASH=$(echo "$MAC_NORM" | tr -d '-')
+  IFACE=$(printf '%s\n' "$LOOKUP_OUT" | awk -v mac="$MAC_NO_DASH" '
+    {
+      field = toupper($1);
+      gsub(/[-]/, "", field);
+      if (field == mac) {
+        print $4;
+        exit;
+      }
     }
-  }
-')
-IFACE=$(expand_iface "$IFACE")
-log "LOOKUP_IFACE mac=$MAC_NORM iface=$IFACE"
+  ')
+  IFACE=$(expand_iface "$IFACE")
+  log "LOOKUP_IFACE mac=$MAC_NORM iface=$IFACE"
+fi  # end SSH live lookup
 
 if [ -z "$IFACE" ]; then
   echo "Unable to locate interface for $MAC_NORM" >&2
   exit 3
+fi
+
+# Persist live SSH result to DB cache so future lookups skip SSH
+if [ -z "$CACHE_IFACE" ] && command -v docker >/dev/null 2>&1; then
+  docker exec "$REPLUG_DB_CONTAINER" psql -U "$REPLUG_DB_USER" -d "$REPLUG_DB_NAME" -c \
+    "INSERT INTO mac_port_cache (mac_address, switch_iface, switch_host, last_seen)
+     VALUES ('${MAC_COLON}', '${IFACE}', '${SWITCH_HOST}', NOW())
+     ON CONFLICT (mac_address) DO UPDATE SET
+       switch_iface = EXCLUDED.switch_iface, switch_host = EXCLUDED.switch_host, last_seen = EXCLUDED.last_seen;
+     UPDATE devices SET switch_iface = '${IFACE}', switch_iface_seen_at = NOW() WHERE mac_address = '${MAC_COLON}';" \
+    2>/dev/null || true
+  log "CACHE_UPDATED mac=$MAC_NORM iface=$IFACE"
 fi
 
 CMDS_DOWN=$(cat <<EOF

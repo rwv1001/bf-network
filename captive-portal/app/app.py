@@ -1862,6 +1862,43 @@ def _find_switch_port_for_mac(client, mac_address):
     return None
 
 
+def _persist_switch_port(mac_address, iface):
+    """Persist a confirmed switch port->MAC mapping at registration time.
+    Updates both mac_port_cache (all devices) and devices.switch_iface."""
+    if not mac_address or not iface:
+        return
+    try:
+        switch_host = os.getenv('SWITCH_HOST', '')
+        db.session.execute(
+            text("""
+                INSERT INTO mac_port_cache (mac_address, switch_iface, switch_host, last_seen)
+                VALUES (:mac, :iface, :host, NOW())
+                ON CONFLICT (mac_address) DO UPDATE SET
+                    switch_iface = EXCLUDED.switch_iface,
+                    switch_host  = EXCLUDED.switch_host,
+                    last_seen    = EXCLUDED.last_seen
+            """),
+            {"mac": mac_address, "iface": iface, "host": switch_host},
+        )
+        db.session.execute(
+            text("""
+                UPDATE devices
+                SET switch_iface = :iface,
+                    switch_iface_seen_at = NOW()
+                WHERE mac_address = :mac
+            """),
+            {"iface": iface, "mac": mac_address},
+        )
+        db.session.commit()
+        logger.info("Cached switch port %s for %s", iface, mac_address)
+    except Exception as exc:
+        logger.warning("Failed to persist switch port for %s: %s", mac_address, exc)
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+
+
 def replug_switch_port_for_mac(mac_address):
     if not _env_truthy('SWITCH_REPLUG_ENABLED', False):
         logger.info("Switch replug disabled; skipping for %s", mac_address)
@@ -1906,6 +1943,8 @@ def replug_switch_port_for_mac(mac_address):
         if not _switch_port_allowed(port):
             logger.warning("Switch replug blocked for port %s", port)
             return False
+
+        _persist_switch_port(mac_address, port)
 
         delay_raw = os.getenv('SWITCH_REPLUG_DELAY_SEC', '3')
         try:
@@ -4767,6 +4806,7 @@ def admin_traffic():
         ('dns_query_count', 'DNS Queries'),
         ('packet_count', 'Packets'),
         ('duration_seconds', 'Duration (s)'),
+        ('switch_iface', 'Switch Port'),
     ]
     
     valid_column_names = {col[0] for col in ALL_COLUMNS}

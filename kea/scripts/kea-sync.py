@@ -13,13 +13,14 @@ The three-pool strategy:
 
 import os
 import sys
+import re
 import json
 import time
 import logging
 import requests
 import psycopg2
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 # Configuration
 DB_CONFIG = {
@@ -32,6 +33,16 @@ DB_CONFIG = {
 
 KEA_CONTROL_SOCKET = os.getenv('KEA_CONTROL_SOCKET', '/tmp/kea-dhcp4.sock')
 SYNC_INTERVAL = int(os.getenv('SYNC_INTERVAL', '60'))  # seconds
+
+# Switch configuration for port lookup
+SWITCH_HOST     = os.getenv('SWITCH_HOST', '')
+SWITCH_USER     = os.getenv('SWITCH_USER', 'admin')
+SWITCH_KEY_PATH = os.getenv('SWITCH_KEY_PATH', '/keys/id_rsa')
+SWITCH_PASS     = os.getenv('SWITCH_PASS', '')
+SWITCH_SSH_PORT = int(os.getenv('SWITCH_SSH_PORT', '22'))
+SWITCH_PORT_SYNC_ENABLED = os.getenv('SWITCH_PORT_SYNC_ENABLED', '1') not in ('0', 'false', 'no')
+SWITCH_REPLUG_DENY_PATTERN   = os.getenv('SWITCH_REPLUG_DENY_PATTERN', '')
+SWITCH_REPLUG_ALLOWED_PREFIXES = os.getenv('SWITCH_REPLUG_ALLOWED_PREFIXES', 'GigabitEthernet,GE')
 
 # Logging
 logging.basicConfig(
@@ -301,12 +312,12 @@ class KeaSync:
             return True
     
     def sync_all(self):
-        """Synchronize all devices with Kea"""
+        """Synchronize all devices with Kea, then update switch port mappings."""
         logger.info("Starting synchronization...")
-        
+
         devices = self.get_devices_needing_update()
         logger.info(f"Found {len(devices)} devices to process")
-        
+
         success_count = 0
         for device in devices:
             try:
@@ -314,8 +325,166 @@ class KeaSync:
                     success_count += 1
             except Exception as e:
                 logger.error(f"Error syncing device {device['mac']}: {e}")
-        
+
         logger.info(f"Synchronization complete: {success_count}/{len(devices)} successful")
+
+        if SWITCH_PORT_SYNC_ENABLED and SWITCH_HOST:
+            self.sync_switch_ports()
+        elif SWITCH_PORT_SYNC_ENABLED and not SWITCH_HOST:
+            logger.debug("Switch port sync skipped: SWITCH_HOST not configured")
+
+    # ------------------------------------------------------------------
+    # Switch port mapping
+    # ------------------------------------------------------------------
+
+    def _switch_port_allowed(self, iface: str) -> bool:
+        if SWITCH_REPLUG_DENY_PATTERN and re.search(SWITCH_REPLUG_DENY_PATTERN, iface):
+            return False
+        allowed = [p.strip() for p in SWITCH_REPLUG_ALLOWED_PREFIXES.split(',') if p.strip()]
+        if not allowed:
+            return True
+        return any(iface.startswith(p) for p in allowed)
+
+    def _expand_iface(self, iface: str) -> str:
+        if iface.startswith('GE') and not iface.startswith('GigabitEthernet'):
+            return 'GigabitEthernet' + iface[2:]
+        if iface.startswith('XGE') and not iface.startswith('Ten-GigabitEthernet'):
+            return 'Ten-GigabitEthernet' + iface[3:]
+        return iface
+
+    def _normalize_to_colon(self, raw: str) -> Optional[str]:
+        cleaned = re.sub(r'[^0-9a-fA-F]', '', raw).lower()
+        if len(cleaned) != 12:
+            return None
+        return ':'.join(cleaned[i:i+2] for i in range(0, 12, 2))
+
+    def _fetch_switch_mac_table(self) -> str:
+        """SSH to the switch and return raw 'display mac-address' output."""
+        try:
+            import paramiko
+        except ImportError:
+            logger.warning("paramiko not installed; switch port sync disabled")
+            return ''
+
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        kwargs = dict(
+            hostname=SWITCH_HOST,
+            port=SWITCH_SSH_PORT,
+            username=SWITCH_USER,
+            look_for_keys=False,
+            allow_agent=False,
+            timeout=15,
+            disabled_algorithms={'pubkeys': ['rsa-sha2-512', 'rsa-sha2-256']},
+        )
+        if SWITCH_KEY_PATH and os.path.isfile(SWITCH_KEY_PATH):
+            kwargs['key_filename'] = SWITCH_KEY_PATH
+        elif SWITCH_PASS:
+            kwargs['password'] = SWITCH_PASS
+        else:
+            logger.warning("Switch port sync: no key or password configured")
+            return ''
+        try:
+            client.connect(**kwargs)
+            chan = client.invoke_shell()
+            time.sleep(0.5)
+            if chan.recv_ready():
+                chan.recv(65535)  # drain banner
+            chan.send('display mac-address\n')
+            buf = ''
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                if chan.recv_ready():
+                    chunk = chan.recv(65535).decode('utf-8', errors='ignore')
+                    buf += chunk
+                    while '---- More ----' in buf or '-- More --' in buf:
+                        chan.send(' ')
+                        time.sleep(0.5)
+                        if chan.recv_ready():
+                            buf += chan.recv(65535).decode('utf-8', errors='ignore')
+                else:
+                    time.sleep(0.3)
+            chan.close()
+            return buf
+        except Exception as exc:
+            logger.warning("Switch MAC table fetch failed: %s", exc)
+            return ''
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+    def _parse_switch_mac_table(self, output: str) -> List[Dict]:
+        """Parse 'display mac-address' output into list of {mac_colon, switch_iface, vlan_id}."""
+        iface_re = re.compile(
+            r'\b(?P<iface>(?:GigabitEthernet|Ten-GigabitEthernet|GE|XGE|Ethernet|Bridge-Aggregation)\S+)\b',
+            re.IGNORECASE,
+        )
+        mac_re  = re.compile(r'\b([0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4})\b', re.IGNORECASE)
+        vlan_re = re.compile(r'\b(\d{1,4})\b')
+        entries = []
+        for line in output.splitlines():
+            line = line.strip()
+            mm = mac_re.search(line)
+            im = iface_re.search(line)
+            if not mm or not im:
+                continue
+            mac_colon = self._normalize_to_colon(mm.group(1))
+            if not mac_colon:
+                continue
+            iface = self._expand_iface(im.group('iface'))
+            if not self._switch_port_allowed(iface):
+                continue
+            stripped = mac_re.sub('', iface_re.sub('', line))
+            vlan_id = None
+            vm = vlan_re.search(stripped)
+            if vm:
+                cand = int(vm.group(1))
+                if 1 <= cand <= 4094:
+                    vlan_id = cand
+            entries.append({'mac_colon': mac_colon, 'switch_iface': iface, 'vlan_id': vlan_id})
+        return entries
+
+    def sync_switch_ports(self):
+        """Fetch full switch MAC table and update mac_port_cache + devices.switch_iface."""
+        logger.info("Switch port sync: fetching MAC table from %s", SWITCH_HOST)
+        raw = self._fetch_switch_mac_table()
+        if not raw:
+            logger.warning("Switch port sync: empty output, skipping")
+            return
+        entries = self._parse_switch_mac_table(raw)
+        logger.info("Switch port sync: parsed %d entries", len(entries))
+        if not entries:
+            return
+        try:
+            cur = self.db_conn.cursor()
+            upsert_cache = """
+                INSERT INTO mac_port_cache (mac_address, switch_iface, switch_host, vlan_id, last_seen)
+                VALUES (%s, %s, %s, %s, NOW())
+                ON CONFLICT (mac_address) DO UPDATE SET
+                    switch_iface = EXCLUDED.switch_iface,
+                    switch_host  = EXCLUDED.switch_host,
+                    vlan_id      = EXCLUDED.vlan_id,
+                    last_seen    = EXCLUDED.last_seen
+            """
+            update_device = """
+                UPDATE devices
+                SET switch_iface = %s, switch_iface_seen_at = NOW()
+                WHERE mac_address = %s
+            """
+            cache_rows  = [(e['mac_colon'], e['switch_iface'], SWITCH_HOST, e['vlan_id']) for e in entries]
+            device_rows = [(e['switch_iface'], e['mac_colon']) for e in entries]
+            cur.executemany(upsert_cache, cache_rows)
+            cur.executemany(update_device, device_rows)
+            self.db_conn.commit()
+            logger.info("Switch port sync: upserted %d cache rows", len(entries))
+        except Exception as exc:
+            logger.error("Switch port sync DB update failed: %s", exc)
+            try:
+                self.db_conn.rollback()
+            except Exception:
+                pass
     
     def run(self):
         """Main loop"""
