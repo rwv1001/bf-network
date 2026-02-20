@@ -663,6 +663,13 @@ def add_cors_headers(response):
 KEA_SOCKET = os.getenv('KEA_CONTROL_SOCKET', '/kea/leases/kea4-ctrl-socket')
 kea_client = None
 
+# Cache for per-device Kea reservation self-healing checks.
+# Prevents repeated reservation-get calls from captive portal detection probes.
+# Key: (mac, vlan_id), Value: last-check epoch float
+_kea_reservation_check_cache: dict = {}
+_kea_reservation_check_lock = threading.Lock()
+KEA_RESERVATION_CHECK_TTL_SEC = int(os.getenv('KEA_RESERVATION_CHECK_TTL_SEC', '300'))
+
 # Initialize login manager
 login_manager = LoginManager()
 login_manager.init_app(app)
@@ -2309,26 +2316,36 @@ def register():
                         manage_switch_acl('unblock', current_ip, current_vlan or device.current_vlan)
 
                 if current_connection == 'wifi' and device.current_vlan:
-                    kea = get_kea()
-                    if kea:
-                        try:
-                            reservation = kea.get_reservation(device.mac_address, device.current_vlan)
-                            if not reservation:
-                                hostname = device.device_name or 'device'
-                                success = kea.register_mac(
-                                    mac=device.mac_address,
-                                    vlan=device.current_vlan,
-                                    hostname=hostname,
-                                    ip_address=None,
+                    _cache_key = (device.mac_address, device.current_vlan)
+                    _now = time.monotonic()
+                    with _kea_reservation_check_lock:
+                        _last = _kea_reservation_check_cache.get(_cache_key, 0)
+                        _due = (_now - _last) >= KEA_RESERVATION_CHECK_TTL_SEC
+                        if _due:
+                            _kea_reservation_check_cache[_cache_key] = _now
+                    if _due:
+                        kea = get_kea()
+                        if kea:
+                            try:
+                                reservation = kea.get_reservation(device.mac_address, device.current_vlan)
+                                if not reservation:
+                                    hostname = device.device_name or 'device'
+                                    success = kea.register_mac(
+                                        mac=device.mac_address,
+                                        vlan=device.current_vlan,
+                                        hostname=hostname,
+                                        ip_address=None,
+                                    )
+                                    if success and current_ip:
+                                        kea.force_lease_renewal(device.mac_address, current_ip)
+                            except Exception as exc:
+                                with _kea_reservation_check_lock:
+                                    _kea_reservation_check_cache.pop(_cache_key, None)
+                                logger.warning(
+                                    "Kea reservation check failed for %s: %s",
+                                    device.mac_address,
+                                    exc,
                                 )
-                                if success and current_ip:
-                                    kea.force_lease_renewal(device.mac_address, current_ip)
-                        except Exception as exc:
-                            logger.warning(
-                                "Kea registration check failed for %s: %s",
-                                device.mac_address,
-                                exc,
-                            )
 
                 clear_unregistered_lease(device.mac_address)
 
@@ -3473,22 +3490,32 @@ def registration_status():
                     manage_switch_acl('unblock', current_ip, current_vlan)
 
                 if current_connection == 'wifi' and device.current_vlan:
-                    kea = get_kea()
-                    if kea:
-                        try:
-                            reservation = kea.get_reservation(device.mac_address, device.current_vlan)
-                            if not reservation:
-                                hostname = device.device_name or 'device'
-                                success = kea.register_mac(
-                                    mac=device.mac_address,
-                                    vlan=device.current_vlan,
-                                    hostname=hostname,
-                                    ip_address=None,
-                                )
-                                if success:
-                                    kea.force_lease_renewal(device.mac_address, current_ip)
-                        except Exception as exc:
-                            logger.warning("Kea registration check failed for %s: %s", device.mac_address, exc)
+                    _cache_key = (device.mac_address, device.current_vlan)
+                    _now = time.monotonic()
+                    with _kea_reservation_check_lock:
+                        _last = _kea_reservation_check_cache.get(_cache_key, 0)
+                        _due = (_now - _last) >= KEA_RESERVATION_CHECK_TTL_SEC
+                        if _due:
+                            _kea_reservation_check_cache[_cache_key] = _now
+                    if _due:
+                        kea = get_kea()
+                        if kea:
+                            try:
+                                reservation = kea.get_reservation(device.mac_address, device.current_vlan)
+                                if not reservation:
+                                    hostname = device.device_name or 'device'
+                                    success = kea.register_mac(
+                                        mac=device.mac_address,
+                                        vlan=device.current_vlan,
+                                        hostname=hostname,
+                                        ip_address=None,
+                                    )
+                                    if success:
+                                        kea.force_lease_renewal(device.mac_address, current_ip)
+                            except Exception as exc:
+                                with _kea_reservation_check_lock:
+                                    _kea_reservation_check_cache.pop(_cache_key, None)
+                                logger.warning("Kea reservation check failed for %s: %s", device.mac_address, exc)
 
                 clear_unregistered_lease(device.mac_address)
         response = jsonify({

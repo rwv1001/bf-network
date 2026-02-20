@@ -2,7 +2,7 @@
 
 home_server hp5130_coa {
   type   = coa
-  ipaddr = 192.168.99.1     # HP 5130 SVI (the NAS-IP you target)
+  ipaddr = 192.168.99.2     # HP 5130 SVI (the NAS-IP you target)
   port   = 3799
   secret = ${RADIUS_SECRET} # must match the switch's "radius dynamic-author ... key"
 }

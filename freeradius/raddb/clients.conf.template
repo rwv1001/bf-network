@@ -3,7 +3,7 @@
 
 # HP 5130 switch - MAC authentication
 client hp5130-switch {
-	ipaddr = 192.168.99.1
+	ipaddr = 192.168.99.2
 	secret = ${RADIUS_SECRET}
 	shortname = hp5130
 	nas_type = other
