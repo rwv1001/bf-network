@@ -39,6 +39,7 @@ services:
       sh -c '
       rm -f /usr/local/var/run/kea/dhcp4.kea-dhcp4.pid
       mkdir -p /usr/local/var/run/kea
+      ln -sfn /usr/local/var/run/kea /run/kea
       mkdir -p /kea/sockets
       chown -R 0:1000 /kea/sockets || true
       chmod 750 /kea/sockets || true
