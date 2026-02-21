@@ -16,12 +16,13 @@ services:
       - ../kea-hooks/dynamic_subnet/dhcp_dns_hijack.so:/usr/local/lib/kea/hooks/dhcp_dns_hijack.so:ro
       - /home/admin/.ssh:/keys:ro
     environment:
-      SWITCH_HOST: ${SWITCH_HOST:-192.168.1.3}
+      SWITCH_HOST: 192.168.99.2
+      SWITCH_HOSTS: "192.168.99.2 192.168.99.3"
       SWITCH_USER: ${SWITCH_USER:-robert}
       SWITCH_SSH_PORT: ${SWITCH_SSH_PORT:-22}
       SWITCH_KEY_PATH: ${SWITCH_KEY_PATH:-/keys/id_rsa}
       # Set to "1" to enable async switch port lookup on every DHCP lease/renew
-      SWITCH_PORT_LOOKUP_ENABLED: ${SWITCH_PORT_LOOKUP_ENABLED:-0}
+      SWITCH_PORT_LOOKUP_ENABLED: "1"
       # How long (seconds) a cached port entry is considered fresh (skip SSH re-query)
       SWITCH_PORT_LOOKUP_CACHE_TTL: ${SWITCH_PORT_LOOKUP_CACHE_TTL:-120}
       LFC_INTERVAL: "300"

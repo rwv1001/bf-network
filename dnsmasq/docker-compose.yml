@@ -1,7 +1,9 @@
 services:
   # Normal DNSmasq - serves 192.168.99.4 for registered devices and VLAN 99 wired
   dnsmasq-normal:
-    image: 4km3/dnsmasq:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: dnsmasq-normal
     network_mode: host
     restart: unless-stopped

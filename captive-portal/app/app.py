@@ -4834,6 +4834,8 @@ def admin_traffic():
         ('packet_count', 'Packets'),
         ('duration_seconds', 'Duration (s)'),
         ('switch_iface', 'Switch Port'),
+        ('src_mac', 'MAC Address'),
+        ('switch_host', 'Switch IP'),
     ]
     
     valid_column_names = {col[0] for col in ALL_COLUMNS}

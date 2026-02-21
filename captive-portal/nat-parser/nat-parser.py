@@ -140,40 +140,70 @@ class NATParser:
         self.seen_ips.add(src_ip)
         logger.debug(f"Added {src_ip} to seen_ips (total: {len(self.seen_ips)})")
     
-    def _get_switch_ifaces(self, src_ips):
-        """Batch-lookup current switch_iface for a set of src IPs.
-        Returns dict of {ip_str: switch_iface_or_None}."""
+    def _get_port_info_by_ips(self, src_ips):
+        """Batch-lookup port info for a set of src IPs.
+        Uses Kea leases (timestamped IP->MAC) then mac_port_cache (MAC->port+host)
+        so the data reflects what was true when the session was active, not
+        the current device state (which may have changed).
+        Returns dict of {ip_str: {'src_mac': ..., 'switch_iface': ..., 'switch_host': ...}}.
+        """
         if not src_ips:
             return {}
+
+        # Step 1: IP -> MAC via Kea leases file (timestamped)
+        ip_to_mac = self._parse_kea_leases(list(src_ips))
+        if not ip_to_mac:
+            return {}
+
+        # Step 2: MAC -> {switch_iface, switch_host} via mac_port_cache
+        macs = list(ip_to_mac.values())
+        mac_to_port = {}
         try:
             with self.db_conn.cursor() as cur:
                 cur.execute(
-                    "SELECT ip_address, switch_iface FROM devices "
-                    "WHERE ip_address = ANY(%s) AND switch_iface IS NOT NULL",
-                    (list(src_ips),)
+                    "SELECT mac_address, switch_iface, switch_host "
+                    "FROM mac_port_cache WHERE mac_address = ANY(%s)",
+                    (macs,)
                 )
-                return {row[0]: row[1] for row in cur.fetchall()}
+                for row in cur.fetchall():
+                    mac_to_port[row[0]] = {'switch_iface': row[1], 'switch_host': row[2]}
         except Exception as e:
-            logger.debug(f"switch_iface lookup failed: {e}")
-            return {}
+            logger.debug(f"mac_port_cache lookup failed: {e}")
+
+        # Step 3: Combine into IP-keyed result
+        result = {}
+        for ip, mac in ip_to_mac.items():
+            port = mac_to_port.get(mac, {})
+            result[ip] = {
+                'src_mac':     mac,
+                'switch_iface': port.get('switch_iface'),
+                'switch_host':  port.get('switch_host'),
+            }
+        return result
 
     def _close_session(self, session_key, session):
         """Close a session and write to database"""
         try:
-            iface_map = self._get_switch_ifaces({session['src_ip']})
-            switch_iface = iface_map.get(session['src_ip'])
+            port_map = self._get_port_info_by_ips({session['src_ip']})
+            port_info = port_map.get(session['src_ip'], {})
+            src_mac     = port_info.get('src_mac')
+            switch_iface = port_info.get('switch_iface')
+            switch_host  = port_info.get('switch_host')
             with self.db_conn.cursor() as cur:
                 # Use INSERT ... ON CONFLICT to handle duplicates gracefully
                 # If the same session already exists, update it with the latest end time and packet count
                 cur.execute("""
-                    INSERT INTO nat_sessions 
-                    (src_ip, src_port, dst_ip, dst_port, session_start, session_end, packet_count, switch_iface)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO nat_sessions
+                    (src_ip, src_port, dst_ip, dst_port, session_start, session_end,
+                     packet_count, src_mac, switch_iface, switch_host)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (src_ip, src_port, dst_ip, dst_port, session_start)
                     DO UPDATE SET
-                        session_end = EXCLUDED.session_end,
+                        session_end  = EXCLUDED.session_end,
                         packet_count = EXCLUDED.packet_count,
-                        switch_iface = COALESCE(nat_sessions.switch_iface, EXCLUDED.switch_iface)
+                        src_mac      = COALESCE(nat_sessions.src_mac,      EXCLUDED.src_mac),
+                        switch_iface = COALESCE(nat_sessions.switch_iface, EXCLUDED.switch_iface),
+                        switch_host  = COALESCE(nat_sessions.switch_host,  EXCLUDED.switch_host)
                 """, (
                     session['src_ip'],
                     session['src_port'],
@@ -182,7 +212,9 @@ class NATParser:
                     session['start'],
                     session['last_seen'],
                     session['packet_count'],
-                    switch_iface
+                    src_mac,
+                    switch_iface,
+                    switch_host,
                 ))
             self.db_conn.commit()
             
@@ -323,24 +355,30 @@ class NATParser:
             return
         self.last_flush = now
         try:
-            iface_map = self._get_switch_ifaces({s['src_ip'] for s in self.active_sessions.values()})
+            port_map = self._get_port_info_by_ips({s['src_ip'] for s in self.active_sessions.values()})
             with self.db_conn.cursor() as cur:
                 for session in self.active_sessions.values():
-                    switch_iface = iface_map.get(session['src_ip'])
+                    port_info    = port_map.get(session['src_ip'], {})
+                    src_mac      = port_info.get('src_mac')
+                    switch_iface = port_info.get('switch_iface')
+                    switch_host  = port_info.get('switch_host')
                     cur.execute("""
                         INSERT INTO nat_sessions
-                        (src_ip, src_port, dst_ip, dst_port, session_start, session_end, packet_count, switch_iface)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        (src_ip, src_port, dst_ip, dst_port, session_start, session_end,
+                         packet_count, src_mac, switch_iface, switch_host)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (src_ip, src_port, dst_ip, dst_port, session_start)
                         DO UPDATE SET
-                            session_end = EXCLUDED.session_end,
+                            session_end  = EXCLUDED.session_end,
                             packet_count = EXCLUDED.packet_count,
-                            switch_iface = COALESCE(nat_sessions.switch_iface, EXCLUDED.switch_iface)
+                            src_mac      = COALESCE(nat_sessions.src_mac,      EXCLUDED.src_mac),
+                            switch_iface = COALESCE(nat_sessions.switch_iface, EXCLUDED.switch_iface),
+                            switch_host  = COALESCE(nat_sessions.switch_host,  EXCLUDED.switch_host)
                     """, (
                         session['src_ip'], session['src_port'],
                         session['dst_ip'], session['dst_port'],
                         session['start'], session['last_seen'],
-                        session['packet_count'], switch_iface
+                        session['packet_count'], src_mac, switch_iface, switch_host
                     ))
             self.db_conn.commit()
             logger.debug(f"Flushed {len(self.active_sessions)} active sessions to DB")
@@ -482,11 +520,9 @@ class NATParser:
                 cur.execute("""
                     DELETE FROM nat_sessions 
                     WHERE session_end < %s
-                    RETURNING COUNT(*)
                 """, (cutoff_date,))
                 
-                result = cur.fetchone()
-                deleted_count = result[0] if result else 0
+                deleted_count = cur.rowcount
             
             self.db_conn.commit()
             

@@ -18,10 +18,13 @@ elif [ -f "$BASE_DIR/keys/hp5130_id_rsa" ]; then
   DEFAULT_KEY_PATH="$BASE_DIR/keys/hp5130_id_rsa"
 fi
 
-SWITCH_HOST="${SWITCH_HOST:-192.168.1.3}"
+SWITCH_HOST="${SWITCH_HOST:-192.168.99.2}"
+SWITCH_HOSTS="${SWITCH_HOSTS:-$SWITCH_HOST}"
 SWITCH_USER="${SWITCH_USER:-robert}"
 SWITCH_SSH_PORT="${SWITCH_SSH_PORT:-22}"
 SWITCH_KEY_PATH="${SWITCH_KEY_PATH:-$DEFAULT_KEY_PATH}"
+# The switch we will actually SSH to for the port bounce (resolved from cache/lookup)
+REPLUG_TARGET_HOST="$SWITCH_HOST"
 
 QUEUE_BASE="${REPLUG_QUEUE_DIR:-}"
 if [ -z "$QUEUE_BASE" ]; then
@@ -96,13 +99,13 @@ run_ssh() {
   tmp_err=$(mktemp /tmp/ssh_err.XXXXXX)
 
   set +e
-  printf "%s\nquit\n" "$cmds" | ssh $tty_flag $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}" > "$tmp_out" 2> "$tmp_err"
+  printf "%s\nquit\n" "$cmds" | ssh $tty_flag $SSH_OPTS "${SWITCH_USER}@${REPLUG_TARGET_HOST}" > "$tmp_out" 2> "$tmp_err"
   status=$?
   set -e
 
   if [ $status -ne 0 ] && [ "$SSH_TTY_FALLBACK" = "1" ] && [ "$tty_flag" != "-tt" ]; then
     set +e
-    printf "%s\nquit\n" "$cmds" | ssh -tt $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}" > "$tmp_out" 2> "$tmp_err"
+    printf "%s\nquit\n" "$cmds" | ssh -tt $SSH_OPTS "${SWITCH_USER}@${REPLUG_TARGET_HOST}" > "$tmp_out" 2> "$tmp_err"
     status=$?
     set -e
   fi
@@ -166,61 +169,76 @@ REPLUG_DB_CACHE_TTL="${REPLUG_DB_CACHE_TTL:-900}"  # seconds, default 15 min
 MAC_COLON="$(echo "$MAC_NORM" | tr 'A-F' 'a-f' | tr '-' ':')"
 IFACE=""
 if command -v docker >/dev/null 2>&1; then
-  CACHE_IFACE=$(docker exec "$REPLUG_DB_CONTAINER" psql -U "$REPLUG_DB_USER" -d "$REPLUG_DB_NAME" -tAc \
-    "SELECT switch_iface FROM mac_port_cache WHERE mac_address = '${MAC_COLON}' AND last_seen > NOW() - INTERVAL '${REPLUG_DB_CACHE_TTL} seconds' LIMIT 1" \
-    2>/dev/null | tr -d ' \n\r' || true)
+  CACHE_ROW=$(docker exec "$REPLUG_DB_CONTAINER" psql -U "$REPLUG_DB_USER" -d "$REPLUG_DB_NAME" -tAc \
+    "SELECT switch_iface, COALESCE(switch_host, '') FROM mac_port_cache WHERE mac_address = '${MAC_COLON}' AND last_seen > NOW() - INTERVAL '${REPLUG_DB_CACHE_TTL} seconds' LIMIT 1" \
+    2>/dev/null | tr -d ' \r' || true)
+  CACHE_IFACE=$(echo "$CACHE_ROW" | cut -d'|' -f1 | tr -d '\n')
+  CACHE_HOST=$(echo "$CACHE_ROW" | cut -d'|' -f2 | tr -d '\n')
   if [ -n "$CACHE_IFACE" ]; then
     IFACE="$(expand_iface "$CACHE_IFACE")"
-    log "LOOKUP_IFACE_CACHED mac=$MAC_NORM iface=$IFACE"
+    if [ -n "$CACHE_HOST" ]; then
+      REPLUG_TARGET_HOST="$CACHE_HOST"
+    fi
+    log "LOOKUP_IFACE_CACHED mac=$MAC_NORM iface=$IFACE target=$REPLUG_TARGET_HOST"
   fi
 fi
 # ---- end DB cache lookup --------------------------------------------------
 
-# Only fall through to live SSH lookup if cache did not give us an interface
+# Only fall through to live SSH lookup if cache did not give us an interface.
+# Walk all switches in SWITCH_HOSTS: skip trunk ports (XGE*), stop on access port (GE*).
 if [ -z "$IFACE" ]; then
-  LOOKUP_CMD="display mac-address | include $MAC_LOOKUP"
-  log "LOOKUP_BEGIN mac=$MAC_NORM cmd=$LOOKUP_CMD"
-  set +e
-  LOOKUP_OUT=$(printf '%s\nquit\n' "$LOOKUP_CMD" | ssh $SSH_TTY_FLAG $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}" 2>&1)
-  LOOKUP_STATUS=$?
-  set -e
-  log "LOOKUP_DONE mac=$MAC_NORM status=$LOOKUP_STATUS"
-  printf '%s' "$LOOKUP_OUT" \
-    | tr '\r' '\n' \
-    | sed -E 's/;+$/;/; s/;+/\n/g' \
-    | while IFS= read -r line; do
-        [ -n "$line" ] && log "LOOKUP_OUT $line"
-      done
-
-  if [ -z "$LOOKUP_OUT" ]; then
-    LOOKUP_CMD="display mac-address dynamic | include $MAC_LOOKUP"
-    log "LOOKUP_BEGIN mac=$MAC_NORM cmd=$LOOKUP_CMD"
+  MAC_NO_DASH=$(echo "$MAC_NORM" | tr -d '-')
+  for _SW in $SWITCH_HOSTS; do
+    LOOKUP_CMD="display mac-address | include $MAC_LOOKUP"
+    log "LOOKUP_BEGIN mac=$MAC_NORM switch=$_SW cmd=$LOOKUP_CMD"
     set +e
-    LOOKUP_OUT=$(printf '%s\nquit\n' "$LOOKUP_CMD" | ssh $SSH_TTY_FLAG $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}" 2>&1)
+    LOOKUP_OUT=$(printf '%s\nquit\n' "$LOOKUP_CMD" | ssh $SSH_TTY_FLAG $SSH_OPTS "${SWITCH_USER}@${_SW}" 2>&1)
     LOOKUP_STATUS=$?
     set -e
-    log "LOOKUP_DONE mac=$MAC_NORM status=$LOOKUP_STATUS"
+    log "LOOKUP_DONE mac=$MAC_NORM switch=$_SW status=$LOOKUP_STATUS"
     printf '%s' "$LOOKUP_OUT" \
       | tr '\r' '\n' \
       | sed -E 's/;+$/;/; s/;+/\n/g' \
       | while IFS= read -r line; do
           [ -n "$line" ] && log "LOOKUP_OUT $line"
         done
-  fi
 
-  MAC_NO_DASH=$(echo "$MAC_NORM" | tr -d '-')
-  IFACE=$(printf '%s\n' "$LOOKUP_OUT" | awk -v mac="$MAC_NO_DASH" '
-    {
-      field = toupper($1);
-      gsub(/[-]/, "", field);
-      if (field == mac) {
-        print $4;
-        exit;
+    if [ -z "$LOOKUP_OUT" ]; then
+      LOOKUP_CMD="display mac-address dynamic | include $MAC_LOOKUP"
+      log "LOOKUP_BEGIN mac=$MAC_NORM switch=$_SW cmd=$LOOKUP_CMD"
+      set +e
+      LOOKUP_OUT=$(printf '%s\nquit\n' "$LOOKUP_CMD" | ssh $SSH_TTY_FLAG $SSH_OPTS "${SWITCH_USER}@${_SW}" 2>&1)
+      LOOKUP_STATUS=$?
+      set -e
+      log "LOOKUP_DONE mac=$MAC_NORM switch=$_SW status=$LOOKUP_STATUS"
+    fi
+
+    RAW_IFACE=$(printf '%s\n' "$LOOKUP_OUT" | awk -v mac="$MAC_NO_DASH" '
+      {
+        field = toupper($1);
+        gsub(/[-]/, "", field);
+        if (field == mac) { print $4; exit; }
       }
-    }
-  ')
-  IFACE=$(expand_iface "$IFACE")
-  log "LOOKUP_IFACE mac=$MAC_NORM iface=$IFACE"
+    ')
+
+    if [ -z "$RAW_IFACE" ]; then
+      log "LOOKUP_NOT_FOUND mac=$MAC_NORM switch=$_SW – trying next"
+      continue
+    fi
+
+    case "$RAW_IFACE" in
+      XGE*)
+        log "LOOKUP_TRUNK mac=$MAC_NORM switch=$_SW iface=$RAW_IFACE – looking downstream"
+        continue
+        ;;
+      *)
+        IFACE=$(expand_iface "$RAW_IFACE")
+        REPLUG_TARGET_HOST="$_SW"
+        log "LOOKUP_IFACE mac=$MAC_NORM switch=$_SW iface=$IFACE"
+        break
+        ;;
+    esac
+  done
 fi  # end SSH live lookup
 
 if [ -z "$IFACE" ]; then
@@ -232,12 +250,12 @@ fi
 if [ -z "$CACHE_IFACE" ] && command -v docker >/dev/null 2>&1; then
   docker exec "$REPLUG_DB_CONTAINER" psql -U "$REPLUG_DB_USER" -d "$REPLUG_DB_NAME" -c \
     "INSERT INTO mac_port_cache (mac_address, switch_iface, switch_host, last_seen)
-     VALUES ('${MAC_COLON}', '${IFACE}', '${SWITCH_HOST}', NOW())
+     VALUES ('${MAC_COLON}', '${IFACE}', '${REPLUG_TARGET_HOST}', NOW())
      ON CONFLICT (mac_address) DO UPDATE SET
        switch_iface = EXCLUDED.switch_iface, switch_host = EXCLUDED.switch_host, last_seen = EXCLUDED.last_seen;
      UPDATE devices SET switch_iface = '${IFACE}', switch_iface_seen_at = NOW() WHERE mac_address = '${MAC_COLON}';" \
     2>/dev/null || true
-  log "CACHE_UPDATED mac=$MAC_NORM iface=$IFACE"
+  log "CACHE_UPDATED mac=$MAC_NORM iface=$IFACE host=$REPLUG_TARGET_HOST"
 fi
 
 CMDS_DOWN=$(cat <<EOF
