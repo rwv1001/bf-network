@@ -1,11 +1,21 @@
 # FreeRADIUS clients configuration
 # This template file uses environment variables
 
-# HP 5130 switch - MAC authentication
+# HP 5130 switch 1 - MAC authentication
 client hp5130-switch {
-	ipaddr = 192.168.99.2
-	secret = ${RADIUS_SECRET}
-	shortname = hp5130
+        ipaddr = 192.168.99.2
+        secret = ${RADIUS_SECRET}
+        shortname = hp5130-sw1
+        nas_type = other
+        require_message_authenticator = false
+        limit_proxy_state = true
+}
+
+# HP 5130 switch 2 - MAC authentication
+client hp5130-switch-2 {
+        ipaddr = 192.168.99.3
+        secret = ${RADIUS_SECRET}
+        shortname = hp5130-sw2
 	nas_type = other
 	require_message_authenticator = false
 	limit_proxy_state = true
