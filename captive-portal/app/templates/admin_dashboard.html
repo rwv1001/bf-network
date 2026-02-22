@@ -208,21 +208,6 @@ function searchTable(tableType, searchValue) {
 
 {% block content %}
 <div style="margin-bottom: 30px;">
-    {% if current_user.can_manage_users %}
-    <a href="{{ url_for('admin_add_user') }}" class="btn">+ Add New User</a>
-    <a href="{{ url_for('admin_import_users') }}" class="btn" style="background: #2c7a7b; margin-left: 10px;">⬆ Import CSV</a>
-    {% endif %}
-    {% if current_user.can_manage_vlans %}
-    <a href="{{ url_for('admin_vlan_config') }}" class="btn" style="background: #764ba2; margin-left: 10px;">⚙️ VLAN Configuration</a>
-    {% endif %}
-    {% if current_user.can_view_traffic %}
-    <a href="{{ url_for('admin_traffic') }}" class="btn" style="background: #05668d; margin-left: 10px;">🔍 Traffic Viewer</a>
-    {% endif %}
-    {% if current_user.can_manage_admins %}
-    <a href="{{ url_for('admin_manage_admins') }}" class="btn" style="background: #c0392b; margin-left: 10px;">👥 Manage Admins</a>
-    {% endif %}
-    <a href="{{ url_for('admin_mfa_setup') }}" class="btn" style="background: #28a745; margin-left: 10px;">🔐 Two-Factor Auth</a>
-    <a href="{{ url_for('admin_logout') }}" class="btn" style="background: #999; margin-left: 10px;">Logout</a>
     {% if test_env and current_user.can_manage_users %}
     <form method="post" action="{{ url_for('admin_reset_test') }}" style="display: inline-block; margin-left: 10px;"
           onsubmit="return confirm('Reset test environment? This deletes all users, devices, and requests, clears ACL/DNS hijack rules, reapplies the baseline ACLs, clears all MAC authentication sessions, and resets user device ports on the switch.');">

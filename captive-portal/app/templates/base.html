@@ -229,41 +229,37 @@
             color: #721c24;
         }
         
-        .nav {
-            background-color: #f8f9fa;
+        .admin-nav {
+            background: #2c3e2c;
             padding: 15px 30px;
+            margin: 0;
+            border-bottom: 2px solid #1a2b1a;
             display: flex;
-            justify-content: space-between;
             align-items: center;
-            border-bottom: 1px solid #e0e0e0;
         }
-        
-        .nav a {
-            color: #263326;
+
+        .admin-nav a {
+            color: white;
             text-decoration: none;
-            margin-left: 20px;
+            margin-right: 20px;
+            padding: 8px 16px;
+            border-radius: 4px;
+            transition: background 0.3s;
         }
-        
-        .nav a:hover {
-            text-decoration: underline;
+
+        .admin-nav a:hover {
+            background: rgba(255,255,255,0.1);
+        }
+
+        .admin-nav a.active {
+            background: rgba(255,255,255,0.2);
+            font-weight: bold;
         }
     </style>
     {% block extra_head %}{% endblock %}
 </head>
 <body>
     <div class="container">
-        {% if current_user and current_user.is_authenticated %}
-        <div class="nav">
-            <div>
-                <strong>Admin Panel</strong>
-            </div>
-            <div>
-                <a href="{{ url_for('admin_dashboard') }}">Dashboard</a>
-                <a href="{{ url_for('admin_logout') }}">Logout</a>
-            </div>
-        </div>
-        {% endif %}
-        
         <div class="header">
             {% block logo %}
             <img src="{{ url_for('static', filename='laudare-2827310_960_720.png') }}" alt="Blackfriars Logo" class="logo">
@@ -272,6 +268,28 @@
             {% block subheader %}{% endblock %}
         </div>
         
+        {% if current_user and current_user.is_authenticated %}
+        <div class="admin-nav">
+            {% if current_user.can_manage_users %}
+            <a href="{{ url_for('admin_dashboard') }}" class="{% if request.endpoint == 'admin_dashboard' %}active{% endif %}">Dashboard</a>
+            {% endif %}
+            <a href="{{ url_for('admin_traffic') }}" class="{% if request.endpoint == 'admin_traffic' %}active{% endif %}">Traffic Viewer</a>
+            {% if current_user.can_manage_vlans %}
+            <a href="{{ url_for('admin_vlan_config') }}" class="{% if request.endpoint == 'admin_vlan_config' %}active{% endif %}">VLAN Config</a>
+            <a href="{{ url_for('admin_switch_ports') }}" class="{% if request.endpoint == 'admin_switch_ports' %}active{% endif %}">Switch Ports</a>
+            {% endif %}
+            {% if current_user.can_manage_users %}
+            <a href="{{ url_for('admin_add_user') }}" class="{% if request.endpoint == 'admin_add_user' %}active{% endif %}">Add User</a>
+            <a href="{{ url_for('admin_import_users') }}" class="{% if request.endpoint == 'admin_import_users' %}active{% endif %}">Import Users</a>
+            {% endif %}
+            {% if current_user.can_manage_admins %}
+            <a href="{{ url_for('admin_manage_admins') }}" class="{% if request.endpoint == 'admin_manage_admins' %}active{% endif %}">Manage Admins</a>
+            {% endif %}
+            <a href="{{ url_for('admin_mfa_setup') }}" class="{% if request.endpoint == 'admin_mfa_setup' %}active{% endif %}">🔐 Two-Factor Auth</a>
+            <a href="{{ url_for('admin_logout') }}" style="margin-left: auto;">Logout</a>
+        </div>
+        {% endif %}
+
         <div class="content">
             {% with messages = get_flashed_messages(with_categories=true) %}
                 {% if messages %}

@@ -12,33 +12,6 @@
         margin: 20px auto;
     }
     
-    /* Navigation */
-    .admin-nav {
-        background: #2c3e2c;
-        padding: 15px 30px;
-        margin: -30px -30px 20px;
-        border-bottom: 2px solid #1a2b1a;
-    }
-    
-    .admin-nav a {
-        color: white;
-        text-decoration: none;
-        margin-right: 20px;
-        padding: 8px 16px;
-        border-radius: 4px;
-        transition: background 0.3s;
-        display: inline-block;
-    }
-    
-    .admin-nav a:hover {
-        background: rgba(255,255,255,0.1);
-    }
-    
-    .admin-nav a.active {
-        background: rgba(255,255,255,0.2);
-        font-weight: bold;
-    }
-    
     /* Filter section */
     .filter-section {
         background: #f8f9fa;
@@ -344,26 +317,6 @@
 {% endblock %}
 
 {% block content %}
-<div class="admin-nav">
-    {% if current_user.can_manage_users %}
-    <a href="{{ url_for('admin_dashboard') }}">Dashboard</a>
-    {% endif %}
-    <a href="{{ url_for('admin_traffic') }}" class="active">Traffic Viewer</a>
-    {% if current_user.can_manage_vlans %}
-    <a href="{{ url_for('admin_vlan_config') }}">VLAN Config</a>
-    <a href="{{ url_for('admin_switch_ports') }}">Switch Ports</a>
-    {% endif %}
-    {% if current_user.can_manage_users %}
-    <a href="{{ url_for('admin_add_user') }}">Add User</a>
-    <a href="{{ url_for('admin_import_users') }}">Import Users</a>
-    {% endif %}
-    {% if current_user.can_manage_admins %}
-    <a href="{{ url_for('admin_manage_admins') }}">Manage Admins</a>
-    {% endif %}
-    <a href="{{ url_for('admin_mfa_setup') }}">🔐 Two-Factor Auth</a>
-    <a href="{{ url_for('admin_logout') }}" style="float: right;">Logout</a>
-</div>
-
 <div class="filter-section">
     <h3>Column Selection & Filters</h3>
     

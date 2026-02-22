@@ -4,6 +4,12 @@
 
 {% block header %}Import Users and Devices{% endblock %}
 
+{% block extra_head %}
+<style>
+    .container { max-width: 95%; }
+</style>
+{% endblock %}
+
 {% block content %}
 {% if errors %}
 <div class="form-group" style="margin-bottom: 20px;">
