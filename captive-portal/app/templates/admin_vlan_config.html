@@ -288,6 +288,9 @@
                 {% if current_user.can_view_traffic %}
                 <a href="{{ url_for('admin_traffic') }}" class="back-link" style="margin-right: 10px;">🔍 Traffic Viewer</a>
                 {% endif %}
+                {% if current_user.can_manage_vlans %}
+                <a href="{{ url_for('admin_switch_ports') }}" class="back-link" style="margin-right: 10px;">🔀 Switch Ports</a>
+                {% endif %}
                 {% if current_user.can_manage_admins %}
                 <a href="{{ url_for('admin_manage_admins') }}" class="back-link" style="margin-right: 10px;">Manage Admins</a>
                 {% endif %}

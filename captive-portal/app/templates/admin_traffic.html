@@ -351,6 +351,7 @@
     <a href="{{ url_for('admin_traffic') }}" class="active">Traffic Viewer</a>
     {% if current_user.can_manage_vlans %}
     <a href="{{ url_for('admin_vlan_config') }}">VLAN Config</a>
+    <a href="{{ url_for('admin_switch_ports') }}">Switch Ports</a>
     {% endif %}
     {% if current_user.can_manage_users %}
     <a href="{{ url_for('admin_add_user') }}">Add User</a>

@@ -1,0 +1,409 @@
+{% extends "base.html" %}
+
+{% block title %}Switch Ports - Network Access Portal{% endblock %}
+
+{% block header %}Switch Port Management{% endblock %}
+
+{% block extra_head %}
+<style>
+    .container {
+        max-width: 98%;
+        margin: 20px auto;
+    }
+
+    .admin-nav {
+        background: #2c3e2c;
+        padding: 15px 30px;
+        margin: -30px -30px 20px;
+        border-bottom: 2px solid #1a2b1a;
+    }
+
+    .admin-nav a {
+        color: white;
+        text-decoration: none;
+        margin-right: 20px;
+        padding: 8px 16px;
+        border-radius: 4px;
+        transition: background 0.3s;
+        display: inline-block;
+    }
+
+    .admin-nav a:hover { background: rgba(255,255,255,0.1); }
+
+    .admin-nav a.active {
+        background: rgba(255,255,255,0.2);
+        font-weight: bold;
+    }
+
+    .page-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 20px;
+        flex-wrap: wrap;
+        gap: 10px;
+    }
+
+    .page-header h2 { margin: 0; color: #2c3e2c; }
+
+    .btn {
+        padding: 8px 18px;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        font-size: 14px;
+        font-weight: 500;
+        transition: all 0.3s;
+        text-decoration: none;
+        display: inline-block;
+    }
+    .btn-primary   { background: #2c3e2c; color: white; }
+    .btn-primary:hover   { background: #3d5a3d; }
+    .btn-secondary { background: #6c757d; color: white; }
+    .btn-secondary:hover { background: #5a6268; }
+    .btn-warning   { background: #e67e22; color: white; }
+    .btn-warning:hover   { background: #d35400; }
+
+    .switch-section {
+        background: white;
+        border-radius: 8px;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+        margin-bottom: 30px;
+        overflow: hidden;
+    }
+
+    .switch-section-header {
+        background: #2c3e2c;
+        color: white;
+        padding: 12px 20px;
+        font-size: 16px;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+    }
+
+    .switch-section-header .badge {
+        background: rgba(255,255,255,0.2);
+        padding: 2px 10px;
+        border-radius: 12px;
+        font-size: 12px;
+        font-weight: normal;
+    }
+
+    table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+    }
+
+    th {
+        background: #f0f4f0;
+        color: #2c3e2c;
+        padding: 10px 14px;
+        text-align: left;
+        font-weight: 600;
+        border-bottom: 2px solid #d4e0d4;
+        white-space: nowrap;
+    }
+
+    td {
+        padding: 7px 14px;
+        border-bottom: 1px solid #eef2ee;
+        vertical-align: middle;
+    }
+
+    tr.row-unclassified td {
+    }
+
+    tr:hover { background: #f8fbf8; }
+
+    .port-name {
+        font-family: 'Courier New', monospace;
+        font-weight: bold;
+        color: #2c3e2c;
+    }
+
+    .port-desc {
+        color: #495057;
+        font-size: 12px;
+        max-width: 200px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .link-up   { color: #27ae60; font-weight: 600; }
+    .link-down { color: #e74c3c; }
+    .link-adm  { color: #95a5a6; }
+    .link-unknown { color: #bdc3c7; }
+
+    /* Role radio buttons */
+    .role-group {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+    }
+
+    .role-group label {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 4px 10px;
+        border-radius: 20px;
+        font-size: 12px;
+        font-weight: 500;
+        cursor: pointer;
+        border: 1.5px solid transparent;
+        transition: all 0.2s;
+        white-space: nowrap;
+        background: #f0f4f0;
+        color: #495057;
+        border-color: #d4e0d4;
+    }
+
+    .role-group input[type=radio] { display: none; }
+
+    .role-group input[type=radio]:checked + span {
+        font-weight: bold;
+    }
+        /* handled by JS adding .selected class to the label */
+    }
+
+    .role-group label.selected-ap           { background: #d5f5e3; color: #1d6a3a; border-color: #27ae60; }
+    .role-group label.selected-wired        { background: #d6eaf8; color: #1a5276; border-color: #2980b9; }
+    .role-group label.selected-pi           { background: #fdebd0; color: #784212; border-color: #e67e22; }
+    .role-group label.selected-inter_switch { background: #f4ecf7; color: #6c3483; border-color: #8e44ad; }
+    .role-group label.selected-uplink_udm   { background: #fdedec; color: #7b241c; border-color: #e74c3c; }
+    .role-group label.selected-unknown      { background: #f2f3f4; color: #626567; border-color: #000; }
+
+    .flash-messages { margin-bottom: 16px; }
+    .alert {
+        padding: 12px 18px;
+        border-radius: 5px;
+        margin-bottom: 8px;
+        font-size: 14px;
+    }
+    .alert-success { background: #d5f5e3; color: #1d6a3a; border-left: 4px solid #27ae60; }
+    .alert-warning { background: #fef9e7; color: #7d6608; border-left: 4px solid #f1c40f; }
+    .alert-info    { background: #d6eaf8; color: #1a5276; border-left: 4px solid #2980b9; }
+
+    .empty-state {
+        padding: 40px;
+        text-align: center;
+        color: #6c757d;
+    }
+
+    .last-seen {
+        font-size: 11px;
+        color: #aaa;
+        white-space: nowrap;
+    }
+
+    .role-group.role-updating {
+        opacity: 0.45;
+        pointer-events: none;
+    }
+
+    .role-status {
+        margin-top: 4px;
+        font-size: 11px;
+        min-height: 14px;
+    }
+    .status-pending { color: #888; }
+    .status-ok      { color: #27ae60; font-weight: 600; }
+    .status-err     { color: #c0392b; font-weight: 600; }
+
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="admin-nav">
+    {% if current_user.can_manage_users %}
+    <a href="{{ url_for('admin_dashboard') }}">Dashboard</a>
+    {% endif %}
+    <a href="{{ url_for('admin_traffic') }}">Traffic Viewer</a>
+    {% if current_user.can_manage_vlans %}
+    <a href="{{ url_for('admin_vlan_config') }}">VLAN Config</a>
+    <a href="{{ url_for('admin_switch_ports') }}" class="active">Switch Ports</a>
+    {% endif %}
+    {% if current_user.can_manage_users %}
+    <a href="{{ url_for('admin_add_user') }}">Add User</a>
+    <a href="{{ url_for('admin_import_users') }}">Import Users</a>
+    {% endif %}
+    {% if current_user.can_manage_admins %}
+    <a href="{{ url_for('admin_manage_admins') }}">Manage Admins</a>
+    {% endif %}
+    <a href="{{ url_for('admin_mfa_setup') }}">🔐 Two-Factor Auth</a>
+    <a href="{{ url_for('admin_logout') }}" style="float: right;">Logout</a>
+</div>
+
+<div class="flash-messages">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, message in messages %}
+    <div class="alert alert-{{ category }}">{{ message }}</div>
+    {% endfor %}
+    {% endwith %}
+</div>
+
+<div class="page-header">
+    <h2>Switch Port Roles</h2>
+</div>
+
+{% if not switch_hosts %}
+<div class="empty-state">
+    <p>No switches configured. Set <code>SWITCH_HOSTS</code> environment variable.</p>
+</div>
+{% else %}
+
+{% for host in switch_hosts %}
+{% set ports = ports_by_switch.get(host, []) %}
+<div class="switch-section">
+    <div class="switch-section-header">
+        🔀 {{ host }}
+        <span class="badge">{{ ports|length }} ports</span>
+    </div>
+
+    {% if not ports %}
+    <div class="empty-state">
+        No ports discovered yet. Port discovery runs automatically at startup.
+    </div>
+    {% else %}
+    <table>
+        <thead>
+            <tr>
+                <th style="width:120px">Port</th>
+                <th style="width:180px">Description (on switch)</th>
+                <th>Role</th>
+                <th style="width:60px">Link</th>
+                <th style="width:120px">Last Seen</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for port in ports %}
+        <tr{% if port.port_role == 'unknown' %} class="row-unclassified"{% endif %}>
+            <td><span class="port-name">{{ port.port_name }}</span></td>
+            <td><span class="port-desc" title="{{ port.port_description }}">{{ port.port_description or '—' }}</span></td>
+            <td>
+                <div class="role-group"
+                     id="rg_{{ host }}_{{ port.port_name | replace('/', '_') | replace('.', '_') }}"
+                     data-host="{{ host }}"
+                     data-port="{{ port.port_name }}">
+                {% for role_key, role_label in port_roles.items() %}
+                    <label id="lbl_{{ host }}_{{ port.port_name | replace('/', '_') | replace('.', '_') }}_{{ role_key }}"
+                           class="{% if port.port_role == role_key %}selected-{{ role_key }}{% endif %}">
+                        <input type="radio"
+                               name="role_{{ host }}_{{ port.port_name }}"
+                               value="{{ role_key }}"
+                               {% if port.port_role == role_key %}checked{% endif %}>
+                        <span>{{ role_label }}</span>
+                    </label>
+                {% endfor %}
+                </div>
+                <div class="role-status" id="status_{{ host }}_{{ port.port_name | replace('/', '_') | replace('.', '_') }}"></div>
+            </td>
+            <td>
+                {% if port.link_status == 'UP' %}
+                    <span class="link-up">UP</span>
+                {% elif port.link_status == 'DOWN' %}
+                    <span class="link-down">DOWN</span>
+                {% elif port.link_status == 'ADM' %}
+                    <span class="link-adm">ADM</span>
+                {% else %}
+                    <span class="link-unknown">—</span>
+                {% endif %}
+            </td>
+            <td>
+                <span class="last-seen">
+                    {% if port.last_discovered %}
+                        {{ port.last_discovered.strftime('%d %b %H:%M') }}
+                    {% else %}—{% endif %}
+                </span>
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</div>
+{% endfor %}
+
+{% endif %}
+
+<script>
+// Apply role styles on page load
+document.querySelectorAll('.role-group input[type=radio]:checked').forEach(r => {
+    r.parentElement.classList.add('selected-' + r.value);
+});
+
+function setAllGroupsDisabled(disabled) {
+    document.querySelectorAll('.role-group').forEach(g => {
+        if (disabled) {
+            g.classList.add('role-updating');
+        } else {
+            g.classList.remove('role-updating');
+        }
+        g.querySelectorAll('input[type=radio]').forEach(r => r.disabled = disabled);
+    });
+}
+
+function updateRoleStyle(group, value) {
+    group.querySelectorAll('label').forEach(lbl => {
+        lbl.className = lbl.className.replace(/\bselected-\S+/g, '').trim();
+    });
+    const checked = group.querySelector(`input[value="${value}"]`);
+    if (checked) checked.parentElement.classList.add('selected-' + value);
+}
+
+document.querySelectorAll('.role-group').forEach(group => {
+    group.addEventListener('change', function(e) {
+        const radio = e.target;
+        if (!radio.matches('input[type=radio]')) return;
+
+        const host     = group.dataset.host;
+        const port     = group.dataset.port;
+        const newRole  = radio.value;
+        const statusId = 'status_' + host + '_' + port.replace(/\//g, '_').replace(/\./g, '_');
+        const statusEl = document.getElementById(statusId);
+        const row      = group.closest('tr');
+
+        // Remember previous role in case we need to revert
+        const prevRadio = group.querySelector('input[type=radio]:not(:checked)[data-prev]');
+        const prevRole  = group.querySelector('input[type=radio][data-prev]')?.dataset.prev
+                          || [...group.querySelectorAll('input[type=radio]')]
+                               .find(r => r !== radio && r.defaultChecked)?.value
+                          || newRole;
+
+        updateRoleStyle(group, newRole);
+        if (statusEl) statusEl.innerHTML = '<span class="status-pending">⏳ Updating…</span>';
+        setAllGroupsDisabled(true);
+
+        fetch('/admin/switch-ports/update-single', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({host, port, role: newRole})
+        })
+        .then(r => r.json())
+        .then(data => {
+            setAllGroupsDisabled(false);
+            if (data.success) {
+                if (statusEl) {
+                    statusEl.innerHTML = '<span class="status-ok">✓ Saved</span>';
+                    setTimeout(() => statusEl.innerHTML = '', 3000);
+                }
+                if (row) {
+                    row.classList.toggle('row-unclassified', newRole === 'unknown');
+                }
+            } else {
+                if (statusEl) statusEl.innerHTML = '<span class="status-err">✗ ' + (data.error || 'Failed') + '</span>';
+                // Revert visual style (can't revert radio check reliably without storing prev)
+            }
+        })
+        .catch(() => {
+            setAllGroupsDisabled(false);
+            if (statusEl) statusEl.innerHTML = '<span class="status-err">✗ Network error</span>';
+        });
+    });
+});
+</script>
+{% endblock %}

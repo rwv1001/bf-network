@@ -1664,21 +1664,8 @@ def manage_switch_acl(action, ip_address, vlan_id):
         except Exception as exc:
             logger.warning("ACL queue script error for %s: %s", ip_address, exc)
 
-    try:
-        import paramiko
-    except ImportError:
-        logger.error("paramiko not installed - cannot manage switch ACLs")
-        return False
-
-    switch_host = os.getenv('SWITCH_HOST', '192.168.99.1')
-    switch_user = os.getenv('SWITCH_USER', 'admin')
-    switch_pass = os.getenv('SWITCH_PASS', '')
-    switch_key = os.getenv('SWITCH_KEY_PATH', '')
-    switch_ssh_port = int(os.getenv('SWITCH_SSH_PORT', '22'))
-
-    if not switch_pass and not switch_key:
-        logger.error("SWITCH_PASS or SWITCH_KEY_PATH must be configured")
-        return False
+    # Fallback: apply ACL directly via SSH
+    switch_host = os.getenv('SWITCH_HOST', '192.168.99.2')
 
     if not vlan_id and ip_address:
         try:
@@ -1705,9 +1692,7 @@ def manage_switch_acl(action, ip_address, vlan_id):
             "system-view",
             f"acl advanced {acl_num}",
             f"rule {rule_num} deny ip source {ip_address} 0",
-            "quit",
-            "quit",
-            "save force"
+            "quit", "quit", "save force"
         ]
     elif action == 'unblock':
         logger.info(f"Removing ACL deny rule for {ip_address} on VLAN {vlan_id} via SSH")
@@ -1715,52 +1700,21 @@ def manage_switch_acl(action, ip_address, vlan_id):
             "system-view",
             f"acl advanced {acl_num}",
             f"undo rule {rule_num}",
-            "quit",
-            "quit",
-            "save force"
+            "quit", "quit", "save force"
         ]
     else:
         logger.error(f"Invalid action: {action}")
         return False
 
     try:
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
-        connect_kwargs = {
-            "hostname": switch_host,
-            "port": switch_ssh_port,
-            "username": switch_user,
-            "allow_agent": False,
-            "look_for_keys": False,
-            "timeout": 10,
-            "disabled_algorithms": {"pubkeys": ["rsa-sha2-512", "rsa-sha2-256"]}
-        }
-
-        if switch_key:
-            connect_kwargs["key_filename"] = switch_key
-        else:
-            connect_kwargs["password"] = switch_pass
-
-        client.connect(**connect_kwargs)
-        chan = client.invoke_shell()
-        output = ""
-
-        for cmd in commands:
-            chan.send(cmd + "\n")
-            time.sleep(1)
-            if chan.recv_ready():
-                output += chan.recv(65535).decode("utf-8", errors="ignore")
-
-        chan.close()
-        client.close()
-
-        if output:
-            logger.debug(f"SSH ACL output: {output}")
-
-        logger.info(f"ACL {action} successful for {ip_address} on VLAN {vlan_id} via SSH")
-        return True
-
+        output = _run_switch_command(switch_host, '\n'.join(commands))
+        if output is not None:
+            if output:
+                logger.debug(f"SSH ACL output: {output}")
+            logger.info(f"ACL {action} successful for {ip_address} on VLAN {vlan_id} via SSH")
+            return True
+        logger.error(f"Switch ACL {action} failed for {ip_address}: no response")
+        return False
     except Exception as e:
         logger.error(f"Switch ACL {action} failed for {ip_address}: {e}")
         import traceback
@@ -1797,66 +1751,32 @@ def _switch_port_allowed(iface):
 
 
 def _get_switch_ssh_client():
-    try:
-        import paramiko
-    except ImportError:
-        logger.error("paramiko not installed - cannot manage switch")
-        return None
-
-    switch_host = os.getenv('SWITCH_HOST', '192.168.99.1')
-    switch_user = os.getenv('SWITCH_USER', 'admin')
-    switch_pass = os.getenv('SWITCH_PASS', '')
-    switch_key = os.getenv('SWITCH_KEY_PATH', '')
-    switch_ssh_port = int(os.getenv('SWITCH_SSH_PORT', '22'))
-
-    if not switch_pass and not switch_key:
-        logger.error("SWITCH_PASS or SWITCH_KEY_PATH must be configured")
-        return None
-
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
-    connect_kwargs = {
-        "hostname": switch_host,
-        "port": switch_ssh_port,
-        "username": switch_user,
-        "allow_agent": False,
-        "look_for_keys": False,
-        "timeout": 10,
-        "disabled_algorithms": {"pubkeys": ["rsa-sha2-512", "rsa-sha2-256"]}
-    }
-
-    if switch_key:
-        connect_kwargs["key_filename"] = switch_key
-    else:
-        connect_kwargs["password"] = switch_pass
-
-    client.connect(**connect_kwargs)
-    return client
+    """Retained for backward compat; returns a host string instead of a paramiko client.
+    All callers have been updated to use _run_switch_command() directly."""
+    return os.getenv('SWITCH_HOST', '192.168.99.2')
 
 
-def _find_switch_port_for_mac(client, mac_address):
+def _find_switch_port_for_mac(client_or_host, mac_address):
+    """Find which physical switch port a MAC is on.
+    client_or_host is either the SWITCH_HOST string or legacy paramiko client (ignored).
+    Uses _run_switch_command via subprocess ssh, matching hp5130-port-lookup.sh behaviour.
+    """
+    switch_host = os.getenv('SWITCH_HOST', '192.168.99.2')
+
     normalized = _normalize_switch_mac(mac_address)
     if not normalized:
         return None
-
-    commands = [
-        f"display mac-address | include {normalized}",
-        f"display mac-address dynamic | include {normalized}",
-        "display mac-address"
-    ]
 
     iface_pattern = re.compile(
         r"\b(?P<iface>(?:GigabitEthernet|Ten-GigabitEthernet|GE|XGE|Ethernet|Bridge-Aggregation)\S+)\b",
         re.IGNORECASE
     )
 
-    for command in commands:
-        stdin, stdout, stderr = client.exec_command(command, timeout=10)
-        output = stdout.read().decode('utf-8', errors='ignore')
-        err = stderr.read().decode('utf-8', errors='ignore')
-        if err:
-            logger.debug("Switch MAC lookup error for '%s': %s", command, err.strip())
+    for command in [
+        f"display mac-address | include {normalized}",
+        f"display mac-address dynamic | include {normalized}",
+    ]:
+        output = _run_switch_command(switch_host, command)
         if not output:
             continue
         for line in output.splitlines():
@@ -1953,42 +1873,25 @@ def replug_switch_port_for_mac(mac_address):
 
         _persist_switch_port(mac_address, port)
 
+        logger.info("Replugging %s on port %s", mac_address, port)
+        switch_host = os.getenv('SWITCH_HOST', '192.168.99.2')
         delay_raw = os.getenv('SWITCH_REPLUG_DELAY_SEC', '3')
         try:
             delay_sec = max(1, int(delay_raw))
         except ValueError:
             delay_sec = 3
 
-        logger.info("Replugging %s on port %s", mac_address, port)
-        chan = client.invoke_shell()
-        commands = [
-            "system-view",
-            f"interface {port}",
-            "shutdown",
-            "quit",
-            f"interface {port}",
-            "undo shutdown",
-            "quit",
-            "quit"
-        ]
+        cmds_down = f"system-view\ninterface {port}\nshutdown\nquit\nquit"
+        cmds_up   = f"system-view\ninterface {port}\nundo shutdown\nquit\nquit"
 
-        for cmd in commands:
-            chan.send(cmd + "\n")
-            time.sleep(1)
-            if cmd == "shutdown":
-                time.sleep(delay_sec)
-
-        chan.close()
+        _run_switch_command(switch_host, cmds_down)
+        time.sleep(delay_sec)
+        _run_switch_command(switch_host, cmds_up)
         logger.info("Replug complete for %s on port %s", mac_address, port)
         return True
     except Exception as exc:
         logger.error("Switch replug failed for %s: %s", mac_address, exc)
         return False
-    finally:
-        try:
-            client.close()
-        except Exception:
-            pass
 
 
 def apply_device_block(device, flash_messages=False):
@@ -4809,6 +4712,630 @@ def admin_dashboard():
     return render_template('admin_dashboard.html', **template_vars)
 
 
+# ---------------------------------------------------------------------------
+# Switch Port Management
+# ---------------------------------------------------------------------------
+
+PORT_ROLES = {
+    'ap':           'AP Uplink',
+    'wired':        'Wired Device',
+    'pi':           'Pi / Kea',
+    'inter_switch': 'Inter-Switch Link',
+    'uplink_udm':   'Uplink to UDM',
+    'unknown':      'Unclassified',
+}
+
+
+def _run_switch_command(host, command):
+    """Run a single command on an HP5130 switch via the system ssh binary.
+    Uses the same SSH options as hp5130-port-lookup.sh / hp5130-replug.sh so
+    the old RSA host-key algorithms negotiate correctly.
+    Returns the command output as a string, or None on failure.
+    """
+    import subprocess
+
+    switch_user = os.getenv('SWITCH_USER', 'robert')
+    switch_port = os.getenv('SWITCH_SSH_PORT', '22')
+    switch_key  = os.getenv('SWITCH_KEY_PATH', '')
+
+    ssh_args = [
+        'ssh',
+        '-tt',
+        '-i', switch_key,
+        '-p', switch_port,
+        '-o', 'HostKeyAlgorithms=+ssh-rsa',
+        '-o', 'PubkeyAcceptedAlgorithms=+ssh-rsa',
+        '-o', 'StrictHostKeyChecking=no',
+        '-o', 'UserKnownHostsFile=/dev/null',
+        '-o', 'ConnectTimeout=10',
+        '-o', 'ServerAliveInterval=5',
+        '-o', 'ServerAliveCountMax=3',
+        f'{switch_user}@{host}',
+    ]
+
+    try:
+        result = subprocess.run(
+            ssh_args,
+            input=f'{command}\nquit\n',
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        if result.returncode != 0:
+            logger.warning("SSH to %s exited %d: %s", host, result.returncode,
+                           result.stderr.strip()[:200])
+        return result.stdout if result.stdout.strip() else None
+    except subprocess.TimeoutExpired:
+        logger.warning("SSH command timed out for %s", host)
+        return None
+    except Exception as e:
+        logger.warning("SSH command failed for %s: %s", host, e)
+        return None
+
+
+def _get_switch_ssh_client_for_host(host):
+    """Push a multi-line config command block to a switch.
+    Wraps _run_switch_command for callers that previously used paramiko.
+    Returns a simple object with an exec_command-style interface, or None.
+    """
+    # Return a thin wrapper so existing call-sites in admin_switch_ports_update
+    # can be replaced without touching the call-sites.  New code should call
+    # _run_switch_command() directly.
+    class _SshWrapper:
+        def __init__(self, h): self._host = h
+        def send_commands(self, cmds):
+            """cmds: list of str"""
+            block = '\n'.join(cmds)
+            return _run_switch_command(self._host, block)
+        def close(self): pass
+
+    # Quick connectivity check
+    if _run_switch_command(host, 'display version') is None:
+        return None
+    return _SshWrapper(host)
+
+
+def _detect_port_role(port_name, description):
+    """Infer a port role from its name and description using keyword heuristics."""
+    desc = (description or '').lower()
+    name = (port_name or '').upper()
+
+    if 'udm' in desc or 'usg' in desc:
+        return 'uplink_udm'
+    # "Uplink to UniFi AP", "AP-uplink", " AP" suffix, etc.
+    if ('unifi' in desc and 'ap' in desc) or \
+       desc.endswith(' ap') or ' ap ' in desc or \
+       '-ap' in desc or desc.startswith('ap'):
+        return 'ap'
+    if 'pi' in desc or 'kea' in desc or 'portal' in desc:
+        return 'pi'
+    # Only classify as inter-switch if the description explicitly says so
+    if 'inter-switch' in desc or 'inter switch' in desc or 'isl' in desc:
+        return 'inter_switch'
+    # Ports with a non-empty description that didn't match above → wired
+    if desc.strip():
+        return 'wired'
+    # No description (including XGE ports) → unclassified
+    return 'unknown'
+
+
+def _discover_switch_ports(switch_host):
+    """SSH to switch_host and return a list of port dicts.
+
+    Three-phase, pagination-safe strategy for HP5130/Comware 7:
+
+    Phase 1 – slot detection (1 SSH call, ≤8 one-liner queries, never paginates):
+      'display current-configuration | include interface | include GigabitEthernetN/0/1'
+      for N=1..8.  Even if the port list paginates, at least one line comes back before
+      '---- More ----', so we can identify which slots exist.
+
+    Phase 2 – port existence & link state (1 SSH call):
+      'display interface GigabitEthernetN/0/n | include current state'
+      Each command returns exactly 1 result line (or an error).  Result lines are
+      self-identifying (they contain the full port name), so no alignment needed.
+
+    Phase 3 – descriptions (1 SSH call, existing ports only):
+      'display interface GigabitEthernetN/0/n | include Description'
+      Ports with no configured description return *no* output for this filter.
+      We split the raw output on prompt patterns to get per-command sections and
+      map them back to the ordered port list.
+
+    Returns: [{'port_name': str, 'link_status': str, 'description': str}]
+    """
+    import re
+
+    def _shorten(name):
+        if name.startswith('GigabitEthernet'):
+            return 'GE' + name[len('GigabitEthernet'):]
+        if name.startswith('Ten-GigabitEthernet'):
+            return 'XGE' + name[len('Ten-GigabitEthernet'):]
+        return name
+
+    def _iface_sort_key(name):
+        nums = [int(x) for x in re.findall(r'\d+', name)]
+        return (1 if name.startswith('Ten-') else 0, nums)
+
+    def _split_by_prompts(output):
+        """Split raw -tt SSH output into one section per command sent.
+        Each section contains the output lines produced by that command
+        (the command echo itself is stripped).
+        Returns a list of strings (one element per command).
+        """
+        # Prompts look like '<AccessSW-01>' – split on them
+        parts = re.split(r'<[A-Za-z][^>\n]{0,40}>', output)
+        sections = []
+        for part in parts[1:]:   # parts[0] is the initial banner
+            lines = part.replace('\r', '').split('\n')
+            # lines[0] is the command echo; the rest is command output
+            body = '\n'.join(l for l in lines[1:] if l.strip())
+            sections.append(body)
+        return sections
+
+    max_slot = int(os.getenv('SWITCH_MAX_SLOT', '8'))
+    ge_max   = int(os.getenv('SWITCH_GE_MAX',   '52'))
+    xge_max  = int(os.getenv('SWITCH_XGE_MAX',  '4'))
+
+    # ------------------------------------------------------------------ Phase 1
+    # Detect which slots have GE ports.  Each query returns ≤12 lines (port X,
+    # X0..X9) so will never hit the '---- More ----' limit.
+    slot_cmds = '\n'.join(
+        f'display current-configuration | include interface | include GigabitEthernet{s}/0/1'
+        for s in range(1, max_slot + 1)
+    )
+    slot_output = _run_switch_command(switch_host, slot_cmds)
+    detected_slots = set()
+    for line in (slot_output or '').splitlines():
+        # Only match actual config lines, not the echoed command itself
+        # Real lines look like: "interface GigabitEthernet3/0/1"
+        # Echoed command lines look like: "<SW>display ... GigabitEthernet3/0/1"
+        stripped = line.strip()
+        if stripped.startswith('interface GigabitEthernet'):
+            m = re.search(r'GigabitEthernet(\d+)/', stripped)
+            if m:
+                detected_slots.add(int(m.group(1)))
+
+    if not detected_slots:
+        logger.warning("No switch slots detected on %s", switch_host)
+        return []
+
+    logger.info("Detected slots on %s: %s", switch_host, sorted(detected_slots))
+
+    # ------------------------------------------------------------------ Phase 2
+    # Probe every candidate port with '| include state' (single-word filter;
+    # HP5130 rejects multi-word patterns like 'current state').
+    # Existing ports return  "Current state: UP/DOWN/…"
+    # Non-existent ports     return  "% Wrong parameter found…"
+    # We split raw SSH output on prompt lines to align sections with candidates.
+    candidates = []
+    for s in sorted(detected_slots):
+        for n in range(1, ge_max + 1):
+            candidates.append(f'GigabitEthernet{s}/0/{n}')
+        # HP5130 numbers XGE ports in the same range as GE (e.g. 25-28 on a 24-port
+        # model, 49-52 on a 48-port model) so we must probe up to ge_max.
+        # Non-existent ports are already skipped via the '% Wrong' error check.
+        for n in range(1, ge_max + 1):
+            candidates.append(f'Ten-GigabitEthernet{s}/0/{n}')
+
+    state_cmds = '\n'.join(
+        f'display interface {full} | include state'
+        for full in candidates
+    )
+    state_raw = _run_switch_command(switch_host, state_cmds) or ''
+    state_sections = _split_by_prompts(state_raw)
+
+    existing = {}   # full_name -> link_status string
+    for i, full_name in enumerate(candidates):
+        if i >= len(state_sections):
+            break
+        section = state_sections[i]
+        if '% ' in section or 'Wrong' in section or 'Error' in section:
+            continue  # port does not exist on this switch
+        m = re.search(r'Current state:\s*(\S+)', section, re.IGNORECASE)
+        link = m.group(1).upper() if m else 'UNKNOWN'
+        existing[full_name] = link
+
+    if not existing:
+        logger.warning("No ports found via state probe on %s", switch_host)
+        return []
+
+    sorted_existing = sorted(existing.keys(), key=_iface_sort_key)
+    logger.info("Found %d physical ports on %s", len(sorted_existing), switch_host)
+
+    # ------------------------------------------------------------------ Phase 3
+    # Fetch descriptions for existing ports.  Ports with no configured description
+    # return *nothing* from '| include Description', so we split on prompts to
+    # get per-command output sections and map them back by position.
+    desc_cmds = '\n'.join(
+        f'display interface {full} | include Description'
+        for full in sorted_existing
+    )
+    desc_raw = _run_switch_command(switch_host, desc_cmds) or ''
+    desc_sections = _split_by_prompts(desc_raw)
+
+    ports = []
+    for i, full_name in enumerate(sorted_existing):
+        desc = ''
+        if i < len(desc_sections):
+            section = desc_sections[i]
+            if 'Description:' in section:
+                raw = [l for l in section.splitlines() if 'Description:' in l]
+                if raw:
+                    desc = raw[0].split(':', 1)[1].strip()
+        # Drop uninformative Comware default "GigabitEthernetX/Y/Z Interface"
+        if desc.endswith(' Interface') and 'Ethernet' in desc:
+            desc = ''
+        ports.append({
+            'port_name':   _shorten(full_name),
+            'link_status': existing[full_name],
+            'description': desc,
+        })
+
+    logger.info("Discovered %d ports on %s", len(ports), switch_host)
+    return ports
+
+
+def _refresh_switch_ports():
+    """Discover all switches and upsert ports into switch_ports table.
+    Preserves manually-set roles (only auto-assigns when role is 'unknown').
+    Returns dict: {switch_host: port_count_or_error_string}
+    """
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
+    if not switch_hosts:
+        return {}
+
+    results = {}
+    with app.app_context():
+        for host in switch_hosts:
+            ports = _discover_switch_ports(host)
+            if not ports:
+                results[host] = 'no ports discovered (check SSH)'
+                continue
+            for p in ports:
+                auto_role = _detect_port_role(p['port_name'], p['description'])
+                db.session.execute(
+                    text("""
+                        INSERT INTO switch_ports
+                            (switch_host, port_name, port_description, port_role,
+                             link_status, last_discovered, last_updated)
+                        VALUES (:host, :name, :desc, :role, :link, NOW(), NOW())
+                        ON CONFLICT (switch_host, port_name) DO UPDATE SET
+                            port_description = EXCLUDED.port_description,
+                            link_status      = EXCLUDED.link_status,
+                            last_discovered  = EXCLUDED.last_discovered,
+                            -- Preserve a manually-set role; only auto-update 'unknown'
+                            port_role = CASE
+                                WHEN switch_ports.port_role = 'unknown'
+                                THEN EXCLUDED.port_role
+                                ELSE switch_ports.port_role
+                            END
+                    """),
+                    {
+                        'host': host,
+                        'name': p['port_name'],
+                        'desc': p['description'],
+                        'role': auto_role,
+                        'link': p['link_status'],
+                    }
+                )
+            db.session.commit()
+            results[host] = len(ports)
+
+    return results
+
+
+def _startup_switch_discovery():
+    """Trigger switch port discovery in a background thread shortly after startup.
+    Uses a postgres advisory lock so only one gunicorn worker does the work.
+    Skips if the switch_ports table already has data less than 24 h old.
+    """
+    import threading
+    import time as _time
+
+    def _run():
+        # Stagger workers slightly using PID to reduce the startup race window.
+        _time.sleep(5 + (os.getpid() % 4))
+        with app.app_context():
+            try:
+                # Only one worker across all gunicorn processes should run discovery.
+                lock_acquired = db.session.execute(
+                    text("SELECT pg_try_advisory_lock(99001)")
+                ).scalar()
+                if not lock_acquired:
+                    logger.info("Switch discovery lock held by another worker, skipping")
+                    return
+                cutoff = datetime.utcnow() - timedelta(hours=24)
+                fresh = db.session.execute(
+                    text("SELECT 1 FROM switch_ports WHERE last_discovered > :cutoff LIMIT 1"),
+                    {'cutoff': cutoff}
+                ).fetchone()
+                if fresh:
+                    logger.info("Switch port discovery skipped – data is already fresh")
+                    db.session.execute(text("SELECT pg_advisory_unlock(99001)"))
+                    db.session.commit()
+                    return
+            except Exception:
+                pass   # table might not exist yet; proceed anyway
+        logger.info("Background switch port discovery starting…")
+        try:
+            results = _refresh_switch_ports()
+            for host, result in results.items():
+                logger.info("Switch discovery %s: %s", host, result)
+        except Exception as e:
+            logger.warning("Background switch port discovery error: %s", e)
+        finally:
+            try:
+                with app.app_context():
+                    db.session.execute(text("SELECT pg_advisory_unlock(99001)"))
+                    db.session.commit()
+            except Exception:
+                pass
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+@app.route('/admin/switch-ports')
+@login_required
+@permission_required('manage_vlans')
+def admin_switch_ports():
+    """Switch port management page."""
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
+
+    ports_by_switch = {}
+    for host in switch_hosts:
+        rows = db.session.execute(
+            text("""
+                SELECT port_name, port_description, port_role, link_status, last_discovered
+                FROM switch_ports
+                WHERE switch_host = :host
+                ORDER BY
+                    (CASE WHEN port_name LIKE 'XGE%' THEN 1 ELSE 0 END),
+                    split_part(port_name, '/', 1),
+                    CAST(NULLIF(split_part(port_name, '/', 2), '') AS INTEGER),
+                    CAST(NULLIF(split_part(port_name, '/', 3), '') AS INTEGER)
+            """),
+            {'host': host}
+        ).fetchall()
+        ports_by_switch[host] = [
+            {
+                'port_name':        r[0],
+                'port_description': r[1] or '',
+                'port_role':        r[2] or 'unknown',
+                'link_status':      r[3] or 'unknown',
+                'last_discovered':  r[4],
+            }
+            for r in rows
+        ]
+
+    return render_template(
+        'admin_switch_ports.html',
+        ports_by_switch=ports_by_switch,
+        switch_hosts=switch_hosts,
+        port_roles=PORT_ROLES,
+    )
+
+
+@app.route('/admin/switch-ports/refresh', methods=['POST'])
+@login_required
+@permission_required('manage_vlans')
+def admin_switch_ports_refresh():
+    """Re-discover ports from all switches and redirect back."""
+    results = _refresh_switch_ports()
+    for host, result in results.items():
+        if isinstance(result, int):
+            flash(f"{host}: discovered {result} ports", 'success')
+        else:
+            flash(f"{host}: {result}", 'warning')
+    return redirect(url_for('admin_switch_ports'))
+
+
+def _build_port_config(port_name, role, description=''):
+    """Build the complete HP5130 config command block for a given port role.
+    Uses the existing description if provided, otherwise falls back to a
+    canonical default for the role.
+    Returns a newline-joined string ready to pass to _run_switch_command().
+    """
+    expanded = _expand_switch_iface_name(port_name)
+
+    CANONICAL_DESC = {
+        'ap':           'Uplink to UniFi AP',
+        'wired':        'wired port',
+        'pi':           'TRUNK-TO-PI-Kea',
+        'inter_switch': 'Inter-switch link',
+        'uplink_udm':   'TRUNK-TO-UDM',
+        'unknown':      '',
+    }
+    desc = (description or '').strip() or CANONICAL_DESC.get(role, '')
+
+    head = ['system-view', f'interface {expanded}']
+    if desc:
+        head.append(f'description {desc}')
+
+    if role == 'wired':
+        body = [
+            'port link-type hybrid',
+            'undo port hybrid vlan 1',
+            'port hybrid vlan 10 20 30 40 50 60 70 80 90 99 untagged',
+            'port hybrid vlan 250 untagged',
+            'port hybrid pvid vlan 250',
+            'mac-vlan enable',
+            'ip verify source ip-address mac-address',
+            'mac-authentication max-user 16',
+            'mac-authentication domain macauth',
+            'mac-authentication guest-vlan 250',
+            'mac-authentication host-mode multi-vlan',
+            'port-security port-mode mac-authentication',
+            'dhcp snooping binding record',
+            'dhcp snooping check mac-address',
+        ]
+    elif role == 'ap':
+        body = [
+            'port link-type hybrid',
+            'port hybrid vlan 10 20 30 40 50 60 70 99 tagged',
+            'port hybrid vlan 1 untagged',
+            'mac-authentication max-user 256',
+            'mac-authentication domain macauth',
+            'mac-authentication host-mode multi-vlan',
+            'dhcp snooping check mac-address',
+        ]
+    elif role == 'pi':
+        body = [
+            'port link-type trunk',
+            'undo port trunk permit vlan 1',
+            'port trunk permit vlan 10 20 30 40 50 60 70 80 90 99',
+            'port trunk permit vlan 250',
+            'port trunk pvid vlan 1028',
+            'arp detection trust',
+            'dhcp snooping trust',
+        ]
+    elif role == 'uplink_udm':
+        body = [
+            'dhcp snooping trust',
+        ]
+    elif role == 'inter_switch':
+        body = [
+            'port link-type trunk',
+            'port trunk permit vlan 1 10 20 30 40 50 60 70 80 90',
+            'port trunk permit vlan 99 250',
+            'port trunk pvid vlan 1028',
+            'arp detection trust',
+            'dhcp snooping trust',
+        ]
+    else:  # unknown – description only
+        body = []
+
+    return '\n'.join(head + body + ['quit', 'quit', 'save force'])
+
+
+@app.route('/admin/switch-ports/update-single', methods=['POST'])
+@login_required
+@permission_required('manage_vlans')
+def admin_switch_ports_update_single():
+    """AJAX endpoint: update one port's role and push full config to the switch."""
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({'success': False, 'error': 'No JSON body'})
+
+    host      = (data.get('host', '') or '').strip()
+    port_name = (data.get('port', '') or '').strip()
+    role      = (data.get('role', '') or '').strip()
+
+    if not host or not port_name or role not in PORT_ROLES:
+        return jsonify({'success': False, 'error': 'Invalid request'})
+
+    row = db.session.execute(
+        text("SELECT port_description, port_role FROM switch_ports WHERE switch_host=:h AND port_name=:p"),
+        {'h': host, 'p': port_name}
+    ).fetchone()
+    if not row:
+        return jsonify({'success': False, 'error': 'Port not found in DB'})
+
+    existing_desc, existing_role = row
+    if existing_role == role:
+        return jsonify({'success': True, 'message': 'No change needed'})
+
+    cmds = _build_port_config(port_name, role, existing_desc)
+    logger.info("Pushing config to %s %s (role=%s):\n%s", host, port_name, role, cmds)
+
+    result = _run_switch_command(host, cmds)
+    if result is None:
+        return jsonify({'success': False, 'error': f'SSH to {host} failed'})
+
+    db.session.execute(
+        text("""
+            UPDATE switch_ports
+            SET port_role = :role, last_updated = NOW()
+            WHERE switch_host = :host AND port_name = :name
+        """),
+        {'role': role, 'host': host, 'name': port_name}
+    )
+    db.session.commit()
+    logger.info("Admin set %s %s → %s", host, port_name, role)
+    return jsonify({'success': True})
+@login_required
+@permission_required('manage_vlans')
+def admin_switch_ports_update():
+    """Save role changes and push canonical descriptions back to the switches."""
+    # Each radio button is named: role_<switch_host>_<port_name>
+    # e.g.  role_192.168.99.2_GE1/0/17
+    updates = {}
+    for key, role in request.form.items():
+        if not key.startswith('role_'):
+            continue
+        m = re.match(r'^role_(\d+\.\d+\.\d+\.\d+)_(.+)$', key)
+        if not m:
+            continue
+        host, port = m.group(1), m.group(2)
+        if role in PORT_ROLES:
+            updates[(host, port)] = role
+
+    if not updates:
+        flash('No changes submitted.', 'info')
+        return redirect(url_for('admin_switch_ports'))
+
+    # Canonical description pushed to the switch when role is set
+    ROLE_DESC = {
+        'ap':           'AP-UPLINK',
+        'wired':        'WIRED-ACCESS',
+        'pi':           'PI-TRUNK',
+        'inter_switch': 'ISL',
+        'uplink_udm':   'UDM-UPLINK',
+        'unknown':      None,
+    }
+
+    changed = 0
+    for (host, port_name), role in updates.items():
+        existing = db.session.execute(
+            text("SELECT port_role FROM switch_ports WHERE switch_host=:h AND port_name=:p"),
+            {'h': host, 'p': port_name}
+        ).fetchone()
+        if existing and existing[0] == role:
+            continue  # no change
+
+        db.session.execute(
+            text("""
+                UPDATE switch_ports
+                SET port_role = :role, last_updated = NOW()
+                WHERE switch_host = :host AND port_name = :name
+            """),
+            {'role': role, 'host': host, 'name': port_name}
+        )
+        changed += 1
+
+        # Push canonical description to the switch
+        desc = ROLE_DESC.get(role)
+        if desc:
+            expanded = _expand_switch_iface_name(port_name)
+            cmds = '\n'.join([
+                'system-view',
+                f'interface {expanded}',
+                f'description {desc}',
+                'quit',
+                'save force',
+            ])
+            try:
+                result = _run_switch_command(host, cmds)
+                if result is not None:
+                    logger.info("Pushed description '%s' → %s %s", desc, host, expanded)
+                else:
+                    logger.warning("Failed to push description to %s %s", host, port_name)
+            except Exception as e:
+                logger.warning("Failed to push description to %s %s: %s", host, port_name, e)
+
+    db.session.commit()
+
+    if changed:
+        flash(f'Updated {changed} port role(s).', 'success')
+        logger.info("Admin updated %d switch port roles", changed)
+    else:
+        flash('No changes (selected roles already matched).', 'info')
+
+    return redirect(url_for('admin_switch_ports'))
+
+
+# ---------------------------------------------------------------------------
+
 @app.route('/admin/traffic')
 @login_required
 @permission_required('view_traffic')
@@ -5998,6 +6525,10 @@ def health():
         logger.error(f"Health check failed: {e}")
         return jsonify({'status': 'unhealthy', 'error': str(e)}), 500
 
+
+# Trigger port discovery on every worker start (gunicorn spawns multiple workers;
+# the fresh-data check inside ensures only the first worker actually does the work).
+_startup_switch_discovery()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=True)
