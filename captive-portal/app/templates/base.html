@@ -255,7 +255,95 @@
             background: rgba(255,255,255,0.2);
             font-weight: bold;
         }
+
+        .nav-toggle {
+            display: none;
+            background: none;
+            border: 2px solid rgba(255,255,255,0.6);
+            color: white;
+            font-size: 20px;
+            padding: 5px 11px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-left: auto;
+            line-height: 1;
+        }
+
+        @media (max-width: 768px) {
+            .nav-toggle {
+                display: block;
+            }
+            .admin-nav {
+                flex-wrap: wrap;
+                padding: 10px 15px;
+            }
+            .admin-nav a {
+                display: none;
+                width: 100%;
+                margin-right: 0;
+                padding: 10px 8px;
+                border-bottom: 1px solid rgba(255,255,255,0.1);
+            }
+            .admin-nav.open a {
+                display: block;
+                margin-left: 0 !important;
+            }
+            .admin-nav.open .nav-toggle {
+                margin-left: auto;
+            }
+
+            /* Responsive tables: each row becomes a labelled card */
+            table.auto-responsive,
+            .table-responsive table {
+                display: block;
+            }
+            table.auto-responsive thead,
+            .table-responsive table thead {
+                display: none;
+            }
+            table.auto-responsive tbody,
+            table.auto-responsive tr,
+            .table-responsive table tbody,
+            .table-responsive table tr {
+                display: block;
+            }
+            table.auto-responsive tr,
+            .table-responsive table tr {
+                border: 1px solid #e0e0e0;
+                border-radius: 6px;
+                margin-bottom: 12px;
+                padding: 6px 0;
+                background: #fff;
+            }
+            table.auto-responsive td,
+            .table-responsive table td {
+                display: block;
+                padding: 6px 12px;
+                border: none;
+                border-bottom: 1px solid #f0f0f0;
+                font-size: 14px;
+                overflow-wrap: anywhere;
+            }
+            table.auto-responsive td:last-child,
+            .table-responsive table td:last-child {
+                border-bottom: none;
+            }
+            table.auto-responsive td::before,
+            .table-responsive table td::before {
+                content: attr(data-label);
+                display: block;
+                font-weight: 600;
+                color: #777;
+                font-size: 11px;
+                text-transform: uppercase;
+                letter-spacing: 0.03em;
+                margin-bottom: 2px;
+            }
+        }
     </style>
+    {% if current_user and current_user.is_authenticated %}
+    <style>.container { max-width: 95%; }</style>
+    {% endif %}
     {% block extra_head %}{% endblock %}
 </head>
 <body>
@@ -270,16 +358,18 @@
         
         {% if current_user and current_user.is_authenticated %}
         <div class="admin-nav">
+            <button class="nav-toggle" aria-label="Toggle menu">&#9776;</button>
             {% if current_user.can_manage_users %}
             <a href="{{ url_for('admin_dashboard') }}" class="{% if request.endpoint == 'admin_dashboard' %}active{% endif %}">Dashboard</a>
             {% endif %}
             <a href="{{ url_for('admin_traffic') }}" class="{% if request.endpoint == 'admin_traffic' %}active{% endif %}">Traffic Viewer</a>
             {% if current_user.can_manage_vlans %}
             <a href="{{ url_for('admin_vlan_config') }}" class="{% if request.endpoint == 'admin_vlan_config' %}active{% endif %}">VLAN Config</a>
+            {% endif %}
+            {% if current_user.can_manage_switch_ports %}
             <a href="{{ url_for('admin_switch_ports') }}" class="{% if request.endpoint == 'admin_switch_ports' %}active{% endif %}">Switch Ports</a>
             {% endif %}
             {% if current_user.can_manage_users %}
-            <a href="{{ url_for('admin_add_user') }}" class="{% if request.endpoint == 'admin_add_user' %}active{% endif %}">Add User</a>
             <a href="{{ url_for('admin_import_users') }}" class="{% if request.endpoint == 'admin_import_users' %}active{% endif %}">Import Users</a>
             {% endif %}
             {% if current_user.can_manage_admins %}
@@ -310,5 +400,32 @@
             {% endblock %}
         </div>
     </div>
+    <script>
+        // Hamburger nav toggle
+        var toggle = document.querySelector('.nav-toggle');
+        if (toggle) {
+            toggle.addEventListener('click', function() {
+                this.closest('.admin-nav').classList.toggle('open');
+            });
+        }
+
+        // Auto-label table cells for responsive card layout
+        // Skip tables that have a filter-row (e.g. traffic viewer) — those use horizontal scroll instead
+        document.addEventListener('DOMContentLoaded', function() {
+            document.querySelectorAll('table').forEach(function(table) {
+                if (table.querySelector('tr.filter-row')) return;
+                var headers = Array.from(table.querySelectorAll('thead th')).map(function(th) {
+                    return th.textContent.trim();
+                });
+                if (!headers.length) return;
+                table.classList.add('auto-responsive');
+                table.querySelectorAll('tbody tr').forEach(function(row) {
+                    row.querySelectorAll('td').forEach(function(td, i) {
+                        if (headers[i]) td.setAttribute('data-label', headers[i]);
+                    });
+                });
+            });
+        });
+    </script>
 </body>
 </html>

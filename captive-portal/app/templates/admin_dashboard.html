@@ -6,12 +6,6 @@
 
 {% block extra_head %}
 <style>
-    /* Override container max-width for admin dashboard */
-    .container {
-        max-width: 95%;
-        margin: 20px auto;
-    }
-    
     /* Responsive table wrapper */
     .table-responsive {
         overflow-x: auto;
@@ -92,6 +86,63 @@
     tr:hover td:nth-child(even) {
         background: #fffef5 !important;
     }
+    .toggle-btn {
+        padding: 5px 13px;
+        border: 1px solid #ccc;
+        border-radius: 20px;
+        background: #fff;
+        color: #666;
+        cursor: pointer;
+        font-size: 12px;
+        transition: background 0.15s, color 0.15s, border-color 0.15s;
+        white-space: nowrap;
+    }
+    .toggle-btn.active {
+        background: #2c7a7b;
+        color: #fff;
+        border-color: #2c7a7b;
+    }
+    .toggle-btn:hover:not(.active) {
+        border-color: #2c7a7b;
+        color: #2c7a7b;
+    }
+    /* Section Panes */
+    .section-pane {
+        background: #fff;
+        border: 1px solid #dde2e8;
+        border-radius: 8px;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.07);
+        margin: 22px 0;
+        overflow: hidden;
+    }
+    .section-pane-header {
+        background: linear-gradient(90deg, #2c7a7b 0%, #3a9e9e 100%);
+        color: white;
+        padding: 13px 18px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 10px;
+    }
+    .section-pane-header h2, .section-pane-header h3 {
+        margin: 0;
+        color: white !important;
+        font-size: 17px;
+        font-weight: 600;
+    }
+    .section-pane-header--pending  { background: linear-gradient(90deg, #5a4fc0 0%, #7b6fdb 100%); }
+    .section-pane-header--warning  { background: linear-gradient(90deg, #b85c2b 0%, #d9804a 100%); }
+    .section-pane-header--domain   { background: linear-gradient(90deg, #4a5568 0%, #718096 100%); }
+    .section-pane-header .btn-pane {
+        font-size: 13px; padding: 5px 13px;
+        background: rgba(255,255,255,0.18);
+        border: 1px solid rgba(255,255,255,0.45);
+        color: white;
+        border-radius: 4px;
+    }
+    .section-pane-header .btn-pane:hover { background: rgba(255,255,255,0.30); }
+    .section-pane-body { padding: 16px 18px; }
 </style>
 <script>
 // Generic function to update a table via AJAX
@@ -216,12 +267,23 @@ function searchTable(tableType, searchValue) {
     {% endif %}
 </div>
 
+<div style="display:flex;flex-wrap:wrap;gap:8px;margin:0 0 5px 0;padding:10px 14px;background:#f8f9fa;border-radius:6px;border:1px solid #e0e0e0;align-items:center;">
+    <span style="font-size:13px;font-weight:600;color:#555;margin-right:4px;">Show sections:</span>
+    <button onclick="toggleSection('lease-stats-section','lease_stats',this)" class="toggle-btn{% if 'lease_stats' not in dashboard_hidden_sections %} active{% endif %}">&#128202; Active Leases</button>
+    <button onclick="toggleSection('unregistered-table-section','unregistered',this)" class="toggle-btn{% if 'unregistered' not in dashboard_hidden_sections %} active{% endif %}">&#128721; Unregistered Devices</button>
+    <button onclick="toggleSection('users-table-section','users',this)" class="toggle-btn{% if 'users' not in dashboard_hidden_sections %} active{% endif %}">&#128101; Authorized Users</button>
+    <button onclick="toggleSection('devices-table-section','devices',this)" class="toggle-btn{% if 'devices' not in dashboard_hidden_sections %} active{% endif %}">&#128241; All Devices</button>
+    <button onclick="toggleSection('domain-policies-section','domain_policies',this)" class="toggle-btn{% if 'domain_policies' not in dashboard_hidden_sections %} active{% endif %}">&#128231; Domain Policies</button>
+</div>
+
 {% include 'partials/lease_stats.html' %}
 
 {% if pending_total > 0 %}
-<div id="pending-table-section">
-<h2 style="margin-top: 30px; color: #667eea;">⏳ Pending Registration Requests ({{ pending_total }})</h2>
-
+<div id="pending-table-section" class="section-pane" style="margin-top:20px;">
+<div class="section-pane-header section-pane-header--pending">
+    <h2>&#9203; Pending Registration Requests ({{ pending_total }})</h2>
+</div>
+<div class="section-pane-body">
 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 15px; flex-wrap: wrap;">
     <form onsubmit="return searchTable('pending', this.pending_search.value);" style="display: flex; gap: 10px; align-items: center; flex: 1; min-width: 300px;">
         <input type="text" name="pending_search" value="{{ pending_search }}" 
@@ -343,11 +405,15 @@ function searchTable(tableType, searchValue) {
     {% endif %}
 </div>
 {% endif %}
+</div>
+</div>
 {% endif %}
 
-<div id="unregistered-table-section">
-<h2 style="margin-top: 30px; color: #e67e22;">🛑 Unregistered Devices ({{ unregistered_total }})</h2>
-
+<div id="unregistered-table-section" class="section-pane" {% if 'unregistered' in dashboard_hidden_sections %}style="display:none"{% endif %}>
+<div class="section-pane-header section-pane-header--warning">
+    <h2>&#128721; Unregistered Devices ({{ unregistered_total }})</h2>
+</div>
+<div class="section-pane-body">
 {% if unregistered_total > 0 %}
 <div class="table-responsive">
 <table>
@@ -383,6 +449,7 @@ function searchTable(tableType, searchValue) {
 {% else %}
 <div style="margin: 10px 0 20px; color: #666;">No unregistered devices currently detected.</div>
 {% endif %}
+</div>
 </div>
 
 <!-- Assign Device Modal -->
@@ -481,9 +548,54 @@ document.getElementById('assignDeviceModal').addEventListener('click', function(
 });
 </script>
 
-<div id="users-table-section">
-<h2 style="margin-top: 40px; color: #667eea;">👥 Authorized Users ({{ users_total }})</h2>
+<!-- Reassign Device Modal -->
+<div id="reassignDeviceModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; overflow: auto;">
+    <div style="background: white; max-width: 480px; margin: 50px auto; padding: 30px; border-radius: 5px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+        <h3 style="margin-top: 0;">Reassign Device</h3>
+        <form method="post" id="reassignDeviceForm">
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: bold;">MAC Address:</label>
+                <input type="text" id="reassignMacAddress" readonly style="width: 100%; padding: 8px; border: 1px solid #ddd; background: #f5f5f5; box-sizing: border-box;">
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label for="reassignUserId" style="display: block; margin-bottom: 5px; font-weight: bold;">New Owner: *</label>
+                <select name="user_id" id="reassignUserId" required style="width: 100%; padding: 8px; border: 1px solid #ddd;">
+                    <option value="">-- Select a user --</option>
+                    {% for u in users %}
+                    <option value="{{ u.id }}">{{ u.email }}{% if u.full_name %} ({{ u.full_name }}){% endif %}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div style="display: flex; gap: 10px; margin-top: 20px;">
+                <button type="submit" class="btn">Reassign</button>
+                <button type="button" onclick="hideReassignDeviceForm()" class="btn" style="background: #999;">Cancel</button>
+            </div>
+        </form>
+    </div>
+</div>
+<script>
+function showReassignDeviceForm(deviceId, mac) {
+    document.getElementById('reassignMacAddress').value = mac;
+    document.getElementById('reassignDeviceForm').action = '/admin/device/' + deviceId + '/reassign';
+    document.getElementById('reassignUserId').value = '';
+    document.getElementById('reassignDeviceModal').style.display = 'block';
+}
+function hideReassignDeviceForm() {
+    document.getElementById('reassignDeviceModal').style.display = 'none';
+}
+document.getElementById('reassignDeviceModal').addEventListener('click', function(e) {
+    if (e.target === this) hideReassignDeviceForm();
+});
+</script>
 
+<div id="users-table-section" class="section-pane" {% if 'users' in dashboard_hidden_sections %}style="display:none"{% endif %}>
+<div class="section-pane-header">
+    <h2>&#128101; Authorized Users ({{ users_total }})</h2>
+    {% if current_user.can_manage_users %}
+    <a href="{{ url_for('admin_add_user') }}" class="btn-pane btn">+ Add User</a>
+    {% endif %}
+</div>
+<div class="section-pane-body">
 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 15px; flex-wrap: wrap;">
     <form onsubmit="return searchTable('users', this.users_search.value);" style="display: flex; gap: 10px; align-items: center; flex: 1; min-width: 300px;">
         <input type="text" name="users_search" value="{{ users_search }}" 
@@ -624,6 +736,20 @@ document.getElementById('assignDeviceModal').addEventListener('click', function(
                     </button>
                 </form>
                 {% endif %}
+                {% if current_user.can_manage_users %}
+                {% if user.devices|length == 0 %}
+                <form method="POST" action="{{ url_for('admin_delete_user', user_id=user.id) }}" style="display: inline; margin-left: 5px;">
+                    <button type="submit" class="btn btn-small" style="background: #dc3545;"
+                            onclick="return confirm('Permanently delete user {{ user.email }}? This cannot be undone.')">
+                        🗑️ Delete
+                    </button>
+                </form>
+                {% else %}
+                <span style="display:inline-block;margin-left:5px;" title="User owns {{ user.devices|length }} device(s) — delete or reassign them first">
+                    <button disabled class="btn btn-small" style="background:#ccc;cursor:not-allowed;opacity:0.6;">🗑️ Delete</button>
+                </span>
+                {% endif %}
+                {% endif %}
             </td>
         </tr>
         {% endfor %}
@@ -649,10 +775,13 @@ document.getElementById('assignDeviceModal').addEventListener('click', function(
 </div>
 {% endif %}
 </div>
+</div>
 
-<div id="devices-table-section">
-<h2 style="margin-top: 40px; color: #667eea;">📱 All Registered Devices ({{ devices_total }})</h2>
-
+<div id="devices-table-section" class="section-pane" {% if 'devices' in dashboard_hidden_sections %}style="display:none"{% endif %}>
+<div class="section-pane-header">
+    <h2>&#128241; All Registered Devices ({{ devices_total }})</h2>
+</div>
+<div class="section-pane-body">
 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 15px; flex-wrap: wrap;">
     <form onsubmit="return searchTable('devices', this.devices_search.value);" style="display: flex; gap: 10px; align-items: center; flex: 1; min-width: 300px;">
         <input type="text" name="devices_search" value="{{ devices_search }}" 
@@ -830,6 +959,9 @@ document.getElementById('assignDeviceModal').addEventListener('click', function(
                         🗑️ Delete
                     </button>
                 </form>
+                {% if current_user.can_manage_users %}
+                <button onclick="showReassignDeviceForm({{ device.id }}, '{{ device.mac_address }}')" class="btn btn-small" style="background: #4a7c59; margin-left: 5px;">&#8599; Reassign</button>
+                {% endif %}
             </td>
         </tr>
         {% endfor %}
@@ -855,9 +987,13 @@ document.getElementById('assignDeviceModal').addEventListener('click', function(
 </div>
 {% endif %}
 </div>
+</div>
 
-<h3 style="margin-top: 40px; color: #667eea;">📧 Domain VLAN Policies</h3>
-
+<div id="domain-policies-section" class="section-pane" {% if 'domain_policies' in dashboard_hidden_sections %}style="display:none"{% endif %}>
+<div class="section-pane-header section-pane-header--domain">
+    <h3>&#128231; Domain VLAN Policies</h3>
+</div>
+<div class="section-pane-body">
 <div class="info-box" style="margin-bottom: 20px;">
     <p><strong>Note:</strong> Domain policies grant VLAN access by email domain. Unchecked VLANs mean “not specified.”</p>
 </div>
@@ -955,23 +1091,31 @@ document.getElementById('assignDeviceModal').addEventListener('click', function(
 </div>
 {% endif %}
 
-<h3 style="margin-top: 30px; color: #667eea;">VLAN Mappings</h3>
-<div class="table-responsive">
-<table>
-    <thead>
-        <tr>
-            <th>Status</th>
-            <th>VLAN ID</th>
-        </tr>
-    </thead>
-    <tbody>
-        {% for status, vlan_id in vlan_map.items() %}
-        <tr>
-            <td>{{ status }}</td>
-            <td>{{ vlan_id }}</td>
-        </tr>
-        {% endfor %}
-    </tbody>
-</table>
 </div>
+</div>
+
+<script>
+var hiddenSections = {{ dashboard_hidden_sections | list | tojson }};
+function toggleSection(elementId, prefKey, btn) {
+    var el = document.getElementById(elementId);
+    var idx = hiddenSections.indexOf(prefKey);
+    if (idx === -1) {
+        el.style.display = 'none';
+        hiddenSections.push(prefKey);
+        btn.classList.remove('active');
+    } else {
+        el.style.display = '';
+        hiddenSections.splice(idx, 1);
+        btn.classList.add('active');
+    }
+    saveDashboardPrefs();
+}
+function saveDashboardPrefs() {
+    fetch('/admin/save-dashboard-prefs', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({hidden_sections: hiddenSections})
+    });
+}
+</script>
 {% endblock %}

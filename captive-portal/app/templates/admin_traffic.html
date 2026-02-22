@@ -6,11 +6,6 @@
 
 {% block extra_head %}
 <style>
-    /* Override container max-width for traffic viewer */
-    .container {
-        max-width: 98%;
-        margin: 20px auto;
-    }
     
     /* Filter section */
     .filter-section {
@@ -313,6 +308,81 @@
     .empty-state h3 {
         margin-bottom: 10px;
     }
+
+    /* Mobile cards and filter panel (hidden on desktop) */
+    .mobile-cards { display: none; }
+    .mobile-filter-panel { display: none; }
+
+    @media (max-width: 768px) {
+        .filter-section { padding: 12px; }
+        .column-selector { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+        .filter-help { font-size: 12px; }
+        .filter-actions { flex-wrap: wrap; }
+
+        /* Hide desktop table, show mobile alternatives */
+        .table-responsive { display: none !important; }
+        .mobile-cards { display: block; }
+        .mobile-filter-panel { display: block; }
+
+        /* Mobile session cards */
+        .mobile-card {
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            margin-bottom: 12px;
+            background: #fff;
+            overflow: hidden;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.07);
+        }
+        .mobile-card-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            padding: 7px 12px;
+            border-bottom: 1px solid #f0f0f0;
+            font-size: 13px;
+            gap: 8px;
+        }
+        .mobile-card-row:last-child { border-bottom: none; }
+        .mobile-card-label {
+            font-weight: 600;
+            color: #555;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+            flex-shrink: 0;
+            min-width: 100px;
+            padding-top: 1px;
+        }
+        .mobile-card-value {
+            color: #333;
+            text-align: right;
+            word-break: break-all;
+        }
+
+        /* Mobile filter panel */
+        .mobile-filter-panel {
+            background: #f0f4f0;
+            border: 1px solid #c8d8c8;
+            border-radius: 6px;
+            padding: 12px;
+            margin-bottom: 16px;
+        }
+        .mobile-filter-panel h4 {
+            margin: 0 0 10px 0;
+            color: #2c3e2c;
+            font-size: 14px;
+        }
+        .mobile-filter-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+            gap: 8px;
+        }
+        .mobile-filter-grid .filter-item label { font-size: 11px; }
+        .mobile-filter-grid .filter-item input {
+            font-size: 13px;
+            padding: 6px 8px;
+        }
+    }
 </style>
 {% endblock %}
 
@@ -364,6 +434,24 @@
             </select>
         </div>
         
+        <!-- Mobile filter panel: inputs synced to form via JS before submit -->
+        <div class="mobile-filter-panel">
+            <h4>Filters</h4>
+            <div class="mobile-filter-grid">
+                {% for col_name in selected_columns %}
+                {% set col_label = dict(all_columns)[col_name] %}
+                <div class="filter-item">
+                    <label>{{ col_label }}</label>
+                    <input type="text"
+                           class="mobile-filter-input"
+                           data-target="filter_{{ col_name }}"
+                           value="{{ filters.get(col_name, '') }}"
+                           placeholder="{% if col_name in ['session_start', 'session_end'] %}YYYY-MM-DD{% else %}filter...{% endif %}">
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
         <!-- Hidden fields for sorting -->
         <input type="hidden" name="sort" value="{{ sort_col }}">
         <input type="hidden" name="order" value="{{ sort_order }}">
@@ -456,6 +544,31 @@
     </table>
 </div>
 
+<!-- Mobile cards (shown on mobile instead of table) -->
+<div class="mobile-cards">
+    {% for row in rows %}
+    <div class="mobile-card">
+        {% for col_name in selected_columns %}
+        {% set col_label = dict(all_columns)[col_name] %}
+        <div class="mobile-card-row">
+            <span class="mobile-card-label">{{ col_label }}</span>
+            <span class="mobile-card-value">
+                {% if row[col_name] is none %}
+                <span style="color:#999;">—</span>
+                {% elif col_name in ['session_start', 'session_end'] %}
+                {{ row[col_name].strftime('%Y-%m-%d %H:%M') if row[col_name] else '—' }}
+                {% elif col_name == 'duration_seconds' %}
+                {{ "%.2f"|format(row[col_name]) if row[col_name] else '0.00' }}
+                {% else %}
+                {{ row[col_name] }}
+                {% endif %}
+            </span>
+        </div>
+        {% endfor %}
+    </div>
+    {% endfor %}
+</div>
+
 <div class="pagination-controls">
     <div class="pagination-info">
         Showing {{ ((page - 1) * per_page) + 1 if total > 0 else 0 }} - {{ [page * per_page, total]|min }} of {{ total }} sessions
@@ -468,9 +581,9 @@
         {% else %}
         <span style="color: #ccc;">← Previous</span>
         {% endif %}
-        
+
         <span>Page {{ page }} of {{ total_pages }}</span>
-        
+
         {% if page < total_pages %}
         <a href="{{ url_for('admin_traffic', page=page+1, per_page=per_page, sort=sort_col, order=sort_order, columns=selected_columns, **filters) }}">
             Next →
@@ -516,6 +629,23 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         });
     });
+
+    // Mobile filter inputs: sync to desktop inputs and submit on Enter
+    function syncMobileFilters() {
+        document.querySelectorAll('.mobile-filter-input').forEach(function(inp) {
+            const target = document.getElementById(inp.dataset.target);
+            if (target) target.value = inp.value;
+        });
+    }
+    document.querySelectorAll('.mobile-filter-input').forEach(function(inp) {
+        inp.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                syncMobileFilters();
+                document.getElementById('filterForm').submit();
+            }
+        });
+    });
     
     // Column selection tracking
     const initialColumns = new Set({{ selected_columns|tojson }});
@@ -555,6 +685,9 @@ document.addEventListener('DOMContentLoaded', function() {
     // Disable button on form submit to prevent double submission
     const form = document.getElementById('filterForm');
     form.addEventListener('submit', function() {
+        // Sync mobile filter inputs to desktop filter inputs before submit
+        syncMobileFilters();
+
         if (!updateColumnsBtn.disabled) {
             updateColumnsBtn.disabled = true;
             updateColumnsBtn.textContent = 'Updating...';

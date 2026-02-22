@@ -1,6 +1,11 @@
 <div id="users-table-section">
-<h2 style="margin-top: 40px; color: #667eea;">👥 Authorized Users ({{ users_total }})</h2>
-
+<div class="section-pane-header">
+    <h2>&#128101; Authorized Users ({{ users_total }})</h2>
+    {% if current_user.can_manage_users %}
+    <a href="{{ url_for('admin_add_user') }}" class="btn-pane btn">+ Add User</a>
+    {% endif %}
+</div>
+<div class="section-pane-body">
 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 15px; flex-wrap: wrap;">
     <form onsubmit="return searchTable('users', this.users_search.value);" style="display: flex; gap: 10px; align-items: center; flex: 1; min-width: 300px;">
         <input type="text" name="users_search" value="{{ users_search }}" 
@@ -141,6 +146,20 @@
                     </button>
                 </form>
                 {% endif %}
+                {% if current_user.can_manage_users %}
+                {% if user.devices|length == 0 %}
+                <form method="POST" action="{{ url_for('admin_delete_user', user_id=user.id) }}" style="display: inline; margin-left: 5px;">
+                    <button type="submit" class="btn btn-small" style="background: #dc3545;"
+                            onclick="return confirm('Permanently delete user {{ user.email }}? This cannot be undone.')">
+                        🗑️ Delete
+                    </button>
+                </form>
+                {% else %}
+                <span style="display:inline-block;margin-left:5px;" title="User owns {{ user.devices|length }} device(s) — delete or reassign them first">
+                    <button disabled class="btn btn-small" style="background:#ccc;cursor:not-allowed;opacity:0.6;">🗑️ Delete</button>
+                </span>
+                {% endif %}
+                {% endif %}
             </td>
         </tr>
         {% endfor %}
@@ -167,4 +186,5 @@
     {% endif %}
 </div>
 {% endif %}
+</div>
 </div>

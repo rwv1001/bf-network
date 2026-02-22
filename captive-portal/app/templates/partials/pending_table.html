@@ -1,6 +1,8 @@
 <div id="pending-table-section">
-<h2 style="margin-top: 30px; color: #667eea;">⏳ Pending Registration Requests ({{ pending_total }})</h2>
-
+<div class="section-pane-header section-pane-header--pending">
+    <h2>&#9203; Pending Registration Requests ({{ pending_total }})</h2>
+</div>
+<div class="section-pane-body">
 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 15px; flex-wrap: wrap;">
     <form onsubmit="return searchTable('pending', this.pending_search.value);" style="display: flex; gap: 10px; align-items: center; flex: 1; min-width: 300px;">
         <input type="text" name="pending_search" value="{{ pending_search }}" 
@@ -124,4 +126,4 @@
 {% endif %}
 
 {% include 'partials/lease_stats.html' %}
-</div>
+</div></div>

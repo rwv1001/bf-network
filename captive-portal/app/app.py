@@ -751,13 +751,14 @@ class AdminUser:
     """Admin user class for Flask-Login with role-based permissions"""
     def __init__(self, admin_id, username, can_manage_users=True, can_manage_vlans=False, 
                  can_view_traffic=False, can_manage_admins=False, traffic_viewer_settings=None, 
-                 mfa_enabled=False, must_change_password=False):
+                 mfa_enabled=False, must_change_password=False, can_manage_switch_ports=False):
         self.id = str(admin_id)  # Flask-Login requires string ID
         self.username = username
         self.can_manage_users = can_manage_users
         self.can_manage_vlans = can_manage_vlans
         self.can_view_traffic = can_view_traffic
         self.can_manage_admins = can_manage_admins
+        self.can_manage_switch_ports = can_manage_switch_ports
         self.traffic_viewer_settings = traffic_viewer_settings
         self.mfa_enabled = mfa_enabled
         self.must_change_password = must_change_password
@@ -796,7 +797,8 @@ def load_user(user_id):
                 admin.can_manage_admins,
                 admin.traffic_viewer_settings,
                 admin.mfa_enabled,
-                getattr(admin, 'must_change_password', False)
+                getattr(admin, 'must_change_password', False),
+                getattr(admin, 'can_manage_switch_ports', False)
             )
     except (ValueError, TypeError):
         pass
@@ -825,6 +827,9 @@ def permission_required(permission):
                 return redirect(url_for('admin_dashboard'))
             elif permission == 'manage_admins' and not current_user.can_manage_admins:
                 flash('You do not have permission to manage admins.', 'error')
+                return redirect(url_for('admin_dashboard'))
+            elif permission == 'manage_switch_ports' and not current_user.can_manage_switch_ports:
+                flash('You do not have permission to manage switch ports.', 'error')
                 return redirect(url_for('admin_dashboard'))
             
             return f(*args, **kwargs)
@@ -3634,7 +3639,8 @@ def admin_login():
                 admin.can_view_traffic,
                 admin.can_manage_admins,
                 admin.traffic_viewer_settings,
-                admin.mfa_enabled
+                admin.mfa_enabled,
+                can_manage_switch_ports=getattr(admin, 'can_manage_switch_ports', False)
             )
             login_user(user)
             return redirect(url_for('admin_dashboard'))
@@ -3650,12 +3656,13 @@ def admin_login():
                     admin.can_manage_vlans = True
                     admin.can_view_traffic = True
                     admin.can_manage_admins = True
+                    admin.can_manage_switch_ports = True
                     db.session.add(admin)
                     db.session.commit()
                     logger.info(f"Migrated legacy admin '{username}' to database")
                 
                 # Log in with full permissions
-                user = AdminUser(admin.id, admin.username, True, True, True, True)
+                user = AdminUser(admin.id, admin.username, True, True, True, True, can_manage_switch_ports=True)
                 login_user(user)
                 return redirect(url_for('admin_dashboard'))
             
@@ -3715,7 +3722,8 @@ def admin_mfa_verify():
                 admin.can_view_traffic,
                 admin.can_manage_admins,
                 admin.traffic_viewer_settings,
-                admin.mfa_enabled
+                admin.mfa_enabled,
+                can_manage_switch_ports=getattr(admin, 'can_manage_switch_ports', False)
             )
             login_user(user)
             logger.info(f"Admin '{admin.username}' logged in with MFA")
@@ -4038,6 +4046,7 @@ def admin_manage_admins():
             'can_manage_vlans': admin.can_manage_vlans,
             'can_view_traffic': admin.can_view_traffic,
             'can_manage_admins': admin.can_manage_admins,
+            'can_manage_switch_ports': admin.can_manage_switch_ports,
             'created_at': admin.created_at,
             'last_login': admin.last_login,
             'is_current': is_current,
@@ -4060,6 +4069,7 @@ def admin_create_admin():
     can_manage_vlans = bool(request.form.get('can_manage_vlans'))
     can_view_traffic = bool(request.form.get('can_view_traffic'))
     can_manage_admins = bool(request.form.get('can_manage_admins'))
+    can_manage_switch_ports = bool(request.form.get('can_manage_switch_ports'))
     must_change_password = bool(request.form.get('must_change_password'))  # checkbox: present=True, absent=False
     
     if not username or not password:
@@ -4083,6 +4093,7 @@ def admin_create_admin():
     admin.can_manage_vlans = can_manage_vlans
     admin.can_view_traffic = can_view_traffic
     admin.can_manage_admins = can_manage_admins
+    admin.can_manage_switch_ports = can_manage_switch_ports
     admin.must_change_password = must_change_password
     admin.created_by = int(current_user.id)
     db.session.add(admin)
@@ -4104,6 +4115,7 @@ def admin_update_admin_permissions(admin_id):
     can_manage_vlans = bool(request.form.get('can_manage_vlans'))
     can_view_traffic = bool(request.form.get('can_view_traffic'))
     can_manage_admins = bool(request.form.get('can_manage_admins'))
+    can_manage_switch_ports = bool(request.form.get('can_manage_switch_ports'))
     
     # Check if this would remove the last super admin
     if admin.can_manage_admins and not can_manage_admins:
@@ -4116,6 +4128,7 @@ def admin_update_admin_permissions(admin_id):
     admin.can_manage_vlans = can_manage_vlans
     admin.can_view_traffic = can_view_traffic
     admin.can_manage_admins = can_manage_admins
+    admin.can_manage_switch_ports = can_manage_switch_ports
     db.session.commit()
     
     logger.info(f"Admin '{admin.username}' permissions updated by {current_user.username}")
@@ -4657,6 +4670,15 @@ def admin_dashboard():
         policy.allowed_vlans_set = _parse_allowed_vlans(policy.allowed_vlans)
         policy.adoptable_vlans_set = _parse_allowed_vlans(policy.adoptable_vlans)
 
+    # Load dashboard section visibility preferences
+    _dash_settings = {}
+    if current_user.traffic_viewer_settings:
+        try:
+            _dash_settings = json.loads(current_user.traffic_viewer_settings)
+        except Exception:
+            pass
+    dashboard_hidden_sections = set(_dash_settings.get('dashboard_hidden_sections', []))
+
     template_vars = dict(
         devices=devices,
         devices_page=devices_page,
@@ -4694,7 +4716,8 @@ def admin_dashboard():
         ],
         lease_stats=lease_stats,
         domain_policies=domain_policies,
-        test_env=is_test_env()
+        test_env=is_test_env(),
+        dashboard_hidden_sections=dashboard_hidden_sections
     )
     
     # For AJAX requests, determine which table section to render
@@ -4710,6 +4733,26 @@ def admin_dashboard():
     
     # For regular requests, render the full page
     return render_template('admin_dashboard.html', **template_vars)
+
+
+@app.route('/admin/save-dashboard-prefs', methods=['POST'])
+@login_required
+def admin_save_dashboard_prefs():
+    """Save per-admin dashboard section visibility preferences."""
+    data = request.get_json(silent=True) or {}
+    admin = Admin.query.get(int(current_user.id))
+    if not admin:
+        return jsonify({'success': False})
+    settings = {}
+    if admin.traffic_viewer_settings:
+        try:
+            settings = json.loads(admin.traffic_viewer_settings)
+        except Exception:
+            pass
+    settings['dashboard_hidden_sections'] = data.get('hidden_sections', [])
+    admin.traffic_viewer_settings = json.dumps(settings)
+    db.session.commit()
+    return jsonify({'success': True})
 
 
 # ---------------------------------------------------------------------------
@@ -5076,7 +5119,7 @@ def _startup_switch_discovery():
 
 @app.route('/admin/switch-ports')
 @login_required
-@permission_required('manage_vlans')
+@permission_required('manage_switch_ports')
 def admin_switch_ports():
     """Switch port management page."""
     switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
@@ -5118,7 +5161,7 @@ def admin_switch_ports():
 
 @app.route('/admin/switch-ports/refresh', methods=['POST'])
 @login_required
-@permission_required('manage_vlans')
+@permission_required('manage_switch_ports')
 def admin_switch_ports_refresh():
     """Re-discover ports from all switches and redirect back."""
     results = _refresh_switch_ports()
@@ -5210,7 +5253,7 @@ def _build_port_config(port_name, role, description=''):
 
 @app.route('/admin/switch-ports/update-single', methods=['POST'])
 @login_required
-@permission_required('manage_vlans')
+@permission_required('manage_switch_ports')
 def admin_switch_ports_update_single():
     """AJAX endpoint: update one port's role and push full config to the switch."""
     data = request.get_json(silent=True)
@@ -5254,7 +5297,7 @@ def admin_switch_ports_update_single():
     logger.info("Admin set %s %s → %s", host, port_name, role)
     return jsonify({'success': True})
 @login_required
-@permission_required('manage_vlans')
+@permission_required('manage_switch_ports')
 def admin_switch_ports_update():
     """Save role changes and push canonical descriptions back to the switches."""
     # Each radio button is named: role_<switch_host>_<port_name>
@@ -6510,6 +6553,50 @@ def admin_delete_device(device_id):
     flash(f'Device {mac_address} has been deleted', 'success')
     logger.info(f"Admin deleted device {mac_address}")
     
+    return redirect(url_for('admin_dashboard'))
+
+
+@app.route('/admin/user/<int:user_id>/delete', methods=['POST'])
+@login_required
+@permission_required('manage_users')
+def admin_delete_user(user_id):
+    """Delete a user — only allowed if they own no devices."""
+    user = User.query.get_or_404(user_id)
+    device_count = Device.query.filter_by(user_id=user_id).count()
+    if device_count > 0:
+        flash(f'Cannot delete {user.email}: they still own {device_count} device(s). Delete or reassign them first.', 'error')
+        return redirect(url_for('admin_dashboard'))
+    db.session.delete(user)
+    db.session.commit()
+    logger.info(f"Admin deleted user {user.email}")
+    flash(f'User {user.email} deleted.', 'success')
+    return redirect(url_for('admin_dashboard'))
+
+
+@app.route('/admin/device/<int:device_id>/reassign', methods=['POST'])
+@login_required
+@permission_required('manage_users')
+def admin_reassign_device(device_id):
+    """Reassign a registered device to a different user."""
+    device = Device.query.get_or_404(device_id)
+    user_id = request.form.get('user_id', '').strip()
+    if not user_id:
+        flash('A user must be selected.', 'error')
+        return redirect(url_for('admin_dashboard'))
+    try:
+        user_id = int(user_id)
+    except ValueError:
+        flash('Invalid user ID.', 'error')
+        return redirect(url_for('admin_dashboard'))
+    new_user = User.query.get(user_id)
+    if not new_user:
+        flash('User not found.', 'error')
+        return redirect(url_for('admin_dashboard'))
+    old_email = device.user.email if device.user else 'unowned'
+    device.user_id = new_user.id
+    db.session.commit()
+    logger.info(f"Admin reassigned device {device.mac_address} from {old_email} to {new_user.email}")
+    flash(f'Device {device.mac_address} reassigned to {new_user.email}.', 'success')
     return redirect(url_for('admin_dashboard'))
 
 

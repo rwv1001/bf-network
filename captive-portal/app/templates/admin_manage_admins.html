@@ -6,11 +6,6 @@
 
 {% block extra_head %}
 <style>
-    .container {
-        max-width: 95%;
-        margin: 20px auto;
-    }
-    
     .admin-table {
         width: 100%;
         border-collapse: collapse;
@@ -171,17 +166,6 @@ function changeEmail(adminId, username, currentEmail) {
 {% block content %}
 <div style="margin-bottom: 30px;">
     <button onclick="toggleCreateForm()" id="toggleFormBtn" class="btn">+ Create New Admin</button>
-    {% if current_user.can_manage_users %}
-    <a href="{{ url_for('admin_dashboard') }}" class="btn" style="background: #999; margin-left: 10px;">Dashboard</a>
-    {% endif %}
-    {% if current_user.can_view_traffic %}
-    <a href="{{ url_for('admin_traffic') }}" class="btn" style="background: #3b82f6; margin-left: 10px;">🔍 Traffic Viewer</a>
-    {% endif %}
-    {% if current_user.can_manage_vlans %}
-    <a href="{{ url_for('admin_vlan_config') }}" class="btn" style="background: #3b82f6; margin-left: 10px;">VLAN Config</a>
-    {% endif %}
-    <a href="{{ url_for('admin_mfa_setup') }}" class="btn" style="background: #28a745; margin-left: 10px;">🔐 Two-Factor Auth</a>
-    <a href="{{ url_for('admin_logout') }}" class="btn" style="background: #999; margin-left: 10px;">Logout</a>
 </div>
 
 <div id="createAdminForm" class="create-admin-form" style="display: none;">
@@ -189,13 +173,13 @@ function changeEmail(adminId, username, currentEmail) {
     <form method="post" action="{{ url_for('admin_create_admin') }}">
         <div class="form-group">
             <label for="username">Username: *</label>
-            <input type="text" id="username" name="username" required>
+            <input type="text" id="username" name="username" required autocomplete="off">
         </div>
         
         <div class="form-group">
             <label for="password">Password: * (minimum 6 characters)</label>
             <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;max-width:400px;">
-                <input type="password" id="password" name="password" required minlength="6" style="width:100%;max-width:none;margin:0;">
+                <input type="password" id="password" name="password" required minlength="6" style="width:100%;max-width:none;margin:0;" autocomplete="new-password">
                 <button type="button" onclick="togglePasswordVisibility('password', this)" style="padding:6px 10px;background:#4a5568;color:#fff;border:none;border-radius:4px;cursor:pointer;white-space:nowrap;font-size:0.85em;">Show</button>
             </div>
         </div>
@@ -223,6 +207,10 @@ function changeEmail(adminId, username, currentEmail) {
                 <div class="permission-item">
                     <input type="checkbox" id="new_can_manage_admins" name="can_manage_admins" value="1">
                     <label for="new_can_manage_admins">Manage Admins (Super Admin)</label>
+                </div>
+                <div class="permission-item">
+                    <input type="checkbox" id="new_can_manage_switch_ports" name="can_manage_switch_ports" value="1">
+                    <label for="new_can_manage_switch_ports">Switch Ports</label>
                 </div>
             </div>
         </div>
@@ -259,6 +247,7 @@ function changeEmail(adminId, username, currentEmail) {
                 <th style="text-align: center;">Manage<br>VLANs</th>
                 <th style="text-align: center;">View<br>Traffic</th>
                 <th style="text-align: center;">Manage Admins<br>(Super Admin)</th>
+                <th style="text-align: center;">Switch<br>Ports</th>
                 <th>Created</th>
                 <th>Last Login</th>
                 <th>Actions</th>
@@ -307,8 +296,14 @@ function changeEmail(adminId, username, currentEmail) {
                                {% if admin.is_only_super %}disabled title="Cannot remove the last super admin"{% endif %}
                                onchange="updatePermissions({{ admin.id }})">
                         {% if admin.is_only_super %}
+                        <input type="hidden" name="can_manage_admins" value="1">
                         <br><span class="warning-text">Last super admin</span>
                         {% endif %}
+                    </td>
+                    <td style="text-align: center;">
+                        <input type="checkbox" name="can_manage_switch_ports" value="1" 
+                               {% if admin.can_manage_switch_ports %}checked{% endif %}
+                               onchange="updatePermissions({{ admin.id }})">
                     </td>
                 </form>
                 <td>{{ admin.created_at.strftime('%Y-%m-%d %H:%M') if admin.created_at else 'N/A' }}</td>

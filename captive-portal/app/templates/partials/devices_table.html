@@ -1,6 +1,8 @@
 <div id="devices-table-section">
-<h2 style="margin-top: 40px; color: #667eea;">📱 All Registered Devices ({{ devices_total }})</h2>
-
+<div class="section-pane-header">
+    <h2>&#128241; All Registered Devices ({{ devices_total }})</h2>
+</div>
+<div class="section-pane-body">
 {% if wired_vlan_choices %}
 <form method="POST" action="{{ url_for('admin_change_devices_vlan') }}" style="margin: 10px 0 20px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
     <strong>Bulk wired VLAN change:</strong>
@@ -205,6 +207,9 @@
                         🗑️ Delete
                     </button>
                 </form>
+                {% if current_user.can_manage_users %}
+                <button onclick="showReassignDeviceForm({{ device.id }}, '{{ device.mac_address }}')" class="btn btn-small" style="background: #4a7c59; margin-left: 5px;">&#8599; Reassign</button>
+                {% endif %}
             </td>
         </tr>
         {% endfor %}
@@ -231,4 +236,4 @@
     {% endif %}
 </div>
 {% endif %}
-</div>
+</div></div>

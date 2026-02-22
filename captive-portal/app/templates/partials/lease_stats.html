@@ -1,7 +1,10 @@
 {% if lease_stats %}
-<div id="lease-stats-section" style="margin: 20px 0 30px;">
-    <h2 style="margin-top: 10px; color: #2c7a7b;">📊 Active Leases by VLAN</h2>
-    <div style="font-size: 13px; color: #666; margin: 6px 0 12px;">
+<div id="lease-stats-section" class="section-pane" style="{% if 'lease_stats' in dashboard_hidden_sections %}display:none;{% endif %}">
+<div class="section-pane-header">
+    <h2>&#128202; Active Leases by VLAN</h2>
+</div>
+<div class="section-pane-body">
+    <div style="font-size: 13px; color: #666; margin: 0 0 12px;">
         Counts are based on current entries in the Kea lease file.
     </div>
     <div class="table-responsive">
@@ -26,5 +29,6 @@
             </tbody>
         </table>
     </div>
+</div>
 </div>
 {% endif %}
