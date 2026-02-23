@@ -637,8 +637,8 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
                     <span class="sort-arrow">{% if users_sort == 'first_name' %}{{ '▼' if users_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
                 </a>
             </th>
-            <th>Allowed VLANs</th>
-            <th>Adoptable VLANs</th>
+            <th>Allowed VLANs (auto-approved)</th>
+            <th>Adoptable VLANs (auto-approved)</th>
             <th class="sortable {% if users_sort == 'begin_date' %}active{% endif %}">
                 <a href="#" onclick="return sortTable('users', 'begin_date');">
                     Dates
