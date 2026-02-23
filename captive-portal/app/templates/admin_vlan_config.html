@@ -223,6 +223,7 @@
                         <th>VLAN ID</th>
                         <th>SSID</th>
                         <th>Wired</th>
+                        <th>Pwd Reqd</th>
                         <th>Subnet Size</th>
                         <th>Remove</th>
                     </tr>
@@ -263,6 +264,12 @@
                                        {% if entry.status in ['restricted', 'unregistered', 'wired_unregistered'] %}disabled{% endif %}>
                                 Allow
                             </label>
+                        </td>
+                        <td>
+                            <input type="checkbox"
+                                   name="vlan_require_password"
+                                   value="{{ entry.status }}"
+                                   {% if entry.require_password %}checked{% endif %}>
                         </td>
                         <td>
                             {% if entry.status in prefix_statuses %}
@@ -310,6 +317,19 @@
     const spinner = saveButton ? saveButton.querySelector('.spinner') : null;
     if (form && saveButton) {
         form.addEventListener('submit', () => {
+            // Synchronise checkbox values for dynamically-added rows where
+            // the value was initially blank.
+            form.querySelectorAll('#vlan-table tbody tr').forEach(row => {
+                const statusInput = row.querySelector('input[name="vlan_status"]');
+                const wiredCb = row.querySelector('input[name="vlan_wired"]');
+                const pwdCb = row.querySelector('input[name="vlan_require_password"]');
+                if (statusInput && wiredCb && !wiredCb.value) {
+                    wiredCb.value = statusInput.value;
+                }
+                if (statusInput && pwdCb && !pwdCb.value) {
+                    pwdCb.value = statusInput.value;
+                }
+            });
             saveButton.disabled = true;
             if (buttonText) { buttonText.textContent = 'Updating configuration'; }
             if (spinner) { spinner.classList.remove('hidden'); }
@@ -338,6 +358,9 @@
                         <input type="checkbox" name="vlan_wired" value="">
                         Allow
                     </label>
+                </td>
+                <td>
+                    <input type="checkbox" name="vlan_require_password" value="">
                 </td>
                 <td><span style="color: #777; font-size: 13px;">Not configurable</span></td>
                 <td><input type="checkbox" name="vlan_remove" disabled></td>

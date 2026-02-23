@@ -362,15 +362,14 @@
             {% if current_user.can_manage_users %}
             <a href="{{ url_for('admin_dashboard') }}" class="{% if request.endpoint == 'admin_dashboard' %}active{% endif %}">Dashboard</a>
             {% endif %}
+            {% if current_user.can_view_traffic %}
             <a href="{{ url_for('admin_traffic') }}" class="{% if request.endpoint == 'admin_traffic' %}active{% endif %}">Traffic Viewer</a>
+            {% endif %}
             {% if current_user.can_manage_vlans %}
             <a href="{{ url_for('admin_vlan_config') }}" class="{% if request.endpoint == 'admin_vlan_config' %}active{% endif %}">VLAN Config</a>
             {% endif %}
             {% if current_user.can_manage_switch_ports %}
             <a href="{{ url_for('admin_switch_ports') }}" class="{% if request.endpoint == 'admin_switch_ports' %}active{% endif %}">Switch Ports</a>
-            {% endif %}
-            {% if current_user.can_manage_users %}
-            <a href="{{ url_for('admin_import_users') }}" class="{% if request.endpoint == 'admin_import_users' %}active{% endif %}">Import Users</a>
             {% endif %}
             {% if current_user.can_manage_admins %}
             <a href="{{ url_for('admin_manage_admins') }}" class="{% if request.endpoint == 'admin_manage_admins' %}active{% endif %}">Manage Admins</a>

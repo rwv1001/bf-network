@@ -422,6 +422,34 @@ document.addEventListener('DOMContentLoaded', function() {
                 return;
             }
 
+            if (status === 'pending_password') {
+                showStatus(message, 'info');
+                form.style.display = 'none';
+                // Suggest resubmitting with phone number if none was entered
+                const submittedPhone = (document.getElementById('phone_number')?.value || '').trim();
+                if (!submittedPhone) {
+                    const hintDiv = document.createElement('div');
+                    hintDiv.style.marginTop = '10px';
+                    hintDiv.innerHTML = `<p style="margin:0;font-size:0.9em;">No phone number was provided. If you'd like an administrator to contact you directly, <a href="#" id="resubmitForPhoneLink" style="color:#0c5460;">click here to resubmit with your phone number</a>.</p>`;
+                    statusMessage.appendChild(hintDiv);
+                    document.getElementById('resubmitForPhoneLink').addEventListener('click', function(e) {
+                        e.preventDefault();
+                        hintDiv.remove();
+                        form.style.display = 'block';
+                        registerBtn.disabled = false;
+                        registerBtn.textContent = 'Resubmit Registration';
+                        document.getElementById('phone_number').focus();
+                    });
+                }
+                startPolling();
+                return;
+            }
+
+            if (status === 'password_required') {
+                showNetworkPasswordPrompt('A network password is required to access this network. Please enter your password below.');
+                return;
+            }
+
             // Handle other statuses (e.g., error, rejected)
             showStatus(message, 'info');
         })
@@ -431,6 +459,127 @@ document.addEventListener('DOMContentLoaded', function() {
             registerBtn.textContent = 'Register Device';
         });
     });
+
+    // Show a password-entry prompt. Used when: (a) the server returned password_required
+    // on form submit, (b) polling transitions from pending_password to enter_password, or
+    // (c) checkInitialStatus finds enter_password on page load.
+    function showNetworkPasswordPrompt(msg) {
+        const oldPwdDiv = document.getElementById('passwordPrompt');
+        if (oldPwdDiv) oldPwdDiv.remove();
+
+        const pwdDiv = document.createElement('div');
+        pwdDiv.id = 'passwordPrompt';
+        pwdDiv.style.marginTop = '12px';
+        pwdDiv.innerHTML = `
+            <p style="margin:0 0 10px 0;">${msg || 'A network password is required. Please enter it below.'}</p>
+            <div class="form-group">
+                <label for="network_password"><strong>Network Password</strong></label>
+                <input type="password" id="network_password" placeholder="Enter your network password"
+                       style="width:100%;padding:10px;margin-top:6px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box;">
+            </div>
+            <button type="button" id="submitPasswordBtn" class="btn" style="margin-top:10px;">Submit Password</button>
+            <p style="margin:10px 0 0 0;font-size:0.9em;">
+                <a href="#" id="forgotNetworkPwdLink" style="color:#0c5460;">Forgot your password?</a>
+            </p>
+        `;
+        statusMessage.textContent = '';
+        statusMessage.style.display = 'block';
+        statusMessage.style.backgroundColor = '#d1ecf1';
+        statusMessage.style.color = '#0c5460';
+        statusMessage.style.border = '1px solid #bee5eb';
+        statusMessage.appendChild(pwdDiv);
+        form.style.display = 'none';
+
+        document.getElementById('forgotNetworkPwdLink').addEventListener('click', function(e) {
+            e.preventDefault();
+            const emailField = form.querySelector('[name="email"]');
+            const emailVal = emailField ? emailField.value.trim() : '';
+            if (!emailVal) {
+                showStatus('Please enter your email address in the form above, then click Forgot your password.', 'error');
+                statusMessage.appendChild(pwdDiv);
+                return;
+            }
+            const forgotData = new FormData();
+            forgotData.set('email', emailVal);
+            const link = document.getElementById('forgotNetworkPwdLink');
+            link.textContent = 'Sending...';
+            fetch('/forgot-network-password', {
+                method: 'POST',
+                body: forgotData,
+                credentials: 'same-origin',
+                headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' }
+            })
+            .then(r => r.json().catch(() => ({})))
+            .then(data => {
+                pwdDiv.remove();
+                showStatus((data.message || 'If that email has a network account, a reset link has been sent. Please check your email.'), 'info');
+            })
+            .catch(() => {
+                link.textContent = 'Forgot your password?';
+                showStatus('Could not send reset email. Please try again.', 'error');
+                statusMessage.appendChild(pwdDiv);
+            });
+        });
+
+        document.getElementById('submitPasswordBtn').addEventListener('click', function() {
+            const pwd = document.getElementById('network_password').value.trim();
+            if (!pwd) {
+                showStatus('Please enter your network password.', 'error');
+                statusMessage.appendChild(pwdDiv);
+                return;
+            }
+            const resubmitData = new FormData(form);
+            resubmitData.set('network_password', pwd);
+            const btn = document.getElementById('submitPasswordBtn');
+            btn.disabled = true;
+            btn.textContent = 'Checking...';
+
+            fetch(form.action, {
+                method: 'POST',
+                body: resubmitData,
+                credentials: 'same-origin',
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'Accept': 'application/json'
+                }
+            })
+            .then(async response => {
+                const data = await response.json().catch(() => ({}));
+                if (data.status === 'registered') {
+                    pwdDiv.remove();
+                    if (data.network_mismatch && data.current_ssid && data.expected_ssid) {
+                        showStatus(`You have logged onto the wrong WiFi network. Please disconnect from "${data.current_ssid}" and connect to "${data.expected_ssid}".`, 'error');
+                        startMismatchPolling();
+                    } else {
+                        showStatus((data.message || 'Device registered successfully') + ' Checking access...', 'success');
+                        startAccessCheck();
+                    }
+                } else if (data.status === 'pending') {
+                    // Password correct but admin must still approve (admin_required mode)
+                    pwdDiv.remove();
+                    showStatus(data.message || 'Password accepted. Your registration has been submitted for admin approval. Please wait...', 'info');
+                    pollingStarted = false;
+                    startPolling();
+                } else if (data.status === 'error') {
+                    btn.disabled = false;
+                    btn.textContent = 'Submit Password';
+                    showStatus(data.message || 'Incorrect password. Please try again.', 'error');
+                    statusMessage.appendChild(pwdDiv);
+                } else {
+                    btn.disabled = false;
+                    btn.textContent = 'Submit Password';
+                    showStatus(data.message || 'An error occurred. Please try again.', 'info');
+                    statusMessage.appendChild(pwdDiv);
+                }
+            })
+            .catch(err => {
+                btn.disabled = false;
+                btn.textContent = 'Submit Password';
+                showStatus('Error: ' + (err.message || 'Please try again.'), 'error');
+                statusMessage.appendChild(pwdDiv);
+            });
+        });
+    }
 
     // Modified polling: Update DOM instead of redirect
     function startPolling() {
@@ -464,7 +613,11 @@ document.addEventListener('DOMContentLoaded', function() {
                         // Show resubmit button again if needed
                         const resubmitBtn = document.getElementById('resubmitBtn');
                         if (resubmitBtn) resubmitBtn.style.display = 'block';
-                    } else if (data.status === 'pending') {
+                    } else if (data.status === 'enter_password') {
+                        clearInterval(pollInterval);
+                        pollingStarted = false;
+                        showNetworkPasswordPrompt(data.message || 'Your administrator has set a password. Please enter it to continue.');
+                    } else if (data.status === 'pending' || data.status === 'pending_password') {
                         // Do nothing, keep polling
                     }
                 })
@@ -583,6 +736,12 @@ document.addEventListener('DOMContentLoaded', function() {
                     showStatus(`Request rejected: ${data.reason || ''}`, 'error');
                 } else if (data.status === 'pending') {
                     showStatus('Awaiting approval...', 'info');
+                    startPolling();
+                } else if (data.status === 'enter_password') {
+                    showNetworkPasswordPrompt(data.message || 'Your administrator has set a password. Please enter it to continue.');
+                } else if (data.status === 'pending_password') {
+                    showStatus(data.message || 'A network password is required. An administrator will be in touch to help you set up your password.', 'info');
+                    form.style.display = 'none';
                     startPolling();
                 }
             })

@@ -27,8 +27,11 @@ from radius_coa import send_coa_disconnect, send_coa_change
 from email_service import (
     send_verification_email,
     send_admin_notification,
+    send_admin_password_setup_email,
     send_wifi_registration_confirmation,
-    send_user_blocked_device_notice
+    send_user_blocked_device_notice,
+    send_admin_password_reset_email,
+    send_network_password_set_email,
 )
 from kea_integration import get_kea_client
 from urllib.parse import urlparse
@@ -81,6 +84,22 @@ def _build_confirm_url(token):
         parsed = urlparse(portal_url)
         return f"{parsed.scheme}://{parsed.netloc}{url_for('confirm_device', token=token)}"
     return url_for('confirm_device', token=token, _external=True)
+
+
+def _build_set_password_url(token):
+    portal_url = _get_portal_base_url()
+    if portal_url:
+        parsed = urlparse(portal_url)
+        return f"{parsed.scheme}://{parsed.netloc}{url_for('set_network_password', token=token)}"
+    return url_for('set_network_password', token=token, _external=True)
+
+
+def _build_admin_set_password_url(approval_token):
+    portal_url = _get_portal_base_url()
+    if portal_url:
+        parsed = urlparse(portal_url)
+        return f"{parsed.scheme}://{parsed.netloc}{url_for('admin_set_user_password', token=approval_token)}"
+    return url_for('admin_set_user_password', token=approval_token, _external=True)
 
 
 def _portal_host_mismatch():
@@ -455,6 +474,14 @@ def _get_wired_assignable_vlan_ids():
     return {entry.vlan_id for entry in _get_wired_assignable_entries()}
 
 
+def _vlan_requires_password(vlan_id):
+    """Return True if the given VLAN ID requires a network password for registration."""
+    if not vlan_id:
+        return False
+    mapping = VlanMapping.query.filter_by(vlan_id=vlan_id).first()
+    return bool(mapping and mapping.require_password)
+
+
 def _get_admin_assignable_entries():
     """Get all VLANs that admins with manage_users permission can assign devices to.
     Unlike _get_wired_assignable_entries(), this doesn't require wired_enabled to be True.
@@ -683,6 +710,8 @@ _AUTH_EXEMPT_ENDPOINTS = {
     'admin_mfa_verify',
     'admin_mfa_disable',
     'admin_change_own_password',
+    'admin_forgot_password',
+    'admin_reset_password',
     'static',
 }
 
@@ -2383,6 +2412,17 @@ def register():
                 "new": new_profile
             }) if profile_changed else None
 
+            # If the VLAN requires a network password and the user already has one set,
+            # bypass the needs_approval flow entirely so the password-check section below
+            # handles everything.  For 'once'/'always' modes the user will be auto-registered
+            # after entering the correct password; for 'admin_required' the password-check
+            # section will create the pending request and send the admin notification itself.
+            _pwd_check_vlan = target_vlan or detected_vlan
+            if needs_approval and _vlan_requires_password(_pwd_check_vlan) and user.has_network_password:
+                needs_approval = False
+                if not target_vlan:
+                    target_vlan = _pwd_check_vlan  # ensure downstream code has a non-None VLAN
+
             if needs_approval:
                 pending_request = (
                     RegistrationRequest.query.filter_by(
@@ -2457,6 +2497,140 @@ def register():
                         }
                     })
                 return redirect(url_for('pending_approval'))
+
+            # --- Network password check for password-required VLANs (existing user) ---
+            vlan_pwd_required = _vlan_requires_password(target_vlan)
+            if vlan_pwd_required:
+                if not user.has_network_password:
+                    # User has no password yet - needs admin to set one first
+                    pending_pwd_request = (
+                        RegistrationRequest.query.filter_by(
+                            mac_address=mac_address,
+                            email=email,
+                            status='pending_password'
+                        )
+                        .order_by(RegistrationRequest.submitted_at.desc())
+                        .first()
+                    )
+                    # Generate or refresh set-password token for the user
+                    user.network_password_set_token = secrets.token_urlsafe(32)
+                    user.network_password_set_token_expires = datetime.utcnow() + timedelta(hours=24)
+                    if not pending_pwd_request:
+                        pending_pwd_request = RegistrationRequest(
+                            mac_address=mac_address,
+                            ip_address=ip_address,
+                            email=email,
+                            first_name=first_name,
+                            last_name=last_name,
+                            phone_number=phone_number,
+                            device_type=device_type,
+                            requested_vlan=target_vlan,
+                            status='pending_password',
+                            approval_token=secrets.token_urlsafe(32)
+                        )
+                        db.session.add(pending_pwd_request)
+                        db.session.commit()
+                        portal_url = os.getenv('PORTAL_URL')
+                        if portal_url:
+                            parsed = urlparse(portal_url)
+                            approval_url = f"{parsed.scheme}://{parsed.netloc}{url_for('admin_approve_request', token=pending_pwd_request.approval_token)}"
+                        else:
+                            approval_url = url_for('admin_approve_request', token=pending_pwd_request.approval_token, _external=True)
+                        admin_set_pwd_url = _build_admin_set_password_url(pending_pwd_request.approval_token)
+                        send_admin_password_setup_email(pending_pwd_request, admin_set_pwd_url, target_vlan, current_ssid)
+                    else:
+                        db.session.commit()
+                    # Send the user an email with their set-password link
+                    set_password_url = _build_set_password_url(user.network_password_set_token)
+                    send_network_password_set_email(
+                        user.email,
+                        user.first_name or first_name or 'there',
+                        set_password_url,
+                    )
+                    if is_ajax:
+                        return jsonify({
+                            'status': 'pending_password',
+                            'message': 'A network password is required to access this network. Please check your email for a link to set your password.'
+                        })
+                    return redirect(url_for('pending_approval'))
+                else:
+                    # User has a password - verify it before registering
+                    network_password = (request.form.get('network_password') or '').strip()
+                    if not network_password:
+                        if is_ajax:
+                            return jsonify({'status': 'password_required'})
+                        return render_template(
+                            'register.html',
+                            prefill={
+                                'email': email,
+                                'first_name': first_name,
+                                'last_name': last_name,
+                                'phone_number': phone_number,
+                                'device_type': device_type,
+                            },
+                            show_password_field=True,
+                            detected_mac=detected_mac,
+                            detected_ip=detected_ip,
+                            wired_vlan_required=is_wired_unregistered,
+                            wired_vlan_options=wired_vlan_options,
+                        )
+                    if not user.check_network_password(network_password):
+                        if is_ajax:
+                            return jsonify({'status': 'error', 'message': 'Incorrect network password. Please try again.'})
+                        flash('Incorrect network password.', 'error')
+                        return render_template(
+                            'register.html',
+                            prefill={
+                                'email': email,
+                                'first_name': first_name,
+                                'last_name': last_name,
+                                'phone_number': phone_number,
+                                'device_type': device_type,
+                            },
+                            show_password_field=True,
+                            detected_mac=detected_mac,
+                            detected_ip=detected_ip,
+                            wired_vlan_required=is_wired_unregistered,
+                            wired_vlan_options=wired_vlan_options,
+                        )
+                    # Password correct – check if admin approval is still required
+                    if user.network_password_approval_mode == 'admin_required':
+                        # Correct password, but this user requires admin sign-off regardless
+                        _admin_req = RegistrationRequest(
+                            mac_address=mac_address,
+                            ip_address=ip_address,
+                            email=email,
+                            first_name=first_name,
+                            last_name=last_name,
+                            phone_number=phone_number,
+                            device_type=device_type,
+                            requested_vlan=target_vlan,
+                            status='pending',
+                            approval_token=secrets.token_urlsafe(32),
+                            notes='Password verified; awaiting admin approval'
+                        )
+                        db.session.add(_admin_req)
+                        db.session.commit()
+                        _portal_url = os.getenv('PORTAL_URL')
+                        if _portal_url:
+                            _parsed = urlparse(_portal_url)
+                            _appr_url = f"{_parsed.scheme}://{_parsed.netloc}{url_for('admin_approve_request', token=_admin_req.approval_token)}"
+                        else:
+                            _appr_url = url_for('admin_approve_request', token=_admin_req.approval_token, _external=True)
+                        send_admin_notification(_admin_req, _appr_url, detected_vlan, current_ssid)
+                        if is_ajax:
+                            return jsonify({
+                                'status': 'pending',
+                                'message': 'Password accepted. Your registration has been submitted for admin approval.',
+                                'prefill': {'email': email, 'first_name': first_name, 'last_name': last_name,
+                                            'phone_number': phone_number, 'device_type': device_type}
+                            })
+                        return redirect(url_for('pending_approval'))
+                    # 'once': auto-approve this device, then require admin approval for all future ones
+                    if user.network_password_approval_mode == 'once':
+                        user.network_password_approval_mode = 'admin_required'
+                        db.session.commit()
+                    # 'always' or None: fall through to registration below
 
             if existing_device:
                 existing_device.user_id = user.id
@@ -2570,6 +2744,54 @@ def register():
                     target_vlan = wired_vlan_id
                 else:
                     target_vlan = detected_vlan if connection_type == 'wifi' else default_vlan
+
+                # Check if target VLAN requires a network password (new user, auto-approve domain)
+                if _vlan_requires_password(target_vlan):
+                    # Create the user now (domain policy allows them) but hold off on device
+                    new_user = User(
+                        email=email,
+                        first_name=first_name,
+                        last_name=last_name,
+                        phone_number=phone_number,
+                        begin_date=datetime.utcnow().date(),
+                        notes='Auto-approved via domain policy – awaiting network password',
+                        created_by='domain-policy',
+                        network_password_set_token=secrets.token_urlsafe(32),
+                        network_password_set_token_expires=datetime.utcnow() + timedelta(hours=24),
+                    )
+                    db.session.add(new_user)
+                    db.session.flush()  # get new_user.id without committing
+                    reg_request = RegistrationRequest(
+                        mac_address=mac_address,
+                        ip_address=ip_address,
+                        email=email,
+                        first_name=first_name,
+                        last_name=last_name,
+                        phone_number=phone_number,
+                        device_type=device_type,
+                        requested_vlan=target_vlan,
+                        status='pending_password',
+                        approval_token=secrets.token_urlsafe(32)
+                    )
+                    db.session.add(reg_request)
+                    db.session.commit()
+                    # Send user the set-password email
+                    set_password_url = _build_set_password_url(new_user.network_password_set_token)
+                    send_network_password_set_email(
+                        email,
+                        first_name or 'there',
+                        set_password_url,
+                    )
+                    # Also notify admin with the set-password-for-user link
+                    admin_set_pwd_url = _build_admin_set_password_url(reg_request.approval_token)
+                    send_admin_password_setup_email(reg_request, admin_set_pwd_url, target_vlan, ssid)
+                    if is_ajax:
+                        return jsonify({
+                            'status': 'pending_password',
+                            'message': 'A network password is required to access this network. Please check your email for a link to set your password.'
+                        })
+                    return redirect(url_for('pending_approval'))
+
                 user = User(
                     email=email,
                     first_name=first_name,
@@ -2654,6 +2876,12 @@ def register():
                     })
                 return redirect(url_for('registered'))
 
+            # If the VLAN this user needs requires a network password, flag as pending_password
+            # This applies even when admin approval is required (not just auto-approve domains)
+            _vlan_for_pw_check = wired_vlan_id if is_wired_unregistered else detected_vlan
+            _request_needs_password = bool(_vlan_for_pw_check and _vlan_requires_password(_vlan_for_pw_check))
+            _request_status = 'pending_password' if _request_needs_password else 'pending'
+
             reg_request = RegistrationRequest(
                 mac_address=mac_address,
                 ip_address=ip_address,
@@ -2662,8 +2890,8 @@ def register():
                 last_name=last_name,
                 phone_number=phone_number,
                 device_type=device_type,
-                requested_vlan=wired_vlan_id if is_wired_unregistered else None,
-                status='pending',
+                requested_vlan=wired_vlan_id if is_wired_unregistered else (detected_vlan if _request_needs_password else None),
+                status=_request_status,
                 approval_token=secrets.token_urlsafe(32)
             )
             db.session.add(reg_request)
@@ -2675,8 +2903,6 @@ def register():
             else:
                 approval_url = url_for('admin_approve_request', token=reg_request.approval_token, _external=True)
 
-            send_admin_notification(reg_request, approval_url, detected_vlan, ssid)
-
             prefill_data = {
                 'email': email,
                 'first_name': first_name,
@@ -2685,11 +2911,23 @@ def register():
                 'device_type': device_type
             }
 
+            if _request_needs_password:
+                admin_set_pwd_url = _build_admin_set_password_url(reg_request.approval_token)
+                send_admin_password_setup_email(reg_request, admin_set_pwd_url, detected_vlan, ssid)
+            else:
+                send_admin_notification(reg_request, approval_url, detected_vlan, ssid)
+
             if is_ajax:
+                if _request_needs_password:
+                    return jsonify({
+                        'status': 'pending_password',
+                        'message': 'This network requires a network password. '
+                                   'An administrator has been notified and will be in touch to help get you set up.',
+                    })
                 return jsonify({
                     'status': 'pending',
                     'message': 'Registration request submitted. Waiting for approval...',
-                    'prefill': prefill_data  # Send back for client to display/prefill on resubmit
+                    'prefill': prefill_data
                 })
             else:
                 return redirect(url_for('pending_approval'))
@@ -3251,6 +3489,239 @@ def adopt_change_vlan():
     return redirect(url_for('adopt_devices'))
 
 
+@app.route('/admin/set-user-password/<token>', methods=['GET', 'POST'])
+def admin_set_user_password(token):
+    """Admin page (token-secured, no login required) to set a user's network password
+    and choose the approval policy for this pending_password registration request."""
+    from models import User as _User
+
+    reg_request = RegistrationRequest.query.filter_by(approval_token=token).first_or_404()
+
+    if reg_request.status != 'pending_password':
+        already_action = reg_request.status
+        return render_template('admin_set_user_password.html',
+                               already_processed=True,
+                               already_action=already_action,
+                               reg_request=reg_request)
+
+    user = _User.query.filter_by(email=reg_request.email).first()
+
+    if request.method == 'GET':
+        return render_template('admin_set_user_password.html',
+                               reg_request=reg_request,
+                               user=user)
+
+    # POST – validate and apply
+    password = (request.form.get('password') or '').strip()
+    confirm = (request.form.get('confirm_password') or '').strip()
+    mode = (request.form.get('approval_mode') or 'always').strip()
+
+    if mode not in ('once', 'always', 'admin_required'):
+        mode = 'always'
+
+    if not password or len(password) < 8:
+        return render_template('admin_set_user_password.html', reg_request=reg_request, user=user,
+                               form_error='Password must be at least 8 characters.')
+    if password != confirm:
+        return render_template('admin_set_user_password.html', reg_request=reg_request, user=user,
+                               form_error='Passwords do not match. Please try again.')
+
+    # Create user if this is a brand-new registration (e.g. pending_password from non-auto-approve path)
+    if not user:
+        user = _User(
+            email=reg_request.email,
+            first_name=reg_request.first_name,
+            last_name=reg_request.last_name,
+            phone_number=reg_request.phone_number,
+            begin_date=datetime.utcnow().date(),
+            notes='Created via admin password setup',
+            created_by='admin-password-setup',
+        )
+        db.session.add(user)
+        db.session.flush()
+
+    # Set the password on the user
+    user.set_network_password(password)
+    user.network_password_set_token = None
+    user.network_password_set_token_expires = None
+
+    # All modes: just persist the password and the approval policy.
+    # The pending_password request(s) remain as-is.  The registration-status API
+    # now returns 'enter_password' for this MAC once it sees the password hash is set,
+    # causing the portal to stop showing "waiting" and instead show a password field.
+    # Device registration happens when the user enters the correct password on their device.
+    user.network_password_approval_mode = mode
+    db.session.commit()
+
+    return render_template('admin_set_user_password.html', success=True, mode=mode,
+                           reg_request=reg_request, user=user)
+
+
+@app.route('/set-network-password/<token>', methods=['GET', 'POST'])
+def set_network_password(token):
+    """Allow a user to set their network password via emailed token."""
+    from models import User as _User
+    user = _User.query.filter_by(network_password_set_token=token).first()
+    if not user:
+        return render_template('set_network_password.html', error='invalid')
+    if not user.network_password_set_token_expires or datetime.utcnow() > user.network_password_set_token_expires:
+        return render_template('set_network_password.html', error='expired')
+
+    if request.method == 'POST':
+        password = (request.form.get('password') or '').strip()
+        confirm = (request.form.get('confirm_password') or '').strip()
+        if not password or len(password) < 8:
+            return render_template('set_network_password.html', token=token, user=user,
+                                   form_error='Password must be at least 8 characters.')
+        if password != confirm:
+            return render_template('set_network_password.html', token=token, user=user,
+                                   form_error='Passwords do not match. Please try again.')
+
+        # Store the password and clear the token
+        user.set_network_password(password)
+        user.network_password_set_token = None
+        user.network_password_set_token_expires = None
+        db.session.commit()
+
+        # Complete all pending_password registration requests for this user
+        pending_requests = (
+            RegistrationRequest.query
+            .filter_by(email=user.email, status='pending_password')
+            .order_by(RegistrationRequest.submitted_at.desc())
+            .all()
+        )
+        for reg_request in pending_requests:
+            target_vlan = reg_request.requested_vlan
+            connection_type, detected_vlan, ssid = detect_connection_type(reg_request.ip_address)
+            if not target_vlan:
+                target_vlan = detected_vlan
+
+            existing_device = Device.query.filter_by(mac_address=reg_request.mac_address).first()
+            if existing_device:
+                existing_device.user_id = user.id
+                existing_device.device_name = reg_request.device_type or existing_device.device_name or 'unknown'
+                existing_device.ip_address = reg_request.ip_address
+                existing_device.registration_status = 'registered'
+                existing_device.current_vlan = target_vlan
+                existing_device.connection_type = connection_type
+                existing_device.ssid = ssid
+                existing_device.is_wired = connection_type == 'wired'
+                existing_device.wired_target_vlan = target_vlan if connection_type == 'wired' else None
+                existing_device.unregister_token = existing_device.unregister_token or secrets.token_urlsafe(32)
+                device = existing_device
+            else:
+                device = Device(
+                    mac_address=reg_request.mac_address,
+                    user_id=user.id,
+                    device_name=reg_request.device_type or 'unknown',
+                    ip_address=reg_request.ip_address,
+                    registration_status='registered',
+                    current_vlan=target_vlan,
+                    connection_type=connection_type,
+                    ssid=ssid,
+                    is_wired=connection_type == 'wired',
+                    wired_target_vlan=target_vlan if connection_type == 'wired' else None,
+                    unregister_token=secrets.token_urlsafe(32)
+                )
+                db.session.add(device)
+
+            reg_request.status = 'approved'
+            reg_request.processed_at = datetime.utcnow()
+            reg_request.processed_by = 'user-password-set'
+            db.session.commit()
+
+            # Network provisioning
+            if connection_type == 'wifi' and target_vlan:
+                kea = get_kea()
+                if kea:
+                    try:
+                        hostname = f"{(reg_request.first_name or 'user').lower()}-{reg_request.device_type or 'device'}"
+                        kea.register_mac(mac=reg_request.mac_address, vlan=target_vlan,
+                                         hostname=hostname, ip_address=None)
+                        if reg_request.ip_address:
+                            kea.force_lease_renewal(reg_request.mac_address, reg_request.ip_address)
+                    except Exception as exc:
+                        logger.warning("Kea registration failed for %s: %s", reg_request.mac_address, exc)
+            elif target_vlan:
+                try:
+                    send_coa_change(reg_request.mac_address, target_vlan)
+                    replug_switch_port_for_mac(reg_request.mac_address)
+                except Exception as exc:
+                    logger.warning("CoA/replug failed for %s: %s", reg_request.mac_address, exc)
+
+            if reg_request.ip_address:
+                if _should_hijack_vlan(target_vlan or detected_vlan):
+                    manage_dns_hijack('unhijack', reg_request.ip_address)
+                if detected_vlan:
+                    manage_switch_acl('unblock', reg_request.ip_address, detected_vlan)
+            clear_unregistered_lease(reg_request.mac_address)
+
+            # Send registration confirmation email
+            try:
+                unregister_url = _build_unregister_url(device.unregister_token)
+                ssid_display = ssid or 'Wired Network'
+                send_wifi_registration_confirmation(
+                    user.email,
+                    user.first_name or reg_request.first_name or 'there',
+                    ssid_display,
+                    reg_request.mac_address,
+                    unregister_url,
+                    registration_details={
+                        'email': user.email,
+                        'first_name': user.first_name or reg_request.first_name,
+                        'last_name': user.last_name or reg_request.last_name,
+                        'phone_number': user.phone_number or reg_request.phone_number,
+                        'device_type': reg_request.device_type,
+                        'ip_address': reg_request.ip_address,
+                        'ssid': ssid_display,
+                    }
+                )
+            except Exception as exc:
+                logger.warning("Confirmation email failed for %s: %s", user.email, exc)
+
+        return render_template('set_network_password.html', success=True, user=user)
+
+    return render_template('set_network_password.html', token=token, user=user)
+
+
+@app.route('/forgot-network-password', methods=['POST'])
+def forgot_network_password():
+    """Send a password-reset link to a user who has a network password but has forgotten it."""
+    from models import User as _User
+    email = (request.form.get('email') or '').strip().lower()
+    is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+
+    # Always respond success to avoid user enumeration
+    success_response = {'status': 'ok', 'message': 'If that email address has a network account, a reset link has been sent.'}
+
+    if not email:
+        if is_ajax:
+            return jsonify({'status': 'error', 'message': 'Please enter your email address.'})
+        flash('Please enter your email address.', 'error')
+        return redirect(url_for('register'))
+
+    user = _User.query.filter_by(email=email).first()
+    if user and user.has_network_password:
+        # Generate / refresh reset token
+        user.network_password_set_token = secrets.token_urlsafe(32)
+        user.network_password_set_token_expires = datetime.utcnow() + timedelta(hours=24)
+        db.session.commit()
+        set_password_url = _build_set_password_url(user.network_password_set_token)
+        try:
+            send_network_password_set_email(
+                user.email,
+                user.first_name or 'there',
+                set_password_url,
+            )
+        except Exception as exc:
+            logger.warning('forgot-network-password email failed for %s: %s', email, exc)
+
+    if is_ajax:
+        return jsonify(success_response)
+    flash(success_response['message'], 'info')
+    return redirect(url_for('register'))
+
+
 @app.route('/pending-approval')
 def pending_approval():
     """Pending approval page for registrations requiring admin review."""
@@ -3448,6 +3919,13 @@ def registration_status():
         }
         if reg_request.status == 'rejected' and reg_request.notes:
             payload['reason'] = reg_request.notes
+        # If the VLAN requires a password and the admin has now set one, tell the portal
+        # to stop showing "waiting" and instead prompt the user to enter the password.
+        if reg_request.status == 'pending_password':
+            _pwd_user = User.query.filter_by(email=reg_request.email).first()
+            if _pwd_user and _pwd_user.has_network_password:
+                payload['status'] = 'enter_password'
+                payload['message'] = 'Your administrator has set a network password for your account. Please enter it to continue.'
         response = jsonify(payload)
         response.headers['Access-Control-Allow-Origin'] = '*'
         return response
@@ -3669,6 +4147,60 @@ def admin_login():
             flash('Invalid credentials', 'error')
     
     return render_template('admin_login.html')
+
+
+@app.route('/admin/forgot-password', methods=['GET', 'POST'])
+def admin_forgot_password():
+    """Admin forgot-password page — request a reset link via email."""
+    if request.method == 'POST':
+        email = request.form.get('email', '').strip().lower()
+        if email:
+            admin = Admin.query.filter(
+                db.func.lower(Admin.email) == email
+            ).first()
+            if admin:
+                token = secrets.token_urlsafe(32)
+                admin.password_reset_token = token
+                admin.password_reset_expires = datetime.utcnow() + timedelta(hours=1)
+                db.session.commit()
+                reset_url = url_for('admin_reset_password', token=token, _external=True)
+                try:
+                    send_admin_password_reset_email(admin.email, admin.username, reset_url)
+                    logger.info(f"Password reset email sent to admin '{admin.username}'")
+                except Exception as e:
+                    logger.error(f"Failed to send password reset email to admin '{admin.username}': {e}")
+        # Always show the same message regardless of whether the email matched
+        flash('If that email address is registered, you will receive a password reset link shortly.', 'info')
+        return redirect(url_for('admin_forgot_password'))
+    return render_template('admin_forgot_password.html')
+
+
+@app.route('/admin/reset-password/<token>', methods=['GET', 'POST'])
+def admin_reset_password(token):
+    """Admin password reset form — validate token and accept new password."""
+    admin = Admin.query.filter_by(password_reset_token=token).first()
+    if not admin or not admin.password_reset_expires or admin.password_reset_expires < datetime.utcnow():
+        flash('This password reset link is invalid or has expired.', 'error')
+        return redirect(url_for('admin_forgot_password'))
+
+    if request.method == 'POST':
+        password = request.form.get('password', '')
+        confirm = request.form.get('confirm_password', '')
+        if len(password) < 8:
+            flash('Password must be at least 8 characters.', 'error')
+            return render_template('admin_reset_password.html', token=token)
+        if password != confirm:
+            flash('Passwords do not match.', 'error')
+            return render_template('admin_reset_password.html', token=token)
+        admin.set_password(password)
+        admin.password_reset_token = None
+        admin.password_reset_expires = None
+        db.session.commit()
+        logger.info(f"Admin '{admin.username}' reset their password via email link")
+        flash('Password reset successfully. You can now log in.', 'success')
+        return redirect(url_for('admin_login'))
+
+    return render_template('admin_reset_password.html', token=token)
 
 
 @app.route('/admin/logout')
@@ -4251,6 +4783,7 @@ def admin_vlan_config():
         vlan_ids = request.form.getlist('vlan_id')
         ssids = request.form.getlist('vlan_ssid')
         wired_statuses = set(request.form.getlist('vlan_wired'))
+        password_statuses = set(request.form.getlist('vlan_require_password'))
         remove_statuses = set(request.form.getlist('vlan_remove'))
 
         warnings = []
@@ -4267,6 +4800,10 @@ def admin_vlan_config():
                 warnings.append(f"Duplicate VLAN key skipped: {status}")
                 continue
             seen_statuses.add(status)
+
+            # wired_unregistered is hardcoded to VLAN 250 and must not be modified here
+            if status == WIRED_UNREGISTERED_STATUS:
+                continue
 
             if status in remove_statuses:
                 mapping = VlanMapping.query.filter_by(status=status).first()
@@ -4296,6 +4833,7 @@ def admin_vlan_config():
 
             ssid = (ssids[index] if index < len(ssids) else '').strip() or None
             wired_enabled = status in wired_statuses
+            require_password = status in password_statuses
 
             mapping = VlanMapping.query.filter_by(status=status).first()
             if mapping:
@@ -4303,6 +4841,7 @@ def admin_vlan_config():
                 mapping.display_name = display_name
                 mapping.ssid = ssid
                 mapping.wired_enabled = wired_enabled
+                mapping.require_password = require_password
             else:
                 mapping = VlanMapping(
                     status=status,
@@ -4310,6 +4849,7 @@ def admin_vlan_config():
                     display_name=display_name,
                     ssid=ssid,
                     wired_enabled=wired_enabled,
+                    require_password=require_password,
                 )
                 db.session.add(mapping)
 
@@ -4397,7 +4937,7 @@ def admin_vlan_config():
     # Load current configuration
     vlan_map = get_vlan_map()
     prefix_map = _get_vlan_prefix_map()
-    vlan_entries = get_vlan_entries()
+    vlan_entries = [e for e in get_vlan_entries() if e.status != WIRED_UNREGISTERED_STATUS]
     valid_vlan_ids = _parse_valid_vlan_ids()
     return render_template(
         'admin_vlan_config.html',

@@ -592,7 +592,10 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
 <div class="section-pane-header">
     <h2>&#128101; Authorized Users ({{ users_total }})</h2>
     {% if current_user.can_manage_users %}
-    <a href="{{ url_for('admin_add_user') }}" class="btn-pane btn">+ Add User</a>
+    <div style="display:flex; gap:8px;">
+        <a href="{{ url_for('admin_import_users') }}" class="btn-pane btn">&#8679; Import Users</a>
+        <a href="{{ url_for('admin_add_user') }}" class="btn-pane btn">+ Add User</a>
+    </div>
     {% endif %}
 </div>
 <div class="section-pane-body">

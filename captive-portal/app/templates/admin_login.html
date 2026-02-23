@@ -19,7 +19,13 @@
     <button type="submit" class="btn">Login</button>
 </form>
 
-<div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e0e0e0; text-align: center;">
+<div style="margin-top: 14px; text-align: center;">
+    <a href="{{ url_for('admin_forgot_password') }}" style="color: #667eea; font-size: 14px; text-decoration: none;">
+        Forgot password?
+    </a>
+</div>
+
+<div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid #e0e0e0; text-align: center;">
     <a href="{{ url_for('index') }}" style="color: #667eea; text-decoration: none;">
         ← Back to portal
     </a>

@@ -29,6 +29,8 @@ class Admin(db.Model):
     mfa_enabled = db.Column(db.Boolean, default=False, nullable=False)
     mfa_secret = db.Column(db.String(32), nullable=True)  # TOTP secret (base32 encoded)
     must_change_password = db.Column(db.Boolean, default=False, nullable=False)
+    password_reset_token = db.Column(db.String(255), nullable=True, index=True)
+    password_reset_expires = db.Column(db.DateTime, nullable=True)
     
     def set_password(self, password):
         """Hash and set password"""
@@ -63,6 +65,13 @@ class User(db.Model):
     adoptable_vlans_override = db.Column(db.Text)  # Explicitly adoptable VLAN IDs
     adoptable_vlans_deny = db.Column(db.Text)  # Explicitly denied adoptable VLAN IDs
     require_approval_every_device = db.Column(db.Boolean, default=False, nullable=False)
+    network_password_hash = db.Column(db.String(255), nullable=True)  # bcrypt hash of user's network password
+    network_password_set_token = db.Column(db.String(255), nullable=True, index=True)  # token for user to set their own network password
+    network_password_set_token_expires = db.Column(db.DateTime, nullable=True)
+    # How future correct-password registrations are handled:
+    #   None / 'always'    → auto-approve on correct password
+    #   'admin_required'   → correct password still needs admin approval in portal
+    network_password_approval_mode = db.Column(db.String(20), nullable=True)
     begin_date = db.Column(db.Date, nullable=False)
     expiry_date = db.Column(db.Date, nullable=True)  # NULL means no expiration
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -77,6 +86,20 @@ class User(db.Model):
     def __repr__(self):
         return f'<User {self.email}>'
     
+    def set_network_password(self, password):
+        """Hash and store the user's network (portal) password."""
+        self.network_password_hash = generate_password_hash(password)
+
+    def check_network_password(self, password):
+        """Verify the user's network (portal) password."""
+        if not self.network_password_hash:
+            return False
+        return check_password_hash(self.network_password_hash, password)
+
+    @property
+    def has_network_password(self):
+        return bool(self.network_password_hash)
+
     @property
     def full_name(self):
         return f"{self.first_name} {self.last_name}".strip()
@@ -181,6 +204,7 @@ class VlanMapping(db.Model):
     display_name = db.Column(db.String(100))
     ssid = db.Column(db.String(100))
     wired_enabled = db.Column(db.Boolean, default=False, nullable=False)
+    require_password = db.Column(db.Boolean, default=False, nullable=False)
     description = db.Column(db.Text)
     
     def __repr__(self):
