@@ -49,14 +49,16 @@
                     <label style="display: inline-flex; align-items: center; gap: 6px;">
                         <input type="radio" name="allowed_vlan_{{ vlan_id }}" value="deny"
                                {% if vlan_id in allowed_vlans_deny %}checked{% endif %}>
-                        Not allowed
+                        Require approval
                     </label>
                 </div>
                 {% endif %}
             {% endfor %}
         </div>
         <small style="color: #666; display: block; margin-top: 5px;">
-            Not specified means domain rules apply; not allowed overrides any domain allowances.
+            <strong>Not specified</strong>: domain rules apply (if the domain auto-approves this VLAN the user is auto-approved too).<br>
+            <strong>Allowed</strong>: always auto-approve this user on this VLAN, regardless of domain rules.<br>
+            <strong>Require approval</strong>: always send an admin approval email for this user on this VLAN, even if the domain would normally auto-approve it.
         </small>
     </div>
 

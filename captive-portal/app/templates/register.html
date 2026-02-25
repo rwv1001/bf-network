@@ -512,7 +512,10 @@ document.addEventListener('DOMContentLoaded', function() {
             .then(r => r.json().catch(() => ({})))
             .then(data => {
                 pwdDiv.remove();
-                showStatus((data.message || 'If that email has a network account, a reset link has been sent. Please check your email.'), 'info');
+                showStatus((data.message || 'If that email has a network account, a reset link has been sent. Please check your email, set your new password, then return here.'), 'info');
+                // Poll so the portal detects when the password has been reset and
+                // the device becomes registered (or enter_password becomes available).
+                startPolling();
             })
             .catch(() => {
                 link.textContent = 'Forgot your password?';

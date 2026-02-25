@@ -403,8 +403,7 @@ def send_admin_password_setup_email(registration_request, set_password_url, curr
 
             <p>A user has requested network access on a VLAN that requires a network password,
             but no password has been set for them yet.
-            Please click the button below to set their password and choose how future
-            access requests from this user should be handled.</p>
+            Please click the button below to set their password.</p>
 
             <table style="border-collapse: collapse; margin: 20px 0;">
                 <tr>
@@ -441,7 +440,7 @@ def send_admin_password_setup_email(registration_request, set_password_url, curr
                 <a href="{set_password_url}"
                    style="background-color:#1e5128; color:white; padding:12px 24px; text-decoration:none;
                           border-radius:5px; display:inline-block; font-weight:bold;">
-                    Set Password &amp; Choose Approval Policy
+                    Set Password
                 </a>
             </p>
 
@@ -468,7 +467,8 @@ def send_admin_password_setup_email(registration_request, set_password_url, curr
 
 Hello {admin_username},
 
-A user needs a network password set before they can access the network.
+A user has requested network access on a VLAN that requires a network password,
+but no password has been set for them yet. Please click the link below to set their password.
 
 Name:     {registration_request.full_name}
 Email:    {registration_request.email}
@@ -477,7 +477,7 @@ MAC:      {registration_request.mac_address}
 VLAN:     {current_vlan or 'Unknown'}
 SSID:     {current_ssid or 'Unknown'}
 
-Set their password and choose an approval policy here:
+Set their password here:
 {set_password_url}
 """
         if send_email(admin_email, subject, html_body, text_body):
@@ -818,7 +818,7 @@ This is an automated message from Blackfriars Network Access Portal
     return send_email(admin_email, subject, html_body, text_body)
 
 
-def send_network_password_set_email(to_email, first_name, set_password_url, expiry_hours=24):
+def send_network_password_set_email(to_email, first_name, set_password_url, expiry_hours=24, network_name=None):
     """
     Send a network password setup link to a user who needs to create a portal password.
 
@@ -827,8 +827,10 @@ def send_network_password_set_email(to_email, first_name, set_password_url, expi
         first_name: User's first name
         set_password_url: Full URL of the set-password page
         expiry_hours: Hours until link expires (default 24)
+        network_name: SSID or network description shown to the user (e.g. 'BF-Staff' or 'Wired Network')
     """
     subject = "Set Your Network Password – Blackfriars Network Portal"
+    network_display = network_name or 'the network'
 
     html_body = f"""
     <html><body style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto;">
@@ -836,10 +838,12 @@ def send_network_password_set_email(to_email, first_name, set_password_url, expi
             <h1 style="color: white; margin: 0; font-size: 22px;">Set Your Network Password</h1>
         </div>
         <div style="background: #f9f9f9; padding: 28px; border: 1px solid #dde2e8; border-top: none; border-radius: 0 0 8px 8px;">
-            <p>Hi <strong>{first_name}</strong>,</p>
-            <p>Access to this network requires a personal network password. Please click the button
-               below to set your password and complete your registration.</p>
-            <p>This link is valid for <strong>{expiry_hours} hours</strong>.</p>
+            <p>Hello <strong>{first_name}</strong>,</p>
+            <p>Thank you for attempting to logon to the network <strong>{network_display}</strong>.
+               In order to gain access, you will need to set a password by following the link below.</p>
+            <p>If you have already been given a password by the network administrator,
+               please ignore this email.</p>
+            <p style="font-size: 13px; color: #888;">This link is valid for <strong>{expiry_hours} hours</strong>.</p>
             <div style="text-align: center; margin: 32px 0;">
                 <a href="{set_password_url}"
                    style="background: #2c7a7b; color: white; padding: 13px 30px; border-radius: 6px;
@@ -856,9 +860,6 @@ def send_network_password_set_email(to_email, first_name, set_password_url, expi
                 Once you've set your password, return to the network registration page on the
                 device you want to connect and enter it when prompted.
             </p>
-            <p style="font-size: 13px; color: #888;">
-                If you didn't request network access, you can safely ignore this email.
-            </p>
             <p style="font-size: 12px; color: #aaa; margin-top: 20px;">
                 This is an automated message from Blackfriars Network Access Portal
             </p>
@@ -868,22 +869,78 @@ def send_network_password_set_email(to_email, first_name, set_password_url, expi
 
     text_body = f"""Set Your Network Password – Blackfriars Network Portal
 
-Hi {first_name},
+Hello {first_name},
 
-Access to this network requires a personal network password.
+Thank you for attempting to logon to the network {network_display}.
+In order to gain access, you will need to set a password by following the link below.
 
-Click the link below to set your password and complete your registration
-(valid for {expiry_hours} hours):
+If you have already been given a password by the network administrator, please ignore this email.
 
+Set your password here (valid for {expiry_hours} hours):
 {set_password_url}
 
 Once you've set your password, return to the network registration page on the
 device you want to connect and enter it when prompted.
 
-If you didn't request network access, you can safely ignore this email.
-
 ---
 This is an automated message from Blackfriars Network Access Portal
+"""
+
+    return send_email(to_email, subject, html_body, text_body)
+
+
+def send_network_password_reset_email(to_email, first_name, reset_url, expiry_hours=24):
+    """
+    Send a password-reset link to a user who has forgotten their network password.
+
+    Args:
+        to_email: User's email address
+        first_name: User's first name
+        reset_url: Full URL of the set-password page
+        expiry_hours: Hours until link expires (default 24)
+    """
+    portal_name = os.getenv('PORTAL_NAME', 'Blackfriars Network Portal')
+    subject = f"Reset Your Password \u2013 {portal_name}"
+
+    html_body = f"""
+    <html><body style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto;">
+        <div style="background: linear-gradient(90deg,#2c7a7b,#3a9e9e); padding: 24px 28px; border-radius: 8px 8px 0 0;">
+            <h1 style="color: white; margin: 0; font-size: 22px;">Reset Your Password</h1>
+        </div>
+        <div style="background: #f9f9f9; padding: 28px; border: 1px solid #dde2e8; border-top: none; border-radius: 0 0 8px 8px;">
+            <p>Dear <strong>{first_name}</strong>,</p>
+            <p>To reset your password for the {portal_name}, please click on the link below.</p>
+            <p style="font-size: 13px; color: #888;">This link is valid for <strong>{expiry_hours} hours</strong>.</p>
+            <div style="text-align: center; margin: 32px 0;">
+                <a href="{reset_url}"
+                   style="background: #2c7a7b; color: white; padding: 13px 30px; border-radius: 6px;
+                          text-decoration: none; font-size: 15px; font-weight: bold;">
+                    Reset My Password
+                </a>
+            </div>
+            <p style="font-size: 13px; color: #666;">
+                If the button doesn't work, copy and paste this link into your browser:<br>
+                <a href="{reset_url}" style="color: #2c7a7b; word-break: break-all;">{reset_url}</a>
+            </p>
+            <hr style="border: none; border-top: 1px solid #dde2e8; margin: 24px 0;">
+            <p style="font-size: 12px; color: #aaa; margin-top: 20px;">
+                This is an automated message from {portal_name}
+            </p>
+        </div>
+    </body></html>
+    """
+
+    text_body = f"""Reset Your Password \u2013 {portal_name}
+
+Dear {first_name},
+
+To reset your password for the {portal_name}, please click on the link below.
+
+Reset your password here (valid for {expiry_hours} hours):
+{reset_url}
+
+---
+This is an automated message from {portal_name}
 """
 
     return send_email(to_email, subject, html_body, text_body)

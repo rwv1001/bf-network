@@ -32,6 +32,7 @@ from email_service import (
     send_user_blocked_device_notice,
     send_admin_password_reset_email,
     send_network_password_set_email,
+    send_network_password_reset_email,
 )
 from kea_integration import get_kea_client
 from urllib.parse import urlparse
@@ -2547,6 +2548,7 @@ def register():
                         user.email,
                         user.first_name or first_name or 'there',
                         set_password_url,
+                        network_name=current_ssid or 'Wired Network',
                     )
                     if is_ajax:
                         return jsonify({
@@ -2626,6 +2628,16 @@ def register():
                         else:
                             _appr_url = url_for('admin_approve_request', token=_admin_req.approval_token, _external=True)
                         send_admin_notification(_admin_req, _appr_url, detected_vlan, current_ssid)
+                        # Close the pending_password request for this MAC now that the
+                        # password has been verified and an admin-approval request raised.
+                        RegistrationRequest.query.filter_by(
+                            mac_address=mac_address, status='pending_password'
+                        ).update(
+                            {'status': 'approved', 'processed_at': datetime.utcnow(),
+                             'processed_by': 'user-portal-verified'},
+                            synchronize_session=False
+                        )
+                        db.session.commit()
                         if is_ajax:
                             return jsonify({
                                 'status': 'pending',
@@ -2666,6 +2678,17 @@ def register():
                 )
                 db.session.add(device)
 
+            db.session.commit()
+
+            # Close any pending_password request for this MAC – the user has now
+            # verified their password on the portal and the device is being registered.
+            RegistrationRequest.query.filter_by(
+                mac_address=mac_address, status='pending_password'
+            ).update(
+                {'status': 'approved', 'processed_at': datetime.utcnow(),
+                 'processed_by': 'user-portal-registered'},
+                synchronize_session=False
+            )
             db.session.commit()
 
             # Register in network (your existing logic)
@@ -2785,6 +2808,7 @@ def register():
                         email,
                         first_name or 'there',
                         set_password_url,
+                        network_name=ssid or 'Wired Network',
                     )
                     # Also notify admin with the set-password-for-user link
                     admin_set_pwd_url = _build_admin_set_password_url(reg_request.approval_token)
@@ -2918,6 +2942,31 @@ def register():
             if _request_needs_password:
                 admin_set_pwd_url = _build_admin_set_password_url(reg_request.approval_token)
                 send_admin_password_setup_email(reg_request, admin_set_pwd_url, detected_vlan, ssid)
+                # Also send the registering user a direct set-password email so they don't
+                # need to wait for an admin action before they can set their own password.
+                from models import User as _RegUser
+                _pwd_user = _RegUser.query.filter_by(email=email).first()
+                if not _pwd_user:
+                    _pwd_user = _RegUser(
+                        email=email,
+                        first_name=first_name,
+                        last_name=last_name,
+                        phone_number=phone_number,
+                        begin_date=datetime.utcnow().date(),
+                        notes='Created via pending_password registration',
+                        created_by='registration',
+                    )
+                    db.session.add(_pwd_user)
+                    db.session.flush()
+                _pwd_user.network_password_set_token = secrets.token_urlsafe(32)
+                _pwd_user.network_password_set_token_expires = datetime.utcnow() + timedelta(hours=24)
+                db.session.commit()
+                send_network_password_set_email(
+                    email,
+                    first_name or 'there',
+                    _build_set_password_url(_pwd_user.network_password_set_token),
+                    network_name=ssid or 'Wired Network',
+                )
             else:
                 send_admin_notification(reg_request, approval_url, detected_vlan, ssid)
 
@@ -3582,107 +3631,15 @@ def set_network_password(token):
             return render_template('set_network_password.html', token=token, user=user,
                                    form_error='Passwords do not match. Please try again.')
 
-        # Store the password and clear the token
+        # Store the password and clear the token.
+        # Do NOT register devices here – the portal will detect the password is now set
+        # (registration-status returns 'enter_password') and prompt the user to enter it.
+        # Domain-policy approval logic in the register route then decides whether to
+        # auto-register or send an admin approval request.
         user.set_network_password(password)
         user.network_password_set_token = None
         user.network_password_set_token_expires = None
         db.session.commit()
-
-        # Complete all pending_password registration requests for this user
-        pending_requests = (
-            RegistrationRequest.query
-            .filter_by(email=user.email, status='pending_password')
-            .order_by(RegistrationRequest.submitted_at.desc())
-            .all()
-        )
-        for reg_request in pending_requests:
-            target_vlan = reg_request.requested_vlan
-            connection_type, detected_vlan, ssid = detect_connection_type(reg_request.ip_address)
-            if not target_vlan:
-                target_vlan = detected_vlan
-
-            existing_device = Device.query.filter_by(mac_address=reg_request.mac_address).first()
-            if existing_device:
-                existing_device.user_id = user.id
-                existing_device.device_name = reg_request.device_type or existing_device.device_name or 'unknown'
-                existing_device.ip_address = reg_request.ip_address
-                existing_device.registration_status = 'registered'
-                existing_device.current_vlan = target_vlan
-                existing_device.connection_type = connection_type
-                existing_device.ssid = ssid
-                existing_device.is_wired = connection_type == 'wired'
-                existing_device.wired_target_vlan = target_vlan if connection_type == 'wired' else None
-                existing_device.unregister_token = existing_device.unregister_token or secrets.token_urlsafe(32)
-                device = existing_device
-            else:
-                device = Device(
-                    mac_address=reg_request.mac_address,
-                    user_id=user.id,
-                    device_name=reg_request.device_type or 'unknown',
-                    ip_address=reg_request.ip_address,
-                    registration_status='registered',
-                    current_vlan=target_vlan,
-                    connection_type=connection_type,
-                    ssid=ssid,
-                    is_wired=connection_type == 'wired',
-                    wired_target_vlan=target_vlan if connection_type == 'wired' else None,
-                    unregister_token=secrets.token_urlsafe(32)
-                )
-                db.session.add(device)
-
-            reg_request.status = 'approved'
-            reg_request.processed_at = datetime.utcnow()
-            reg_request.processed_by = 'user-password-set'
-            db.session.commit()
-
-            # Network provisioning
-            if connection_type == 'wifi' and target_vlan:
-                kea = get_kea()
-                if kea:
-                    try:
-                        hostname = f"{(reg_request.first_name or 'user').lower()}-{reg_request.device_type or 'device'}"
-                        kea.register_mac(mac=reg_request.mac_address, vlan=target_vlan,
-                                         hostname=hostname, ip_address=None)
-                        if reg_request.ip_address:
-                            kea.force_lease_renewal(reg_request.mac_address, reg_request.ip_address)
-                    except Exception as exc:
-                        logger.warning("Kea registration failed for %s: %s", reg_request.mac_address, exc)
-            elif target_vlan:
-                try:
-                    send_coa_change(reg_request.mac_address, target_vlan)
-                    replug_switch_port_for_mac(reg_request.mac_address)
-                except Exception as exc:
-                    logger.warning("CoA/replug failed for %s: %s", reg_request.mac_address, exc)
-
-            if reg_request.ip_address:
-                if _should_hijack_vlan(target_vlan or detected_vlan):
-                    manage_dns_hijack('unhijack', reg_request.ip_address)
-                if detected_vlan:
-                    manage_switch_acl('unblock', reg_request.ip_address, detected_vlan)
-            clear_unregistered_lease(reg_request.mac_address)
-
-            # Send registration confirmation email
-            try:
-                unregister_url = _build_unregister_url(device.unregister_token)
-                ssid_display = ssid or 'Wired Network'
-                send_wifi_registration_confirmation(
-                    user.email,
-                    user.first_name or reg_request.first_name or 'there',
-                    ssid_display,
-                    reg_request.mac_address,
-                    unregister_url,
-                    registration_details={
-                        'email': user.email,
-                        'first_name': user.first_name or reg_request.first_name,
-                        'last_name': user.last_name or reg_request.last_name,
-                        'phone_number': user.phone_number or reg_request.phone_number,
-                        'device_type': reg_request.device_type,
-                        'ip_address': reg_request.ip_address,
-                        'ssid': ssid_display,
-                    }
-                )
-            except Exception as exc:
-                logger.warning("Confirmation email failed for %s: %s", user.email, exc)
 
         return render_template('set_network_password.html', success=True, user=user)
 
@@ -3713,13 +3670,44 @@ def forgot_network_password():
         db.session.commit()
         set_password_url = _build_set_password_url(user.network_password_set_token)
         try:
-            send_network_password_set_email(
+            send_network_password_reset_email(
                 user.email,
                 user.first_name or 'there',
                 set_password_url,
             )
         except Exception as exc:
             logger.warning('forgot-network-password email failed for %s: %s', email, exc)
+
+        # Ensure a pending_password RegistrationRequest exists for this device so that:
+        # (a) the registration-status API returns 'enter_password' once the new password
+        #     is set, causing the portal to show the password prompt again, and
+        # (b) set_network_password can register the device when the user submits their
+        #     new password via the email link.
+        mac_address = get_client_mac()
+        ip_address = get_client_ip()
+        if mac_address and ip_address:
+            existing_req = RegistrationRequest.query.filter_by(
+                mac_address=mac_address, status='pending_password'
+            ).first()
+            if not existing_req:
+                _, detected_vlan, _ = detect_connection_type(ip_address)
+                pwd_req = RegistrationRequest(
+                    mac_address=mac_address,
+                    ip_address=ip_address,
+                    email=user.email,
+                    first_name=user.first_name or '',
+                    last_name=user.last_name or '',
+                    phone_number=user.phone_number or '',
+                    device_type='unknown',
+                    requested_vlan=detected_vlan,
+                    status='pending_password',
+                    approval_token=secrets.token_urlsafe(32),
+                )
+                db.session.add(pwd_req)
+                db.session.commit()
+                logger.info(
+                    'Created pending_password request for %s (forgot-password flow)', mac_address
+                )
 
     if is_ajax:
         return jsonify(success_response)
