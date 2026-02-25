@@ -2413,11 +2413,12 @@ def register():
             }) if profile_changed else None
 
             # If the VLAN requires a network password and the user already has one set,
-            # bypass the needs_approval flow entirely so the password-check section below
-            # handles everything.  For 'once'/'always' modes the user will be auto-registered
-            # after entering the correct password; for 'admin_required' the password-check
-            # section will create the pending request and send the admin notification itself.
+            # bypass the needs_approval flow so the password-check section handles it.
+            # We save original_needs_approval so that after a correct password entry the
+            # normal VLAN-based approval logic can still be applied (unless this is the
+            # first use of a freshly admin-set password, which is always auto-approved).
             _pwd_check_vlan = target_vlan or detected_vlan
+            original_needs_approval = needs_approval
             if needs_approval and _vlan_requires_password(_pwd_check_vlan) and user.has_network_password:
                 needs_approval = False
                 if not target_vlan:
@@ -2593,9 +2594,16 @@ def register():
                             wired_vlan_required=is_wired_unregistered,
                             wired_vlan_options=wired_vlan_options,
                         )
-                    # Password correct – check if admin approval is still required
-                    if user.network_password_approval_mode == 'admin_required':
-                        # Correct password, but this user requires admin sign-off regardless
+                    # Password correct.
+                    # 'first_use': first device registered after an admin set the password –
+                    # always auto-register regardless of VLAN rules, then clear the flag.
+                    if user.network_password_approval_mode == 'first_use':
+                        user.network_password_approval_mode = None
+                        db.session.commit()
+                        # fall through to registration below
+                    elif original_needs_approval:
+                        # Password correct, but normal VLAN rules say this user/VLAN still
+                        # needs admin approval – send the standard approval email.
                         _admin_req = RegistrationRequest(
                             mac_address=mac_address,
                             ip_address=ip_address,
@@ -2626,11 +2634,7 @@ def register():
                                             'phone_number': phone_number, 'device_type': device_type}
                             })
                         return redirect(url_for('pending_approval'))
-                    # 'once': auto-approve this device, then require admin approval for all future ones
-                    if user.network_password_approval_mode == 'once':
-                        user.network_password_approval_mode = 'admin_required'
-                        db.session.commit()
-                    # 'always' or None: fall through to registration below
+                    # else: VLAN is auto-approved for this user – fall through to registration below
 
             if existing_device:
                 existing_device.user_id = user.id
@@ -3507,17 +3511,15 @@ def admin_set_user_password(token):
     user = _User.query.filter_by(email=reg_request.email).first()
 
     if request.method == 'GET':
+        already_has_password = bool(user and user.has_network_password)
         return render_template('admin_set_user_password.html',
                                reg_request=reg_request,
-                               user=user)
+                               user=user,
+                               already_has_password=already_has_password)
 
     # POST – validate and apply
     password = (request.form.get('password') or '').strip()
     confirm = (request.form.get('confirm_password') or '').strip()
-    mode = (request.form.get('approval_mode') or 'always').strip()
-
-    if mode not in ('once', 'always', 'admin_required'):
-        mode = 'always'
 
     if not password or len(password) < 8:
         return render_template('admin_set_user_password.html', reg_request=reg_request, user=user,
@@ -3550,10 +3552,13 @@ def admin_set_user_password(token):
     # now returns 'enter_password' for this MAC once it sees the password hash is set,
     # causing the portal to stop showing "waiting" and instead show a password field.
     # Device registration happens when the user enters the correct password on their device.
-    user.network_password_approval_mode = mode
+    # 'first_use' means the next device registered by this user on a password-protected
+    # VLAN will be auto-approved, regardless of VLAN rules.  After that the normal
+    # VLAN-based approval logic takes over.
+    user.network_password_approval_mode = 'first_use'
     db.session.commit()
 
-    return render_template('admin_set_user_password.html', success=True, mode=mode,
+    return render_template('admin_set_user_password.html', success=True,
                            reg_request=reg_request, user=user)
 
 
@@ -6485,6 +6490,25 @@ def admin_edit_user(user_id):
         user.expiry_date = datetime.strptime(expiry_date_str, '%Y-%m-%d').date() if expiry_date_str else None
         
         user.notes = request.form.get('notes', '').strip()
+
+        # --- Network password settings ---
+        new_net_pwd = request.form.get('new_network_password', '').strip()
+        confirm_net_pwd = request.form.get('confirm_network_password', '').strip()
+        clear_net_pwd = bool(request.form.get('clear_network_password'))
+
+        if clear_net_pwd:
+            user.network_password_hash = None
+            user.network_password_approval_mode = None
+        elif new_net_pwd:
+            if new_net_pwd != confirm_net_pwd:
+                flash('Network passwords do not match.', 'error')
+                return redirect(url_for('admin_edit_user', user_id=user.id))
+            if len(new_net_pwd) < 8:
+                flash('Network password must be at least 8 characters.', 'error')
+                return redirect(url_for('admin_edit_user', user_id=user.id))
+            user.set_network_password(new_net_pwd)
+            # Mark as 'first_use' so the next device registered is always auto-approved
+            user.network_password_approval_mode = 'first_use'
 
         vlan_map = get_vlan_map()
         allowed_vlans_allow, allowed_vlans_deny = _parse_vlan_override_form(vlan_map, 'allowed_vlan')

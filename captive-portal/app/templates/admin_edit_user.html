@@ -119,6 +119,59 @@
         <label for="notes">Notes</label>
         <textarea id="notes" name="notes" rows="3">{{ user.notes or '' }}</textarea>
     </div>
+
+    <h3 style="color:#667eea; margin-top:32px;">Network Password Settings</h3>
+    <p style="color:#555; font-size:0.9em; margin-bottom:16px;">
+        These settings apply when the user registers devices on a password-protected VLAN.
+        The password is shared across all password-protected VLANs for this user. When a
+        new password is set, the first device the user registers with it is always
+        auto-approved. For subsequent devices, the normal VLAN access rules apply —
+        auto-approved if the VLAN is in their allowed list, otherwise a normal approval
+        email is sent to you.
+    </p>
+
+    <div class="form-group">
+        <label>Current Password Status</label>
+        <p style="margin:6px 0 0 0;">
+            {% if user.has_network_password %}
+                <span style="color:#155724; font-weight:600;">&#10003; Password is set</span>
+                {% if user.network_password_approval_mode == 'first_use' %}
+                <span style="color:#856404; margin-left:8px; font-size:0.9em;">(not yet used — first device will be auto-approved)</span>
+                {% endif %}
+            {% else %}
+                <span style="color:#856404;">&#8212; No password set</span>
+            {% endif %}
+        </p>
+    </div>
+
+    <div class="form-group">
+        <label for="new_network_password">Set New Network Password</label>
+        <input type="password" id="new_network_password" name="new_network_password"
+               autocomplete="new-password" minlength="8"
+               placeholder="Leave blank to keep existing password"
+               style="font-size:1em;">
+        <small style="color:#666; display:block; margin-top:4px;">Minimum 8 characters. Leave blank to keep the current password unchanged.</small>
+    </div>
+
+    <div class="form-group">
+        <label for="confirm_network_password">Confirm New Network Password</label>
+        <input type="password" id="confirm_network_password" name="confirm_network_password"
+               autocomplete="new-password"
+               placeholder="Repeat new password"
+               style="font-size:1em;">
+    </div>
+
+    {% if user.has_network_password %}
+    <div class="form-group">
+        <label style="display:inline-flex; align-items:center; gap:8px;">
+            <input type="checkbox" name="clear_network_password" value="1"
+                   id="clearNetPwdCheck"
+                   onchange="document.getElementById('new_network_password').disabled=this.checked;
+                             document.getElementById('confirm_network_password').disabled=this.checked;">
+            Clear network password (user will need a new one set before they can register on password-protected VLANs)
+        </label>
+    </div>
+    {% endif %}
     
     <div class="info-box">
         <strong>User Information</strong>
