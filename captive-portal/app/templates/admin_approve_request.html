@@ -119,7 +119,10 @@
     </div>
     
     <div style="margin-top: 30px;">
-        <button type="submit" class="btn btn-success">✓ Approve and Activate</button>
+        <button type="submit" class="btn btn-success"
+                onclick="this.disabled=true; this.style.backgroundColor='#6c757d'; this.style.borderColor='#6c757d'; this.style.cursor='not-allowed'; this.textContent='Approving…'; this.form.submit();">
+            ✓ Approve and Activate
+        </button>
     </div>
 </form>
 
