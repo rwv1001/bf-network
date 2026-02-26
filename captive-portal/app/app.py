@@ -1528,6 +1528,7 @@ def reset_test_data():
     # Clear NAT and DNS logging tables
     db.session.execute(text("DELETE FROM nat_sessions"))
     db.session.execute(text("DELETE FROM dns_resolutions"))
+    db.session.execute(text("DELETE FROM mac_port_cache"))
     db.session.commit()
 
 
@@ -6037,35 +6038,52 @@ def admin_traffic():
     params = {}
     param_counter = 0
     
+    def _parse_date(s):
+        """Parse a date string (YYYY-MM-DD or YYYY-MM-DD HH:MM) into a datetime object."""
+        for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M', '%Y-%m-%d'):
+            try:
+                return datetime.strptime(s.strip(), fmt)
+            except ValueError:
+                continue
+        return None
+
     for col_name, filter_value in filters.items():
         # Handle date range syntax: "2024-01-01 to 2024-01-31" or ">2024-01-01" or "<2024-01-01"
         if col_name in ['session_start', 'session_end']:
             if ' to ' in filter_value.lower():
                 parts = filter_value.lower().split(' to ')
                 if len(parts) == 2:
-                    start_date = parts[0].strip()
-                    end_date = parts[1].strip()
-                    param_counter += 1
-                    where_clauses.append(f"{col_name} >= :date_start_{param_counter}::timestamp")
-                    params[f'date_start_{param_counter}'] = start_date
-                    param_counter += 1
-                    where_clauses.append(f"{col_name} <= :date_end_{param_counter}::timestamp + INTERVAL '1 day'")
-                    params[f'date_end_{param_counter}'] = end_date
+                    start_dt = _parse_date(parts[0])
+                    end_dt = _parse_date(parts[1])
+                    if start_dt and end_dt:
+                        param_counter += 1
+                        where_clauses.append(f"{col_name} >= :date_start_{param_counter}")
+                        params[f'date_start_{param_counter}'] = start_dt
+                        param_counter += 1
+                        where_clauses.append(f"{col_name} < :date_end_{param_counter}")
+                        params[f'date_end_{param_counter}'] = end_dt + timedelta(days=1)
             elif filter_value.startswith('>'):
-                date_val = filter_value[1:].strip()
-                param_counter += 1
-                where_clauses.append(f"{col_name} > :date_{param_counter}::timestamp")
-                params[f'date_{param_counter}'] = date_val
+                date_dt = _parse_date(filter_value[1:])
+                if date_dt:
+                    param_counter += 1
+                    where_clauses.append(f"{col_name} > :date_{param_counter}")
+                    params[f'date_{param_counter}'] = date_dt
             elif filter_value.startswith('<'):
-                date_val = filter_value[1:].strip()
-                param_counter += 1
-                where_clauses.append(f"{col_name} < :date_{param_counter}::timestamp")
-                params[f'date_{param_counter}'] = date_val
+                date_dt = _parse_date(filter_value[1:])
+                if date_dt:
+                    param_counter += 1
+                    where_clauses.append(f"{col_name} < :date_{param_counter}")
+                    params[f'date_{param_counter}'] = date_dt
             else:
-                # Exact date match (includes full day)
-                param_counter += 1
-                where_clauses.append(f"{col_name}::date = :date_{param_counter}::date")
-                params[f'date_{param_counter}'] = filter_value
+                # Exact date match: cover the whole day
+                date_dt = _parse_date(filter_value)
+                if date_dt:
+                    param_counter += 1
+                    where_clauses.append(f"{col_name} >= :date_start_{param_counter}")
+                    params[f'date_start_{param_counter}'] = date_dt
+                    param_counter += 1
+                    where_clauses.append(f"{col_name} < :date_end_{param_counter}")
+                    params[f'date_end_{param_counter}'] = date_dt + timedelta(days=1)
         else:
             # Text filter with % wildcard support
             param_counter += 1

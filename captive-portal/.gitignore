@@ -5,9 +5,11 @@
 data/
 */data/
 
-# Database backups
+# Database backups (but not schema definition files)
 *.sql
 *.sql.gz
+!init-db.sql
+!nat-sessions-schema.sql
 
 # Python cache
 __pycache__/

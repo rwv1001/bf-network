@@ -1,0 +1,340 @@
+-- Captive portal schema
+
+-- Admin users with role-based permissions
+CREATE TABLE IF NOT EXISTS admins (
+    id SERIAL PRIMARY KEY,
+    username VARCHAR(100) UNIQUE NOT NULL,
+    email VARCHAR(255),
+    password_hash VARCHAR(255) NOT NULL,
+    can_manage_users BOOLEAN DEFAULT TRUE NOT NULL,
+    can_manage_vlans BOOLEAN DEFAULT FALSE NOT NULL,
+    can_view_traffic BOOLEAN DEFAULT FALSE NOT NULL,
+    can_manage_admins BOOLEAN DEFAULT FALSE NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW(),
+    created_by INTEGER REFERENCES admins(id) ON DELETE SET NULL,
+    last_login TIMESTAMP,
+    traffic_viewer_settings TEXT,
+    mfa_enabled BOOLEAN DEFAULT FALSE NOT NULL,
+    mfa_secret VARCHAR(32),
+    must_change_password BOOLEAN DEFAULT FALSE NOT NULL,
+    can_manage_switch_ports BOOLEAN DEFAULT FALSE NOT NULL,
+    password_reset_token VARCHAR(255),
+    password_reset_expires TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_admins_username ON admins(username);
+CREATE INDEX IF NOT EXISTS idx_admins_email ON admins(email);
+
+CREATE TABLE IF NOT EXISTS users (
+    id SERIAL PRIMARY KEY,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    first_name VARCHAR(100),
+    last_name VARCHAR(100),
+    phone_number VARCHAR(20),
+    begin_date DATE NOT NULL,
+    expiry_date DATE NULL,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW(),
+    created_by VARCHAR(100) DEFAULT 'admin',
+    notes TEXT,
+    blocked BOOLEAN DEFAULT FALSE NOT NULL,
+    allowed_vlans TEXT,
+    adoptable_vlans TEXT,
+    allowed_vlans_override TEXT,
+    allowed_vlans_deny TEXT,
+    adoptable_vlans_override TEXT,
+    adoptable_vlans_deny TEXT,
+    require_approval_every_device BOOLEAN DEFAULT FALSE NOT NULL,
+    network_password_hash VARCHAR(255),
+    network_password_set_token VARCHAR(255),
+    network_password_set_token_expires TIMESTAMP,
+    network_password_approval_mode VARCHAR(20)
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+
+CREATE TABLE IF NOT EXISTS devices (
+    id SERIAL PRIMARY KEY,
+    mac_address VARCHAR(17) UNIQUE NOT NULL,
+    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    device_name VARCHAR(100),
+    current_vlan INTEGER,
+    registration_status VARCHAR(50) DEFAULT 'pending',
+    verification_token VARCHAR(255),
+    verification_expires_at TIMESTAMP,
+    registered_at TIMESTAMP DEFAULT NOW(),
+    first_seen TIMESTAMP DEFAULT NOW(),
+    last_seen TIMESTAMP,
+    ip_address VARCHAR(45),
+    connection_type VARCHAR(10) DEFAULT 'unknown',
+    ssid VARCHAR(100),
+    is_wired BOOLEAN DEFAULT FALSE NOT NULL,
+    wired_target_vlan INTEGER,
+    unregister_token VARCHAR(255) UNIQUE,
+    confirmation_token VARCHAR(255) UNIQUE,
+    confirmation_deadline TIMESTAMP,
+    confirmation_confirmed_at TIMESTAMP,
+    profile_snapshot TEXT,
+    switch_iface VARCHAR(100),
+    switch_iface_seen_at TIMESTAMP WITH TIME ZONE
+);
+
+CREATE INDEX IF NOT EXISTS idx_devices_mac ON devices(mac_address);
+CREATE INDEX IF NOT EXISTS idx_devices_registration_status ON devices(registration_status);
+CREATE INDEX IF NOT EXISTS idx_devices_first_seen ON devices(first_seen);
+CREATE INDEX IF NOT EXISTS idx_devices_confirmation_token ON devices(confirmation_token);
+CREATE INDEX IF NOT EXISTS idx_devices_switch_iface ON devices(switch_iface);
+
+-- Cache table for HP5130 switch MAC->port mappings (populated by hp5130-mac-poll.py)
+CREATE TABLE IF NOT EXISTS mac_port_cache (
+    mac_address     VARCHAR(17) PRIMARY KEY,  -- lowercase colon format: aa:bb:cc:dd:ee:ff
+    switch_iface    VARCHAR(100) NOT NULL,
+    switch_host     VARCHAR(255),
+    vlan_id         INTEGER,
+    last_seen       TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    created_at      TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_mac_port_cache_last_seen ON mac_port_cache(last_seen);
+
+CREATE TABLE IF NOT EXISTS registration_requests (
+    id SERIAL PRIMARY KEY,
+    mac_address VARCHAR(17) NOT NULL,
+    email VARCHAR(255) NOT NULL,
+    first_name VARCHAR(100),
+    last_name VARCHAR(100),
+    phone_number VARCHAR(20),
+    device_type VARCHAR(50),
+    ip_address VARCHAR(45),
+    user_agent TEXT,
+    status VARCHAR(50) DEFAULT 'pending',
+    requested_vlan INTEGER,
+    approval_token VARCHAR(255),
+    submitted_at TIMESTAMP DEFAULT NOW(),
+    processed_at TIMESTAMP,
+    processed_by VARCHAR(100),
+    notes TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_registration_requests_mac ON registration_requests(mac_address);
+CREATE INDEX IF NOT EXISTS idx_registration_requests_email ON registration_requests(email);
+CREATE INDEX IF NOT EXISTS idx_registration_requests_status ON registration_requests(status);
+
+CREATE TABLE IF NOT EXISTS vlan_mappings (
+    id SERIAL PRIMARY KEY,
+    status VARCHAR(50) UNIQUE NOT NULL,
+    vlan_id INTEGER NOT NULL,
+    description TEXT,
+    display_name TEXT,
+    ssid TEXT,
+    wired_enabled BOOLEAN DEFAULT FALSE NOT NULL,
+    require_password BOOLEAN DEFAULT FALSE NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS domain_policies (
+    id SERIAL PRIMARY KEY,
+    domain VARCHAR(255) UNIQUE NOT NULL,
+    allowed_vlans TEXT,
+    adoptable_vlans TEXT,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key VARCHAR(100) PRIMARY KEY,
+    value TEXT,
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS unregistered_leases (
+    mac_address VARCHAR(17) PRIMARY KEY,
+    ip_address VARCHAR(45) NOT NULL,
+    expires_at TIMESTAMP NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_unregistered_leases_expires_at ON unregistered_leases(expires_at);
+
+-- Kea DHCP hosts table for PostgreSQL backend
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INT PRIMARY KEY NOT NULL,
+    minor INT
+);
+
+INSERT INTO schema_version (version, minor)
+SELECT 1, 0
+WHERE NOT EXISTS (SELECT 1 FROM schema_version);
+
+CREATE TABLE IF NOT EXISTS hosts (
+    host_id SERIAL PRIMARY KEY,
+    dhcp_identifier BYTEA NOT NULL,
+    dhcp_identifier_type SMALLINT NOT NULL,
+    dhcp4_subnet_id INTEGER NULL,
+    dhcp6_subnet_id INTEGER NULL,
+    ipv4_address BIGINT NULL,
+    hostname VARCHAR(255) NULL,
+    dhcp4_client_classes VARCHAR(255) NULL,
+    dhcp6_client_classes VARCHAR(255) NULL,
+    dhcp4_next_server BIGINT NULL,
+    dhcp4_server_hostname VARCHAR(64) NULL,
+    dhcp4_boot_file_name VARCHAR(128) NULL,
+    user_context TEXT NULL,
+    auth_key VARCHAR(16) NULL
+);
+
+CREATE INDEX IF NOT EXISTS hosts_dhcp4_subnet_id ON hosts (dhcp4_subnet_id);
+CREATE INDEX IF NOT EXISTS hosts_dhcp_identifier ON hosts (dhcp_identifier, dhcp_identifier_type);
+
+-- NAT Session Tracking Schema
+-- Stores SNAT sessions with start/end timestamps
+-- Groups continuous activity (< 60 second gaps) into sessions
+
+CREATE TABLE IF NOT EXISTS nat_sessions (
+    id SERIAL PRIMARY KEY,
+    src_ip INET NOT NULL,
+    src_port INTEGER NOT NULL,
+    dst_ip INET NOT NULL,
+    dst_port INTEGER NOT NULL,
+    session_start TIMESTAMP NOT NULL,
+    session_end TIMESTAMP NOT NULL,
+    packet_count INTEGER DEFAULT 1,
+    switch_iface VARCHAR(100),
+    src_mac VARCHAR(17),
+    switch_host VARCHAR(255),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT unique_nat_session UNIQUE (src_ip, src_port, dst_ip, dst_port, session_start)
+);
+
+CREATE INDEX IF NOT EXISTS idx_nat_sessions_src ON nat_sessions(src_ip, src_port, session_end DESC);
+CREATE INDEX IF NOT EXISTS idx_nat_sessions_active ON nat_sessions(src_ip, src_port, session_end) WHERE session_end > (CURRENT_TIMESTAMP - INTERVAL '2 minutes');
+CREATE INDEX IF NOT EXISTS idx_nat_sessions_time ON nat_sessions(session_start DESC, session_end DESC);
+CREATE INDEX IF NOT EXISTS idx_nat_sessions_dst ON nat_sessions(dst_ip, dst_port);
+
+-- Generic updated_at trigger function (used by dns_resolutions and others)
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE VIEW nat_active_sessions AS
+SELECT 
+    src_ip,
+    src_port,
+    dst_ip,
+    dst_port,
+    protocol,
+    session_start,
+    session_end,
+    packet_count,
+    EXTRACT(EPOCH FROM (session_end - session_start)) AS duration_seconds
+FROM nat_sessions
+WHERE session_end > (CURRENT_TIMESTAMP - INTERVAL '2 minutes')
+ORDER BY session_end DESC;
+
+CREATE OR REPLACE VIEW nat_session_stats_by_ip AS
+SELECT 
+    src_ip,
+    COUNT(*) AS total_sessions,
+    SUM(packet_count) AS total_packets,
+    MIN(session_start) AS first_seen,
+    MAX(session_end) AS last_seen,
+    AVG(EXTRACT(EPOCH FROM (session_end - session_start))) AS avg_session_duration_seconds
+FROM nat_sessions
+GROUP BY src_ip
+ORDER BY last_seen DESC;
+
+-- ============================================================================
+-- DNS RESOLUTIONS TABLE
+-- ============================================================================
+-- Tracks DNS query resolutions with deduplication (12-hour threshold)
+-- Used to map destination IPs in NAT sessions to domain names
+
+CREATE TABLE IF NOT EXISTS dns_resolutions (
+    id SERIAL PRIMARY KEY,
+    domain_name VARCHAR(255) NOT NULL,
+    resolved_ip INET NOT NULL,
+    first_seen TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    query_count INTEGER DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT unique_domain_ip UNIQUE (domain_name, resolved_ip)
+);
+
+-- Indexes for efficient querying
+CREATE INDEX IF NOT EXISTS idx_dns_resolved_ip ON dns_resolutions(resolved_ip, last_seen DESC);
+CREATE INDEX IF NOT EXISTS idx_dns_domain ON dns_resolutions(domain_name);
+CREATE INDEX IF NOT EXISTS idx_dns_last_seen ON dns_resolutions(last_seen DESC);
+
+-- Trigger to update updated_at timestamp
+DROP TRIGGER IF EXISTS dns_resolutions_updated_at ON dns_resolutions;
+CREATE TRIGGER dns_resolutions_updated_at
+    BEFORE UPDATE ON dns_resolutions
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- View: Recent DNS resolutions (last 24 hours)
+CREATE OR REPLACE VIEW dns_recent_resolutions AS
+SELECT 
+    domain_name,
+    resolved_ip,
+    first_seen,
+    last_seen,
+    query_count,
+    EXTRACT(EPOCH FROM (last_seen - first_seen)) AS tracking_duration_seconds
+FROM dns_resolutions
+WHERE last_seen > (CURRENT_TIMESTAMP - INTERVAL '24 hours')
+ORDER BY last_seen DESC;
+
+-- View: DNS resolution stats by domain
+CREATE OR REPLACE VIEW dns_stats_by_domain AS
+SELECT 
+    domain_name,
+    COUNT(DISTINCT resolved_ip) AS unique_ips,
+    MAX(last_seen) AS last_queried,
+    SUM(query_count) AS total_queries
+FROM dns_resolutions
+GROUP BY domain_name
+ORDER BY total_queries DESC;
+
+-- View: NAT sessions with DNS and user info (JOIN view)
+CREATE OR REPLACE VIEW nat_sessions_enriched AS
+SELECT
+    n.id AS session_id,
+    n.session_start,
+    n.session_end,
+    n.src_ip,
+    n.src_port,
+    n.src_mac,
+    u.email AS user_email,
+    u.first_name AS user_first_name,
+    u.last_name AS user_last_name,
+    d.registration_status,
+    n.dst_ip,
+    n.dst_port,
+    dns.domain_name,
+    dns.query_count AS dns_query_count,
+    n.packet_count,
+    EXTRACT(EPOCH FROM (n.session_end - n.session_start)) AS duration_seconds,
+    -- Prefer the port recorded at session time, fall back to device's last-known port
+    COALESCE(n.switch_iface, d.switch_iface) AS switch_iface,
+    n.switch_host
+FROM nat_sessions n
+-- Join on MAC address: stable, unique, stored at session-capture time.
+-- IP-based joins break when DHCP reassigns the address or the device is deleted.
+LEFT JOIN devices d ON n.src_mac = d.mac_address
+LEFT JOIN users u ON d.user_id = u.id
+LEFT JOIN LATERAL (
+    SELECT domain_name, resolved_ip, query_count
+    FROM dns_resolutions
+    WHERE resolved_ip = n.dst_ip
+    AND last_seen >= n.session_start - INTERVAL '12 hours'
+    AND last_seen <= n.session_start + INTERVAL '12 hours'
+    ORDER BY ABS(EXTRACT(EPOCH FROM (last_seen - n.session_start)))
+    LIMIT 1
+) dns ON true
+ORDER BY n.session_start DESC;
+
