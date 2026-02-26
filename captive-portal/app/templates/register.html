@@ -551,7 +551,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (data.status === 'registered') {
                     pwdDiv.remove();
                     if (data.network_mismatch && data.current_ssid && data.expected_ssid) {
-                        showStatus(`You have logged onto the wrong WiFi network. Please disconnect from "${data.current_ssid}" and connect to "${data.expected_ssid}".`, 'error');
                         startMismatchPolling();
                     } else {
                         showStatus((data.message || 'Device registered successfully') + ' Checking access...', 'success');

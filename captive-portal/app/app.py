@@ -3636,9 +3636,13 @@ def set_network_password(token):
         # (registration-status returns 'enter_password') and prompt the user to enter it.
         # Domain-policy approval logic in the register route then decides whether to
         # auto-register or send an admin approval request.
+        # Clear network_password_approval_mode so that the normal domain-policy/VLAN
+        # approval logic applies when the user next submits their password on the portal.
+        # This prevents a previously admin-set 'first_use' flag from bypassing approval.
         user.set_network_password(password)
         user.network_password_set_token = None
         user.network_password_set_token_expires = None
+        user.network_password_approval_mode = None
         db.session.commit()
 
         return render_template('set_network_password.html', success=True, user=user)
