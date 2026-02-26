@@ -60,7 +60,15 @@ CACHED="$(PGPASSWORD="$DB_PASSWORD" \
        AND last_seen > NOW() - INTERVAL '${FRESHNESS_TTL} seconds'
      LIMIT 1" 2>/dev/null | tr -d ' \n\r' || true)"
 if [ -n "$CACHED" ]; then
-    # Cache hit – nothing to do
+    # Cache hit – SSH query not needed, but still backfill devices.switch_iface
+    # in case the device was registered after the initial lookup ran.
+    PGPASSWORD="$DB_PASSWORD" \
+        psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
+        -c "UPDATE devices
+            SET switch_iface = '${CACHED}', switch_iface_seen_at = NOW()
+            WHERE mac_address = '${MAC_COLON}'
+              AND (switch_iface IS NULL OR switch_iface != '${CACHED}');" \
+        2>/dev/null || true
     exit 0
 fi
 

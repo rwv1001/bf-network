@@ -859,6 +859,12 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
                     <span class="sort-arrow">{% if devices_sort == 'ssid' %}{{ '▼' if devices_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
                 </a>
             </th>
+            <th class="sortable {% if devices_sort == 'switch_iface' %}active{% endif %}">
+                <a href="#" onclick="return sortTable('devices', 'switch_iface');">
+                    Switch Port
+                    <span class="sort-arrow">{% if devices_sort == 'switch_iface' %}{{ '▼' if devices_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
             <th class="sortable {% if devices_sort == 'first_seen' %}active{% endif %}">
                 <a href="#" onclick="return sortTable('devices', 'first_seen');">
                     First Seen
@@ -925,6 +931,15 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
                 {% endif %}
             </td>
             <td>{{ device.ssid or '-' }}</td>
+            <td style="font-family: monospace; font-size: 11px; white-space: nowrap;">
+                {% if device.switch_iface %}
+                    <span title="{% if device.switch_iface_seen_at %}Last seen: {{ device.switch_iface_seen_at.strftime('%Y-%m-%d %H:%M') }}{% else %}Switch port{% endif %}">
+                        {{ device.switch_iface }}
+                    </span>
+                {% else %}
+                    <em style="color: #999;">-</em>
+                {% endif %}
+            </td>
             <td style="font-size: 12px;">
                 {% if device.first_seen %}
                     {{ device.first_seen.strftime('%Y-%m-%d %H:%M') }}
