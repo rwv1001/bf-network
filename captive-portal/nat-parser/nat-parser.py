@@ -21,6 +21,7 @@ from pathlib import Path
 LOG_FILE = os.getenv("LOG_FILE", "/logs/remote-syslog.log")
 DB_URL = os.getenv("DATABASE_URL", "postgresql://portal_user:change_this_password@127.0.0.1:5432/captive_portal")
 KEA_LEASES_FILE = os.getenv("KEA_LEASES_FILE", "/kea/leases/kea-leases4.csv")
+POSITION_FILE = os.getenv("POSITION_FILE", "/state/nat-parser.pos")
 
 UDM_HOST = os.getenv("UDM_HOST", "192.168.1.1")
 UDM_SSH_KEY = os.getenv("UDM_SSH_KEY", "/config/udm_key")
@@ -44,7 +45,7 @@ logger = logging.getLogger('nat-parser')
 class NATParser:
     def __init__(self):
         self.db_conn = None
-        self.last_position = 0
+        self.last_position = None  # None = not yet initialised; will seek to EOF on first open
         self.last_log_timestamp = None
         self.last_reinstall_attempt = None
         self.last_cleanup = None
@@ -398,15 +399,46 @@ class NATParser:
         for key in stale_keys:
             self._close_session(key, self.active_sessions[key])
     
+    def _load_position(self):
+        """Load last file position from disk, or default to end-of-file."""
+        if os.path.exists(POSITION_FILE):
+            try:
+                with open(POSITION_FILE, 'r') as f:
+                    pos = int(f.read().strip())
+                logger.info(f"Resuming from saved position {pos}")
+                return pos
+            except Exception as e:
+                logger.warning(f"Could not read position file: {e}")
+        # No saved position – start from current end of file so we don't replay history
+        try:
+            pos = os.path.getsize(LOG_FILE)
+            logger.info(f"No saved position; starting from end of log file (byte {pos})")
+            return pos
+        except Exception:
+            return 0
+
+    def _save_position(self, pos):
+        """Persist current file position to disk."""
+        try:
+            os.makedirs(os.path.dirname(POSITION_FILE), exist_ok=True)
+            with open(POSITION_FILE, 'w') as f:
+                f.write(str(pos))
+        except Exception as e:
+            logger.warning(f"Could not save position file: {e}")
+
     def process_log_file(self):
         """Process new entries from log file"""
         try:
             if not os.path.exists(LOG_FILE):
                 logger.warning(f"Log file not found: {LOG_FILE}")
                 return
-            
+
             file_size = os.path.getsize(LOG_FILE)
-            
+
+            # Initialise position on first call
+            if self.last_position is None:
+                self.last_position = self._load_position()
+
             # Handle log rotation (file got smaller)
             if file_size < self.last_position:
                 logger.info("Log file rotated, resetting position")
@@ -425,8 +457,9 @@ class NATParser:
                         timestamp, src_ip, src_port, dst_ip, dst_port = result
                         self.process_nat_entry(timestamp, src_ip, src_port, dst_ip, dst_port)
                         self.last_log_timestamp = datetime.now()
-                
+
                 self.last_position = f.tell()
+                self._save_position(self.last_position)
         
         except Exception as e:
             logger.error(f"Error processing log file: {e}")

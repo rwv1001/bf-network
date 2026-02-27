@@ -7,6 +7,17 @@ set -e
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 UDM_HOST="192.168.1.1"
 UDM_SSH_KEY="$HOME/.ssh/udm_key"
+
+# Source credentials from captive-portal .env if not already set in environment
+ENV_FILE="$SCRIPT_DIR/../captive-portal/.env"
+if [ -f "$ENV_FILE" ]; then
+    # Only export lines that are valid KEY=VALUE pairs (skip comments and prose)
+    while IFS='=' read -r key value; do
+        [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+        [ -z "${!key+x}" ] && export "$key"="$value"
+    done < <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$ENV_FILE")
+fi
+
 DB_NAME="${DB_NAME:-captive_portal}"
 DB_USER="${DB_USER:-portal_user}"
 DB_PASSWORD="${DB_PASSWORD:-change_this_password}"
@@ -46,7 +57,7 @@ fi
 
 # Check database connectivity
 echo -n "Testing database connectivity..."
-if PGPASSWORD="$DB_PASSWORD" psql -h 127.0.0.1 -U "$DB_USER" -d "$DB_NAME" -c "SELECT 1" &>/dev/null; then
+if docker exec captive-portal-db psql -U "$DB_USER" -d "$DB_NAME" -c "SELECT 1" &>/dev/null; then
     echo " ✓"
 else
     echo " ❌"
@@ -56,16 +67,6 @@ else
     exit 1
 fi
 
-# Check Python dependencies
-echo -n "Checking Python dependencies..."
-if python3 -c "import psycopg2" 2>/dev/null; then
-    echo " ✓"
-else
-    echo " ❌"
-    echo "Installing psycopg2..."
-    pip3 install psycopg2-binary
-fi
-
 echo ""
 
 # Step 2: Deploy database schema
@@ -73,7 +74,7 @@ echo "Step 2: Deploying database schema..."
 echo "---------------------------------------------------"
 SCHEMA_FILE="$SCRIPT_DIR/../captive-portal/nat-sessions-schema.sql"
 if [ -f "$SCHEMA_FILE" ]; then
-    PGPASSWORD="$DB_PASSWORD" psql -h 127.0.0.1 -U "$DB_USER" -d "$DB_NAME" -f "$SCHEMA_FILE"
+    docker exec -i captive-portal-db psql -U "$DB_USER" -d "$DB_NAME" < "$SCHEMA_FILE"
     echo "✓ Database schema deployed"
 else
     echo "❌ ERROR: Schema file not found: $SCHEMA_FILE"
@@ -100,49 +101,36 @@ ssh -i "$UDM_SSH_KEY" -o StrictHostKeyChecking=no "root@$UDM_HOST" "bash /tmp/ud
 echo "✓ UDM NAT logger deployed and started"
 echo ""
 
-# Step 4: Update rsyslog.conf environment variable
-echo "Step 4: Updating parser environment..."
+# Step 4: Stop legacy host nat-parser service if running (superseded by Docker container)
+echo "Step 4: Checking for legacy host nat-parser service..."
 echo "---------------------------------------------------"
+if systemctl is-active --quiet nat-parser.service 2>/dev/null; then
+    echo "Stopping legacy host nat-parser.service (superseded by Docker container)..."
+    sudo systemctl stop nat-parser.service
+    sudo systemctl disable nat-parser.service 2>/dev/null || true
+    echo "✓ Legacy service stopped and disabled"
+elif systemctl is-enabled --quiet nat-parser.service 2>/dev/null; then
+    echo "Disabling legacy host nat-parser.service..."
+    sudo systemctl disable nat-parser.service 2>/dev/null || true
+    echo "✓ Legacy service disabled"
+else
+    echo "✓ No legacy host nat-parser service found"
+fi
 
-# Create environment file for systemd service
-ENV_FILE="/etc/systemd/system/nat-parser.service.d/override.conf"
-sudo mkdir -p "$(dirname $ENV_FILE)"
-sudo tee "$ENV_FILE" > /dev/null <<EOF
-[Service]
-Environment="DB_NAME=$DB_NAME"
-Environment="DB_USER=$DB_USER"
-Environment="DB_PASSWORD=$DB_PASSWORD"
-EOF
-
-echo "✓ Environment configured"
 echo ""
 
-# Step 5: Install and start parser service
-echo "Step 5: Installing NAT parser service..."
+# Step 5: Ensure Docker nat-parser container is running
+echo "Step 5: Ensuring Docker nat-parser is running..."
 echo "---------------------------------------------------"
-
-# Make parser executable
-chmod +x "$SCRIPT_DIR/nat-parser.py"
-
-# Install systemd service
-sudo cp "$SCRIPT_DIR/nat-parser.service" /etc/systemd/system/
-
-# Reload systemd
-sudo systemctl daemon-reload
-
-# Enable service
-sudo systemctl enable nat-parser.service
-
-# Restart service
-sudo systemctl restart nat-parser.service
-
-# Check status
-if sudo systemctl is-active --quiet nat-parser.service; then
-    echo "✓ NAT parser service installed and running"
+cd "$SCRIPT_DIR/../captive-portal"
+if docker compose ps nat-parser 2>/dev/null | grep -q 'Up'; then
+    echo "✓ Docker nat-parser container already running"
 else
-    echo "❌ WARNING: Service installed but not running"
-    echo "Check status: sudo systemctl status nat-parser.service"
+    echo "Starting Docker nat-parser container..."
+    docker compose up -d nat-parser
+    echo "✓ Docker nat-parser container started"
 fi
+cd "$SCRIPT_DIR"
 
 echo ""
 
@@ -154,8 +142,8 @@ echo "UDM Logger Status:"
 ssh -i "$UDM_SSH_KEY" "root@$UDM_HOST" "ps aux | grep nat_logger | grep -v grep || echo 'Not running'"
 
 echo ""
-echo "Parser Service Status:"
-sudo systemctl status nat-parser.service --no-pager -l | head -20
+echo "Parser Container Status:"
+docker compose -f "$SCRIPT_DIR/../captive-portal/docker-compose.yml" ps nat-parser
 
 echo ""
 echo "Recent NAT logs:"
@@ -163,7 +151,7 @@ tail -5 /home/admin/bf-network/syslog-container/logs/remote-syslog.log 2>/dev/nu
 
 echo ""
 echo "Database status:"
-PGPASSWORD="$DB_PASSWORD" psql -h 127.0.0.1 -U "$DB_USER" -d "$DB_NAME" -c \
+docker exec captive-portal-db psql -U "$DB_USER" -d "$DB_NAME" -c \
     "SELECT COUNT(*) as total_sessions FROM nat_sessions;"
 
 echo ""
@@ -172,10 +160,10 @@ echo "✓ Deployment Complete!"
 echo "==================================================="
 echo ""
 echo "Monitoring commands:"
-echo "  UDM logs:      ssh -i ~/.ssh/udm_key root@$UDM_HOST 'tail -f /var/log/messages | grep NAT-Logger'"
-echo "  Pi syslog:     tail -f /home/admin/bf-network/syslog-container/logs/remote-syslog.log"
-echo "  Parser logs:   sudo journalctl -u nat-parser.service -f"
-echo "  Parser status: sudo systemctl status nat-parser.service"
+echo "  UDM logs:        ssh -i ~/.ssh/udm_key root@$UDM_HOST 'tail -f /var/log/messages | grep NAT-Logger'"
+echo "  Pi syslog:       tail -f /home/admin/bf-network/syslog-container/logs/remote-syslog.log"
+echo "  Parser logs:     docker logs -f nat-parser"
+echo "  Parser status:   docker compose -f captive-portal/docker-compose.yml ps nat-parser"
 echo ""
 echo "Database queries:"
 echo "  Active sessions:   SELECT * FROM nat_active_sessions;"

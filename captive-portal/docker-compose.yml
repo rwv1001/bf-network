@@ -119,11 +119,13 @@ services:
       CHECK_INTERVAL_SECONDS: ${NAT_CHECK_INTERVAL_SECONDS:-5}
       REINSTALL_COOLDOWN_SECONDS: ${NAT_REINSTALL_COOLDOWN_SECONDS:-300}
       RETENTION_DAYS: ${NAT_RETENTION_DAYS:-90}
+      POSITION_FILE: /state/nat-parser.pos
     volumes:
       - ../syslog-container/logs:/logs:ro
       - ../kea/leases:/kea/leases:ro
       - /home/admin/.ssh:/config:ro
       - ../scripts:/scripts:ro
+      - ./data/nat-parser:/state
     network_mode: host
     depends_on:
       db:
