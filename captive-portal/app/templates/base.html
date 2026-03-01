@@ -374,6 +374,9 @@
             {% if current_user.can_manage_switch_ports %}
             <a href="{{ url_for('admin_switch_ports') }}" class="{% if request.endpoint == 'admin_switch_ports' %}active{% endif %}">Switch Ports</a>
             {% endif %}
+            {% if current_user.can_manage_firmware %}
+            <a href="{{ url_for('admin_firmware') }}" class="{% if request.endpoint == 'admin_firmware' %}active{% endif %}">Firmware</a>
+            {% endif %}
             {% if current_user.can_manage_admins %}
             <a href="{{ url_for('admin_manage_admins') }}" class="{% if request.endpoint == 'admin_manage_admins' %}active{% endif %}">Manage Admins</a>
             {% endif %}

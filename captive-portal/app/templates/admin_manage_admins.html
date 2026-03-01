@@ -216,6 +216,10 @@ function changeEmail(adminId, username, currentEmail) {
                     <input type="checkbox" id="new_can_manage_isp_routers" name="can_manage_isp_routers" value="1">
                     <label for="new_can_manage_isp_routers">ISP Routers</label>
                 </div>
+                <div class="permission-item">
+                    <input type="checkbox" id="new_can_manage_firmware" name="can_manage_firmware" value="1">
+                    <label for="new_can_manage_firmware">Firmware Updates</label>
+                </div>
             </div>
         </div>
         
@@ -239,7 +243,8 @@ function changeEmail(adminId, username, currentEmail) {
     • <strong>View Traffic:</strong> Access traffic viewer for NAT sessions<br>
     • <strong>Manage Admins:</strong> Create/modify/delete admin users (Super Admin access)<br>
     • <strong>Switch Ports:</strong> View and configure switch port roles<br>
-    • <strong>ISP Routers:</strong> Add/edit/delete ISP router uplinks and push switch config
+    • <strong>ISP Routers:</strong> Add/edit/delete ISP router uplinks and push switch config<br>
+    • <strong>Firmware Updates:</strong> Advance or roll back git commits and restart affected Docker stacks
 </p>
 
 <div class="table-responsive">
@@ -255,6 +260,7 @@ function changeEmail(adminId, username, currentEmail) {
                 <th style="text-align: center;">Manage Admins<br>(Super Admin)</th>
                 <th style="text-align: center;">Switch<br>Ports</th>
                 <th style="text-align: center;">ISP<br>Routers</th>
+                <th style="text-align: center;">Firmware<br>Updates</th>
                 <th>Created</th>
                 <th>Last Login</th>
                 <th>Actions</th>
@@ -315,6 +321,11 @@ function changeEmail(adminId, username, currentEmail) {
                     <td style="text-align: center;">
                         <input type="checkbox" name="can_manage_isp_routers" value="1" 
                                {% if admin.can_manage_isp_routers %}checked{% endif %}
+                               onchange="updatePermissions({{ admin.id }})">
+                    </td>
+                    <td style="text-align: center;">
+                        <input type="checkbox" name="can_manage_firmware" value="1" 
+                               {% if admin.can_manage_firmware %}checked{% endif %}
                                onchange="updatePermissions({{ admin.id }})">
                     </td>
                 </form>

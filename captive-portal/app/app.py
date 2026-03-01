@@ -782,7 +782,7 @@ class AdminUser:
     def __init__(self, admin_id, username, can_manage_users=True, can_manage_vlans=False, 
                  can_view_traffic=False, can_manage_admins=False, traffic_viewer_settings=None, 
                  mfa_enabled=False, must_change_password=False, can_manage_switch_ports=False,
-                 can_manage_isp_routers=False):
+                 can_manage_isp_routers=False, can_manage_firmware=False):
         self.id = str(admin_id)  # Flask-Login requires string ID
         self.username = username
         self.can_manage_users = can_manage_users
@@ -791,6 +791,7 @@ class AdminUser:
         self.can_manage_admins = can_manage_admins
         self.can_manage_switch_ports = can_manage_switch_ports
         self.can_manage_isp_routers = can_manage_isp_routers
+        self.can_manage_firmware = can_manage_firmware
         self.traffic_viewer_settings = traffic_viewer_settings
         self.mfa_enabled = mfa_enabled
         self.must_change_password = must_change_password
@@ -831,7 +832,8 @@ def load_user(user_id):
                 admin.mfa_enabled,
                 getattr(admin, 'must_change_password', False),
                 getattr(admin, 'can_manage_switch_ports', False),
-                getattr(admin, 'can_manage_isp_routers', False)
+                getattr(admin, 'can_manage_isp_routers', False),
+                getattr(admin, 'can_manage_firmware', False)
             )
     except (ValueError, TypeError):
         pass
@@ -866,6 +868,9 @@ def permission_required(permission):
                 return redirect(url_for('admin_dashboard'))
             elif permission == 'manage_isp_routers' and not current_user.can_manage_isp_routers:
                 flash('You do not have permission to manage ISP routers.', 'error')
+                return redirect(url_for('admin_dashboard'))
+            elif permission == 'manage_firmware' and not current_user.can_manage_firmware:
+                flash('You do not have permission to manage firmware.', 'error')
                 return redirect(url_for('admin_dashboard'))
             
             return f(*args, **kwargs)
@@ -4123,7 +4128,8 @@ def admin_login():
                 admin.traffic_viewer_settings,
                 admin.mfa_enabled,
                 can_manage_switch_ports=getattr(admin, 'can_manage_switch_ports', False),
-                can_manage_isp_routers=getattr(admin, 'can_manage_isp_routers', False)
+                can_manage_isp_routers=getattr(admin, 'can_manage_isp_routers', False),
+                can_manage_firmware=getattr(admin, 'can_manage_firmware', False)
             )
             login_user(user)
             return redirect(url_for('admin_dashboard'))
@@ -4141,12 +4147,13 @@ def admin_login():
                     admin.can_manage_admins = True
                     admin.can_manage_switch_ports = True
                     admin.can_manage_isp_routers = True
+                    admin.can_manage_firmware = True
                     db.session.add(admin)
                     db.session.commit()
                     logger.info(f"Migrated legacy admin '{username}' to database")
                 
                 # Log in with full permissions
-                user = AdminUser(admin.id, admin.username, True, True, True, True, can_manage_switch_ports=True, can_manage_isp_routers=True)
+                user = AdminUser(admin.id, admin.username, True, True, True, True, can_manage_switch_ports=True, can_manage_isp_routers=True, can_manage_firmware=True)
                 login_user(user)
                 return redirect(url_for('admin_dashboard'))
             
@@ -4262,7 +4269,8 @@ def admin_mfa_verify():
                 admin.traffic_viewer_settings,
                 admin.mfa_enabled,
                 can_manage_switch_ports=getattr(admin, 'can_manage_switch_ports', False),
-                can_manage_isp_routers=getattr(admin, 'can_manage_isp_routers', False)
+                can_manage_isp_routers=getattr(admin, 'can_manage_isp_routers', False),
+                can_manage_firmware=getattr(admin, 'can_manage_firmware', False)
             )
             login_user(user)
             logger.info(f"Admin '{admin.username}' logged in with MFA")
@@ -4587,6 +4595,7 @@ def admin_manage_admins():
             'can_manage_admins': admin.can_manage_admins,
             'can_manage_switch_ports': admin.can_manage_switch_ports,
             'can_manage_isp_routers': getattr(admin, 'can_manage_isp_routers', False),
+            'can_manage_firmware': getattr(admin, 'can_manage_firmware', False),
             'created_at': admin.created_at,
             'last_login': admin.last_login,
             'is_current': is_current,
@@ -4611,6 +4620,7 @@ def admin_create_admin():
     can_manage_admins = bool(request.form.get('can_manage_admins'))
     can_manage_switch_ports = bool(request.form.get('can_manage_switch_ports'))
     can_manage_isp_routers = bool(request.form.get('can_manage_isp_routers'))
+    can_manage_firmware = bool(request.form.get('can_manage_firmware'))
     must_change_password = bool(request.form.get('must_change_password'))  # checkbox: present=True, absent=False
     
     if not username or not password:
@@ -4636,6 +4646,7 @@ def admin_create_admin():
     admin.can_manage_admins = can_manage_admins
     admin.can_manage_switch_ports = can_manage_switch_ports
     admin.can_manage_isp_routers = can_manage_isp_routers
+    admin.can_manage_firmware = can_manage_firmware
     admin.must_change_password = must_change_password
     admin.created_by = int(current_user.id)
     db.session.add(admin)
@@ -4659,6 +4670,7 @@ def admin_update_admin_permissions(admin_id):
     can_manage_admins = bool(request.form.get('can_manage_admins'))
     can_manage_switch_ports = bool(request.form.get('can_manage_switch_ports'))
     can_manage_isp_routers = bool(request.form.get('can_manage_isp_routers'))
+    can_manage_firmware = bool(request.form.get('can_manage_firmware'))
     
     # Check if this would remove the last super admin
     if admin.can_manage_admins and not can_manage_admins:
@@ -4673,6 +4685,7 @@ def admin_update_admin_permissions(admin_id):
     admin.can_manage_admins = can_manage_admins
     admin.can_manage_switch_ports = can_manage_switch_ports
     admin.can_manage_isp_routers = can_manage_isp_routers
+    admin.can_manage_firmware = can_manage_firmware
     db.session.commit()
     
     logger.info(f"Admin '{admin.username}' permissions updated by {current_user.username}")
@@ -4924,6 +4937,89 @@ def admin_isp_routers():
     return render_template('admin_isp_routers.html', routers=routers,
                            switch_ports=switch_ports_list,
                            used_vlan_ids=used_vlan_ids)
+
+
+# ---------------------------------------------------------------------------
+# Firmware Management
+# ---------------------------------------------------------------------------
+
+def _run_firmware_script(action, stream=False):
+    """Run the firmware-manager.sh script.
+
+    The git repo ($GIT_REPO_DIR) and docker compose plugin are mounted into
+    the container at their real host paths, so git commands and docker compose
+    commands run inside the container exactly as they would on the host.
+    The script is available at /scripts/firmware-manager.sh via the existing
+    ../scripts:/scripts volume mount.
+    """
+    git_repo_dir = os.getenv('GIT_REPO_DIR', '/home/admin/bf-network')
+    # Prefer the container-side /scripts mount (same file, already mounted ro)
+    script_path = '/scripts/firmware-manager.sh'
+    cmd = ['/bin/bash', script_path, action]
+    env = dict(os.environ)
+    env['GIT_REPO_DIR'] = git_repo_dir
+
+    if stream:
+        return subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, env=env
+        )
+    else:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30, env=env
+        )
+        return result
+
+
+@app.route('/admin/firmware')
+@login_required
+@permission_required('manage_firmware')
+def admin_firmware():
+    """Firmware management page — shows current/next/prev git commits."""
+    status = {}
+    error = None
+    try:
+        result = _run_firmware_script('status')
+        if result.returncode == 0:
+            import json as _json
+            status = _json.loads(result.stdout)
+        else:
+            error = (result.stderr or result.stdout or 'Script returned non-zero exit').strip()
+    except Exception as e:
+        error = str(e)
+    return render_template('admin_firmware.html', status=status, error=error)
+
+
+@app.route('/admin/firmware/stream/<action>')
+@login_required
+@permission_required('manage_firmware')
+def admin_firmware_stream(action):
+    """SSE endpoint: run update or rollback and stream output line by line."""
+    if action not in ('update', 'rollback'):
+        return jsonify({'error': 'Invalid action'}), 400
+
+    from flask import stream_with_context, Response as FlaskResponse
+
+    def generate():
+        try:
+            proc = _run_firmware_script(action, stream=True)
+            for line in proc.stdout:
+                # SSE format: each message is "data: <text>\n\n"
+                yield f"data: {line.rstrip()}\n\n"
+            proc.wait()
+            yield f"data: __EXIT__:{proc.returncode}\n\n"
+        except Exception as exc:
+            yield f"data: ERROR: {exc}\n\n"
+            yield "data: __EXIT__:1\n\n"
+
+    return FlaskResponse(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',
+        }
+    )
 
 
 @app.route('/admin/vlan-config', methods=['GET', 'POST'])

@@ -84,6 +84,7 @@ services:
       DEFAULT_ISP_ROUTER_VLAN: ${DEFAULT_ISP_ROUTER_VLAN:-1}
       DEFAULT_ISP_ROUTER_PORT: ${DEFAULT_ISP_ROUTER_PORT:-}
       DEFAULT_ISP_ROUTER_DHCP_TRUST: ${DEFAULT_ISP_ROUTER_DHCP_TRUST:-true}
+      GIT_REPO_DIR: ${GIT_REPO_DIR:-/home/admin/bf-network}
     volumes:
       - ./app:/app
       - ../kea/leases:/kea/leases:ro  # Access to Kea lease database
@@ -95,6 +96,8 @@ services:
       - ../shared/acl-queue:/acl-queue
       - /home/admin/.ssh:/keys:ro  # SSH keys for switch access
       - /etc/systemd/network:/host-systemd-network
+      - ${GIT_REPO_DIR:-/home/admin/bf-network}:${GIT_REPO_DIR:-/home/admin/bf-network}  # git repo for firmware management
+      - /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro  # docker compose plugin
     network_mode: host
     privileged: true  # Required for iptables manipulation from non-root user
     depends_on:
