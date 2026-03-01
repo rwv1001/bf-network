@@ -4785,7 +4785,6 @@ def admin_isp_routers():
             name = request.form.get('name', '').strip()
             vlan_id_raw = request.form.get('vlan_id', '').strip()
             switch_port = request.form.get('switch_port', '').strip() or None
-            dhcp_trust = request.form.get('dhcp_snooping_trust') == 'on'
             if not name or not vlan_id_raw:
                 flash('Name and VLAN ID are required.', 'error')
                 return redirect(url_for('admin_isp_routers'))
@@ -4795,6 +4794,7 @@ def admin_isp_routers():
                 flash('VLAN ID must be an integer.', 'error')
                 return redirect(url_for('admin_isp_routers'))
             subnet = f'192.168.{vlan_id}.0/24'
+            dhcp_trust = (vlan_id == 1)
             if ISPRouter.query.filter_by(name=name).first():
                 flash(f'A router named "{name}" already exists.', 'error')
                 return redirect(url_for('admin_isp_routers'))
@@ -4834,29 +4834,41 @@ def admin_isp_routers():
             router.subnet = f'192.168.{router.vlan_id}.0/24'
             new_port = request.form.get('switch_port', '').strip() or None
             router.switch_port = new_port
-            router.dhcp_snooping_trust = request.form.get('dhcp_snooping_trust') == 'on'
+            router.dhcp_snooping_trust = (router.vlan_id == 1)
             db.session.commit()
             # If name changed, remove the old PBR entries from all switches
             if old_pbr_name != router.pbr_name:
                 _remove_isp_router_pbr_from_switches(old_pbr_name)
             # If VLAN ID changed, explicitly undo the old next-hop in the PBR
             # permit node before rebuilding, then remove the stale VLAN/interface
-            if old_vlan_id != router.vlan_id:
+            vlan_changed = old_vlan_id != router.vlan_id
+            if vlan_changed:
                 old_gateway_ip = f'192.168.{old_vlan_id}.1'
                 switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
                 switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
                 for host in switch_hosts:
                     _run_switch_command(host, _build_pbr_undo_next_hop(router.pbr_name, old_gateway_ip))
                 _remove_isp_router_vlan_from_switches(old_vlan_id)
+            # Clear the old port if it changed
             if old_port and old_port != new_port:
                 _clear_isp_router_port(old_port)
+            # Create the new VLAN/interface/PBR BEFORE configuring the port,
+            # so that 'port access vlan N' succeeds on an existing VLAN
+            _apply_isp_router_to_switches(router)
+            # Now configure the port
             if new_port and new_port != old_port:
                 _set_isp_router_port(new_port, router)
             elif new_port and new_port == old_port:
-                # Port unchanged but VLAN/snooping may have changed — re-push port config
+                if vlan_changed:
+                    # The old VLAN removal leaves a stale port-security sticky MAC
+                    # entry bound to the old VLAN.  Reset the port first to clear
+                    # it, then re-apply the config with the new VLAN.
+                    sw_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+                    sw_hosts = [h.strip() for h in sw_hosts_raw.split() if h.strip()]
+                    for host in sw_hosts:
+                        _run_switch_command(host, _build_reset_port_config(new_port))
                 _set_isp_router_port(new_port, router)
-            _apply_isp_router_to_switches(router)
-            if old_vlan_id != router.vlan_id:
+            if vlan_changed:
                 _update_isl_trunk_vlan(old_vlan_id, add=False)
             _update_isl_trunk_vlan(router.vlan_id, add=True)
             flash(f'ISP router "{router.name}" updated.', 'success')
@@ -6164,10 +6176,10 @@ def _build_reset_port_config(port_name):
         'system-view',
         f'interface {expanded}',
         ' undo description',
-        ' undo port access vlan',
-        ' undo port-security max-mac-count',
+        ' undo port access vlan',        
         ' undo port-security port-mode',
         ' undo port-security intrusion-mode',
+        ' undo port-security max-mac-count',
         'quit',
         'quit',
         'save force',

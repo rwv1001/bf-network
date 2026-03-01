@@ -252,16 +252,9 @@
                                    placeholder="No ports discovered yet">
                             {% endif %}
                         </div>
-                        <div class="form-group" style="justify-content: center;">
-                            <label>DHCP Snooping Trust</label>
-                            <div class="checkbox-row">
-                                <input type="checkbox" name="dhcp_snooping_trust" id="trust-edit-{{ router.id }}"
-                                       {% if router.dhcp_snooping_trust %}checked{% endif %}>
-                                <label for="trust-edit-{{ router.id }}" style="font-weight:400; font-size:14px;">
-                                    Enable DHCP snooping trust on uplink port
-                                </label>
-                            </div>
-                        </div>
+                        {% if router.vlan_id == 1 %}
+                        <input type="hidden" name="dhcp_snooping_trust" value="on">
+                        {% endif %}
                         <div class="router-hint" id="hint-edit-{{ router.id }}">
                             ⚠️ <strong>Router configuration required:</strong>
                             <ul>
@@ -320,15 +313,7 @@
                 <input type="text" name="switch_port" placeholder="No ports discovered yet — refresh Switch Ports first">
                 {% endif %}
             </div>
-            <div class="form-group" style="justify-content: center;">
-                <label>DHCP Snooping Trust</label>
-                <div class="checkbox-row">
-                    <input type="checkbox" name="dhcp_snooping_trust" id="trust-add">
-                    <label for="trust-add" style="font-weight:400; font-size:14px;">
-                        Enable DHCP snooping trust on uplink port
-                    </label>
-                </div>
-            </div>
+
             <div class="router-hint" id="hint-add">
                 ⚠️ <strong>Router configuration required:</strong>
                 <ul>
