@@ -225,6 +225,7 @@
                         <th>Wired</th>
                         <th>Pwd Reqd</th>
                         <th>Subnet Size</th>
+                        <th>ISP Router</th>
                         <th>Remove</th>
                     </tr>
                 </thead>
@@ -287,6 +288,14 @@
                             {% else %}
                                 <span style="color: #777; font-size: 13px;">Not configurable</span>
                             {% endif %}
+                        </td>
+                        <td>
+                            <select name="vlan_isp_router" style="font-size:13px; padding:4px 8px; border:1.5px solid #d4e0d4; border-radius:5px;">
+                                <option value="">— Default —</option>
+                                {% for r in isp_routers %}
+                                <option value="{{ r.id }}" {% if entry.isp_router_id == r.id %}selected{% endif %}>{{ r.name }}</option>
+                                {% endfor %}
+                            </select>
                         </td>
                         <td>
                             <input type="checkbox"

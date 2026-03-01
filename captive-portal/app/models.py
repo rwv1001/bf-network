@@ -194,6 +194,41 @@ class RegistrationRequest(db.Model):
         return f"{self.first_name} {self.last_name}".strip()
 
 
+class ISPRouter(db.Model):
+    """ISP routers — one row per upstream gateway (e.g. UDM, Teltonika)."""
+    __tablename__ = 'isp_routers'
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), unique=True, nullable=False)   # e.g. "UDM"
+    subnet = db.Column(db.String(50), nullable=False)               # e.g. "192.168.1.0/24"
+    vlan_id = db.Column(db.Integer, nullable=False)                 # uplink VLAN
+    switch_port = db.Column(db.String(100), nullable=True)          # e.g. "GigabitEthernet1/0/24"
+    dhcp_snooping_trust = db.Column(db.Boolean, default=True, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    # VLANs routed via this ISP
+    vlan_mappings = db.relationship('VlanMapping', backref='isp_router', lazy=True,
+                                    foreign_keys='VlanMapping.isp_router_id')
+
+    @property
+    def pbr_name(self):
+        """PBR route-map name, e.g. PBR-UDM"""
+        return f"PBR-{self.name.upper().replace(' ', '_')}"
+
+    @property
+    def gateway_ip(self):
+        """LAN IP of the router: 192.168.<vlan_id>.1"""
+        return f"192.168.{self.vlan_id}.1"
+
+    def switch_host_ip(self, switch_host):
+        """Per-switch VLAN interface IP based on the last octet of switch_host."""
+        last_octet = switch_host.split('.')[-1]
+        return f"192.168.{self.vlan_id}.{last_octet}"
+
+    def __repr__(self):
+        return f'<ISPRouter {self.name} vlan={self.vlan_id}>'
+
+
 class VlanMapping(db.Model):
     """VLAN mappings for different user statuses"""
     __tablename__ = 'vlan_mappings'
@@ -206,6 +241,8 @@ class VlanMapping(db.Model):
     wired_enabled = db.Column(db.Boolean, default=False, nullable=False)
     require_password = db.Column(db.Boolean, default=False, nullable=False)
     description = db.Column(db.Text)
+    isp_router_id = db.Column(db.Integer, db.ForeignKey('isp_routers.id',
+                              ondelete='SET NULL'), nullable=True)
     
     def __repr__(self):
         return f'<VlanMapping {self.status} -> VLAN {self.vlan_id}>'

@@ -1,5 +1,6 @@
 # Logs & temporary files
 *.log
+*.log.*
 *.tmp
 *.swp
 *.swo

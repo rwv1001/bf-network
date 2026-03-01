@@ -119,6 +119,16 @@ CREATE INDEX IF NOT EXISTS idx_registration_requests_mac ON registration_request
 CREATE INDEX IF NOT EXISTS idx_registration_requests_email ON registration_requests(email);
 CREATE INDEX IF NOT EXISTS idx_registration_requests_status ON registration_requests(status);
 
+CREATE TABLE IF NOT EXISTS isp_routers (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(100) UNIQUE NOT NULL,
+    subnet VARCHAR(50) NOT NULL,
+    vlan_id INTEGER NOT NULL,
+    switch_port VARCHAR(100),
+    dhcp_snooping_trust BOOLEAN DEFAULT TRUE NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS vlan_mappings (
     id SERIAL PRIMARY KEY,
     status VARCHAR(50) UNIQUE NOT NULL,
@@ -127,7 +137,8 @@ CREATE TABLE IF NOT EXISTS vlan_mappings (
     display_name TEXT,
     ssid TEXT,
     wired_enabled BOOLEAN DEFAULT FALSE NOT NULL,
-    require_password BOOLEAN DEFAULT FALSE NOT NULL
+    require_password BOOLEAN DEFAULT FALSE NOT NULL,
+    isp_router_id INTEGER REFERENCES isp_routers(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS domain_policies (

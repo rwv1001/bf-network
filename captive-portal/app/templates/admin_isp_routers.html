@@ -1,0 +1,393 @@
+{% extends "base.html" %}
+
+{% block title %}ISP Routers - Admin Portal{% endblock %}
+
+{% block header %}ISP Routers{% endblock %}
+
+{% block extra_head %}
+<style>
+    .page-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 24px;
+        flex-wrap: wrap;
+        gap: 10px;
+    }
+    .page-header h2 { margin: 0; color: #2c3e2c; }
+
+    .btn {
+        padding: 8px 18px;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        font-size: 14px;
+        font-weight: 500;
+        transition: all 0.3s;
+        text-decoration: none;
+        display: inline-block;
+    }
+    .btn-primary  { background: #2c3e2c; color: white; }
+    .btn-primary:hover  { background: #3d5a3d; }
+    .btn-danger   { background: #c0392b; color: white; }
+    .btn-danger:hover   { background: #a93226; }
+    .btn-secondary { background: #6c757d; color: white; }
+    .btn-secondary:hover { background: #5a6268; }
+    .btn-sm { padding: 4px 12px; font-size: 12px; }
+
+    .card {
+        background: white;
+        border-radius: 8px;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+        margin-bottom: 24px;
+        overflow: hidden;
+    }
+    .card-header {
+        background: #2c3e2c;
+        color: white;
+        padding: 12px 20px;
+        font-size: 16px;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+    .card-body { padding: 20px; }
+
+    table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 14px;
+    }
+    th {
+        background: #f0f4f0;
+        color: #2c3e2c;
+        padding: 10px 14px;
+        text-align: left;
+        font-weight: 600;
+        border-bottom: 2px solid #d4e0d4;
+        white-space: nowrap;
+    }
+    td {
+        padding: 9px 14px;
+        border-bottom: 1px solid #eef2ee;
+        vertical-align: middle;
+    }
+    tr:hover { background: #f8fbf8; }
+
+    .mono { font-family: 'Courier New', monospace; font-size: 13px; }
+
+    .badge-trust    { background: #d5f5e3; color: #1d6a3a; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 500; }
+    .badge-notrust  { background: #fde8e8; color: #7b241c; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 500; }
+
+    .add-form {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+    }
+    .form-group { display: flex; flex-direction: column; gap: 6px; }
+    .form-group label { font-size: 13px; font-weight: 600; color: #555; }
+    .form-group input[type=text],
+    .form-group input[type=number],
+    .form-group select {
+        padding: 8px 12px;
+        border: 1.5px solid #d4e0d4;
+        border-radius: 6px;
+        font-size: 14px;
+        transition: border-color 0.2s;
+    }
+    .form-group input:focus { outline: none; border-color: #2c3e2c; }
+    .form-group select:focus { outline: none; border-color: #2c3e2c; }
+    .checkbox-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 4px;
+    }
+    .checkbox-row input[type=checkbox] { width: 18px; height: 18px; cursor: pointer; }
+    .form-footer { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 10px; margin-top: 4px; }
+
+    .info-box {
+        background: #eaf4fb;
+        border-left: 4px solid #2980b9;
+        padding: 12px 16px;
+        border-radius: 4px;
+        font-size: 13px;
+        color: #1a5276;
+        margin-bottom: 20px;
+    }
+    .alert { padding: 12px 18px; border-radius: 5px; margin-bottom: 10px; font-size: 14px; }
+    .alert-success { background: #d5f5e3; color: #1d6a3a; border-left: 4px solid #27ae60; }
+    .alert-warning { background: #fef9e7; color: #7d6608; border-left: 4px solid #f1c40f; }
+    .alert-error, .alert-danger { background: #fde8e8; color: #7b241c; border-left: 4px solid #e74c3c; }
+    .alert-info   { background: #d6eaf8; color: #1a5276; border-left: 4px solid #2980b9; }
+
+    .router-hint {
+        display: none;
+        grid-column: 1 / -1;
+        background: #fef9e7;
+        border-left: 4px solid #f39c12;
+        border-radius: 4px;
+        padding: 12px 16px;
+        font-size: 13px;
+        color: #7d5a00;
+        margin-bottom: 4px;
+    }
+    .router-hint strong { color: #5d4200; }
+    .router-hint code {
+        background: #fdefc3;
+        padding: 1px 5px;
+        border-radius: 3px;
+        font-family: 'Courier New', monospace;
+        font-size: 12px;
+    }
+    .router-hint ul { margin: 6px 0 0 0; padding-left: 18px; }
+    .router-hint li { margin-bottom: 3px; }
+
+    /* inline edit form hidden by default */
+    .edit-row { display: none; }
+    .edit-row td { background: #f8fff8; padding: 14px; }
+    .edit-form { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .edit-form .form-footer { grid-column: 1 / -1; display: flex; gap: 8px; justify-content: flex-end; }
+
+    @media (max-width: 700px) {
+        .add-form, .edit-form { grid-template-columns: 1fr; }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h2>ISP Routers</h2>
+</div>
+
+<div class="info-box">
+    Each ISP router represents an upstream gateway. Assigning a router to a VLAN (on the VLAN Config page) creates
+    policy-based routing on the HP5130 switches so traffic from that VLAN exits via the chosen router.
+    At least one router must exist (the default is <strong>UDM</strong>).
+</div>
+
+<!-- Existing routers table -->
+<div class="card">
+    <div class="card-header">🌐 Configured ISP Routers</div>
+    <div class="card-body" style="padding: 0;">
+        {% if routers %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Subnet</th>
+                    <th>VLAN ID</th>
+                    <th>HP5130 Port</th>
+                    <th>DHCP Snoop Trust</th>
+                    <th>Gateway IP</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for router in routers %}
+            <tr id="row-{{ router.id }}">
+                <td><strong>{{ router.name }}</strong></td>
+                <td class="mono">{{ router.subnet }}</td>
+                <td class="mono">{{ router.vlan_id }}</td>
+                <td class="mono">{{ router.switch_port or '—' }}</td>
+                <td>
+                    {% if router.dhcp_snooping_trust %}
+                        <span class="badge-trust">✓ Trust</span>
+                    {% else %}
+                        <span class="badge-notrust">✗ No Trust</span>
+                    {% endif %}
+                </td>
+                <td class="mono">{{ router.gateway_ip }}</td>
+                <td>
+                    <button type="button" class="btn btn-secondary btn-sm"
+                            onclick="toggleEdit({{ router.id }})">Edit</button>
+                    {% if routers|length > 1 %}
+                    <form method="POST" style="display:inline;"
+                          onsubmit="return confirm('Delete router {{ router.name }}?');">
+                        <input type="hidden" name="action" value="delete">
+                        <input type="hidden" name="router_id" value="{{ router.id }}">
+                        <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+                    </form>
+                    {% endif %}
+                </td>
+            </tr>
+            <tr class="edit-row" id="edit-row-{{ router.id }}">
+                <td colspan="7">
+                    <form method="POST" class="edit-form">
+                        <input type="hidden" name="action" value="update">
+                        <input type="hidden" name="router_id" value="{{ router.id }}">
+                        <div class="form-group">
+                            <label>Name</label>
+                            <input type="text" name="name" value="{{ router.name }}" required>
+                        </div>
+                        <div class="form-group">
+                            <label>VLAN ID</label>
+                            {% if router.vlan_id == 1 %}
+                            <input type="number" name="vlan_id" value="1" readonly
+                                   style="background:#f0f0f0; cursor:not-allowed;"
+                                   title="VLAN 1 is the default gateway VLAN and cannot be changed">
+                            {% else %}
+                            <select name="vlan_id" id="edit-vlan-id-{{ router.id }}" required
+                                    onchange="updateHint('edit-{{ router.id }}')">
+                                {% for v in range(2, 8) %}
+                                {% if v not in used_vlan_ids or v == router.vlan_id %}
+                                <option value="{{ v }}" {% if router.vlan_id == v %}selected{% endif %}>VLAN {{ v }}</option>
+                                {% endif %}
+                                {% endfor %}
+                            </select>
+                            {% endif %}
+                        </div>
+                        <div class="form-group">
+                            <label>HP5130 Port</label>
+                            {% if switch_ports %}
+                            <select name="switch_port">
+                                <option value="">— Unassigned —</option>
+                                {% for p in switch_ports %}
+                                <option value="{{ p }}" {% if router.switch_port == p %}selected{% endif %}>{{ p }}</option>
+                                {% endfor %}
+                            </select>
+                            {% else %}
+                            <input type="text" name="switch_port" value="{{ router.switch_port or '' }}"
+                                   placeholder="No ports discovered yet">
+                            {% endif %}
+                        </div>
+                        <div class="form-group" style="justify-content: center;">
+                            <label>DHCP Snooping Trust</label>
+                            <div class="checkbox-row">
+                                <input type="checkbox" name="dhcp_snooping_trust" id="trust-edit-{{ router.id }}"
+                                       {% if router.dhcp_snooping_trust %}checked{% endif %}>
+                                <label for="trust-edit-{{ router.id }}" style="font-weight:400; font-size:14px;">
+                                    Enable DHCP snooping trust on uplink port
+                                </label>
+                            </div>
+                        </div>
+                        <div class="router-hint" id="hint-edit-{{ router.id }}">
+                            ⚠️ <strong>Router configuration required:</strong>
+                            <ul>
+                                <li>Set the router's LAN IP to <code id="hint-edit-{{ router.id }}-gw"></code></li>
+                                <li>Add a static route on the router: Target <code>192.168.0.0</code> &nbsp;Mask <code>255.255.0.0</code> &nbsp;Gateway <code id="hint-edit-{{ router.id }}-sw"></code></li>
+                            </ul>
+                        </div>
+                        <div class="form-footer">
+                            <button type="button" class="btn btn-secondary btn-sm"
+                                    onclick="toggleEdit({{ router.id }})">Cancel</button>
+                            <button type="submit" class="btn btn-primary btn-sm">Save Changes</button>
+                        </div>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div style="padding: 30px; text-align: center; color: #666;">No ISP routers configured yet. Add one below.</div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Add new router -->
+<div class="card">
+    <div class="card-header">➕ Add ISP Router</div>
+    <div class="card-body">
+        <form method="POST" class="add-form">
+            <input type="hidden" name="action" value="add">
+            <div class="form-group">
+                <label>Router Name *</label>
+                <input type="text" name="name" placeholder="e.g. Teltonika" required>
+            </div>
+            <div class="form-group">
+                <label>VLAN ID *</label>
+                <select name="vlan_id" id="add-vlan-id" required onchange="updateHint('add')">
+                    <option value="" disabled selected>Select VLAN…</option>
+                    {% for v in range(2, 8) %}
+                    {% if v not in used_vlan_ids %}
+                    <option value="{{ v }}">VLAN {{ v }}</option>
+                    {% endif %}
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="form-group">
+                <label>HP5130 Port</label>
+                {% if switch_ports %}
+                <select name="switch_port">
+                    <option value="">— Unassigned —</option>
+                    {% for p in switch_ports %}
+                    <option value="{{ p }}">{{ p }}</option>
+                    {% endfor %}
+                </select>
+                {% else %}
+                <input type="text" name="switch_port" placeholder="No ports discovered yet — refresh Switch Ports first">
+                {% endif %}
+            </div>
+            <div class="form-group" style="justify-content: center;">
+                <label>DHCP Snooping Trust</label>
+                <div class="checkbox-row">
+                    <input type="checkbox" name="dhcp_snooping_trust" id="trust-add">
+                    <label for="trust-add" style="font-weight:400; font-size:14px;">
+                        Enable DHCP snooping trust on uplink port
+                    </label>
+                </div>
+            </div>
+            <div class="router-hint" id="hint-add">
+                ⚠️ <strong>Router configuration required:</strong>
+                <ul>
+                    <li>Set the router's LAN IP to <code id="hint-add-gw"></code></li>
+                    <li>Add a static route on the router: Target <code>192.168.0.0</code> &nbsp;Mask <code>255.255.0.0</code> &nbsp;Gateway <code id="hint-add-sw"></code></li>
+                </ul>
+            </div>
+            <div class="form-footer">
+                <button type="submit" class="btn btn-primary">Add ISP Router</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+function updateHint(key) {
+    let vlanId;
+    if (key === 'add') {
+        const sel = document.getElementById('add-vlan-id');
+        vlanId = sel ? parseInt(sel.value) : null;
+    } else {
+        const id = key.replace('edit-', '');
+        const sel = document.getElementById('edit-vlan-id-' + id);
+        vlanId = sel ? parseInt(sel.value) : null;
+    }
+    const hintBox = document.getElementById('hint-' + key);
+    if (!hintBox) return;
+    if (!vlanId || isNaN(vlanId)) {
+        hintBox.style.display = 'none';
+        return;
+    }
+    const gw  = '192.168.' + vlanId + '.1';
+    const sw  = '192.168.' + vlanId + '.2';
+    const gwEl = document.getElementById('hint-' + key + '-gw');
+    const swEl = document.getElementById('hint-' + key + '-sw');
+    if (gwEl) gwEl.textContent = gw;
+    if (swEl) swEl.textContent = sw;
+    hintBox.style.display = 'block';
+}
+
+function toggleEdit(id) {
+    const row = document.getElementById('edit-row-' + id);
+    const opening = (row.style.display !== 'table-row');
+    row.style.display = opening ? 'table-row' : 'none';
+    if (opening) updateHint('edit-' + id);
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    document.querySelectorAll('form').forEach(function (form) {
+        form.addEventListener('submit', function () {
+            const btn = form.querySelector('button[type="submit"]');
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = 'Saving…';
+                btn.style.opacity = '0.6';
+                btn.style.cursor = 'not-allowed';
+            }
+        });
+    });
+});
+</script>
+{% endblock %}

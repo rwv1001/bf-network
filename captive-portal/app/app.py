@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import text
 import secrets
 
-from models import db, Admin, User, Device, RegistrationRequest, VlanMapping, Setting, UnregisteredLease, DomainPolicy
+from models import db, Admin, User, Device, RegistrationRequest, VlanMapping, ISPRouter, Setting, UnregisteredLease, DomainPolicy
 from radius_coa import send_coa_disconnect, send_coa_change
 from email_service import (
     send_verification_email,
@@ -4769,6 +4769,137 @@ def admin_reset_test():
     return redirect(url_for('admin_dashboard'))
 
 
+# ---------------------------------------------------------------------------
+# ISP Routers Management
+# ---------------------------------------------------------------------------
+
+@app.route('/admin/isp-routers', methods=['GET', 'POST'])
+@login_required
+@permission_required('manage_vlans')
+def admin_isp_routers():
+    """ISP router management page."""
+    if request.method == 'POST':
+        action = request.form.get('action', '').strip()
+
+        if action == 'add':
+            name = request.form.get('name', '').strip()
+            vlan_id_raw = request.form.get('vlan_id', '').strip()
+            switch_port = request.form.get('switch_port', '').strip() or None
+            dhcp_trust = request.form.get('dhcp_snooping_trust') == 'on'
+            if not name or not vlan_id_raw:
+                flash('Name and VLAN ID are required.', 'error')
+                return redirect(url_for('admin_isp_routers'))
+            try:
+                vlan_id = int(vlan_id_raw)
+            except ValueError:
+                flash('VLAN ID must be an integer.', 'error')
+                return redirect(url_for('admin_isp_routers'))
+            subnet = f'192.168.{vlan_id}.0/24'
+            if ISPRouter.query.filter_by(name=name).first():
+                flash(f'A router named "{name}" already exists.', 'error')
+                return redirect(url_for('admin_isp_routers'))
+            router = ISPRouter(name=name, subnet=subnet, vlan_id=vlan_id,
+                               switch_port=switch_port,
+                               dhcp_snooping_trust=dhcp_trust)
+            db.session.add(router)
+            db.session.commit()
+            _apply_isp_router_to_switches(router)
+            _update_isl_trunk_vlan(router.vlan_id, add=True)
+            if switch_port:
+                _set_isp_router_port(switch_port, router)
+            flash(
+                f'ISP router "{name}" added. '
+                f'⚠ Set the router LAN IP to {router.gateway_ip} and add a '
+                f'static route: Target 192.168.0.0 / Mask 255.255.0.0 / '
+                f'Gateway 192.168.{vlan_id}.2 on the router.',
+                'success'
+            )
+            return redirect(url_for('admin_isp_routers'))
+
+        elif action == 'update':
+            router = ISPRouter.query.get_or_404(request.form.get('router_id'))
+            old_port = router.switch_port
+            old_vlan_id = router.vlan_id
+            old_pbr_name = router.pbr_name
+            router.name = request.form.get('name', router.name).strip()
+            # VLAN 1 (default gateway) is locked — never allow changing it
+            if router.vlan_id != 1:
+                try:
+                    new_vlan_id = int(request.form.get('vlan_id', router.vlan_id))
+                    if 2 <= new_vlan_id <= 7:
+                        router.vlan_id = new_vlan_id
+                except (ValueError, TypeError):
+                    pass
+            # Always derive subnet from VLAN ID
+            router.subnet = f'192.168.{router.vlan_id}.0/24'
+            new_port = request.form.get('switch_port', '').strip() or None
+            router.switch_port = new_port
+            router.dhcp_snooping_trust = request.form.get('dhcp_snooping_trust') == 'on'
+            db.session.commit()
+            # If name changed, remove the old PBR entries from all switches
+            if old_pbr_name != router.pbr_name:
+                _remove_isp_router_pbr_from_switches(old_pbr_name)
+            # If VLAN ID changed, explicitly undo the old next-hop in the PBR
+            # permit node before rebuilding, then remove the stale VLAN/interface
+            if old_vlan_id != router.vlan_id:
+                old_gateway_ip = f'192.168.{old_vlan_id}.1'
+                switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+                switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
+                for host in switch_hosts:
+                    _run_switch_command(host, _build_pbr_undo_next_hop(router.pbr_name, old_gateway_ip))
+                _remove_isp_router_vlan_from_switches(old_vlan_id)
+            if old_port and old_port != new_port:
+                _clear_isp_router_port(old_port)
+            if new_port and new_port != old_port:
+                _set_isp_router_port(new_port, router)
+            elif new_port and new_port == old_port:
+                # Port unchanged but VLAN/snooping may have changed — re-push port config
+                _set_isp_router_port(new_port, router)
+            _apply_isp_router_to_switches(router)
+            if old_vlan_id != router.vlan_id:
+                _update_isl_trunk_vlan(old_vlan_id, add=False)
+            _update_isl_trunk_vlan(router.vlan_id, add=True)
+            flash(f'ISP router "{router.name}" updated.', 'success')
+            return redirect(url_for('admin_isp_routers'))
+
+        elif action == 'delete':
+            router = ISPRouter.query.get_or_404(request.form.get('router_id'))
+            vlan_to_remove = router.vlan_id
+            if router.switch_port:
+                _clear_isp_router_port(router.switch_port)
+            _remove_isp_router_from_switches(router)
+            _update_isl_trunk_vlan(vlan_to_remove, add=False)
+            db.session.delete(router)
+            db.session.commit()
+            flash(f'ISP router "{router.name}" deleted.', 'success')
+            return redirect(url_for('admin_isp_routers'))
+
+    routers = ISPRouter.query.order_by(ISPRouter.id).all()
+    used_vlan_ids = {r.vlan_id for r in routers}
+    # Populate port dropdown from the primary switch (first of SWITCH_HOSTS)
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
+    primary_host = switch_hosts[0] if switch_hosts else ''
+    switch_ports_list = []
+    if primary_host:
+        rows = db.session.execute(
+            text("""
+                SELECT port_name FROM switch_ports
+                WHERE switch_host = :host
+                ORDER BY
+                    (CASE WHEN port_name LIKE 'XGE%' THEN 1 ELSE 0 END),
+                    split_part(port_name, '/', 1),
+                    CAST(NULLIF(split_part(port_name, '/', 2), '') AS INTEGER),
+                    CAST(NULLIF(split_part(port_name, '/', 3), '') AS INTEGER)
+            """),
+            {'host': primary_host}
+        ).fetchall()
+        switch_ports_list = [r[0] for r in rows]
+    return render_template('admin_isp_routers.html', routers=routers,
+                           switch_ports=switch_ports_list,
+                           used_vlan_ids=used_vlan_ids)
+
+
 @app.route('/admin/vlan-config', methods=['GET', 'POST'])
 @login_required
 @permission_required('manage_vlans')
@@ -4783,11 +4914,13 @@ def admin_vlan_config():
         wired_statuses = set(request.form.getlist('vlan_wired'))
         password_statuses = set(request.form.getlist('vlan_require_password'))
         remove_statuses = set(request.form.getlist('vlan_remove'))
+        isp_router_ids = request.form.getlist('vlan_isp_router')  # positional, matches statuses
 
         warnings = []
         errors = []
         seen_statuses = set()
         seen_vlan_ids = set()
+        pbr_changes = []  # list of (vlan_id, old_pbr_name_or_None, new_pbr_name_or_None)
 
         for index, status_raw in enumerate(statuses):
             status = (status_raw or '').strip().lower()
@@ -4833,13 +4966,26 @@ def admin_vlan_config():
             wired_enabled = status in wired_statuses
             require_password = status in password_statuses
 
+            # ISP router assignment
+            isp_router_id_raw = isp_router_ids[index] if index < len(isp_router_ids) else ''
+            new_isp_router_id = int(isp_router_id_raw) if isp_router_id_raw.strip().isdigit() else None
+
             mapping = VlanMapping.query.filter_by(status=status).first()
             if mapping:
+                old_isp_router = mapping.isp_router
+                new_isp_router = ISPRouter.query.get(new_isp_router_id) if new_isp_router_id else None
+                if (mapping.isp_router_id or None) != (new_isp_router_id or None):
+                    pbr_changes.append((
+                        vlan_id,
+                        old_isp_router.pbr_name if old_isp_router else None,
+                        new_isp_router.pbr_name if new_isp_router else None,
+                    ))
                 mapping.vlan_id = vlan_id
                 mapping.display_name = display_name
                 mapping.ssid = ssid
                 mapping.wired_enabled = wired_enabled
                 mapping.require_password = require_password
+                mapping.isp_router_id = new_isp_router_id
             else:
                 mapping = VlanMapping(
                     status=status,
@@ -4848,6 +4994,7 @@ def admin_vlan_config():
                     ssid=ssid,
                     wired_enabled=wired_enabled,
                     require_password=require_password,
+                    isp_router_id=new_isp_router_id,
                 )
                 db.session.add(mapping)
 
@@ -4882,6 +5029,21 @@ def admin_vlan_config():
             return redirect(url_for('admin_vlan_config'))
 
         db.session.commit()
+
+        # Push PBR changes to all switches
+        if pbr_changes:
+            switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+            switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
+            for (pbr_vlan_id, old_pbr, new_pbr) in pbr_changes:
+                for host in switch_hosts:
+                    if new_pbr:
+                        # _build_vlan_pbr_assign already issues 'undo ip policy-based-route'
+                        # before the assign, so a separate remove call is not needed.
+                        _run_switch_command(host, _build_vlan_pbr_assign(pbr_vlan_id, new_pbr))
+                    elif old_pbr:
+                        # Router removed entirely — just undo with the known name.
+                        _run_switch_command(host, _build_vlan_pbr_remove(pbr_vlan_id, old_pbr))
+            flash('ISP router PBR assignments pushed to switches.', 'success')
 
         vlan_map = get_vlan_map()
         vlan_prefix_by_id = {}
@@ -4937,6 +5099,7 @@ def admin_vlan_config():
     prefix_map = _get_vlan_prefix_map()
     vlan_entries = [e for e in get_vlan_entries() if e.status != WIRED_UNREGISTERED_STATUS]
     valid_vlan_ids = _parse_valid_vlan_ids()
+    isp_routers = ISPRouter.query.order_by(ISPRouter.id).all()
     return render_template(
         'admin_vlan_config.html',
         vlan_map=vlan_map,
@@ -4946,6 +5109,7 @@ def admin_vlan_config():
         prefix_map=prefix_map,
         prefix_choices=POOL_PREFIX_CHOICES,
         prefix_statuses=POOL_PREFIX_STATUSES,
+        isp_routers=isp_routers,
     )
 
 
@@ -5302,7 +5466,7 @@ PORT_ROLES = {
     'wired':        'Wired Device',
     'pi':           'Pi / Kea',
     'inter_switch': 'Inter-Switch Link',
-    'uplink_udm':   'Uplink to UDM',
+    'uplink_udm':   'Uplink to Router',
     'unknown':      'Unclassified',
 }
 
@@ -5694,6 +5858,7 @@ def admin_switch_ports():
         ports_by_switch=ports_by_switch,
         switch_hosts=switch_hosts,
         port_roles=PORT_ROLES,
+        locked_ports=_get_isp_router_locked_ports(),
     )
 
 
@@ -5775,10 +5940,17 @@ def _build_port_config(port_name, role, description=''):
             'dhcp snooping trust',
         ]
     elif role == 'inter_switch':
+        # ISP router VLANs go on their own permit line (separate from user VLANs)
+        try:
+            isp_vlan_ids = [str(r.vlan_id) for r in ISPRouter.query.order_by(ISPRouter.vlan_id).all()]
+        except Exception:
+            isp_vlan_ids = ['1']
+        isp_vlan_str = ' '.join(isp_vlan_ids) if isp_vlan_ids else '1'
         body = [
             'port link-type trunk',
-            'port trunk permit vlan 1 10 20 30 40 50 60 70 80 90',
+            'port trunk permit vlan 10 20 30 40 50 60 70 80 90',
             'port trunk permit vlan 99 250',
+            f'port trunk permit vlan {isp_vlan_str}',
             'port trunk pvid vlan 1028',
             'arp detection trust',
             'dhcp snooping trust',
@@ -5787,6 +5959,279 @@ def _build_port_config(port_name, role, description=''):
         body = []
 
     return '\n'.join(head + body + ['quit', 'quit', 'save force'])
+
+
+# ---------------------------------------------------------------------------
+# ISP Router HP5130 Config Helpers
+# ---------------------------------------------------------------------------
+
+def _build_isp_router_switch_config(router, switch_host):
+    """Generate HP5130 config for an ISP router uplink VLAN, interface, and PBR."""
+    last_octet = switch_host.split('.')[-1]
+    host_ip = f"192.168.{router.vlan_id}.{last_octet}"
+    pbr_name = router.pbr_name
+    name_upper = router.name.upper().replace(' ', '_')
+    lines = [
+        'system-view',
+        f'vlan {router.vlan_id}',
+        f' description UPLINK-TO-{name_upper}',
+        'quit',
+        f'dhcp snooping enable vlan {router.vlan_id}',
+        f'interface Vlan-interface{router.vlan_id}',
+        f' description UPLINK-TO-{name_upper}',
+        f' ip address {host_ip} 255.255.255.0',
+        'quit',
+        'acl advanced 3001',
+        ' description PBR-local-traffic-normal-routing',
+        ' rule 10 permit ip any 192.168.0.0 0.0.255.255',
+        'quit',
+        # Undo the whole PBR first so stale nodes/next-hops don't accumulate
+        f'undo policy-based-route {pbr_name}',
+        f'policy-based-route {pbr_name} deny node 5',
+        ' if-match acl 3001',
+        'quit',
+        f'policy-based-route {pbr_name} permit node 10',
+        f' apply next-hop {router.gateway_ip}',
+        'quit',
+        'quit',
+        'save force',
+    ]
+    return '\n'.join(lines)
+
+
+def _build_vlan_pbr_assign(vlan_id, pbr_name):
+    """Add a PBR to a user VLAN interface on the switch.
+    Always undoes any existing PBR first — HP5130 requires this before
+    assigning a different (or the same) PBR.
+    """
+    return '\n'.join([
+        'system-view',
+        f'interface Vlan-interface{vlan_id}',
+        ' undo ip policy-based-route',
+        f' ip policy-based-route {pbr_name}',
+        'quit',
+        'quit',
+        'save force',
+    ])
+
+
+def _build_vlan_pbr_remove(vlan_id, pbr_name):
+    """Remove a PBR from a user VLAN interface on the switch."""
+    return '\n'.join([
+        'system-view',
+        f'interface Vlan-interface{vlan_id}',
+        f' undo ip policy-based-route {pbr_name}',
+        'quit',
+        'quit',
+        'save force',
+    ])
+
+
+def _build_isp_router_port_config(port_name, router):
+    """Configure an HP5130 port as a dedicated access uplink to an ISP router.
+    Uses access mode (single VLAN) — no trunk needed for a point-to-point uplink.
+    """
+    expanded = _expand_switch_iface_name(port_name)
+    name_upper = router.name.upper().replace(' ', '_')
+    lines = [
+        'system-view',
+        f'interface {expanded}',
+        f' description UPLINK-TO-{name_upper}',
+        ' undo ip verify source',
+        ' port link-type access',
+        ' undo port access vlan',
+        f' port access vlan {router.vlan_id}',
+        ' dhcp snooping check mac-address',
+        ' port-security max-mac-count 1',
+        ' port-security port-mode autolearn',
+        ' port-security intrusion-mode blockmac',
+        ' port-security enable',
+        'quit',
+        'quit',
+        'save force',
+    ]
+    return '\n'.join(lines)
+
+
+def _build_remove_isp_router_pbr(pbr_name):
+    """Undo the two PBR nodes for a given PBR name (used when router is renamed)."""
+    return '\n'.join([
+        'system-view',
+        f'undo policy-based-route {pbr_name}',
+        'quit',
+        'save force',
+    ])
+
+
+def _build_pbr_undo_next_hop(pbr_name, old_gateway_ip):
+    """Explicitly undo the apply next-hop within permit node 10 of a PBR.
+    Required on HP5130 when the VLAN ID (and thus gateway IP) changes — the
+    old next-hop must be removed before the new one is applied, even when the
+    whole PBR will be rebuilt immediately after.
+    """
+    return '\n'.join([
+        'system-view',
+        f'policy-based-route {pbr_name} permit node 10',
+        f' undo apply next-hop {old_gateway_ip}',
+        'quit',
+        'quit',
+        'save force',
+    ])
+
+
+def _remove_isp_router_pbr_from_switches(pbr_name):
+    """Push PBR removal for an old PBR name to all switches (e.g. after rename)."""
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
+    for host in switch_hosts:
+        _run_switch_command(host, _build_remove_isp_router_pbr(pbr_name))
+
+
+def _build_remove_isp_router_vlan(vlan_id):
+    """Remove a stale ISP router VLAN and its Vlan-interface from the switch."""
+    return '\n'.join([
+        'system-view',
+        f'undo interface Vlan-interface{vlan_id}',
+        f'undo vlan {vlan_id}',
+        f'undo dhcp snooping enable vlan {vlan_id}',
+        'quit',
+        'save force',
+    ])
+
+
+def _build_remove_isp_router_full(router):
+    """Remove all switch config for an ISP router: PBR, Vlan-interface, VLAN."""
+    pbr_name = router.pbr_name
+    return '\n'.join([
+        'system-view',
+        f'undo policy-based-route {pbr_name}',
+        f'undo interface Vlan-interface{router.vlan_id}',
+        f'undo vlan {router.vlan_id}',
+        f'undo dhcp snooping enable vlan {router.vlan_id}',
+        'quit',
+        'save force',
+    ])
+
+
+def _remove_isp_router_from_switches(router):
+    """Push full ISP router removal config (PBR + VLAN + interface) to all switches."""
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
+    for host in switch_hosts:
+        _run_switch_command(host, _build_remove_isp_router_full(router))
+
+
+def _remove_isp_router_vlan_from_switches(old_vlan_id):
+    """Remove a stale VLAN and its Vlan-interface from all switches."""
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
+    for host in switch_hosts:
+        _run_switch_command(host, _build_remove_isp_router_vlan(old_vlan_id))
+
+
+def _apply_isp_router_to_switches(router):
+    """Push ISP router VLAN/interface/PBR config to all configured switches."""
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
+    failed = []
+    for host in switch_hosts:
+        cfg = _build_isp_router_switch_config(router, host)
+        if _run_switch_command(host, cfg) is None:
+            failed.append(host)
+    if failed:
+        flash(f'Switch config push failed for: {", ".join(failed)}', 'warning')
+
+
+def _set_isp_router_port(port_name, router):
+    """Mark switch port(s) as uplink_udm and push port config on all switches."""
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
+    for host in switch_hosts:
+        db.session.execute(text("""
+            UPDATE switch_ports
+            SET port_role = 'uplink_udm', last_updated = NOW()
+            WHERE switch_host = :host AND port_name = :port
+        """), {'host': host, 'port': port_name})
+        cfg = _build_isp_router_port_config(port_name, router)
+        _run_switch_command(host, cfg)
+    db.session.commit()
+
+
+def _build_reset_port_config(port_name):
+    """Reset an ISP router uplink port back to a plain default state."""
+    expanded = _expand_switch_iface_name(port_name)
+    return '\n'.join([
+        'system-view',
+        f'interface {expanded}',
+        ' undo description',
+        ' undo port access vlan',
+        ' undo port-security max-mac-count',
+        ' undo port-security port-mode',
+        ' undo port-security intrusion-mode',
+        'quit',
+        'quit',
+        'save force',
+    ])
+
+
+def _build_isl_trunk_add_vlan(isl_port, vlan_id):
+    """Add a VLAN to the inter-switch trunk port permit list."""
+    return '\n'.join([
+        'system-view',
+        f'interface {isl_port}',
+        f' port trunk permit vlan {vlan_id}',
+        'quit',
+        'quit',
+        'save force',
+    ])
+
+
+def _build_isl_trunk_remove_vlan(isl_port, vlan_id):
+    """Remove a VLAN from the inter-switch trunk port permit list."""
+    return '\n'.join([
+        'system-view',
+        f'interface {isl_port}',
+        f' undo port trunk permit vlan {vlan_id}',
+        'quit',
+        'quit',
+        'save force',
+    ])
+
+
+def _update_isl_trunk_vlan(vlan_id, add=True):
+    """Push ISL trunk VLAN add or remove to every switch, using the port
+    recorded as inter_switch in the switch_ports table for that host."""
+    rows = db.session.execute(text("""
+        SELECT switch_host, port_name
+        FROM switch_ports
+        WHERE port_role = 'inter_switch'
+    """)).fetchall()
+    for switch_host, port_name in rows:
+        expanded = _expand_switch_iface_name(port_name)
+        cfg = (_build_isl_trunk_add_vlan(expanded, vlan_id)
+               if add else _build_isl_trunk_remove_vlan(expanded, vlan_id))
+        _run_switch_command(switch_host, cfg)
+
+
+def _clear_isp_router_port(port_name):
+    """Revert a switch port that was an ISP router uplink back to unknown and reset it on the switch."""
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
+    for host in switch_hosts:
+        db.session.execute(text("""
+            UPDATE switch_ports
+            SET port_role = 'unknown', last_updated = NOW()
+            WHERE switch_host = :host AND port_name = :port
+              AND port_role = 'uplink_udm'
+        """), {'host': host, 'port': port_name})
+        _run_switch_command(host, _build_reset_port_config(port_name))
+    db.session.commit()
+
+
+def _get_isp_router_locked_ports():
+    """Return {port_name: router_name} for all ISP routers that have a port assigned."""
+    return {r.switch_port: r.name
+            for r in ISPRouter.query.filter(ISPRouter.switch_port.isnot(None)).all()}
 
 
 @app.route('/admin/switch-ports/update-single', methods=['POST'])
@@ -5805,6 +6250,11 @@ def admin_switch_ports_update_single():
     if not host or not port_name or role not in PORT_ROLES:
         return jsonify({'success': False, 'error': 'Invalid request'})
 
+    # Block updates to ports locked as ISP router uplinks
+    locked = _get_isp_router_locked_ports()
+    if port_name in locked:
+        return jsonify({'success': False,
+                        'error': f'Port is locked as uplink to router "{locked[port_name]}". Change it via ISP Routers page.'})
     row = db.session.execute(
         text("SELECT port_description, port_role FROM switch_ports WHERE switch_host=:h AND port_name=:p"),
         {'h': host, 'p': port_name}

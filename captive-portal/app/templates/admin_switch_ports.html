@@ -175,6 +175,25 @@
         opacity: 0.45;
         pointer-events: none;
     }
+    .role-group.role-locked {
+        pointer-events: none;
+        opacity: 0.75;
+    }
+    .role-locked-label {
+        cursor: not-allowed !important;
+        pointer-events: auto !important;
+    }
+    .role-locked-badge {
+        display: inline-block;
+        margin-top: 4px;
+        padding: 2px 8px;
+        background: #fdebd0;
+        color: #784212;
+        border: 1px solid #e67e22;
+        border-radius: 10px;
+        font-size: 11px;
+        font-weight: 600;
+    }
 
     .role-status {
         margin-top: 4px;
@@ -236,21 +255,29 @@
             <td><span class="port-name">{{ port.port_name }}</span></td>
             <td><span class="port-desc" title="{{ port.port_description }}">{{ port.port_description or '—' }}</span></td>
             <td>
-                <div class="role-group"
+                {% set is_locked = port.port_name in locked_ports %}
+                <div class="role-group{% if is_locked %} role-locked{% endif %}"
                      id="rg_{{ host }}_{{ port.port_name | replace('/', '_') | replace('.', '_') }}"
                      data-host="{{ host }}"
-                     data-port="{{ port.port_name }}">
+                     data-port="{{ port.port_name }}"
+                     {% if is_locked %}title="Managed by ISP Router '{{ locked_ports[port.port_name] }}' — change on the ISP Routers page"{% endif %}>
                 {% for role_key, role_label in port_roles.items() %}
+                    {% set is_uplink_udm = role_key == 'uplink_udm' %}
                     <label id="lbl_{{ host }}_{{ port.port_name | replace('/', '_') | replace('.', '_') }}_{{ role_key }}"
-                           class="{% if port.port_role == role_key %}selected-{{ role_key }}{% endif %}">
+                           class="{% if port.port_role == role_key %}selected-{{ role_key }}{% endif %}{% if is_locked %} role-locked-label{% endif %}{% if is_uplink_udm %} role-locked-label{% endif %}"
+                           {% if is_uplink_udm %}title="Uplinks to Router ports are set on the ISP routers page"{% endif %}>
                         <input type="radio"
                                name="role_{{ host }}_{{ port.port_name }}"
                                value="{{ role_key }}"
-                               {% if port.port_role == role_key %}checked{% endif %}>
+                               {% if port.port_role == role_key %}checked{% endif %}
+                               {% if is_locked or is_uplink_udm %}disabled{% endif %}>
                         <span>{{ role_label }}</span>
                     </label>
                 {% endfor %}
                 </div>
+                {% if is_locked %}
+                <div class="role-locked-badge">🔒 {{ locked_ports[port.port_name] }}</div>
+                {% endif %}
                 <div class="role-status" id="status_{{ host }}_{{ port.port_name | replace('/', '_') | replace('.', '_') }}"></div>
             </td>
             <td>
