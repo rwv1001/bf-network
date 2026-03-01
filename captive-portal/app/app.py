@@ -781,7 +781,8 @@ class AdminUser:
     """Admin user class for Flask-Login with role-based permissions"""
     def __init__(self, admin_id, username, can_manage_users=True, can_manage_vlans=False, 
                  can_view_traffic=False, can_manage_admins=False, traffic_viewer_settings=None, 
-                 mfa_enabled=False, must_change_password=False, can_manage_switch_ports=False):
+                 mfa_enabled=False, must_change_password=False, can_manage_switch_ports=False,
+                 can_manage_isp_routers=False):
         self.id = str(admin_id)  # Flask-Login requires string ID
         self.username = username
         self.can_manage_users = can_manage_users
@@ -789,6 +790,7 @@ class AdminUser:
         self.can_view_traffic = can_view_traffic
         self.can_manage_admins = can_manage_admins
         self.can_manage_switch_ports = can_manage_switch_ports
+        self.can_manage_isp_routers = can_manage_isp_routers
         self.traffic_viewer_settings = traffic_viewer_settings
         self.mfa_enabled = mfa_enabled
         self.must_change_password = must_change_password
@@ -828,7 +830,8 @@ def load_user(user_id):
                 admin.traffic_viewer_settings,
                 admin.mfa_enabled,
                 getattr(admin, 'must_change_password', False),
-                getattr(admin, 'can_manage_switch_ports', False)
+                getattr(admin, 'can_manage_switch_ports', False),
+                getattr(admin, 'can_manage_isp_routers', False)
             )
     except (ValueError, TypeError):
         pass
@@ -860,6 +863,9 @@ def permission_required(permission):
                 return redirect(url_for('admin_dashboard'))
             elif permission == 'manage_switch_ports' and not current_user.can_manage_switch_ports:
                 flash('You do not have permission to manage switch ports.', 'error')
+                return redirect(url_for('admin_dashboard'))
+            elif permission == 'manage_isp_routers' and not current_user.can_manage_isp_routers:
+                flash('You do not have permission to manage ISP routers.', 'error')
                 return redirect(url_for('admin_dashboard'))
             
             return f(*args, **kwargs)
@@ -4116,7 +4122,8 @@ def admin_login():
                 admin.can_manage_admins,
                 admin.traffic_viewer_settings,
                 admin.mfa_enabled,
-                can_manage_switch_ports=getattr(admin, 'can_manage_switch_ports', False)
+                can_manage_switch_ports=getattr(admin, 'can_manage_switch_ports', False),
+                can_manage_isp_routers=getattr(admin, 'can_manage_isp_routers', False)
             )
             login_user(user)
             return redirect(url_for('admin_dashboard'))
@@ -4133,12 +4140,13 @@ def admin_login():
                     admin.can_view_traffic = True
                     admin.can_manage_admins = True
                     admin.can_manage_switch_ports = True
+                    admin.can_manage_isp_routers = True
                     db.session.add(admin)
                     db.session.commit()
                     logger.info(f"Migrated legacy admin '{username}' to database")
                 
                 # Log in with full permissions
-                user = AdminUser(admin.id, admin.username, True, True, True, True, can_manage_switch_ports=True)
+                user = AdminUser(admin.id, admin.username, True, True, True, True, can_manage_switch_ports=True, can_manage_isp_routers=True)
                 login_user(user)
                 return redirect(url_for('admin_dashboard'))
             
@@ -4253,7 +4261,8 @@ def admin_mfa_verify():
                 admin.can_manage_admins,
                 admin.traffic_viewer_settings,
                 admin.mfa_enabled,
-                can_manage_switch_ports=getattr(admin, 'can_manage_switch_ports', False)
+                can_manage_switch_ports=getattr(admin, 'can_manage_switch_ports', False),
+                can_manage_isp_routers=getattr(admin, 'can_manage_isp_routers', False)
             )
             login_user(user)
             logger.info(f"Admin '{admin.username}' logged in with MFA")
@@ -4577,6 +4586,7 @@ def admin_manage_admins():
             'can_view_traffic': admin.can_view_traffic,
             'can_manage_admins': admin.can_manage_admins,
             'can_manage_switch_ports': admin.can_manage_switch_ports,
+            'can_manage_isp_routers': getattr(admin, 'can_manage_isp_routers', False),
             'created_at': admin.created_at,
             'last_login': admin.last_login,
             'is_current': is_current,
@@ -4600,6 +4610,7 @@ def admin_create_admin():
     can_view_traffic = bool(request.form.get('can_view_traffic'))
     can_manage_admins = bool(request.form.get('can_manage_admins'))
     can_manage_switch_ports = bool(request.form.get('can_manage_switch_ports'))
+    can_manage_isp_routers = bool(request.form.get('can_manage_isp_routers'))
     must_change_password = bool(request.form.get('must_change_password'))  # checkbox: present=True, absent=False
     
     if not username or not password:
@@ -4624,6 +4635,7 @@ def admin_create_admin():
     admin.can_view_traffic = can_view_traffic
     admin.can_manage_admins = can_manage_admins
     admin.can_manage_switch_ports = can_manage_switch_ports
+    admin.can_manage_isp_routers = can_manage_isp_routers
     admin.must_change_password = must_change_password
     admin.created_by = int(current_user.id)
     db.session.add(admin)
@@ -4646,6 +4658,7 @@ def admin_update_admin_permissions(admin_id):
     can_view_traffic = bool(request.form.get('can_view_traffic'))
     can_manage_admins = bool(request.form.get('can_manage_admins'))
     can_manage_switch_ports = bool(request.form.get('can_manage_switch_ports'))
+    can_manage_isp_routers = bool(request.form.get('can_manage_isp_routers'))
     
     # Check if this would remove the last super admin
     if admin.can_manage_admins and not can_manage_admins:
@@ -4659,6 +4672,7 @@ def admin_update_admin_permissions(admin_id):
     admin.can_view_traffic = can_view_traffic
     admin.can_manage_admins = can_manage_admins
     admin.can_manage_switch_ports = can_manage_switch_ports
+    admin.can_manage_isp_routers = can_manage_isp_routers
     db.session.commit()
     
     logger.info(f"Admin '{admin.username}' permissions updated by {current_user.username}")
@@ -4775,7 +4789,7 @@ def admin_reset_test():
 
 @app.route('/admin/isp-routers', methods=['GET', 'POST'])
 @login_required
-@permission_required('manage_vlans')
+@permission_required('manage_isp_routers')
 def admin_isp_routers():
     """ISP router management page."""
     if request.method == 'POST':

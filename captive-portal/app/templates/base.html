@@ -367,6 +367,8 @@
             {% endif %}
             {% if current_user.can_manage_vlans %}
             <a href="{{ url_for('admin_vlan_config') }}" class="{% if request.endpoint == 'admin_vlan_config' %}active{% endif %}">VLAN Config</a>
+            {% endif %}
+            {% if current_user.can_manage_isp_routers %}
             <a href="{{ url_for('admin_isp_routers') }}" class="{% if request.endpoint == 'admin_isp_routers' %}active{% endif %}">ISP Routers</a>
             {% endif %}
             {% if current_user.can_manage_switch_ports %}

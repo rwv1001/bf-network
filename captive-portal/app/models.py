@@ -22,6 +22,7 @@ class Admin(db.Model):
     can_view_traffic = db.Column(db.Boolean, default=False, nullable=False)
     can_manage_admins = db.Column(db.Boolean, default=False, nullable=False)  # Super admin flag
     can_manage_switch_ports = db.Column(db.Boolean, default=False, nullable=False)
+    can_manage_isp_routers = db.Column(db.Boolean, default=False, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     created_by = db.Column(db.Integer, db.ForeignKey('admins.id'), nullable=True)
     last_login = db.Column(db.DateTime)
