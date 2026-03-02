@@ -48,6 +48,233 @@
         font-family: monospace;
         color: #2b6cb0;
     }
+    .migration-badge {
+        display: inline-block;
+        border-radius: 4px;
+        padding: 2px 10px;
+        font-size: 0.8em;
+        font-weight: bold;
+        margin-top: 10px;
+    }
+    .badge-warn   { background: #fef3c7; border: 1px solid #f59e0b; color: #92400e; }
+    .badge-ok     { background: #d1fae5; border: 1px solid #34d399; color: #065f46; }
+    .migration-detail {
+        margin-top: 8px;
+        font-size: 0.85em;
+        color: #4a5568;
+        background: #fffff0;
+        border-left: 3px solid #f59e0b;
+        padding: 6px 10px;
+        border-radius: 0 4px 4px 0;
+    }
+    .migration-detail ul { margin: 4px 0 0 16px; padding: 0; }
+    .migration-detail li { margin: 2px 0; }
+    .btn-firmware {
+        display: inline-block;
+        padding: 10px 22px;
+        font-size: 15px;
+        font-weight: bold;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        color: white;
+        text-decoration: none;
+    }
+    .btn-update   { background: #38a169; }
+    .btn-update:hover   { background: #2f855a; color: white; }
+    .btn-rollback { background: #e53e3e; }
+    .btn-rollback:hover { background: #c53030; color: white; }
+    .btn-firmware.disabled {
+        background: #a0aec0;
+        cursor: not-allowed;
+        opacity: 0.7;
+        pointer-events: none;
+    }
+    .action-row {
+        display: flex;
+        gap: 16px;
+        flex-wrap: wrap;
+        margin-top: 8px;
+    }
+    .repo-path   { font-family: monospace; color: #718096; font-size: 0.9em; }
+    .cards-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 16px;
+        margin-bottom: 24px;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+
+{% if error %}
+<div class="flash-messages">
+    <div class="flash error">
+        <strong>Error reading git status:</strong> {{ error }}
+    </div>
+</div>
+{% endif %}
+
+{% if status %}
+<p class="repo-path">Repository: {{ status.repo_dir }}</p>
+
+<div class="cards-grid">
+
+    <!-- Previous commit (rollback destination) -->
+    <div class="firmware-card">
+        <h3>&#8592; Previous commit</h3>
+        {% if status.prev_full %}
+            <div class="commit-hash">{{ status.prev_short }}</div>
+            <div class="commit-subject">{{ status.prev_subject }}</div>
+            {% if status.back_dirs %}
+            <div class="affected-dirs">
+                Affected stacks:
+                {% for d in status.back_dirs %}<span>{{ d }}</span>{% endfor %}
+            </div>
+            {% else %}
+            <div class="affected-dirs commit-none">No compose stacks affected</div>
+            {% endif %}
+            {# current_manifest describes what rolling back FROM current TO prev requires #}
+            {% if current_manifest %}
+            <div class="migration-badge badge-warn">&#9888; Migration required on rollback</div>
+            {% if current_manifest.description %}
+            <div class="migration-detail">{{ current_manifest.description }}
+                {% if current_manifest.db and current_manifest.db.down %}
+                <ul><li>DB script: <code>{{ current_manifest.db.down }}</code></li></ul>
+                {% endif %}
+            </div>
+            {% endif %}
+            {% else %}
+            <div class="migration-badge badge-ok">&#10003; No migration on rollback</div>
+            {% endif %}
+        {% else %}
+            <div class="commit-none">No previous commit</div>
+        {% endif %}
+    </div>
+
+    <!-- Current commit (HEAD) -->
+    <div class="firmware-card" style="border-color: #48bb78; background: #f0fff4;">
+        <h3>&#9679; Current (HEAD)</h3>
+        <div class="commit-hash">{{ status.current_short }}</div>
+        <div class="commit-subject">{{ status.current_subject }}</div>
+        <div style="margin-top:6px; font-size:0.8em; color:#718096; font-family:monospace;">{{ status.current_full }}</div>
+    </div>
+
+    <!-- Next commit -->
+    <div class="firmware-card">
+        <h3>&#8594; Next commit</h3>
+        {% if status.next_full %}
+            <div class="commit-hash">{{ status.next_short }}</div>
+            <div class="commit-subject">{{ status.next_subject }}</div>
+            {% if status.forward_dirs %}
+            <div class="affected-dirs">
+                Affected stacks:
+                {% for d in status.forward_dirs %}<span>{{ d }}</span>{% endfor %}
+            </div>
+            {% else %}
+            <div class="affected-dirs commit-none">No compose stacks affected</div>
+            {% endif %}
+            {# next_manifest describes what upgrading TO next requires #}
+            {% if next_manifest %}
+            <div class="migration-badge badge-warn">&#9888; Migration required</div>
+            {% if next_manifest.description %}
+            <div class="migration-detail">{{ next_manifest.description }}
+                {% set new_env = next_manifest.env.add if next_manifest.env else [] %}
+                {% if new_env %}
+                <ul>{% for v in new_env %}<li>New env var: <code>{{ v.key }}</code>{% if v.required %} <strong>(required)</strong>{% endif %}</li>{% endfor %}</ul>
+                {% endif %}
+                {% if next_manifest.db and next_manifest.db.up %}
+                <ul><li>DB script: <code>{{ next_manifest.db.up }}</code></li></ul>
+                {% endif %}
+            </div>
+            {% endif %}
+            {% else %}
+            <div class="migration-badge badge-ok">&#10003; No migration needed</div>
+            {% endif %}
+        {% else %}
+            <div class="commit-none">Already on latest commit</div>
+        {% endif %}
+    </div>
+
+</div>
+
+<!-- Action buttons — link to preflight page -->
+<div class="action-row">
+    <a href="{{ url_for('admin_firmware_preflight', action='rollback') }}"
+       class="btn-firmware btn-rollback {% if not status.prev_full or not status.back_dirs %}disabled{% endif %}">
+        &#8592; Roll Back
+    </a>
+
+    <a href="{{ url_for('admin_firmware_preflight', action='update') }}"
+       class="btn-firmware btn-update {% if not status.next_full or not status.forward_dirs %}disabled{% endif %}">
+        Update &#8594;
+    </a>
+</div>
+
+{% if not status.next_full %}
+<p style="margin-top:12px; color:#718096; font-size:0.9em;">&#10003; Already on the latest commit.</p>
+{% elif not status.forward_dirs %}
+<p style="margin-top:12px; color:#718096; font-size:0.9em;">Update available but no Docker stacks are affected — Update button disabled.</p>
+{% endif %}
+{% if not status.prev_full %}
+<p style="margin-top:6px; color:#718096; font-size:0.9em;">No previous commit to roll back to.</p>
+{% elif not status.back_dirs %}
+<p style="margin-top:6px; color:#718096; font-size:0.9em;">Previous commit exists but no Docker stacks are affected — Roll Back button disabled.</p>
+{% endif %}
+
+{% else %}
+{% if not error %}
+<p style="color:#718096;">No git status available.</p>
+{% endif %}
+{% endif %}
+
+{% endblock %}
+
+{% block extra_head %}
+<style>
+    .firmware-card {
+        background: #f5f5f5;
+        border: 2px solid #667eea;
+        border-radius: 8px;
+        padding: 20px 24px;
+        margin-bottom: 24px;
+    }
+    .firmware-card h3 {
+        margin-top: 0;
+        color: #4a5568;
+        font-size: 1em;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+    .commit-hash {
+        font-family: monospace;
+        font-size: 1.1em;
+        font-weight: bold;
+        color: #2d3748;
+    }
+    .commit-subject {
+        color: #4a5568;
+        margin-top: 4px;
+    }
+    .commit-none {
+        color: #a0aec0;
+        font-style: italic;
+    }
+    .affected-dirs {
+        margin-top: 8px;
+        font-size: 0.9em;
+    }
+    .affected-dirs span {
+        display: inline-block;
+        background: #ebf4ff;
+        border: 1px solid #bee3f8;
+        border-radius: 4px;
+        padding: 2px 8px;
+        margin: 2px 2px 2px 0;
+        font-family: monospace;
+        color: #2b6cb0;
+    }
     .btn-firmware {
         padding: 10px 22px;
         font-size: 15px;

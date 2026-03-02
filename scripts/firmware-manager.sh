@@ -270,12 +270,30 @@ _cmd_rollback() {
 # Dispatch
 # ---------------------------------------------------------------------------
 case "$ACTION" in
-    status)   _cmd_status   ;;
-    update)   _cmd_update   ;;
-    rollback) _cmd_rollback ;;
+    status)        _cmd_status        ;;
+    update)        _cmd_update        ;;
+    rollback)      _cmd_rollback      ;;
+    restart-dirs)
+        # Usage: firmware-manager.sh restart-dirs dir1 dir2 ...
+        # Restarts the given compose-stack directories, captive-portal last.
+        shift
+        declare -a RESTART_FIRST=() RESTART_LAST=()
+        for d in "$@"; do
+            [[ "$d" == "$_SELF_STACK" ]] && RESTART_LAST+=("$d") || RESTART_FIRST+=("$d")
+        done
+        for d in "${RESTART_FIRST[@]}" "${RESTART_LAST[@]}"; do
+            if [[ -f "$GIT_REPO_DIR/$d/docker-compose.yml" ]]; then
+                _restart_stack "$d"
+                echo ""
+            else
+                echo "--- $d: no docker-compose.yml, skipping ---"
+            fi
+        done
+        echo "RESTART COMPLETE"
+        ;;
     *)
         echo "Unknown action: $ACTION" >&2
-        echo "Usage: $0 {status|update|rollback}" >&2
+        echo "Usage: $0 {status|update|rollback|restart-dirs [dirs...]}" >&2
         exit 1
         ;;
 esac

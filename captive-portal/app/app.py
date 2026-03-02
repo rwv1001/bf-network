@@ -4943,19 +4943,15 @@ def admin_isp_routers():
 # Firmware Management
 # ---------------------------------------------------------------------------
 
-def _run_firmware_script(action, stream=False):
-    """Run the firmware-manager.sh script.
+def _run_firmware_script(action, stream=False, extra_args=None):
+    """Run the firmware-manager.sh script for the given action.
 
     The git repo ($GIT_REPO_DIR) and docker compose plugin are mounted into
-    the container at their real host paths, so git commands and docker compose
-    commands run inside the container exactly as they would on the host.
-    The script is available at /scripts/firmware-manager.sh via the existing
-    ../scripts:/scripts volume mount.
+    the container at their real host paths, so git/docker compose work natively.
     """
     git_repo_dir = os.getenv('GIT_REPO_DIR', '/home/admin/bf-network')
-    # Prefer the container-side /scripts mount (same file, already mounted ro)
     script_path = '/scripts/firmware-manager.sh'
-    cmd = ['/bin/bash', script_path, action]
+    cmd = ['/bin/bash', script_path, action] + (extra_args or [])
     env = dict(os.environ)
     env['GIT_REPO_DIR'] = git_repo_dir
 
@@ -4965,52 +4961,408 @@ def _run_firmware_script(action, stream=False):
             text=True, env=env
         )
     else:
-        result = subprocess.run(
+        return subprocess.run(
             cmd, capture_output=True, text=True, timeout=30, env=env
         )
+
+
+def _load_commit_manifest(tree_hash, file_hash):
+    """Load the migration manifest that describes what to do when leaving
+    file_hash and arriving at tree_hash.
+
+    Convention:
+      - The JSON file is named  <file_hash>.json  (the commit being LEFT)
+      - It is committed inside  <tree_hash>       (the commit being ARRIVED AT)
+
+    So for an UPDATE  from current → next: tree_hash=next_full,    file_hash=current_full
+       for a ROLLBACK from current → prev: tree_hash=current_full, file_hash=prev_full
+
+    Returns the parsed dict, or None if no manifest exists.
+    """
+    if not tree_hash or not file_hash:
+        return None
+    git_repo_dir = os.getenv('GIT_REPO_DIR', '/home/admin/bf-network')
+    blob_path = f'captive-portal/commit-migrations/{file_hash}.json'
+    try:
+        result = subprocess.run(
+            ['git', '-C', git_repo_dir, 'show', f'{tree_hash}:{blob_path}'],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return json.loads(result.stdout)
+    except Exception:
+        pass
+    return None
+
+
+def _read_env_file():
+    """Parse the captive-portal .env file and return a dict of current values."""
+    git_repo_dir = os.getenv('GIT_REPO_DIR', '/home/admin/bf-network')
+    env_path = os.path.join(git_repo_dir, 'captive-portal', '.env')
+    result = {}
+    if not os.path.exists(env_path):
         return result
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                key, _, val = line.partition('=')
+                result[key.strip()] = val.strip()
+    return result
+
+
+def _write_env_vars(new_vars):
+    """Add or update key=value pairs in the captive-portal .env file.
+    Existing lines are updated in place; new keys are appended.
+    """
+    if not new_vars:
+        return
+    git_repo_dir = os.getenv('GIT_REPO_DIR', '/home/admin/bf-network')
+    env_path = os.path.join(git_repo_dir, 'captive-portal', '.env')
+    lines = []
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            lines = f.readlines()
+
+    updated = set()
+    new_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith('#') and '=' in stripped:
+            key = stripped.split('=', 1)[0].strip()
+            if key in new_vars:
+                new_lines.append(f'{key}={new_vars[key]}\n')
+                updated.add(key)
+                continue
+        new_lines.append(line)
+
+    for key, value in new_vars.items():
+        if key not in updated:
+            new_lines.append(f'{key}={value}\n')
+
+    with open(env_path, 'w') as f:
+        f.writelines(new_lines)
 
 
 @app.route('/admin/firmware')
 @login_required
 @permission_required('manage_firmware')
 def admin_firmware():
-    """Firmware management page — shows current/next/prev git commits."""
+    """Firmware management page — shows current/next/prev git commits with
+    migration status badges for each direction of travel."""
     status = {}
     error = None
+    next_manifest = None
+    current_manifest = None
     try:
         result = _run_firmware_script('status')
         if result.returncode == 0:
-            import json as _json
-            status = _json.loads(result.stdout)
+            status = json.loads(result.stdout)
+            # Load manifests using the (tree, file) convention:
+            #   update badge:   <current>.json read from next's tree
+            #   rollback badge: <prev>.json    read from current's tree
+            next_manifest    = _load_commit_manifest(status.get('next_full'),    status.get('current_full'))
+            current_manifest = _load_commit_manifest(status.get('current_full'), status.get('prev_full'))
         else:
             error = (result.stderr or result.stdout or 'Script returned non-zero exit').strip()
     except Exception as e:
         error = str(e)
-    return render_template('admin_firmware.html', status=status, error=error)
+    return render_template(
+        'admin_firmware.html',
+        status=status,
+        error=error,
+        next_manifest=next_manifest,
+        current_manifest=current_manifest,
+    )
+
+
+@app.route('/admin/firmware/preflight/<action>', methods=['GET', 'POST'])
+@login_required
+@permission_required('manage_firmware')
+def admin_firmware_preflight(action):
+    """Show (GET) or process (POST) the pre-flight checklist before an
+    update or rollback: collect any new env vars, warn about DB changes.
+    """
+    if action not in ('update', 'rollback'):
+        return jsonify({'error': 'Invalid action'}), 400
+
+    # Fetch current git status
+    status_result = _run_firmware_script('status')
+    if status_result.returncode != 0:
+        flash('Could not read git status — is the repo accessible?', 'danger')
+        return redirect(url_for('admin_firmware'))
+    status = json.loads(status_result.stdout)
+
+    # For update  → manifest of the NEXT commit (what we're moving TO)
+    # For rollback → manifest of CURRENT commit (what we're undoing)
+    if action == 'update':
+        target_hash = status.get('next_full')
+        target_short = status.get('next_short')
+        target_subject = status.get('next_subject')
+        if not target_hash:
+            flash('Already on the latest commit — nothing to update.', 'warning')
+            return redirect(url_for('admin_firmware'))
+        # <current>.json lives inside the next commit's tree
+        manifest = _load_commit_manifest(target_hash, status.get('current_full'))
+    else:
+        target_hash = status.get('current_full')
+        target_short = status.get('current_short')
+        target_subject = status.get('current_subject')
+        if not status.get('prev_full'):
+            flash('Already on the first commit — cannot roll back.', 'warning')
+            return redirect(url_for('admin_firmware'))
+        # <prev>.json lives inside the current commit's tree
+        manifest = _load_commit_manifest(target_hash, status.get('prev_full'))
+    current_env = _read_env_file()
+
+    if request.method == 'POST':
+        # Collect submitted env vars
+        new_vars = {}
+        errors = []
+        if manifest and action == 'update':
+            for entry in manifest.get('env', {}).get('add', []):
+                key = entry['key']
+                val = request.form.get(f'env_{key}', '').strip()
+                if not val and entry.get('required'):
+                    # Allow keeping existing value if already set
+                    if key in current_env:
+                        val = current_env[key]
+                    else:
+                        errors.append(f'{key} is required.')
+                if val:
+                    new_vars[key] = val
+
+        if errors:
+            for e in errors:
+                flash(e, 'danger')
+            return render_template(
+                'admin_firmware_preflight.html',
+                action=action,
+                status=status,
+                manifest=manifest,
+                target_hash=target_hash,
+                target_short=target_short,
+                target_subject=target_subject,
+                current_env=current_env,
+            )
+
+        # Write env vars before containers start
+        if new_vars:
+            try:
+                _write_env_vars(new_vars)
+                logger.info("Firmware preflight wrote %d env var(s): %s",
+                            len(new_vars), ', '.join(new_vars.keys()))
+            except Exception as exc:
+                flash(f'Failed to write .env: {exc}', 'danger')
+                return redirect(url_for('admin_firmware'))
+
+        # Store approval in session so the stream endpoint knows preflight passed
+        session['firmware_preflight_approved'] = action
+        session['firmware_preflight_hash'] = target_hash
+        return redirect(url_for('admin_firmware_do', action=action))
+
+    # GET
+    return render_template(
+        'admin_firmware_preflight.html',
+        action=action,
+        status=status,
+        manifest=manifest,
+        target_hash=target_hash,
+        target_short=target_short,
+        target_subject=target_subject,
+        current_env=current_env,
+    )
+
+
+@app.route('/admin/firmware/do/<action>')
+@login_required
+@permission_required('manage_firmware')
+def admin_firmware_do(action):
+    """Render the streaming page for an update/rollback that has passed preflight."""
+    if action not in ('update', 'rollback'):
+        return redirect(url_for('admin_firmware'))
+    approved = session.get('firmware_preflight_approved')
+    if approved != action:
+        flash('Please complete the pre-flight checklist first.', 'warning')
+        return redirect(url_for('admin_firmware_preflight', action=action))
+    return render_template('admin_firmware_do.html', action=action)
 
 
 @app.route('/admin/firmware/stream/<action>')
 @login_required
 @permission_required('manage_firmware')
 def admin_firmware_stream(action):
-    """SSE endpoint: run update or rollback and stream output line by line."""
+    """SSE endpoint: orchestrate the full update/rollback sequence and stream
+    output line-by-line.  The sequence is:
+
+    UPDATE:
+      1. git checkout <next_hash>
+      2. Run db 'up' migration from manifest (if any) — script is now in new tree
+      3. docker compose restart affected stacks (captive-portal last)
+
+    ROLLBACK:
+      1. Run db 'down' migration from manifest of CURRENT commit (still in tree)
+      2. git checkout HEAD^
+      3. docker compose restart affected stacks (captive-portal last)
+    """
     if action not in ('update', 'rollback'):
         return jsonify({'error': 'Invalid action'}), 400
+
+    # Check preflight was approved
+    if session.get('firmware_preflight_approved') != action:
+        def _denied():
+            yield "data: ERROR: Pre-flight not completed. Please use the Update/Rollback buttons.\n\n"
+            yield "data: __EXIT__:1\n\n"
+        from flask import stream_with_context, Response as FlaskResponse
+        return FlaskResponse(stream_with_context(_denied()),
+                             mimetype='text/event-stream',
+                             headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+    # Clear session approval — one-shot
+    session.pop('firmware_preflight_approved', None)
+    session.pop('firmware_preflight_hash', None)
 
     from flask import stream_with_context, Response as FlaskResponse
 
     def generate():
-        try:
-            proc = _run_firmware_script(action, stream=True)
-            for line in proc.stdout:
-                # SSE format: each message is "data: <text>\n\n"
-                yield f"data: {line.rstrip()}\n\n"
+        git_repo_dir = os.getenv('GIT_REPO_DIR', '/home/admin/bf-network')
+        script_env = dict(os.environ)
+        script_env['GIT_REPO_DIR'] = git_repo_dir
+
+        def emit(line):
+            return f"data: {line}\n\n"
+
+        def stream_proc(cmd, cwd=None, env=None):
+            """Run a command, yielding SSE lines; returns exit code."""
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, cwd=cwd, env=(env or script_env)
+            )
+            for ln in proc.stdout:
+                yield emit(ln.rstrip())
             proc.wait()
-            yield f"data: __EXIT__:{proc.returncode}\n\n"
+            return proc.returncode
+
+        try:
+            # --- Get current status ---
+            status_result = _run_firmware_script('status')
+            if status_result.returncode != 0:
+                yield emit("ERROR: Could not read git status.")
+                yield emit("__EXIT__:1")
+                return
+            status = json.loads(status_result.stdout)
+
+            if action == 'update':
+                next_hash    = status.get('next_full')
+                changed_dirs = status.get('forward_dirs', [])
+                if not next_hash:
+                    yield emit("ERROR: No next commit available.")
+                    yield emit("__EXIT__:1")
+                    return
+
+                # Step 1 — git checkout
+                yield emit(f"=== Step 1/3: Checking out {status.get('next_short')} — "
+                           f"{status.get('next_subject')} ===")
+                rc = yield from stream_proc(
+                    ['git', '-C', git_repo_dir, 'checkout', next_hash])
+                if rc != 0:
+                    yield emit("ERROR: git checkout failed — aborting.")
+                    yield emit("__EXIT__:1")
+                    return
+                yield emit("")
+
+                # Step 2 — db migration: <current>.json from next's tree
+                current_hash_for_manifest = status.get('current_full')
+                manifest = _load_commit_manifest(next_hash, current_hash_for_manifest)
+                db_script = (manifest or {}).get('db', {}).get('up')
+                if db_script:
+                    script_path = os.path.join(
+                        git_repo_dir, 'captive-portal', db_script)
+                    yield emit(f"=== Step 2/3: Running database migration: {db_script} ===")
+                    if not os.path.exists(script_path):
+                        yield emit(f"ERROR: Migration script not found: {script_path}")
+                        yield emit("__EXIT__:1")
+                        return
+                    rc = yield from stream_proc(
+                        ['/bin/bash', script_path],
+                        cwd=os.path.join(git_repo_dir, 'captive-portal'))
+                    if rc != 0:
+                        yield emit(f"ERROR: Migration script {db_script} failed — aborting.")
+                        yield emit("__EXIT__:1")
+                        return
+                    yield emit("")
+                else:
+                    yield emit("=== Step 2/3: No database migration needed ===")
+                    yield emit("")
+
+            else:  # rollback
+                changed_dirs    = status.get('back_dirs', [])
+                current_hash    = status.get('current_full')
+                current_short   = status.get('current_short')
+                current_subject = status.get('current_subject')
+                if not status.get('prev_full'):
+                    yield emit("ERROR: Already on the first commit — cannot roll back.")
+                    yield emit("__EXIT__:1")
+                    return
+
+                # Step 1 — db down migration: <prev>.json from current's tree (still checked out)
+                manifest = _load_commit_manifest(current_hash, status.get('prev_full'))
+                db_script = (manifest or {}).get('db', {}).get('down')
+                if db_script:
+                    script_path = os.path.join(
+                        git_repo_dir, 'captive-portal', db_script)
+                    yield emit(f"=== Step 1/3: Running rollback database migration: {db_script} ===")
+                    if not os.path.exists(script_path):
+                        yield emit(f"ERROR: Migration script not found: {script_path}")
+                        yield emit("__EXIT__:1")
+                        return
+                    rc = yield from stream_proc(
+                        ['/bin/bash', script_path],
+                        cwd=os.path.join(git_repo_dir, 'captive-portal'))
+                    if rc != 0:
+                        yield emit(f"ERROR: Rollback migration {db_script} failed — aborting.")
+                        yield emit("__EXIT__:1")
+                        return
+                    yield emit("")
+                else:
+                    yield emit("=== Step 1/3: No database rollback migration needed ===")
+                    yield emit("")
+
+                # Step 2 — git checkout HEAD^
+                yield emit(f"=== Step 2/3: Rolling back from {current_short} — "
+                           f"{current_subject} ===")
+                rc = yield from stream_proc(
+                    ['git', '-C', git_repo_dir, 'checkout', 'HEAD^'])
+                if rc != 0:
+                    yield emit("ERROR: git checkout HEAD^ failed — aborting.")
+                    yield emit("__EXIT__:1")
+                    return
+                yield emit("")
+
+            # Step 3 — restart affected stacks (common to update and rollback)
+            if changed_dirs:
+                yield emit(f"=== Step 3/3: Restarting affected stacks: "
+                           f"{', '.join(changed_dirs)} ===")
+                rc = yield from stream_proc(
+                    ['/bin/bash', '/scripts/firmware-manager.sh',
+                     'restart-dirs'] + changed_dirs,
+                    env=script_env)
+                if rc != 0:
+                    yield emit("ERROR: Stack restart failed.")
+                    yield emit("__EXIT__:1")
+                    return
+            else:
+                yield emit("=== Step 3/3: No containers to restart ===")
+
+            op = "UPDATE" if action == 'update' else "ROLLBACK"
+            yield emit(f"")
+            yield emit(f"{'='*50}")
+            yield emit(f"{op} COMPLETE")
+            yield emit("__EXIT__:0")
+
         except Exception as exc:
-            yield f"data: ERROR: {exc}\n\n"
-            yield "data: __EXIT__:1\n\n"
+            yield emit(f"ERROR: {exc}")
+            yield emit("__EXIT__:1")
 
     return FlaskResponse(
         stream_with_context(generate()),

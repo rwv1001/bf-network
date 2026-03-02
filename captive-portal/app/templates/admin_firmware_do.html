@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+
+{% block title %}Firmware {{ action|title }} in Progress - Network Access Portal{% endblock %}
+
+{% block header %}
+Firmware {{ action|title }} — Running
+{% endblock %}
+
+{% block extra_head %}
+<style>
+    #log-output {
+        background: #1a202c;
+        color: #e2e8f0;
+        font-family: monospace;
+        font-size: 13px;
+        padding: 16px;
+        border-radius: 6px;
+        height: 480px;
+        overflow-y: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+    }
+    .log-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 8px;
+    }
+    .spinner {
+        display: inline-block;
+        width: 14px; height: 14px;
+        border: 2px solid #667eea;
+        border-top-color: transparent;
+        border-radius: 50%;
+        animation: spin 0.7s linear infinite;
+        vertical-align: middle;
+        margin-right: 6px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .status-ok  { color: #38a169; font-weight: bold; }
+    .status-err { color: #e53e3e; font-weight: bold; }
+</style>
+{% endblock %}
+
+{% block content %}
+
+<div class="log-header">
+    <span style="font-weight:bold;">
+        {% if action == 'update' %}Updating firmware…{% else %}Rolling back firmware…{% endif %}
+    </span>
+    <span id="log-spinner" class="spinner"></span>
+</div>
+
+<div id="log-output"></div>
+<p id="log-done" style="display:none; margin-top:10px;"></p>
+
+<script>
+(function() {
+    const output   = document.getElementById('log-output');
+    const spinner  = document.getElementById('log-spinner');
+    const donePara = document.getElementById('log-done');
+
+    const action = {{ action | tojson }};
+    const evtSource = new EventSource('/admin/firmware/stream/' + action);
+    let selfRestart = false;
+
+    evtSource.onmessage = function(e) {
+        const line = e.data;
+
+        if (line.includes('SSE connection will drop')) {
+            selfRestart = true;
+        }
+
+        if (line.startsWith('__EXIT__:')) {
+            evtSource.close();
+            spinner.style.display = 'none';
+            const code = parseInt(line.split(':')[1], 10);
+            if (code === 0) {
+                donePara.textContent = '✓ Operation completed successfully. Returning to firmware page…';
+                donePara.className = 'status-ok';
+                setTimeout(function() {
+                    window.location.href = '/admin/firmware';
+                }, 2500);
+            } else {
+                donePara.textContent = '✗ Operation failed (exit code ' + code + '). Check the log above.';
+                donePara.className = 'status-err';
+            }
+            donePara.style.display = 'block';
+            return;
+        }
+
+        output.textContent += line + '\n';
+        output.scrollTop = output.scrollHeight;
+    };
+
+    evtSource.onerror = function() {
+        evtSource.close();
+        spinner.style.display = 'none';
+
+        if (selfRestart) {
+            let secs = 25;
+            donePara.className = 'status-ok';
+            const tick = function() {
+                donePara.textContent =
+                    '↻ This container is restarting — reloading firmware page in ' + secs + 's';
+                donePara.style.display = 'block';
+                if (secs <= 0) {
+                    window.location.href = '/admin/firmware';
+                    return;
+                }
+                secs--;
+                setTimeout(tick, 1000);
+            };
+            tick();
+        } else {
+            donePara.textContent = '✗ Connection lost. The operation may still be running.';
+            donePara.className = 'status-err';
+            donePara.style.display = 'block';
+        }
+    };
+})();
+</script>
+
+{% endblock %}
