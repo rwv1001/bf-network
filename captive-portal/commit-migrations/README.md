@@ -4,16 +4,36 @@ Each file in this directory describes the changes an admin must make to
 environment variables and the database when **upgrading to** or **rolling back
 from** a specific commit.
 
-## File naming
+## Naming convention
 
 ```
-<full_commit_hash>.json
+<from_commit_hash>.json
 ```
 
-The file is committed **in the same commit it describes** — so the manifest for
-commit `abc1234…` lives at `commit-migrations/abc1234….json` inside that commit.
-The firmware management page reads it via `git show <hash>:captive-portal/commit-migrations/<hash>.json`
-so it is always read from the target commit, not the current working tree.
+The file is named after the commit you are **leaving** (the current HEAD) and is
+committed in the **next** commit (the one you are moving to).
+
+Example: you are about to commit `B`.  Your current HEAD is `A`.  If `B` requires
+new env vars or a DB migration, create `A.json` and include it in `B`'s commit.
+
+When the firmware page evaluates an upgrade from `A → B` it runs:
+
+```
+git show B:captive-portal/commit-migrations/A.json
+```
+
+and when evaluating a rollback from `B → A` it runs the same command (still on
+`B`'s tree) to find the `down` migration.
+
+**If a commit introduces no env or DB changes, no manifest file is needed.**
+The firmware page handles a missing file gracefully (no preflight form is shown).
+
+### At‐a‐glance
+
+| You are at | Moving to | File name | Committed in |
+|---|---|---|---|
+| `A` (current) | `B` (next) | `A.json` | `B` |
+| `B` (current) | `A` (rollback) | `A.json` | `B` (still on B when rolling back) |
 
 ## Format
 
@@ -69,6 +89,10 @@ The scripts are executed inside the `captive-portal-web` container, which has
 Docker socket access, so `docker exec captive-portal-db psql …` works as normal.
 
 ## Example
+
+Suppose your current HEAD is `abc1234…` and your next commit (`def5678…`) adds
+Microsoft Graph OAuth.  In the same commit as `def5678…` you include the file
+`captive-portal/commit-migrations/abc1234….json`:
 
 ```json
 {
