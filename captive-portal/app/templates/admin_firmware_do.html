@@ -78,13 +78,18 @@ Firmware {{ action|title }} — Running
             if (code === 0) {
                 donePara.textContent = '✓ Operation completed successfully. Returning to firmware page…';
                 donePara.className = 'status-ok';
-                setTimeout(function() {
-                    window.location.href = '/admin/firmware';
-                }, 2500);
-            } else {
-                donePara.textContent = '✗ Operation failed (exit code ' + code + '). Check the log above.';
-                donePara.className = 'status-err';
+                donePara.style.display = 'block';
+                // Record the completed operation so the verify button is enabled on return.
+                fetch('/admin/firmware/mark-done/' + action, {method: 'POST'})
+                    .finally(function() {
+                        setTimeout(function() {
+                            window.location.href = '/admin/firmware';
+                        }, 2500);
+                    });
+                return;
             }
+            donePara.textContent = '✗ Operation failed (exit code ' + code + '). Check the log above.';
+            donePara.className = 'status-err';
             donePara.style.display = 'block';
             return;
         }

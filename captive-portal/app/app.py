@@ -5073,6 +5073,8 @@ def admin_firmware():
         error=error,
         next_manifest=next_manifest,
         current_manifest=current_manifest,
+        last_op=session.get('firmware_last_op'),
+        test_enabled=bool(os.getenv('FIRMWARE_TEST_ENABLED')),
     )
 
 
@@ -5358,6 +5360,10 @@ def admin_firmware_stream(action):
             yield emit(f"")
             yield emit(f"{'='*50}")
             yield emit(f"{op} COMPLETE")
+            # Record the completed operation before yielding exit so session is
+            # saved when the generator is exhausted (non-self-restart path).
+            session['firmware_last_op'] = action
+            session.modified = True
             yield emit("__EXIT__:0")
 
         except Exception as exc:
@@ -5435,94 +5441,97 @@ def _run_db_verify_check(check):
                 'pass': False, 'detail': f"Error running check: {exc}"}
 
 
-@app.route('/admin/firmware/test/<direction>')
+@app.route('/admin/firmware/mark-done/<action>', methods=['POST'])
 @login_required
 @permission_required('manage_firmware')
-def admin_firmware_test(direction):
-    """AJAX endpoint: verify that the .env file and database schema are in the
-    correct state for the requested direction of travel.
+def admin_firmware_mark_done(action):
+    """Called by the streaming page JS after a successful update/rollback.
+    Records the completed operation in the session so the verify button on
+    the firmware page knows which direction to test.
+    """
+    if action in ('update', 'rollback'):
+        session['firmware_last_op'] = action
+        session.modified = True
+    return jsonify({'ok': True})
 
-    direction = 'upgrade'  — checks env vars and DB schema are ready for the
-                             NEXT commit to work (i.e. migrations have been
-                             applied and required .env vars are set).
 
-    direction = 'rollback' — checks that the DB schema left behind by the
-                             CURRENT commit has been unwound (i.e. any columns
-                             or tables added by the current commit's up-migration
-                             are gone, confirming the down-migration ran).
+@app.route('/admin/firmware/verify-last')
+@login_required
+@permission_required('manage_firmware')
+def admin_firmware_verify_last():
+    """AJAX endpoint: verify that the last firmware operation succeeded.
 
-    The manifest is always  <current_hash>.json  read from  <next_hash>'s tree,
-    because that file describes what lies between the two commits.
+    Reads session['firmware_last_op'] to know which direction was performed:
+      update   — loads manifest for current→prev transition, runs verify_up
+                 checks + validates env.add vars are present.
+      rollback — loads manifest for next→current transition, runs verify_down
+                 checks + validates env.remove vars are absent.
+
+    Only accessible when FIRMWARE_TEST_ENABLED env var is set.
 
     Returns JSON:
-      { ok: bool, has_manifest: bool, direction: str, checks: [{category, name, pass, detail}] }
+      { ok: bool, has_manifest: bool, last_op: str, checks: [{category, name, pass, detail}] }
     """
-    if direction not in ('upgrade', 'rollback'):
-        return jsonify({'ok': False, 'error': 'Invalid direction — must be upgrade or rollback'}), 400
+    if not os.getenv('FIRMWARE_TEST_ENABLED'):
+        return jsonify({'ok': False, 'error': 'Test mode not enabled (FIRMWARE_TEST_ENABLED not set)'}), 403
+
+    last_op = session.get('firmware_last_op')
+    if not last_op:
+        return jsonify({'ok': False, 'error': 'No operation recorded in session — perform an update or rollback first.'})
 
     status_result = _run_firmware_script('status')
     if status_result.returncode != 0:
         return jsonify({'ok': False, 'error': 'Could not read git status — is the repo accessible?'})
     status = json.loads(status_result.stdout)
 
-    if direction == 'upgrade' and not status.get('next_full'):
-        return jsonify({'ok': False, 'error': 'No next commit to upgrade to.'})
-    if direction == 'rollback' and not status.get('prev_full'):
-        return jsonify({'ok': False, 'error': 'No previous commit to roll back to.'})
-
-    # manifest is always: current_full.json read from next_full's tree
-    manifest = _load_commit_manifest(
-        status.get('next_full'),
-        status.get('current_full'),
-    )
-
     checks = []
+    manifest = None
+    current_env = _read_env_file()
 
-    if manifest:
-        current_env = _read_env_file()
-
-        if direction == 'upgrade':
-            # Env checks: all env.add entries should be present in .env
+    if last_op == 'update':
+        # We are now at the updated commit (current_full = B, prev_full = A).
+        # Manifest about A→B: <A>.json from B's tree.
+        manifest = _load_commit_manifest(status.get('current_full'), status.get('prev_full'))
+        if manifest:
+            # DB schema checks: verify_up
+            for chk in (manifest.get('db') or {}).get('verify_up', []):
+                checks.append(_run_db_verify_check(chk))
+            # Env checks: all env.add entries should now be present in .env
             for entry in (manifest.get('env') or {}).get('add', []):
                 key = entry['key']
                 value = current_env.get(key, '').strip()
                 present = bool(value)
                 required = entry.get('required', False)
                 if present:
-                    # Mask sensitive values
                     display = '(set)' if entry.get('sensitive') else repr(value[:40])
-                    detail = f"Present: {display}"
+                    detail = f'Present: {display}'
                     passed = True
                 elif required:
-                    detail = "MISSING — required before upgrade can proceed"
+                    detail = 'MISSING — required env var not set'
                     passed = False
                 else:
-                    detail = "Not set (optional — has default)"
+                    detail = 'Not set (optional — has default)'
                     passed = True
                 checks.append({
-                    'category': 'env',
-                    'name': key,
+                    'category': 'env', 'name': key,
                     'description': entry.get('description', ''),
-                    'pass': passed,
-                    'detail': detail,
+                    'pass': passed, 'detail': detail,
                 })
 
-            # DB schema checks: verify_up
-            for chk in (manifest.get('db') or {}).get('verify_up', []):
-                checks.append(_run_db_verify_check(chk))
-
-        else:  # rollback
+    else:  # rollback
+        # We are now at the rolled-back commit (current_full = A, next_full = B).
+        # Manifest about A→B: <A>.json from B's tree.
+        manifest = _load_commit_manifest(status.get('next_full'), status.get('current_full'))
+        if manifest:
             # DB schema checks: verify_down (things added by upgrade should be gone)
             for chk in (manifest.get('db') or {}).get('verify_down', []):
                 checks.append(_run_db_verify_check(chk))
-
-            # Env: check that vars listed in env.remove are gone (informational only)
+            # Env: vars listed in env.remove should be absent
             for key in (manifest.get('env') or {}).get('remove', []):
                 present = key in current_env
                 checks.append({
-                    'category': 'env',
-                    'name': key,
-                    'description': 'Should have been removed',
+                    'category': 'env', 'name': key,
+                    'description': 'Should have been removed after rollback',
                     'pass': not present,
                     'detail': 'Absent \u2713' if not present else 'Still present in .env \u2717',
                 })
@@ -5531,7 +5540,7 @@ def admin_firmware_test(direction):
     return jsonify({
         'ok': overall_ok,
         'has_manifest': manifest is not None,
-        'direction': direction,
+        'last_op': last_op,
         'checks': checks,
     })
 

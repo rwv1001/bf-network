@@ -84,25 +84,19 @@
     .btn-update:hover   { background: #2f855a; color: white; }
     .btn-rollback { background: #e53e3e; }
     .btn-rollback:hover { background: #c53030; color: white; }
-    .btn-test-upgrade  { background: #3182ce; }
-    .btn-test-upgrade:hover   { background: #2b6cb0; color: white; }
-    .btn-test-rollback { background: #805ad5; }
-    .btn-test-rollback:hover  { background: #6b46c1; color: white; }
+    .btn-firmware.disabled {
+        background: #a0aec0 !important;
+        cursor: not-allowed;
+        opacity: 0.7;
+        pointer-events: none;
+    }
+    .btn-verify { background: #3182ce; }
+    .btn-verify:hover { background: #2b6cb0; color: white; }
+    .btn-verify:disabled { background: #a0aec0; cursor: not-allowed; opacity: 0.7; }
     .test-row {
         margin-top: 20px;
         padding-top: 16px;
         border-top: 1px solid #e2e8f0;
-        display: flex;
-        gap: 12px;
-        flex-wrap: wrap;
-        align-items: center;
-    }
-    .test-row-label {
-        font-size: 0.85em;
-        color: #718096;
-        font-style: italic;
-        flex-basis: 100%;
-        margin-bottom: 4px;
     }
     #test-results {
         display: none;
@@ -264,32 +258,28 @@
     </a>
 </div>
 
-<!-- Test readiness buttons -->
+{% if test_enabled %}
+<!-- Post-operation verify button (visible only when FIRMWARE_TEST_ENABLED is set) -->
 <div class="test-row">
-    <span class="test-row-label">Pre-flight readiness checks — verifies that required .env variables and database
-    schema changes are in place <em>before</em> running an upgrade or rollback. Safe to run at any time,
-    makes no changes.</span>
-
-    {% if status.prev_full %}
-    <button type="button" onclick="runTest('rollback')"
-            class="btn-firmware btn-test-rollback">
-        &#128295; Test Rollback Readiness
+    {% if last_op %}
+    <button type="button" id="btn-verify" onclick="runTest()"
+            class="btn-firmware btn-verify">
+        &#128295; Test {{ last_op | capitalize }} Successful
     </button>
+    <span style="font-size:0.85em; color:#718096; margin-left:10px;">
+        Last operation: <strong>{{ last_op }}</strong>
+    </span>
     {% else %}
-    <button type="button" class="btn-firmware btn-test-rollback" disabled
-            title="No previous commit to roll back to">&#128295; Test Rollback Readiness</button>
-    {% endif %}
-
-    {% if status.next_full %}
-    <button type="button" onclick="runTest('upgrade')"
-            class="btn-firmware btn-test-upgrade">
-        &#128295; Test Upgrade Readiness
+    <button type="button" id="btn-verify" class="btn-firmware btn-verify" disabled
+            title="Perform an update or rollback first">
+        &#128295; Test Update/Rollback Successful
     </button>
-    {% else %}
-    <button type="button" class="btn-firmware btn-test-upgrade" disabled
-            title="Already on latest commit">&#128295; Test Upgrade Readiness</button>
+    <span style="font-size:0.85em; color:#a0aec0; margin-left:10px; font-style:italic;">
+        Perform an update or rollback to enable this check.
+    </span>
     {% endif %}
 </div>
+{% endif %}
 
 <!-- Test results panel (populated by JS) -->
 <div id="test-results">
@@ -325,7 +315,7 @@
 {% endif %}
 
 <script>
-function runTest(direction) {
+function runTest() {
     const panel   = document.getElementById('test-results');
     const header  = document.getElementById('test-results-header');
     const body    = document.getElementById('test-results-body');
@@ -337,7 +327,7 @@ function runTest(direction) {
     panel.style.display = 'block';
     panel.scrollIntoView({behavior: 'smooth', block: 'nearest'});
 
-    fetch('/admin/firmware/test/' + direction)
+    fetch('/admin/firmware/verify-last')
         .then(r => r.json())
         .then(data => {
             if (data.error) {
@@ -351,17 +341,17 @@ function runTest(direction) {
                 return;
             }
             if (data.checks.length === 0) {
-                header.textContent = direction === 'upgrade'
-                    ? '✓ Manifest present but defines no checks for this upgrade.'
+                header.textContent = data.last_op === 'update'
+                    ? '✓ Manifest present but defines no checks for this update.'
                     : '✓ Manifest present but defines no checks for this rollback.';
                 header.className   = 'test-results-ok';
                 return;
             }
             const allPass = data.ok;
-            const label   = direction === 'upgrade' ? 'upgrade' : 'rollback';
+            const label   = data.last_op === 'update' ? 'update' : 'rollback';
             header.textContent = allPass
-                ? '✓ All checks passed — ready to ' + label + '.'
-                : '✗ Some checks failed — review before proceeding.';
+                ? '✓ All checks passed — ' + label + ' verified successfully.'
+                : '✗ Some checks failed — ' + label + ' may not have applied correctly.';
             header.className = allPass ? 'test-results-ok' : 'test-results-fail';
 
             data.checks.forEach(c => {
