@@ -84,12 +84,64 @@
     .btn-update:hover   { background: #2f855a; color: white; }
     .btn-rollback { background: #e53e3e; }
     .btn-rollback:hover { background: #c53030; color: white; }
-    .btn-firmware.disabled {
-        background: #a0aec0;
-        cursor: not-allowed;
-        opacity: 0.7;
-        pointer-events: none;
+    .btn-test-upgrade  { background: #3182ce; }
+    .btn-test-upgrade:hover   { background: #2b6cb0; color: white; }
+    .btn-test-rollback { background: #805ad5; }
+    .btn-test-rollback:hover  { background: #6b46c1; color: white; }
+    .test-row {
+        margin-top: 20px;
+        padding-top: 16px;
+        border-top: 1px solid #e2e8f0;
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        align-items: center;
     }
+    .test-row-label {
+        font-size: 0.85em;
+        color: #718096;
+        font-style: italic;
+        flex-basis: 100%;
+        margin-bottom: 4px;
+    }
+    #test-results {
+        display: none;
+        margin-top: 18px;
+        border: 1px solid #e2e8f0;
+        border-radius: 6px;
+        overflow: hidden;
+    }
+    #test-results-header {
+        padding: 10px 16px;
+        font-weight: bold;
+        font-size: 0.95em;
+    }
+    .test-results-ok    { background: #c6f6d5; color: #22543d; }
+    .test-results-fail  { background: #fed7d7; color: #742a2a; }
+    .test-results-empty { background: #e2e8f0; color: #4a5568; }
+    #test-results table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.9em;
+    }
+    #test-results th {
+        background: #edf2f7;
+        padding: 7px 12px;
+        text-align: left;
+        font-size: 0.8em;
+        text-transform: uppercase;
+        color: #718096;
+    }
+    #test-results td {
+        padding: 7px 12px;
+        border-top: 1px solid #e2e8f0;
+        vertical-align: top;
+    }
+    .check-pass { color: #276749; font-weight: bold; }
+    .check-fail { color: #c53030; font-weight: bold; }
+    .check-cat  { display: inline-block; font-size: 0.75em; font-family: monospace;
+                  background: #e2e8f0; padding: 1px 6px; border-radius: 3px;
+                  text-transform: uppercase; }
     .action-row {
         display: flex;
         gap: 16px;
@@ -212,6 +264,49 @@
     </a>
 </div>
 
+<!-- Test readiness buttons -->
+<div class="test-row">
+    <span class="test-row-label">Pre-flight readiness checks — verifies that required .env variables and database
+    schema changes are in place <em>before</em> running an upgrade or rollback. Safe to run at any time,
+    makes no changes.</span>
+
+    {% if status.prev_full %}
+    <button type="button" onclick="runTest('rollback')"
+            class="btn-firmware btn-test-rollback">
+        &#128295; Test Rollback Readiness
+    </button>
+    {% else %}
+    <button type="button" class="btn-firmware btn-test-rollback" disabled
+            title="No previous commit to roll back to">&#128295; Test Rollback Readiness</button>
+    {% endif %}
+
+    {% if status.next_full %}
+    <button type="button" onclick="runTest('upgrade')"
+            class="btn-firmware btn-test-upgrade">
+        &#128295; Test Upgrade Readiness
+    </button>
+    {% else %}
+    <button type="button" class="btn-firmware btn-test-upgrade" disabled
+            title="Already on latest commit">&#128295; Test Upgrade Readiness</button>
+    {% endif %}
+</div>
+
+<!-- Test results panel (populated by JS) -->
+<div id="test-results">
+    <div id="test-results-header"></div>
+    <table>
+        <thead>
+            <tr>
+                <th style="width:7%">Pass</th>
+                <th style="width:10%">Type</th>
+                <th style="width:22%">Name</th>
+                <th>Detail</th>
+            </tr>
+        </thead>
+        <tbody id="test-results-body"></tbody>
+    </table>
+</div>
+
 {% if not status.next_full %}
 <p style="margin-top:12px; color:#718096; font-size:0.9em;">&#10003; Already on the latest commit.</p>
 {% elif not status.forward_dirs %}
@@ -229,322 +324,71 @@
 {% endif %}
 {% endif %}
 
-{% endblock %}
-
-{% block extra_head %}
-<style>
-    .firmware-card {
-        background: #f5f5f5;
-        border: 2px solid #667eea;
-        border-radius: 8px;
-        padding: 20px 24px;
-        margin-bottom: 24px;
-    }
-    .firmware-card h3 {
-        margin-top: 0;
-        color: #4a5568;
-        font-size: 1em;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-    }
-    .commit-hash {
-        font-family: monospace;
-        font-size: 1.1em;
-        font-weight: bold;
-        color: #2d3748;
-    }
-    .commit-subject {
-        color: #4a5568;
-        margin-top: 4px;
-    }
-    .commit-none {
-        color: #a0aec0;
-        font-style: italic;
-    }
-    .affected-dirs {
-        margin-top: 8px;
-        font-size: 0.9em;
-    }
-    .affected-dirs span {
-        display: inline-block;
-        background: #ebf4ff;
-        border: 1px solid #bee3f8;
-        border-radius: 4px;
-        padding: 2px 8px;
-        margin: 2px 2px 2px 0;
-        font-family: monospace;
-        color: #2b6cb0;
-    }
-    .btn-firmware {
-        padding: 10px 22px;
-        font-size: 15px;
-        font-weight: bold;
-        border: none;
-        border-radius: 5px;
-        cursor: pointer;
-        color: white;
-    }
-    .btn-update  { background: #38a169; }
-    .btn-update:hover:not(:disabled)  { background: #2f855a; }
-    .btn-rollback { background: #e53e3e; }
-    .btn-rollback:hover:not(:disabled) { background: #c53030; }
-    .btn-firmware:disabled {
-        background: #a0aec0;
-        cursor: not-allowed;
-        opacity: 0.7;
-    }
-    .action-row {
-        display: flex;
-        gap: 16px;
-        flex-wrap: wrap;
-        margin-top: 8px;
-    }
-    #log-container {
-        display: none;
-        margin-top: 24px;
-    }
-    #log-output {
-        background: #1a202c;
-        color: #e2e8f0;
-        font-family: monospace;
-        font-size: 13px;
-        padding: 16px;
-        border-radius: 6px;
-        height: 420px;
-        overflow-y: auto;
-        white-space: pre-wrap;
-        word-break: break-word;
-    }
-    .log-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 8px;
-    }
-    .spinner {
-        display: inline-block;
-        width: 14px;
-        height: 14px;
-        border: 2px solid #667eea;
-        border-top-color: transparent;
-        border-radius: 50%;
-        animation: spin 0.7s linear infinite;
-        vertical-align: middle;
-        margin-right: 6px;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    .status-ok   { color: #38a169; font-weight: bold; }
-    .status-err  { color: #e53e3e; font-weight: bold; }
-    .repo-path   { font-family: monospace; color: #718096; font-size: 0.9em; }
-    .cards-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-        gap: 16px;
-        margin-bottom: 24px;
-    }
-</style>
-{% endblock %}
-
-{% block content %}
-
-{% if error %}
-<div class="flash-messages">
-    <div class="flash error">
-        <strong>Error reading git status:</strong> {{ error }}
-    </div>
-</div>
-{% endif %}
-
-{% if status %}
-<p class="repo-path">Repository: {{ status.repo_dir }}</p>
-
-<div class="cards-grid">
-
-    <!-- Previous commit -->
-    <div class="firmware-card">
-        <h3>&#8592; Previous commit</h3>
-        {% if status.prev_full %}
-            <div class="commit-hash">{{ status.prev_short }}</div>
-            <div class="commit-subject">{{ status.prev_subject }}</div>
-            {% if status.back_dirs %}
-            <div class="affected-dirs">
-                Affected stacks:
-                {% for d in status.back_dirs %}
-                <span>{{ d }}</span>
-                {% endfor %}
-            </div>
-            {% else %}
-            <div class="affected-dirs commit-none">No compose stacks affected</div>
-            {% endif %}
-        {% else %}
-            <div class="commit-none">No previous commit</div>
-        {% endif %}
-    </div>
-
-    <!-- Current commit -->
-    <div class="firmware-card" style="border-color: #48bb78; background: #f0fff4;">
-        <h3>&#9679; Current (HEAD)</h3>
-        <div class="commit-hash">{{ status.current_short }}</div>
-        <div class="commit-subject">{{ status.current_subject }}</div>
-        <div style="margin-top:6px; font-size:0.8em; color:#718096; font-family:monospace;">{{ status.current_full }}</div>
-    </div>
-
-    <!-- Next commit -->
-    <div class="firmware-card">
-        <h3>&#8594; Next commit</h3>
-        {% if status.next_full %}
-            <div class="commit-hash">{{ status.next_short }}</div>
-            <div class="commit-subject">{{ status.next_subject }}</div>
-            {% if status.forward_dirs %}
-            <div class="affected-dirs">
-                Affected stacks:
-                {% for d in status.forward_dirs %}
-                <span>{{ d }}</span>
-                {% endfor %}
-            </div>
-            {% else %}
-            <div class="affected-dirs commit-none">No compose stacks affected</div>
-            {% endif %}
-        {% else %}
-            <div class="commit-none">Already on latest commit</div>
-        {% endif %}
-    </div>
-
-</div>
-
-<!-- Action buttons -->
-<div class="action-row">
-    <button class="btn-firmware btn-rollback"
-            id="btn-rollback"
-            {% if not status.prev_full or not status.back_dirs %}disabled{% endif %}
-            onclick="runAction('rollback')">
-        &#8592; Roll Back
-    </button>
-
-    <button class="btn-firmware btn-update"
-            id="btn-update"
-            {% if not status.next_full or not status.forward_dirs %}disabled{% endif %}
-            onclick="runAction('update')">
-        Update &#8594;
-    </button>
-</div>
-
-{% if not status.next_full %}
-<p style="margin-top:12px; color:#718096; font-size:0.9em;">
-    &#10003; Already on the latest commit.
-</p>
-{% elif not status.forward_dirs %}
-<p style="margin-top:12px; color:#718096; font-size:0.9em;">
-    Update available but no Docker stacks are affected — Update button disabled.
-</p>
-{% endif %}
-
-{% if not status.prev_full %}
-<p style="margin-top:6px; color:#718096; font-size:0.9em;">
-    No previous commit to roll back to.
-</p>
-{% elif not status.back_dirs %}
-<p style="margin-top:6px; color:#718096; font-size:0.9em;">
-    Previous commit exists but no Docker stacks are affected — Roll Back button disabled.
-</p>
-{% endif %}
-
-{% else %}
-{% if not error %}
-<p style="color:#718096;">No git status available.</p>
-{% endif %}
-{% endif %}
-
-<!-- Live log panel -->
-<div id="log-container">
-    <div class="log-header">
-        <span id="log-title" style="font-weight:bold;"></span>
-        <span id="log-spinner" class="spinner" style="display:none;"></span>
-    </div>
-    <div id="log-output"></div>
-    <p id="log-done" style="display:none; margin-top:10px;"></p>
-</div>
-
 <script>
-function runAction(action) {
-    const btnUpdate   = document.getElementById('btn-update');
-    const btnRollback = document.getElementById('btn-rollback');
-    const container   = document.getElementById('log-container');
-    const output      = document.getElementById('log-output');
-    const title       = document.getElementById('log-title');
-    const spinner     = document.getElementById('log-spinner');
-    const donePara    = document.getElementById('log-done');
+function runTest(direction) {
+    const panel   = document.getElementById('test-results');
+    const header  = document.getElementById('test-results-header');
+    const body    = document.getElementById('test-results-body');
 
-    // Disable both buttons while running
-    btnUpdate.disabled   = true;
-    btnRollback.disabled = true;
+    header.textContent = 'Running checks…';
+    header.className   = '';
+    header.style.background = '#edf2f7';
+    body.innerHTML = '';
+    panel.style.display = 'block';
+    panel.scrollIntoView({behavior: 'smooth', block: 'nearest'});
 
-    // Show log panel
-    container.style.display = 'block';
-    output.textContent = '';
-    donePara.style.display = 'none';
-    donePara.className = '';
-    title.textContent = (action === 'update') ? 'Updating firmware…' : 'Rolling back firmware…';
-    spinner.style.display = 'inline-block';
-
-    const evtSource = new EventSource('/admin/firmware/stream/' + action);
-    let selfRestart = false;   // set true when the script warns it will restart itself
-
-    evtSource.onmessage = function(e) {
-        const line = e.data;
-
-        // Detect when the captive-portal stack is about to restart itself
-        if (line.includes('SSE connection will drop')) {
-            selfRestart = true;
-        }
-
-        if (line.startsWith('__EXIT__:')) {
-            evtSource.close();
-            spinner.style.display = 'none';
-            const code = parseInt(line.split(':')[1], 10);
-            if (code === 0) {
-                donePara.textContent = '✓ Operation completed successfully. Reloading page…';
-                donePara.className = 'status-ok';
-            } else {
-                donePara.textContent = '✗ Operation failed (exit code ' + code + ').';
-                donePara.className = 'status-err';
+    fetch('/admin/firmware/test/' + direction)
+        .then(r => r.json())
+        .then(data => {
+            if (data.error) {
+                header.textContent = '✗ Error: ' + data.error;
+                header.className   = 'test-results-fail';
+                return;
             }
-            donePara.style.display = 'block';
-
-            // Reload after a short delay so the page shows updated commit info
-            if (code === 0) {
-                setTimeout(function() { window.location.reload(); }, 2500);
+            if (!data.has_manifest) {
+                header.textContent = '— No manifest found for this transition — nothing to verify.';
+                header.className   = 'test-results-empty';
+                return;
             }
-            return;
-        }
+            if (data.checks.length === 0) {
+                header.textContent = direction === 'upgrade'
+                    ? '✓ Manifest present but defines no checks for this upgrade.'
+                    : '✓ Manifest present but defines no checks for this rollback.';
+                header.className   = 'test-results-ok';
+                return;
+            }
+            const allPass = data.ok;
+            const label   = direction === 'upgrade' ? 'upgrade' : 'rollback';
+            header.textContent = allPass
+                ? '✓ All checks passed — ready to ' + label + '.'
+                : '✗ Some checks failed — review before proceeding.';
+            header.className = allPass ? 'test-results-ok' : 'test-results-fail';
 
-        output.textContent += line + '\n';
-        output.scrollTop = output.scrollHeight;
-    };
+            data.checks.forEach(c => {
+                const tr = document.createElement('tr');
+                tr.innerHTML =
+                    '<td><span class="' + (c.pass ? 'check-pass' : 'check-fail') + '">' +
+                        (c.pass ? '✓' : '✗') + '</span></td>' +
+                    '<td><span class="check-cat">' + escHtml(c.category || '') + '</span></td>' +
+                    '<td><code>' + escHtml(c.name || '') + '</code>' +
+                        (c.description ? '<br><small style="color:#718096">' + escHtml(c.description) + '</small>' : '') +
+                    '</td>' +
+                    '<td>' + escHtml(c.detail || '') + '</td>';
+                body.appendChild(tr);
+            });
+        })
+        .catch(err => {
+            header.textContent = '✗ Request failed: ' + err;
+            header.className   = 'test-results-fail';
+        });
+}
 
-    evtSource.onerror = function() {
-        evtSource.close();
-        spinner.style.display = 'none';
-
-        if (selfRestart) {
-            // The captive-portal container restarted itself — this is expected.
-            // Count down and reload so the user lands on the updated page.
-            let secs = 20;
-            donePara.className = 'status-ok';
-            const tick = function() {
-                donePara.textContent = '↻ This container is restarting… reloading in ' + secs + 's';
-                donePara.style.display = 'block';
-                if (secs <= 0) { window.location.reload(); return; }
-                secs--;
-                setTimeout(tick, 1000);
-            };
-            tick();
-        } else {
-            donePara.textContent = '✗ Connection to server lost.';
-            donePara.className = 'status-err';
-            donePara.style.display = 'block';
-        }
-    };
+function escHtml(s) {
+    return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
 }
 </script>
 

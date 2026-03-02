@@ -5374,6 +5374,168 @@ def admin_firmware_stream(action):
     )
 
 
+# ---------------------------------------------------------------------------
+# Firmware — pre-flight test endpoint
+# ---------------------------------------------------------------------------
+
+def _run_db_verify_check(check):
+    """Execute one schema verification entry from a manifest's verify_up / verify_down list.
+
+    Supported check types:
+      column        — the column exists in the named table
+      column_absent — the column does NOT exist in the named table
+      table         — the table exists in the database
+      table_absent  — the table does NOT exist in the database
+
+    Returns a dict: {category, name, pass, detail}
+    """
+    ctype = check.get('type', '')
+    try:
+        if ctype in ('column', 'column_absent'):
+            tbl = check.get('table', '')
+            col = check.get('column', '')
+            exists = bool(db.session.execute(
+                text("""SELECT COUNT(*) FROM information_schema.columns
+                        WHERE table_name = :t AND column_name = :c"""),
+                {'t': tbl, 'c': col}
+            ).scalar())
+            want_present = (ctype == 'column')
+            passed = exists if want_present else not exists
+            ok = '\u2713'  # ✓
+            fail = '\u2717'  # ✗
+            if want_present:
+                detail = f"Column {tbl}.{col} exists {ok}" if passed else f"Column {tbl}.{col} MISSING {fail}"
+            else:
+                detail = f"Column {tbl}.{col} absent {ok}" if passed else f"Column {tbl}.{col} still present {fail}"
+            return {'category': 'db', 'name': f"{tbl}.{col}", 'pass': passed, 'detail': detail}
+
+        elif ctype in ('table', 'table_absent'):
+            name = check.get('name', '')
+            exists = bool(db.session.execute(
+                text("""SELECT COUNT(*) FROM information_schema.tables
+                        WHERE table_name = :n"""),
+                {'n': name}
+            ).scalar())
+            want_present = (ctype == 'table')
+            passed = exists if want_present else not exists
+            ok = '\u2713'  # ✓
+            fail = '\u2717'  # ✗
+            if want_present:
+                detail = f"Table {name} exists {ok}" if passed else f"Table {name} MISSING {fail}"
+            else:
+                detail = f"Table {name} absent {ok}" if passed else f"Table {name} still present {fail}"
+            return {'category': 'db', 'name': name, 'pass': passed, 'detail': detail}
+
+        else:
+            return {'category': 'db', 'name': ctype, 'pass': False,
+                    'detail': f"Unknown check type: {ctype!r}"}
+
+    except Exception as exc:
+        return {'category': 'db', 'name': str(check.get('name', check)),
+                'pass': False, 'detail': f"Error running check: {exc}"}
+
+
+@app.route('/admin/firmware/test/<direction>')
+@login_required
+@permission_required('manage_firmware')
+def admin_firmware_test(direction):
+    """AJAX endpoint: verify that the .env file and database schema are in the
+    correct state for the requested direction of travel.
+
+    direction = 'upgrade'  — checks env vars and DB schema are ready for the
+                             NEXT commit to work (i.e. migrations have been
+                             applied and required .env vars are set).
+
+    direction = 'rollback' — checks that the DB schema left behind by the
+                             CURRENT commit has been unwound (i.e. any columns
+                             or tables added by the current commit's up-migration
+                             are gone, confirming the down-migration ran).
+
+    The manifest is always  <current_hash>.json  read from  <next_hash>'s tree,
+    because that file describes what lies between the two commits.
+
+    Returns JSON:
+      { ok: bool, has_manifest: bool, direction: str, checks: [{category, name, pass, detail}] }
+    """
+    if direction not in ('upgrade', 'rollback'):
+        return jsonify({'ok': False, 'error': 'Invalid direction — must be upgrade or rollback'}), 400
+
+    status_result = _run_firmware_script('status')
+    if status_result.returncode != 0:
+        return jsonify({'ok': False, 'error': 'Could not read git status — is the repo accessible?'})
+    status = json.loads(status_result.stdout)
+
+    if direction == 'upgrade' and not status.get('next_full'):
+        return jsonify({'ok': False, 'error': 'No next commit to upgrade to.'})
+    if direction == 'rollback' and not status.get('prev_full'):
+        return jsonify({'ok': False, 'error': 'No previous commit to roll back to.'})
+
+    # manifest is always: current_full.json read from next_full's tree
+    manifest = _load_commit_manifest(
+        status.get('next_full'),
+        status.get('current_full'),
+    )
+
+    checks = []
+
+    if manifest:
+        current_env = _read_env_file()
+
+        if direction == 'upgrade':
+            # Env checks: all env.add entries should be present in .env
+            for entry in (manifest.get('env') or {}).get('add', []):
+                key = entry['key']
+                value = current_env.get(key, '').strip()
+                present = bool(value)
+                required = entry.get('required', False)
+                if present:
+                    # Mask sensitive values
+                    display = '(set)' if entry.get('sensitive') else repr(value[:40])
+                    detail = f"Present: {display}"
+                    passed = True
+                elif required:
+                    detail = "MISSING — required before upgrade can proceed"
+                    passed = False
+                else:
+                    detail = "Not set (optional — has default)"
+                    passed = True
+                checks.append({
+                    'category': 'env',
+                    'name': key,
+                    'description': entry.get('description', ''),
+                    'pass': passed,
+                    'detail': detail,
+                })
+
+            # DB schema checks: verify_up
+            for chk in (manifest.get('db') or {}).get('verify_up', []):
+                checks.append(_run_db_verify_check(chk))
+
+        else:  # rollback
+            # DB schema checks: verify_down (things added by upgrade should be gone)
+            for chk in (manifest.get('db') or {}).get('verify_down', []):
+                checks.append(_run_db_verify_check(chk))
+
+            # Env: check that vars listed in env.remove are gone (informational only)
+            for key in (manifest.get('env') or {}).get('remove', []):
+                present = key in current_env
+                checks.append({
+                    'category': 'env',
+                    'name': key,
+                    'description': 'Should have been removed',
+                    'pass': not present,
+                    'detail': 'Absent \u2713' if not present else 'Still present in .env \u2717',
+                })
+
+    overall_ok = all(c['pass'] for c in checks)
+    return jsonify({
+        'ok': overall_ok,
+        'has_manifest': manifest is not None,
+        'direction': direction,
+        'checks': checks,
+    })
+
+
 @app.route('/admin/vlan-config', methods=['GET', 'POST'])
 @login_required
 @permission_required('manage_vlans')

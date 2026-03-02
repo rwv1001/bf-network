@@ -56,7 +56,15 @@ The firmware page handles a missing file gracefully (no preflight form is shown)
 
   "db": {
     "up":   "migrate-add-something.sh",
-    "down": "migrate-remove-something.sh"
+    "down": "migrate-remove-something.sh",
+    "verify_up": [
+      {"type": "column", "table": "my_table", "column": "new_col"},
+      {"type": "table",  "name":  "new_table"}
+    ],
+    "verify_down": [
+      {"type": "column_absent", "table": "my_table", "column": "new_col"},
+      {"type": "table_absent",  "name":  "new_table"}
+    ]
   },
 
   "notes": "Any extra information the admin should read before upgrading."
@@ -77,7 +85,18 @@ The firmware page handles a missing file gracefully (no preflight form is shown)
 | `env.remove` | no | List of variable names that are no longer used |
 | `db.up` | no | Script in `captive-portal/` to run **after** `git checkout` and **before** container restart |
 | `db.down` | no | Script in `captive-portal/` to run **before** `git checkout HEAD^` on rollback |
+| `db.verify_up` | no | List of schema checks the **Test Upgrade Readiness** button runs to confirm the up-migration has been applied |
+| `db.verify_down` | no | List of schema checks the **Test Rollback Readiness** button runs to confirm the down-migration has been applied |
 | `notes` | no | Free-form text shown to the admin |
+
+### `verify_up` / `verify_down` check types
+
+| `type` | Required keys | Meaning |
+|---|---|---|
+| `column` | `table`, `column` | Assert the column **exists** |
+| `column_absent` | `table`, `column` | Assert the column **does not exist** |
+| `table` | `name` | Assert the table **exists** |
+| `table_absent` | `name` | Assert the table **does not exist** |
 
 ## Script conventions
 
