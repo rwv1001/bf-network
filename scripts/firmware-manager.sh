@@ -68,7 +68,7 @@ _restart_stack() {
 set -uo pipefail
 echo "[docker-agent] Restarting $dir at \$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 cd "$compose_dir"
-docker compose up -d --build
+docker compose up -d --build --force-recreate
 echo "[docker-agent] $dir restart complete, exit \$?"
 JOBSCRIPT
         chmod +x "$job_file"
