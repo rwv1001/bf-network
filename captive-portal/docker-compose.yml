@@ -86,6 +86,8 @@ services:
       DEFAULT_ISP_ROUTER_DHCP_TRUST: ${DEFAULT_ISP_ROUTER_DHCP_TRUST:-true}
       GIT_REPO_DIR: ${GIT_REPO_DIR:-/home/admin/bf-network}
       FIRMWARE_TEST_ENABLED: ${FIRMWARE_TEST_ENABLED:-false}
+    volumes:
+      - ./app:/app
       - ../kea/leases:/kea/leases:ro  # Access to Kea lease database
       - ../kea/sockets:/kea/sockets  # Access to Kea control socket
       - ../kea/config:/kea/config  # Access to Kea config for pool updates

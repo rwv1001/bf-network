@@ -91,9 +91,11 @@ _cmd_status() {
     CURRENT_SHORT=$(_short HEAD)
     CURRENT_SUBJECT=$(_subject HEAD)
 
-    # Next commit: git rev-list --children outputs "HASH child1 child2 ..."
-    # We take the first child (field 2).
-    NEXT_FULL=$(git rev-list --children -n 1 HEAD 2>/dev/null | cut -d' ' -f2)
+    # Next commit: search all refs for a commit whose parent is HEAD.
+    # Using --all ensures children of HEAD are visible even in detached-HEAD state.
+    CURRENT_HASH=$(git rev-parse HEAD) 
+    NEXT_FULL=$(git rev-list --children --all 2>/dev/null \
+        | awk -v h="$CURRENT_HASH" '$1==h {print $2; exit}')
     NEXT_SHORT=""
     NEXT_SUBJECT=""
     if [[ -n "$NEXT_FULL" && "$NEXT_FULL" != "$CURRENT_FULL" ]]; then
@@ -172,7 +174,9 @@ JSON
 _cmd_update() {
     cd "$GIT_REPO_DIR"
 
-    NEXT_FULL=$(git rev-list --children -n 1 HEAD 2>/dev/null | cut -d' ' -f2)
+    CURRENT_HASH=$(git rev-parse HEAD)
+    NEXT_FULL=$(git rev-list --children --all 2>/dev/null \
+        | awk -v h="$CURRENT_HASH" '$1==h {print $2; exit}')
     if [[ -z "$NEXT_FULL" || "$NEXT_FULL" == "$(git rev-parse HEAD)" ]]; then
         echo "ERROR: Already on the latest commit — nowhere to go forward."
         exit 1

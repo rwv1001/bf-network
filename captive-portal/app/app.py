@@ -5593,6 +5593,19 @@ def admin_firmware_verify_last():
                     'description': entry.get('description', ''),
                     'pass': passed, 'detail': detail,
                 })
+            # Env checks: all env.remove entries should now be ABSENT from .env
+            for entry in (manifest.get('env') or {}).get('remove', []):
+                key = entry['key'] if isinstance(entry, dict) else entry
+                if not key:
+                    continue
+                absent = key not in current_env
+                desc = entry.get('description', '') if isinstance(entry, dict) else ''
+                checks.append({
+                    'category': 'env', 'name': key,
+                    'description': desc,
+                    'pass': absent,
+                    'detail': 'Absent \u2713' if absent else 'Still present \u2717 \u2014 should have been removed by update',
+                })
 
     else:  # rollback
         # We are now at the rolled-back commit (current_full = A, next_full = B).
