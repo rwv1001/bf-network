@@ -49,6 +49,7 @@ _compose_dirs_for_changes() {
 # should detect this and prompt the user to refresh.
 # ---------------------------------------------------------------------------
 _SELF_STACK="captive-portal"   # directory name of the stack we're running in
+RESTART_QUEUE_DIR="${RESTART_QUEUE_DIR:-/restart-queue}"
 
 _restart_stack() {
     local dir="$1"
@@ -56,12 +57,24 @@ _restart_stack() {
     cd "$compose_dir"
 
     if [[ "$dir" == "$_SELF_STACK" ]]; then
-        echo "=== Restarting stack: $dir (self — skipping explicit down) ==="
-        echo "  NOTE: The SSE connection will drop when this container is replaced."
-        echo "  The restart is handed off to the Docker daemon — please refresh the"
-        echo "  firmware page in ~30 seconds to confirm the update completed."
-        echo ""
-        docker compose up -d --build && echo "  [up --build sent to Docker daemon OK]"
+        # We cannot restart ourselves directly — Docker would kill this process
+        # before the new container starts.  Instead, write a job script to the
+        # shared restart-queue so the docker-agent sidecar picks it up and runs
+        # the restart after we die.
+        echo "=== Restarting stack: $dir (queuing for docker-agent) ==="
+        local job_file="$RESTART_QUEUE_DIR/restart-${dir}-$(date +%s%N).sh"
+        cat > "$job_file" <<JOBSCRIPT
+#!/bin/bash
+set -uo pipefail
+echo "[docker-agent] Restarting $dir at \$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+cd "$compose_dir"
+docker compose up -d --build
+echo "[docker-agent] $dir restart complete, exit \$?"
+JOBSCRIPT
+        chmod +x "$job_file"
+        echo "  [job queued: $(basename "$job_file")]"
+        echo "  NOTE: The docker-agent will restart this container momentarily."
+        echo "  Please refresh the firmware page in ~30 seconds."
     else
         echo "=== Restarting stack: $dir ==="
         docker compose down   && echo "  [down OK]"
