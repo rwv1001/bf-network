@@ -51,7 +51,9 @@ The firmware page handles a missing file gracefully (no preflight form is shown)
         "sensitive":   false
       }
     ],
-    "remove": ["OLD_VAR_NO_LONGER_NEEDED"]
+    "remove": [
+      { "key": "OLD_VAR_NO_LONGER_NEEDED", "description": "What it was for", "required": false, "sensitive": false }
+    ]
   },
 
   "db": {
@@ -82,11 +84,15 @@ The firmware page handles a missing file gracefully (no preflight form is shown)
 | `env.add[].default` | no | Suggested default value (empty string = no default) |
 | `env.add[].required` | no | `true` → admin must fill it in before upgrade proceeds |
 | `env.add[].sensitive` | no | `true` → rendered as a password input |
-| `env.remove` | no | List of variable names that are no longer used |
+| `env.remove` | no | List of variables removed by this commit. On **update** they are deleted from `.env`. On **rollback** the admin is prompted to re-enter their values. Never store actual values here — the form handles it. |
+| `env.remove[].key` | yes | The variable name |
+| `env.remove[].description` | no | Plain-English description shown in the rollback form |
+| `env.remove[].required` | no | `true` → admin must fill in the value before rollback proceeds |
+| `env.remove[].sensitive` | no | `true` → rendered as a password input |
 | `db.up` | no | Script in `captive-portal/` to run **after** `git checkout` and **before** container restart |
 | `db.down` | no | Script in `captive-portal/` to run **before** `git checkout HEAD^` on rollback |
-| `db.verify_up` | no | List of schema checks the **Test Upgrade Readiness** button runs to confirm the up-migration has been applied |
-| `db.verify_down` | no | List of schema checks the **Test Rollback Readiness** button runs to confirm the down-migration has been applied |
+| `db.verify_up` | no | Schema checks the **Test Update Successful** button runs to confirm the up-migration applied correctly |
+| `db.verify_down` | no | Schema checks the **Test Rollback Successful** button runs to confirm the down-migration applied correctly |
 | `notes` | no | Free-form text shown to the admin |
 
 ### `verify_up` / `verify_down` check types

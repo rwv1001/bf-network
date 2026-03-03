@@ -4982,16 +4982,19 @@ def _load_commit_manifest(tree_hash, file_hash):
     if not tree_hash or not file_hash:
         return None
     git_repo_dir = os.getenv('GIT_REPO_DIR', '/home/admin/bf-network')
-    blob_path = f'captive-portal/commit-migrations/{file_hash}.json'
-    try:
-        result = subprocess.run(
-            ['git', '-C', git_repo_dir, 'show', f'{tree_hash}:{blob_path}'],
-            capture_output=True, text=True, timeout=10
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return json.loads(result.stdout)
-    except Exception:
-        pass
+    # Try short hash (7 chars, conventional naming) first, then full hash as fallback.
+    candidates = [file_hash[:7], file_hash]
+    for name in candidates:
+        blob_path = f'captive-portal/commit-migrations/{name}.json'
+        try:
+            result = subprocess.run(
+                ['git', '-C', git_repo_dir, 'show', f'{tree_hash}:{blob_path}'],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return json.loads(result.stdout)
+        except Exception:
+            pass
     return None
 
 
@@ -5040,6 +5043,31 @@ def _write_env_vars(new_vars):
         if key not in updated:
             new_lines.append(f'{key}={value}\n')
 
+    with open(env_path, 'w') as f:
+        f.writelines(new_lines)
+
+
+def _remove_env_vars(keys):
+    """Remove a list of keys from the captive-portal .env file.
+    Lines whose key matches are deleted; all other lines are preserved.
+    """
+    keys = set(keys)
+    if not keys:
+        return
+    git_repo_dir = os.getenv('GIT_REPO_DIR', '/home/admin/bf-network')
+    env_path = os.path.join(git_repo_dir, 'captive-portal', '.env')
+    if not os.path.exists(env_path):
+        return
+    with open(env_path) as f:
+        lines = f.readlines()
+    new_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith('#') and '=' in stripped:
+            key = stripped.split('=', 1)[0].strip()
+            if key in keys:
+                continue  # drop this line
+        new_lines.append(line)
     with open(env_path, 'w') as f:
         f.writelines(new_lines)
 
@@ -5131,6 +5159,25 @@ def admin_firmware_preflight(action):
                         val = current_env[key]
                     else:
                         errors.append(f'{key} is required.')
+                if val:
+                    new_vars[key] = val
+
+        if manifest and action == 'rollback':
+            # Vars that were removed by this commit need to be re-entered so
+            # they exist in .env once docker-compose.yml references them again.
+            for entry in manifest.get('env', {}).get('remove', []):
+                if not isinstance(entry, dict):
+                    continue
+                key = entry.get('key', '')
+                if not key:
+                    continue
+                val = request.form.get(f'env_restore_{key}', '').strip()
+                if not val:
+                    # Keep existing value if somehow already present
+                    if key in current_env:
+                        val = current_env[key]
+                    elif entry.get('required'):
+                        errors.append(f'{key} is required for rollback.')
                 if val:
                     new_vars[key] = val
 
@@ -5276,6 +5323,22 @@ def admin_firmware_stream(action):
                 # Step 2 — db migration: <current>.json from next's tree
                 current_hash_for_manifest = status.get('current_full')
                 manifest = _load_commit_manifest(next_hash, current_hash_for_manifest)
+
+                # Remove .env vars made redundant by this update (listed in env.remove).
+                # Each entry may be a plain string (legacy) or {"key": ..., "default": ...}.
+                def _remove_keys(entries):
+                    return [e['key'] if isinstance(e, dict) else e
+                            for e in (entries or []) if e]
+
+                env_remove_entries = (manifest or {}).get('env', {}).get('remove', [])
+                env_remove_keys = _remove_keys(env_remove_entries)
+                if env_remove_keys:
+                    yield emit(f"Removing obsolete .env var(s): {', '.join(env_remove_keys)}")
+                    try:
+                        _remove_env_vars(env_remove_keys)
+                    except Exception as exc:
+                        yield emit(f"WARNING: Could not remove .env var(s): {exc}")
+
                 db_script = (manifest or {}).get('db', {}).get('up')
                 if db_script:
                     script_path = os.path.join(
@@ -5339,6 +5402,19 @@ def admin_firmware_stream(action):
                     yield emit("ERROR: git checkout HEAD^ failed — aborting.")
                     yield emit("__EXIT__:1")
                     return
+
+                # Remove .env vars that were introduced by the now-rolled-back commit
+                # (listed in env.add — docker-compose.yml no longer declares them
+                # after the git checkout above).
+                env_added = [e['key'] for e in (manifest or {}).get('env', {}).get('add', []) if e.get('key')]
+                if env_added:
+                    yield emit(f"Removing .env var(s) added by rolled-back commit: {', '.join(env_added)}")
+                    try:
+                        _remove_env_vars(env_added)
+                    except Exception as exc:
+                        yield emit(f"WARNING: Could not remove .env var(s): {exc}")
+                # Note: env.remove vars are restored via the preflight form — already in .env.
+
                 yield emit("")
 
             # Step 3 — restart affected stacks (common to update and rollback)
@@ -5465,7 +5541,7 @@ def admin_firmware_verify_last():
       update   — loads manifest for current→prev transition, runs verify_up
                  checks + validates env.add vars are present.
       rollback — loads manifest for next→current transition, runs verify_down
-                 checks + validates env.remove vars are absent.
+                 checks + validates env.remove vars are restored (present).
 
     Only accessible when FIRMWARE_TEST_ENABLED env var is set.
 
@@ -5526,14 +5602,19 @@ def admin_firmware_verify_last():
             # DB schema checks: verify_down (things added by upgrade should be gone)
             for chk in (manifest.get('db') or {}).get('verify_down', []):
                 checks.append(_run_db_verify_check(chk))
-            # Env: vars listed in env.remove should be absent
-            for key in (manifest.get('env') or {}).get('remove', []):
+            # Env: vars listed in env.remove should be restored (present) after rollback
+            # Env: vars listed in env.remove should be present after rollback —
+            # the admin re-entered them via the rollback preflight form.
+            for entry in (manifest.get('env') or {}).get('remove', []):
+                key = entry['key'] if isinstance(entry, dict) else entry
+                if not key:
+                    continue
                 present = key in current_env
                 checks.append({
                     'category': 'env', 'name': key,
-                    'description': 'Should have been removed after rollback',
-                    'pass': not present,
-                    'detail': 'Absent \u2713' if not present else 'Still present in .env \u2717',
+                    'description': 'Should be restored by rollback preflight form',
+                    'pass': present,
+                    'detail': 'Present \u2713' if present else 'MISSING \u2717 \u2014 was not re-entered on rollback preflight',
                 })
 
     overall_ok = all(c['pass'] for c in checks)

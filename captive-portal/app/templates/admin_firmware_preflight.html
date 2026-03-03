@@ -217,11 +217,18 @@ Firmware {{ action|title }} — Pre-flight Checklist
 
     {% if env_remove %}
     <p style="margin-top:12px; margin-bottom:4px;">
-        The following variables are no longer used after this upgrade
-        (they will be left in <code>.env</code> but can be cleaned up manually):
+        The following variables will be <strong>automatically removed</strong> from <code>.env</code>
+        during this update. If you ever roll back, you will be prompted to re-enter their values.
     </p>
     <ul class="remove-list">
-        {% for key in env_remove %}<li>{{ key }}</li>{% endfor %}
+        {% for entry in env_remove %}
+        {% set key = entry.key if entry is mapping else entry %}
+        <li><code>{{ key }}</code>
+            {% if entry is mapping and entry.sensitive %}
+            <span style="color:#718096; font-size:0.85em;"> — sensitive value</span>
+            {% endif %}
+        </li>
+        {% endfor %}
     </ul>
     {% endif %}
   </div>
@@ -232,19 +239,89 @@ Firmware {{ action|title }} — Pre-flight Checklist
   </div>
   {% endif %}
 {% else %}
-  {# Rollback — env vars added in this commit become orphaned, no input needed #}
-  {% set env_add = (manifest.env.add if manifest and manifest.env else []) %}
-  {% if env_add %}
+  {# Rollback #}
+  {% set env_add    = (manifest.env.add    if manifest and manifest.env else []) %}
+  {% set env_remove = (manifest.env.remove if manifest and manifest.env else []) %}
+  {% if env_add or env_remove %}
+  <div class="preflight-section">
+    <h3>Environment variable changes</h3>
+
+    {% if env_remove %}
+    <p style="margin:0 0 8px;">
+        The following variables were <strong>removed by this commit</strong>.
+        They will be restored to <code>.env</code> on rollback because
+        <code>docker-compose.yml</code> will reference them again.
+        Please enter their values:
+    </p>
+    <table class="env-table">
+        <thead>
+            <tr>
+                <th style="width:26%">Variable</th>
+                <th style="width:35%">Value</th>
+                <th>Description</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for v in env_remove %}
+        {% if v is mapping %}
+        {% set key  = v.key %}
+        {% set desc = v.description if v.description is defined else '' %}
+        {% set req  = v.required    if v.required    is defined else false %}
+        {% set sens = v.sensitive   if v.sensitive   is defined else false %}
+        <tr>
+            <td>
+                {{ key }}
+                {% if req %}<span class="required-star">*</span>{% endif %}
+            </td>
+            <td>
+                {% set existing = current_env.get(key, '') %}
+                {% if sens %}
+                <input type="password" name="env_restore_{{ key }}"
+                       value="{{ existing }}"
+                       placeholder="Enter value to restore"
+                       autocomplete="new-password">
+                {% else %}
+                <input type="text" name="env_restore_{{ key }}"
+                       value="{{ existing or '' }}"
+                       placeholder="Enter value to restore">
+                {% endif %}
+                {% if existing %}
+                <div class="existing-val">
+                    Currently set{% if not sens %}: <code>{{ existing }}</code>{% endif %}
+                </div>
+                {% endif %}
+            </td>
+            <td>
+                <div>{{ desc }}</div>
+                {% if req %}<div class="hint">Required for rollback</div>{% endif %}
+            </td>
+        </tr>
+        {% endif %}
+        {% endfor %}
+        </tbody>
+    </table>
+    <p style="font-size:0.8em; color:#718096; margin-top:6px;">
+        <span style="color:#e53e3e;">*</span> Required fields
+    </p>
+    {% endif %}
+
+    {% if env_add %}
+    <p style="margin-top:12px; margin-bottom:4px;">
+        The following variables were added by this commit and will be
+        <strong>automatically removed</strong> from <code>.env</code> on rollback:
+    </p>
+    <ul class="remove-list">
+        {% for v in env_add %}<li><code>{{ v.key }}</code></li>{% endfor %}
+    </ul>
+    {% endif %}
+
+  </div>
+  {% else %}
   <div class="preflight-section">
     <h3>Environment variables</h3>
-    <p>The following variables were added by this commit. After rollback they will no
-    longer be used (they will remain in <code>.env</code> and can be cleaned up manually):</p>
-    <ul class="remove-list">
-        {% for v in env_add %}<li>{{ v.key }}</li>{% endfor %}
-    </ul>
+    <div class="db-ok">&#10003; No environment variable changes required.</div>
   </div>
   {% endif %}
-{% endif %}
 
 {# ── Database changes ───────────────────────────────────────────────── #}
 <div class="preflight-section">
