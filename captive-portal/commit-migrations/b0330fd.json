@@ -1,25 +1,25 @@
 {
-  "description": "Test cleanup: removes firmware_test_table, firmware_test_col, and the two test env vars (inverse of 046af83 test migration).",
+  "description": "Remove test env vars FIRMWARE_TEST_VAR_1 and FIRMWARE_TEST_VAR_2 — no longer needed after docker-agent integration testing.",
   "env": {
     "add": [],
     "remove": [
       {
         "key": "FIRMWARE_TEST_VAR_1",
-        "description": "Dummy optional env var added during firmware test — no longer needed",
+        "description": "Test env var — was added to verify firmware update env handling",
         "required": false,
         "sensitive": false
       },
       {
         "key": "FIRMWARE_TEST_VAR_2",
-        "description": "Dummy required env var added during firmware test — no longer needed",
+        "description": "Test env var — was added to verify firmware update env handling",
         "required": true,
         "sensitive": false
       }
     ]
   },
   "db": {
-    "up":   "commit-migrations/9185a49-up.sh",
-    "down": "commit-migrations/9185a49-down.sh",
+    "up":   "commit-migrations/b0330fd-up.sh",
+    "down": "commit-migrations/b0330fd-down.sh",
     "verify_up": [
       { "type": "table_absent",  "name": "firmware_test_table" },
       { "type": "column_absent", "table": "users", "column": "firmware_test_col" }
