@@ -1,0 +1,32 @@
+{
+  "description": "Test migration: adds firmware_test_table and firmware_test_col on users (for firmware update flow testing — safe to roll back).",
+  "env": {
+    "add": [
+      {
+        "key": "FIRMWARE_TEST_VAR_1",
+        "description": "Dummy optional env var for firmware update testing",
+        "required": false,
+        "sensitive": false
+      },
+      {
+        "key": "FIRMWARE_TEST_VAR_2",
+        "description": "Dummy required env var for firmware update testing — enter any value",
+        "required": true,
+        "sensitive": false
+      }
+    ],
+    "remove": []
+  },
+  "db": {
+    "up":   "commit-migrations/046af83-up.sh",
+    "down": "commit-migrations/046af83-down.sh",
+    "verify_up": [
+      { "type": "table",  "name": "firmware_test_table" },
+      { "type": "column", "table": "users", "column": "firmware_test_col" }
+    ],
+    "verify_down": [
+      { "type": "table_absent",  "name": "firmware_test_table" },
+      { "type": "column_absent", "table": "users", "column": "firmware_test_col" }
+    ]
+  }
+}

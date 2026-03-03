@@ -5074,7 +5074,7 @@ def admin_firmware():
         next_manifest=next_manifest,
         current_manifest=current_manifest,
         last_op=session.get('firmware_last_op'),
-        test_enabled=bool(os.getenv('FIRMWARE_TEST_ENABLED')),
+        test_enabled=os.getenv('FIRMWARE_TEST_ENABLED', '').lower() not in ('', '0', 'false', 'no'),
     )
 
 
@@ -5472,7 +5472,7 @@ def admin_firmware_verify_last():
     Returns JSON:
       { ok: bool, has_manifest: bool, last_op: str, checks: [{category, name, pass, detail}] }
     """
-    if not os.getenv('FIRMWARE_TEST_ENABLED'):
+    if os.getenv('FIRMWARE_TEST_ENABLED', '').lower() in ('', '0', 'false', 'no'):
         return jsonify({'ok': False, 'error': 'Test mode not enabled (FIRMWARE_TEST_ENABLED not set)'}), 403
 
     last_op = session.get('firmware_last_op')
