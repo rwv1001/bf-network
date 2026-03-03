@@ -5279,6 +5279,7 @@ def admin_firmware_stream(action):
         script_env['GIT_REPO_DIR'] = git_repo_dir
 
         def emit(line):
+            app.logger.info(f'[firmware/{action}] {line}')
             return f"data: {line}\n\n"
 
         def stream_proc(cmd, cwd=None, env=None):
@@ -5300,6 +5301,9 @@ def admin_firmware_stream(action):
                 yield emit("__EXIT__:1")
                 return
             status = json.loads(status_result.stdout)
+            app.logger.info(f'[firmware/{action}] Starting — current={status.get("current_short")} '
+                            f'next={status.get("next_short")} prev={status.get("prev_short")} '
+                            f'forward_dirs={status.get("forward_dirs")} back_dirs={status.get("back_dirs")}')
 
             if action == 'update':
                 next_hash    = status.get('next_full')
@@ -5615,8 +5619,20 @@ def admin_firmware_verify_last():
             # DB schema checks: verify_down (things added by upgrade should be gone)
             for chk in (manifest.get('db') or {}).get('verify_down', []):
                 checks.append(_run_db_verify_check(chk))
-            # Env: vars listed in env.remove should be restored (present) after rollback
-            # Env: vars listed in env.remove should be present after rollback —
+            # Env: vars listed in env.add should now be ABSENT from .env after rollback
+            for entry in (manifest.get('env') or {}).get('add', []):
+                key = entry['key'] if isinstance(entry, dict) else entry
+                if not key:
+                    continue
+                absent = key not in current_env
+                desc = entry.get('description', '') if isinstance(entry, dict) else ''
+                checks.append({
+                    'category': 'env', 'name': key,
+                    'description': desc,
+                    'pass': absent,
+                    'detail': 'Absent \u2713' if absent else 'Still present \u2717 \u2014 should have been removed by rollback',
+                })
+            # Env: vars listed in env.remove should be restored (present) after rollback —
             # the admin re-entered them via the rollback preflight form.
             for entry in (manifest.get('env') or {}).get('remove', []):
                 key = entry['key'] if isinstance(entry, dict) else entry
