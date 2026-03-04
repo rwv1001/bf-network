@@ -1,0 +1,25 @@
+version: "3.8"
+
+# Standalone docker-agent — runs independently of all other stacks.
+# It is the only process that can safely restart other containers because
+# it is never part of the stacks it manages.
+#
+# Start once and leave running:
+#   docker compose up -d --build
+#
+# It shares the restart-queue volume with any stack that needs to trigger
+# a container restart (currently captive-portal).
+
+services:
+  docker-agent:
+    build: .
+    container_name: docker-agent
+    restart: unless-stopped
+    environment:
+      QUEUE_DIR: /restart-queue
+      GIT_REPO_DIR: ${GIT_REPO_DIR:-/home/admin/bf-network}
+    volumes:
+      - ../shared/restart-queue:/restart-queue                                            # Shared job queue
+      - /var/run/docker.sock:/var/run/docker.sock                                         # Docker socket
+      - /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro               # compose plugin
+      - ${GIT_REPO_DIR:-/home/admin/bf-network}:${GIT_REPO_DIR:-/home/admin/bf-network}  # git repo

@@ -89,7 +89,7 @@ services:
       RESTART_QUEUE_DIR: /restart-queue
     volumes:
       - ./app:/app
-      - ../shared/restart-queue:/restart-queue  # Queue for docker-agent self-restart jobs
+      - ../shared/restart-queue:/restart-queue  # Queue for standalone docker-agent (bf-network/docker-agent/)
       - ../kea/leases:/kea/leases:ro  # Access to Kea lease database
       - ../kea/sockets:/kea/sockets  # Access to Kea control socket
       - ../kea/config:/kea/config  # Access to Kea config for pool updates
@@ -158,19 +158,6 @@ services:
     depends_on:
       db:
         condition: service_healthy
-
-  docker-agent:
-    build: ./docker-agent
-    container_name: docker-agent
-    restart: unless-stopped
-    environment:
-      QUEUE_DIR: /restart-queue
-      GIT_REPO_DIR: ${GIT_REPO_DIR:-/home/admin/bf-network}
-    volumes:
-      - ../shared/restart-queue:/restart-queue          # Shared job queue
-      - /var/run/docker.sock:/var/run/docker.sock       # Docker socket
-      - /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro
-      - ${GIT_REPO_DIR:-/home/admin/bf-network}:${GIT_REPO_DIR:-/home/admin/bf-network}  # git repo (compose files + .env)
 
 # Note: Using host network mode so the portal is accessible on all Pi interfaces
 # This ensures devices on VLAN 99 (192.168.99.0/24) can reach it at 192.168.99.4:8080
