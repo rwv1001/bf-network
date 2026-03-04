@@ -282,8 +282,8 @@ _cmd_update() {
     for d in "${CHANGED[@]}"; do echo "  - $d"; done
     echo ""
 
-    # Checkout the next commit
-    git checkout "$NEXT_FULL"
+    # Checkout the next commit (force to overwrite any untracked working-tree changes)
+    git checkout -f "$NEXT_FULL"
     echo "Checked out: $(git rev-parse --short HEAD)"
     echo ""
 
@@ -331,8 +331,8 @@ _cmd_rollback() {
     for d in "${CHANGED[@]}"; do echo "  - $d"; done
     echo ""
 
-    # Checkout the previous commit
-    git checkout HEAD^
+    # Checkout the previous commit (force to overwrite any untracked working-tree changes)
+    git checkout -f HEAD^
     echo "Checked out: $(git rev-parse --short HEAD)"
     echo ""
 

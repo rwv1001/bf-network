@@ -5350,7 +5350,7 @@ def admin_firmware_stream(action):
                 yield emit(f"=== Step 1/3: Checking out {status.get('next_short')} — "
                            f"{status.get('next_subject')} ===")
                 rc = yield from stream_proc(
-                    ['git', '-C', git_repo_dir, 'checkout', next_hash])
+                    ['git', '-C', git_repo_dir, 'checkout', '-f', next_hash])
                 if rc != 0:
                     yield emit("ERROR: git checkout failed — aborting.")
                     yield emit("__EXIT__:1")
@@ -5434,7 +5434,7 @@ def admin_firmware_stream(action):
                 yield emit(f"=== Step 2/3: Rolling back from {current_short} — "
                            f"{current_subject} ===")
                 rc = yield from stream_proc(
-                    ['git', '-C', git_repo_dir, 'checkout', 'HEAD^'])
+                    ['git', '-C', git_repo_dir, 'checkout', '-f', 'HEAD^'])
                 if rc != 0:
                     yield emit("ERROR: git checkout HEAD^ failed — aborting.")
                     yield emit("__EXIT__:1")
@@ -5479,7 +5479,7 @@ def admin_firmware_stream(action):
 
                     yield emit(f"=== Commit {step}/{total_commits}: {commit_short} — {commit_subject} ===")
                     rc = yield from stream_proc(
-                        ['git', '-C', git_repo_dir, 'checkout', commit_hash])
+                        ['git', '-C', git_repo_dir, 'checkout', '-f', commit_hash])
                     if rc != 0:
                         yield emit("ERROR: git checkout failed — aborting.")
                         yield emit("__EXIT__:1")
