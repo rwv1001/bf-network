@@ -1,0 +1,22 @@
+{
+  "description": "Add firmware test vars and test DB schema to validate docker-agent integration.",
+  "env": {
+    "add": [
+      {"key": "FIRMWARE_TEST_VAR_1", "description": "Optional test variable for docker-agent integration testing.", "required": false, "sensitive": false, "default": "test-value-optional"},
+      {"key": "FIRMWARE_TEST_VAR_2", "description": "Required test variable for docker-agent integration testing.", "required": true, "sensitive": false, "default": "test-value-required"}
+    ],
+    "remove": []
+  },
+  "db": {
+    "up":   "commit-migrations/8484187-up.sh",
+    "down": "commit-migrations/8484187-down.sh",
+    "verify_up": [
+      {"type": "table",  "name": "firmware_test_table"},
+      {"type": "column", "table": "users", "column": "firmware_test_col"}
+    ],
+    "verify_down": [
+      {"type": "table_absent",  "name": "firmware_test_table"},
+      {"type": "column_absent", "table": "users", "column": "firmware_test_col"}
+    ]
+  }
+}
