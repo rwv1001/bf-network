@@ -1,0 +1,19 @@
+{
+  "description": "Add FIRMWARE_TEST_VAR_3 and test_col_v2 — tests multi-commit Update to Latest (captive-portal step).",
+  "env": {
+    "add": [
+      {"key": "FIRMWARE_TEST_VAR_3", "description": "Third test variable for Update to Latest testing.", "required": false, "sensitive": false, "default": "test-value-three"}
+    ],
+    "remove": []
+  },
+  "db": {
+    "up":   "commit-migrations/91860ec-up.sh",
+    "down": "commit-migrations/91860ec-down.sh",
+    "verify_up": [
+      {"type": "column", "table": "users", "column": "test_col_v2"}
+    ],
+    "verify_down": [
+      {"type": "column_absent", "table": "users", "column": "test_col_v2"}
+    ]
+  }
+}

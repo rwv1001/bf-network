@@ -88,6 +88,7 @@ services:
       FIRMWARE_TEST_ENABLED: ${FIRMWARE_TEST_ENABLED:-false}
       FIRMWARE_TEST_VAR_1: ${FIRMWARE_TEST_VAR_1:-}
       FIRMWARE_TEST_VAR_2: ${FIRMWARE_TEST_VAR_2:-}
+      FIRMWARE_TEST_VAR_3: ${FIRMWARE_TEST_VAR_3:-}
       RESTART_QUEUE_DIR: /restart-queue
     volumes:
       - ./app:/app
