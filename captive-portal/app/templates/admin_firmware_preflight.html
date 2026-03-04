@@ -134,6 +134,8 @@ Firmware {{ action|title }} — Pre-flight Checklist
 <div class="commit-info">
     {% if action == 'update' %}
         Upgrading to
+    {% elif action == 'update-latest' %}
+        Updating to latest
     {% else %}
         Rolling back from
     {% endif %}
@@ -146,7 +148,7 @@ Firmware {{ action|title }} — Pre-flight Checklist
 {# ── Manifest description ───────────────────────────────────────────── #}
 {% if manifest and manifest.description %}
 <div class="preflight-section">
-    <h3>What this {{ 'upgrade' if action == 'update' else 'rollback' }} does</h3>
+    <h3>What this {{ 'upgrade' if action in ('update', 'update-latest') else 'rollback' }} does</h3>
     <p style="margin:0;">{{ manifest.description }}</p>
     {% if manifest.notes %}
     <div class="notes-box" style="margin-top:12px;">
@@ -157,7 +159,7 @@ Firmware {{ action|title }} — Pre-flight Checklist
 {% endif %}
 
 {# ── Environment variables ──────────────────────────────────────────── #}
-{% if action == 'update' %}
+{% if action in ('update', 'update-latest') %}
   {% set env_add = (manifest.env.add if manifest and manifest.env else []) %}
   {% set env_remove = (manifest.env.remove if manifest and manifest.env else []) %}
   {% if env_add or env_remove %}
@@ -327,7 +329,7 @@ Firmware {{ action|title }} — Pre-flight Checklist
 {# ── Database changes ───────────────────────────────────────────────── #}
 <div class="preflight-section">
     <h3>Database schema changes</h3>
-    {% if action == 'update' %}
+    {% if action in ('update', 'update-latest') %}
       {% set db_script = manifest.db.up if manifest and manifest.db else none %}
     {% else %}
       {% set db_script = manifest.db.down if manifest and manifest.db else none %}
@@ -337,7 +339,7 @@ Firmware {{ action|title }} — Pre-flight Checklist
         <strong>&#9888; Database migration will run.</strong><br>
         Script: <code>captive-portal/{{ db_script }}</code><br>
         This will run automatically inside the container
-        <strong>{{ 'after git checkout and before containers restart' if action == 'update'
+        <strong>{{ 'after git checkout and before containers restart' if action in ('update', 'update-latest')
                   else 'before git checkout' }}</strong>.
         Make sure you have a recent database backup before proceeding.
     </div>
@@ -359,9 +361,11 @@ Firmware {{ action|title }} — Pre-flight Checklist
 {# ── Confirm buttons ────────────────────────────────────────────────── #}
 <div style="margin-top: 20px;">
     <button type="submit"
-            class="btn-proceed {% if action == 'update' %}btn-update-go{% else %}btn-rollback-go{% endif %}">
+            class="btn-proceed {% if action in ('update', 'update-latest') %}btn-update-go{% else %}btn-rollback-go{% endif %}">
         {% if action == 'update' %}
             &#9654; Confirm &amp; Update
+        {% elif action == 'update-latest' %}
+            &#9193; Confirm &amp; Update to Latest
         {% else %}
             &#9664; Confirm &amp; Roll Back
         {% endif %}

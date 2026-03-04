@@ -5103,6 +5103,7 @@ def admin_firmware():
         current_manifest=current_manifest,
         last_op=session.get('firmware_last_op'),
         test_enabled=os.getenv('FIRMWARE_TEST_ENABLED', '').lower() not in ('', '0', 'false', 'no'),
+        commits_ahead_count=len(status.get('commits_ahead', [])),
     )
 
 
@@ -5113,7 +5114,7 @@ def admin_firmware_preflight(action):
     """Show (GET) or process (POST) the pre-flight checklist before an
     update or rollback: collect any new env vars, warn about DB changes.
     """
-    if action not in ('update', 'rollback'):
+    if action not in ('update', 'rollback', 'update-latest'):
         return jsonify({'error': 'Invalid action'}), 400
 
     # Fetch current git status
@@ -5123,8 +5124,9 @@ def admin_firmware_preflight(action):
         return redirect(url_for('admin_firmware'))
     status = json.loads(status_result.stdout)
 
-    # For update  → manifest of the NEXT commit (what we're moving TO)
-    # For rollback → manifest of CURRENT commit (what we're undoing)
+    # For update        → manifest of the NEXT commit (what we're moving TO)
+    # For rollback      → manifest of CURRENT commit (what we're undoing)
+    # For update-latest → aggregated manifest from all commits ahead
     if action == 'update':
         target_hash = status.get('next_full')
         target_short = status.get('next_short')
@@ -5134,7 +5136,38 @@ def admin_firmware_preflight(action):
             return redirect(url_for('admin_firmware'))
         # <current>.json lives inside the next commit's tree
         manifest = _load_commit_manifest(target_hash, status.get('current_full'))
-    else:
+    elif action == 'update-latest':
+        commits_ahead = status.get('commits_ahead', [])
+        target_hash = status.get('latest_full')
+        target_short = status.get('latest_short')
+        target_subject = status.get('latest_subject')
+        if not commits_ahead or not target_hash:
+            flash('Already on the latest commit — nothing to update.', 'warning')
+            return redirect(url_for('admin_firmware'))
+        # Aggregate env.add/remove from all intermediate manifests
+        agg_add, agg_remove = {}, {}
+        migration_count = 0
+        for commit in commits_ahead:
+            m = _load_commit_manifest(commit['full'], commit['from_full'])
+            if not m:
+                continue
+            for entry in (m.get('env') or {}).get('add', []):
+                k = entry.get('key', '')
+                if k and k not in agg_add:
+                    agg_add[k] = entry
+            for entry in (m.get('env') or {}).get('remove', []):
+                if isinstance(entry, dict):
+                    k = entry.get('key', '')
+                    if k and k not in agg_remove:
+                        agg_remove[k] = entry
+            if (m.get('db') or {}).get('up'):
+                migration_count += 1
+        manifest = {
+            'description': f'Update {len(commits_ahead)} commit(s) to {target_short}: {target_subject}',
+            'env': {'add': list(agg_add.values()), 'remove': list(agg_remove.values())},
+            'db': {'up': f'({migration_count} migration script(s) will run in sequence)'} if migration_count else None,
+        }
+    else:  # rollback
         target_hash = status.get('current_full')
         target_short = status.get('current_short')
         target_subject = status.get('current_subject')
@@ -5149,7 +5182,7 @@ def admin_firmware_preflight(action):
         # Collect submitted env vars
         new_vars = {}
         errors = []
-        if manifest and action == 'update':
+        if manifest and action in ('update', 'update-latest'):
             for entry in manifest.get('env', {}).get('add', []):
                 key = entry['key']
                 val = request.form.get(f'env_{key}', '').strip()
@@ -5228,7 +5261,7 @@ def admin_firmware_preflight(action):
 @permission_required('manage_firmware')
 def admin_firmware_do(action):
     """Render the streaming page for an update/rollback that has passed preflight."""
-    if action not in ('update', 'rollback'):
+    if action not in ('update', 'rollback', 'update-latest'):
         return redirect(url_for('admin_firmware'))
     approved = session.get('firmware_preflight_approved')
     if approved != action:
@@ -5254,7 +5287,7 @@ def admin_firmware_stream(action):
       2. git checkout HEAD^
       3. docker compose restart affected stacks (captive-portal last)
     """
-    if action not in ('update', 'rollback'):
+    if action not in ('update', 'rollback', 'update-latest'):
         return jsonify({'error': 'Invalid action'}), 400
 
     # Check preflight was approved
@@ -5364,7 +5397,7 @@ def admin_firmware_stream(action):
                     yield emit("=== Step 2/3: No database migration needed ===")
                     yield emit("")
 
-            else:  # rollback
+            elif action == 'rollback':
                 changed_dirs    = status.get('back_dirs', [])
                 current_hash    = status.get('current_full')
                 current_short   = status.get('current_short')
@@ -5420,6 +5453,92 @@ def admin_firmware_stream(action):
                 # Note: env.remove vars are restored via the preflight form — already in .env.
 
                 yield emit("")
+
+            elif action == 'update-latest':
+                # Apply each commit in sequence: checkout → env.remove → db.up
+                # Then restart the union of all affected dirs in one shot.
+                commits_ahead = status.get('commits_ahead', [])
+                all_changed_dirs = status.get('latest_dirs', [])
+                latest_hash = status.get('latest_full')
+                if not commits_ahead or not latest_hash:
+                    yield emit("ERROR: No commits ahead — nothing to update.")
+                    yield emit("__EXIT__:1")
+                    return
+
+                def _rk(entries):
+                    return [e['key'] if isinstance(e, dict) else e
+                            for e in (entries or []) if e]
+
+                total_commits = len(commits_ahead)
+                for i, commit in enumerate(commits_ahead):
+                    step = i + 1
+                    commit_hash    = commit['full']
+                    commit_short   = commit['short']
+                    commit_subject = commit['subject']
+                    from_full      = commit['from_full']
+
+                    yield emit(f"=== Commit {step}/{total_commits}: {commit_short} — {commit_subject} ===")
+                    rc = yield from stream_proc(
+                        ['git', '-C', git_repo_dir, 'checkout', commit_hash])
+                    if rc != 0:
+                        yield emit("ERROR: git checkout failed — aborting.")
+                        yield emit("__EXIT__:1")
+                        return
+                    yield emit("")
+
+                    # Load manifest from the newly checked-out tree
+                    step_manifest = _load_commit_manifest(commit_hash, from_full)
+
+                    # Apply env.remove for this step
+                    rm_keys = _rk((step_manifest or {}).get('env', {}).get('remove', []))
+                    if rm_keys:
+                        yield emit(f"  Removing .env var(s): {', '.join(rm_keys)}")
+                        try:
+                            _remove_env_vars(rm_keys)
+                        except Exception as exc:
+                            yield emit(f"  WARNING: Could not remove .env var(s): {exc}")
+
+                    # Run db.up if present
+                    db_script = (step_manifest or {}).get('db', {}).get('up')
+                    if db_script:
+                        sp = os.path.join(git_repo_dir, 'captive-portal', db_script)
+                        yield emit(f"  DB migration: {db_script}")
+                        if not os.path.exists(sp):
+                            yield emit(f"ERROR: Migration script not found: {sp}")
+                            yield emit("__EXIT__:1")
+                            return
+                        rc = yield from stream_proc(
+                            ['/bin/bash', sp],
+                            cwd=os.path.join(git_repo_dir, 'captive-portal'))
+                        if rc != 0:
+                            yield emit(f"ERROR: Migration {db_script} failed — aborting.")
+                            yield emit("__EXIT__:1")
+                            return
+                    else:
+                        yield emit("  No DB migration for this commit.")
+                    yield emit("")
+
+                # Restart all stacks affected by any commit in the chain
+                if all_changed_dirs:
+                    yield emit(f"=== Restarting affected stacks: {', '.join(all_changed_dirs)} ===")
+                    rc = yield from stream_proc(
+                        ['/bin/bash', '/scripts/firmware-manager.sh',
+                         'restart-dirs'] + all_changed_dirs,
+                        env=script_env)
+                    if rc != 0:
+                        yield emit("ERROR: Stack restart failed.")
+                        yield emit("__EXIT__:1")
+                        return
+                else:
+                    yield emit("=== No containers to restart ===")
+
+                yield emit("")
+                yield emit("=" * 50)
+                yield emit(f"UPDATE TO LATEST COMPLETE — now at {latest_hash[:7]}")
+                session['firmware_last_op'] = 'update'
+                session.modified = True
+                yield emit("__EXIT__:0")
+                return
 
             # Step 3 — restart affected stacks (common to update and rollback)
             if changed_dirs:
@@ -5529,8 +5648,8 @@ def admin_firmware_mark_done(action):
     Records the completed operation in the session so the verify button on
     the firmware page knows which direction to test.
     """
-    if action in ('update', 'rollback'):
-        session['firmware_last_op'] = action
+    if action in ('update', 'rollback', 'update-latest'):
+        session['firmware_last_op'] = 'update' if action == 'update-latest' else action
         session.modified = True
     return jsonify({'ok': True})
 

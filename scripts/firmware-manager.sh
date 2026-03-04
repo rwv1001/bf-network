@@ -155,6 +155,52 @@ _cmd_status() {
         BACK_DIRS_JSON="[$(IFS=,; echo "${compose_bdirs[*]}")]"
     fi
 
+    # Walk ALL commits ahead to find latest and the full chain
+    COMMITS_AHEAD_JSON="[]"
+    LATEST_FULL=""
+    LATEST_SHORT=""
+    LATEST_SUBJECT=""
+    if [[ -n "$NEXT_FULL" ]]; then
+        AHEAD_HASHES=()
+        CUR_WALK="$NEXT_FULL"
+        PREV_WALK="$CURRENT_FULL"
+        while true; do
+            AHEAD_HASHES+=("$CUR_WALK:$PREV_WALK")
+            N=$(git rev-list --children --all 2>/dev/null \
+                | awk -v h="$CUR_WALK" '$1==h {print $2; exit}')
+            [[ -z "$N" || "$N" == "$CUR_WALK" ]] && break
+            PREV_WALK="$CUR_WALK"
+            CUR_WALK="$N"
+        done
+        LATEST_FULL="$CUR_WALK"
+        LATEST_SHORT=$(_short "$LATEST_FULL")
+        LATEST_SUBJECT=$(_subject "$LATEST_FULL")
+
+        # Changed dirs for full-forward (HEAD → latest)
+        LATEST_DIRS_JSON="[]"
+        mapfile -t ldirs < <(
+            git diff --name-only HEAD "$LATEST_FULL" 2>/dev/null \
+                | cut -d/ -f1 | sort -u
+        )
+        compose_ldirs=()
+        for d in "${ldirs[@]}"; do
+            [[ -f "$GIT_REPO_DIR/$d/docker-compose.yml" ]] && compose_ldirs+=("\"$d\"")
+        done
+        LATEST_DIRS_JSON="[$(IFS=,; echo "${compose_ldirs[*]}")]"
+
+        # Build commits_ahead JSON array: [{full, short, subject, from_full, from_short}]
+        items=()
+        for entry in "${AHEAD_HASHES[@]}"; do
+            h="${entry%%:*}"
+            p="${entry##*:}"
+            s=$(_short "$h")
+            sub=$(_subject "$h")
+            ps=$(_short "$p")
+            items+=("{\"full\":\"$(_json_str "$h")\",\"short\":\"$(_json_str "$s")\",\"subject\":\"$(_json_str "$sub")\",\"from_full\":\"$(_json_str "$p")\",\"from_short\":\"$(_json_str "$ps")\"}")
+        done
+        COMMITS_AHEAD_JSON="[$(IFS=,; echo "${items[*]}")]"
+    fi
+
     # JSON-escape a string (minimal: escape backslash, double-quote, and common control chars)
     _json_str() {
         local s="$1"
@@ -174,8 +220,13 @@ _cmd_status() {
   "prev_full":      "$(_json_str "$PREV_FULL")",
   "prev_short":     "$(_json_str "$PREV_SHORT")",
   "prev_subject":   "$(_json_str "$PREV_SUBJECT")",
+  "latest_full":    "$(_json_str "$LATEST_FULL")",
+  "latest_short":   "$(_json_str "$LATEST_SHORT")",
+  "latest_subject": "$(_json_str "$LATEST_SUBJECT")",
   "forward_dirs":   $FORWARD_DIRS_JSON,
   "back_dirs":      $BACK_DIRS_JSON,
+  "latest_dirs":    ${LATEST_DIRS_JSON:-[]},
+  "commits_ahead":  $COMMITS_AHEAD_JSON,
   "repo_dir":       "$(_json_str "$GIT_REPO_DIR")"
 }
 JSON

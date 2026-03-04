@@ -82,6 +82,8 @@
     }
     .btn-update   { background: #38a169; }
     .btn-update:hover   { background: #2f855a; color: white; }
+    .btn-update-latest { background: #6b46c1; }
+    .btn-update-latest:hover { background: #553c9a; color: white; }
     .btn-rollback { background: #e53e3e; }
     .btn-rollback:hover { background: #c53030; color: white; }
     .btn-firmware.disabled {
@@ -256,6 +258,13 @@
        class="btn-firmware btn-update {% if not status.next_full or not status.forward_dirs %}disabled{% endif %}">
         Update &#8594;
     </a>
+
+    {% if commits_ahead_count > 1 %}
+    <a href="{{ url_for('admin_firmware_preflight', action='update-latest') }}"
+       class="btn-firmware btn-update-latest">
+        &#9193; Update to Latest ({{ commits_ahead_count }} commits)
+    </a>
+    {% endif %}
 </div>
 
 {% if test_enabled %}

@@ -46,7 +46,9 @@ Firmware {{ action|title }} — Running
 
 <div class="log-header">
     <span style="font-weight:bold;">
-        {% if action == 'update' %}Updating firmware…{% else %}Rolling back firmware…{% endif %}
+        {% if action == 'update' %}Updating firmware…
+        {% elif action == 'update-latest' %}Updating to latest…
+        {% else %}Rolling back firmware…{% endif %}
     </span>
     <span id="log-spinner" class="spinner"></span>
 </div>
