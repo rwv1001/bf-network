@@ -103,20 +103,46 @@ Firmware {{ action|title }} — Running
         spinner.style.display = 'none';
 
         if (selfRestart) {
-            let secs = 25;
             donePara.className = 'status-ok';
-            const tick = function() {
-                donePara.textContent =
-                    '↻ This container is restarting — reloading firmware page in ' + secs + 's';
-                donePara.style.display = 'block';
-                if (secs <= 0) {
-                    window.location.href = '/admin/firmware';
+            donePara.style.display = 'block';
+
+            let elapsed = 0;
+            const POLL_INTERVAL = 3000; // ms between health checks
+            const TIMEOUT = 180;        // give up after 3 minutes
+
+            const poll = function() {
+                const dots = '.'.repeat((elapsed % 3) + 1);
+                donePara.textContent = '↻ Container restarting — waiting for it to come back' + dots +
+                    ' (' + elapsed + 's)';
+
+                if (elapsed >= TIMEOUT) {
+                    donePara.textContent = '✗ Container did not come back after ' + TIMEOUT +
+                        's. Please check the server.';
+                    donePara.className = 'status-err';
                     return;
                 }
-                secs--;
-                setTimeout(tick, 1000);
+
+                fetch('/health', {cache: 'no-store'})
+                    .then(function(r) {
+                        if (r.ok) {
+                            donePara.textContent = '✓ Container is back — loading firmware page…';
+                            fetch('/admin/firmware/mark-done/' + action, {method: 'POST'})
+                                .finally(function() {
+                                    window.location.href = '/admin/firmware';
+                                });
+                        } else {
+                            elapsed += POLL_INTERVAL / 1000;
+                            setTimeout(poll, POLL_INTERVAL);
+                        }
+                    })
+                    .catch(function() {
+                        elapsed += POLL_INTERVAL / 1000;
+                        setTimeout(poll, POLL_INTERVAL);
+                    });
             };
-            tick();
+
+            // Short initial delay to let the container fully stop before we start polling
+            setTimeout(poll, 2000);
         } else {
             donePara.textContent = '✗ Connection lost. The operation may still be running.';
             donePara.className = 'status-err';

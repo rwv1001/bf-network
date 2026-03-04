@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+
+{% block title %}{{ code }} — Network Access Portal{% endblock %}
+
+{% block header %}{{ code }}{% endblock %}
+
+{% block extra_head %}
+{% if code == 500 %}
+<meta http-equiv="refresh" content="10;url={{ request.url }}">
+{% endif %}
+<style>
+    .error-box {
+        background: #fff8f8;
+        border: 2px solid #fc8181;
+        border-radius: 8px;
+        padding: 24px 28px;
+        margin: 24px 0;
+        text-align: center;
+    }
+    .error-box p {
+        margin: 0 0 12px;
+        color: #4a5568;
+        font-size: 1.05em;
+    }
+    .error-box .refresh-note {
+        font-size: 0.85em;
+        color: #718096;
+        margin-bottom: 0;
+    }
+    .error-box .btn {
+        margin-top: 16px;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="error-box">
+    <p>{{ message }}</p>
+    {% if code == 500 %}
+    <p class="refresh-note">This page will automatically refresh in 10 seconds.</p>
+    {% endif %}
+    <a href="/" class="btn btn-primary">Go to homepage</a>
+</div>
+{% endblock %}
