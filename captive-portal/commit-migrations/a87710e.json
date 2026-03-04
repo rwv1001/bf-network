@@ -1,0 +1,9 @@
+{
+  "env": {
+    "add": [
+      {"key": "REMOVE_TEST_A", "default": "alpha-default", "required": false},
+      {"key": "REMOVE_TEST_B", "default": "beta-default",  "required": false}
+    ],
+    "remove": []
+  }
+}
