@@ -1,0 +1,6 @@
+{
+  "env": {
+    "add": [],
+    "remove": ["REMOVE_TEST_B"]
+  }
+}
