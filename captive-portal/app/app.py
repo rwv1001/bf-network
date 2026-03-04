@@ -46,6 +46,14 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'postgresql://portal_user:password@db:5432/captive_portal')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+# Detect and recycle stale connections after a container/DB restart.
+# pool_pre_ping issues a lightweight "SELECT 1" before handing out each
+# connection; if it fails the connection is discarded and a fresh one opened.
+# pool_recycle discards connections older than 5 minutes regardless.
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'pool_pre_ping': True,
+    'pool_recycle': 300,
+}
 
 
 @app.context_processor
@@ -837,6 +845,15 @@ def load_user(user_id):
             )
     except (ValueError, TypeError):
         pass
+    except Exception:
+        # DB connection was lost (e.g. container/postgres just restarted).
+        # Roll back the broken transaction so the pool can recover, then
+        # return None — flask-login will treat the user as anonymous and
+        # redirect to the login page instead of raising a 500.
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
     return None
 
 
