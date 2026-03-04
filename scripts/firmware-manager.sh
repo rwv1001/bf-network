@@ -39,6 +39,37 @@ _compose_dirs_for_changes() {
 }
 
 # ---------------------------------------------------------------------------
+# Stack dependency mapping: if files in KEY directory change, also restart
+# the VALUE stack.  Used when a directory has no docker-compose.yml of its
+# own but its build artifacts are consumed by another stack — e.g. kea-hooks
+# compiles a .so that is volume-mounted into the kea container.
+# ---------------------------------------------------------------------------
+declare -A STACK_DEPS=(
+    ["kea-hooks"]="kea"
+)
+
+# Expand a list of changed top-level dirs into compose stacks to restart.
+# Includes dirs that have their own docker-compose.yml *plus* any stacks
+# declared in STACK_DEPS above.  Output is deduplicated, order preserved.
+_dirs_to_stacks() {
+    local -A seen=()
+    local -a result=()
+    for d in "$@"; do
+        [[ -z "$d" ]] && continue
+        if [[ -f "$GIT_REPO_DIR/$d/docker-compose.yml" && -z "${seen[$d]:-}" ]]; then
+            result+=("$d")
+            seen["$d"]=1
+        fi
+        local dep="${STACK_DEPS[$d]:-}"
+        if [[ -n "$dep" && -z "${seen[$dep]:-}" ]]; then
+            result+=("$dep")
+            seen["$dep"]=1
+        fi
+    done
+    printf '%s\n' "${result[@]}"
+}
+
+# ---------------------------------------------------------------------------
 # Helper: restart one docker-compose stack synchronously.
 # Special-case: captive-portal restarts itself last and skips the explicit
 # 'down' step — the container running this script lives inside that stack,
@@ -136,10 +167,9 @@ _cmd_status() {
             git diff --name-only HEAD "$NEXT_FULL" 2>/dev/null \
                 | cut -d/ -f1 | sort -u
         )
+        mapfile -t _fstacks < <(_dirs_to_stacks "${fdirs[@]}")
         compose_fdirs=()
-        for d in "${fdirs[@]}"; do
-            [[ -f "$GIT_REPO_DIR/$d/docker-compose.yml" ]] && compose_fdirs+=("\"$d\"")
-        done
+        for d in "${_fstacks[@]}"; do compose_fdirs+=("\"$d\""); done
         FORWARD_DIRS_JSON="[$(IFS=,; echo "${compose_fdirs[*]}")]"
     fi
 
@@ -150,10 +180,9 @@ _cmd_status() {
             git diff --name-only HEAD^ HEAD 2>/dev/null \
                 | cut -d/ -f1 | sort -u
         )
+        mapfile -t _bstacks < <(_dirs_to_stacks "${bdirs[@]}")
         compose_bdirs=()
-        for d in "${bdirs[@]}"; do
-            [[ -f "$GIT_REPO_DIR/$d/docker-compose.yml" ]] && compose_bdirs+=("\"$d\"")
-        done
+        for d in "${_bstacks[@]}"; do compose_bdirs+=("\"$d\""); done
         BACK_DIRS_JSON="[$(IFS=,; echo "${compose_bdirs[*]}")]"
     fi
 
@@ -184,10 +213,9 @@ _cmd_status() {
             git diff --name-only HEAD "$LATEST_FULL" 2>/dev/null \
                 | cut -d/ -f1 | sort -u
         )
+        mapfile -t _lstacks < <(_dirs_to_stacks "${ldirs[@]}")
         compose_ldirs=()
-        for d in "${ldirs[@]}"; do
-            [[ -f "$GIT_REPO_DIR/$d/docker-compose.yml" ]] && compose_ldirs+=("\"$d\"")
-        done
+        for d in "${_lstacks[@]}"; do compose_ldirs+=("\"$d\""); done
         LATEST_DIRS_JSON="[$(IFS=,; echo "${compose_ldirs[*]}")]"
 
         # Build commits_ahead JSON array: [{full, short, subject, from_full, from_short}]
@@ -259,20 +287,19 @@ _cmd_update() {
     echo "Checked out: $(git rev-parse --short HEAD)"
     echo ""
 
+    # Expand CHANGED dirs with STACK_DEPS (e.g. kea-hooks → kea)
+    mapfile -t CHANGED_STACKS < <(_dirs_to_stacks "${CHANGED[@]}")
+
     # Sort: captive-portal last so the self-restart happens after all others.
     declare -a RESTART_FIRST=() RESTART_LAST=()
-    for d in "${CHANGED[@]}"; do
+    for d in "${CHANGED_STACKS[@]}"; do
         [[ "$d" == "$_SELF_STACK" ]] && RESTART_LAST+=("$d") || RESTART_FIRST+=("$d")
     done
 
     # Restart each affected compose stack synchronously
     for d in "${RESTART_FIRST[@]}" "${RESTART_LAST[@]}"; do
-        if [[ -f "$GIT_REPO_DIR/$d/docker-compose.yml" ]]; then
-            _restart_stack "$d"
-            echo ""
-        else
-            echo "--- $d: no docker-compose.yml, skipping container restart ---"
-        fi
+        _restart_stack "$d"
+        echo ""
     done
 
     echo "UPDATE COMPLETE: now at $(git rev-parse --short HEAD)"
@@ -309,20 +336,19 @@ _cmd_rollback() {
     echo "Checked out: $(git rev-parse --short HEAD)"
     echo ""
 
+    # Expand CHANGED dirs with STACK_DEPS (e.g. kea-hooks → kea)
+    mapfile -t CHANGED_STACKS < <(_dirs_to_stacks "${CHANGED[@]}")
+
     # Sort: captive-portal last so the self-restart happens after all others.
     declare -a RESTART_FIRST=() RESTART_LAST=()
-    for d in "${CHANGED[@]}"; do
+    for d in "${CHANGED_STACKS[@]}"; do
         [[ "$d" == "$_SELF_STACK" ]] && RESTART_LAST+=("$d") || RESTART_FIRST+=("$d")
     done
 
     # Restart each affected compose stack synchronously
     for d in "${RESTART_FIRST[@]}" "${RESTART_LAST[@]}"; do
-        if [[ -f "$GIT_REPO_DIR/$d/docker-compose.yml" ]]; then
-            _restart_stack "$d"
-            echo ""
-        else
-            echo "--- $d: no docker-compose.yml, skipping container restart ---"
-        fi
+        _restart_stack "$d"
+        echo ""
     done
 
     echo "ROLLBACK COMPLETE: now at $(git rev-parse --short HEAD)"
