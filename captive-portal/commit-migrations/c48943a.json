@@ -1,0 +1,8 @@
+{
+  "env": {
+    "add": [
+      {"key": "REQUIRED_VAR_2", "required": true}
+    ],
+    "remove": []
+  }
+}
