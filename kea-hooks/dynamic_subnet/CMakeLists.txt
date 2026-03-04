@@ -32,3 +32,4 @@ install(TARGETS kea_dns_hijack
     LIBRARY DESTINATION /usr/local/lib/kea/hooks
 )
 # test: bump version comment to trigger dhcp_dns_hijack rebuild
+
