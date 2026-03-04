@@ -93,6 +93,8 @@ JOBSCRIPT
 _short() { git -C "$GIT_REPO_DIR" rev-parse --short "$1" 2>/dev/null || true; }
 _subject() { git -C "$GIT_REPO_DIR" log -1 --pretty=format:'%s' "$1" 2>/dev/null || true; }
 _full() { git -C "$GIT_REPO_DIR" rev-parse "$1" 2>/dev/null || true; }
+# JSON-escape a string (minimal: escape backslash and double-quote)
+_json_str() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; echo -n "$s"; }
 
 # ---------------------------------------------------------------------------
 # status — emit JSON describing current / next / previous commits
@@ -200,14 +202,6 @@ _cmd_status() {
         done
         COMMITS_AHEAD_JSON="[$(IFS=,; echo "${items[*]}")]"
     fi
-
-    # JSON-escape a string (minimal: escape backslash, double-quote, and common control chars)
-    _json_str() {
-        local s="$1"
-        s="${s//\\/\\\\}"
-        s="${s//\"/\\\"}"
-        echo -n "$s"
-    }
 
     cat <<JSON
 {
