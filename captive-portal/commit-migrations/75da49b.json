@@ -1,0 +1,8 @@
+{
+  "env": {
+    "add": [
+      {"key": "NEW_FEATURE_API_KEY", "required": true}
+    ],
+    "remove": []
+  }
+}
