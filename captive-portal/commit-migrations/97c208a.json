@@ -1,0 +1,8 @@
+{
+  "env": {
+    "add": [
+      {"key": "NEW_FEATURE_WEBHOOK_URL", "required": true}
+    ],
+    "remove": []
+  }
+}
