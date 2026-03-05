@@ -88,6 +88,7 @@ services:
       FIRMWARE_TEST_ENABLED: ${FIRMWARE_TEST_ENABLED:-false}
       NEW_FEATURE_API_KEY: ${NEW_FEATURE_API_KEY}
       NEW_FEATURE_WEBHOOK_URL: ${NEW_FEATURE_WEBHOOK_URL}
+      NEW_VAR_ONE: ${NEW_VAR_ONE}
       RESTART_QUEUE_DIR: /restart-queue
     volumes:
       - ./app:/app
