@@ -1,0 +1,6 @@
+{
+  "env": {
+    "add": [],
+    "remove": ["FIRMWARE_TEST_VAR_1", "FIRMWARE_TEST_VAR_2", "FIRMWARE_TEST_VAR_3"]
+  }
+}
