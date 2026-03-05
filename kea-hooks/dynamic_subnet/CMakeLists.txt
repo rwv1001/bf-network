@@ -33,3 +33,4 @@ install(TARGETS kea_dns_hijack
 )
 # test: bump version comment to trigger dhcp_dns_hijack rebuild
 
+# kea-hooks test T7 — isolated STACK_DEPS kea restart
