@@ -107,10 +107,23 @@ JOBSCRIPT
         echo "  NOTE: The docker-agent will restart this container momentarily."
         echo "  Please refresh the firmware page in ~30 seconds."
     else
-        echo "=== Restarting stack: $dir ==="
-        docker compose down   && echo "  [down OK]"
-        docker compose build  && echo "  [build OK]"
-        docker compose up -d  && echo "  [up OK]"
+        # Non-self stacks also use the restart-queue so docker-agent (running
+        # as root) performs the docker compose call.  The web container process
+        # runs as an unprivileged UID and cannot access /var/run/docker.sock
+        # directly.
+        echo "=== Restarting stack: $dir (queuing for docker-agent) ==="
+        local job_file="$RESTART_QUEUE_DIR/restart-${dir}-$(date +%s%N).sh"
+        cat > "$job_file" <<JOBSCRIPT
+#!/bin/bash
+set -uo pipefail
+echo "[docker-agent] Restarting $dir at \$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+cd "$compose_dir"
+docker compose up -d --build --force-recreate
+echo "[docker-agent] $dir restart complete, exit \$?"
+JOBSCRIPT
+        chmod +x "$job_file"
+        echo "  [job queued: $(basename "$job_file")]"
+        echo "  NOTE: docker-agent will restart this stack in the background."
     fi
 
     cd "$GIT_REPO_DIR"
