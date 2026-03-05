@@ -50,9 +50,14 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 # pool_pre_ping issues a lightweight "SELECT 1" before handing out each
 # connection; if it fails the connection is discarded and a fresh one opened.
 # pool_recycle discards connections older than 5 minutes regardless.
+# pool_reset_on_return=None suppresses the ROLLBACK SQLAlchemy normally issues
+# when returning a connection to the pool during session teardown — this
+# prevents OperationalError log spam when Postgres restarts mid-request and
+# the teardown rollback hits a dead connection.
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
     'pool_pre_ping': True,
     'pool_recycle': 300,
+    'pool_reset_on_return': None,
 }
 
 
