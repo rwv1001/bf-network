@@ -86,10 +86,6 @@ services:
       DEFAULT_ISP_ROUTER_DHCP_TRUST: ${DEFAULT_ISP_ROUTER_DHCP_TRUST:-true}
       GIT_REPO_DIR: ${GIT_REPO_DIR:-/home/admin/bf-network}
       FIRMWARE_TEST_ENABLED: ${FIRMWARE_TEST_ENABLED:-false}
-      NEW_FEATURE_API_KEY: ${NEW_FEATURE_API_KEY}
-      NEW_FEATURE_WEBHOOK_URL: ${NEW_FEATURE_WEBHOOK_URL}
-      NEW_VAR_ONE: ${NEW_VAR_ONE}
-      NEW_VAR_TWO: ${NEW_VAR_TWO}
       RESTART_QUEUE_DIR: /restart-queue
     volumes:
       - ./app:/app

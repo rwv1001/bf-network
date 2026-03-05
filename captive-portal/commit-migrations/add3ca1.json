@@ -1,0 +1,11 @@
+{
+  "env": {
+    "add": [],
+    "remove": [
+      "NEW_FEATURE_API_KEY",
+      "NEW_FEATURE_WEBHOOK_URL",
+      "NEW_VAR_ONE",
+      "NEW_VAR_TWO"
+    ]
+  }
+}
