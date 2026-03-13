@@ -9,4 +9,13 @@
 
 (sleep 3 && chmod 644 /var/log/dnsmasq-queries.log) &
 
-exec dnsmasq "$@"
+# Derive the portal domain from PORTAL_URL and inject it as a dnsmasq address
+# record so the portal hostname resolves to 192.168.99.4 on VLAN 99.
+# PORTAL_URL comes from captive-portal/.env via the env_file in docker-compose.
+if [ -n "${PORTAL_URL:-}" ]; then
+    PORTAL_DOMAIN=$(printf '%s' "$PORTAL_URL" | sed 's|https\?://||' | cut -d/ -f1)
+    printf 'address=/%s/192.168.99.4\n' "$PORTAL_DOMAIN" > /tmp/portal-address.conf
+    exec dnsmasq "$@" --conf-file=/tmp/portal-address.conf
+else
+    exec dnsmasq "$@"
+fi

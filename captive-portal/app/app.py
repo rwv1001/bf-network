@@ -684,7 +684,7 @@ def add_cors_headers(response):
             'http://connectivitycheck.gstatic.com',
             'http://captive.apple.com',
             'http://detectportal.firefox.com',
-            # Add your portal's domain if self-calls occur: 'http://bf-network.duckdns.org'
+            # Add PORTAL_URL from captive-portal/.env to allowed_origins if self-calls occur
         ]
         
         if origin in allowed_origins:
@@ -3861,7 +3861,7 @@ def registration_status():
         # Variations: Add without www or with trailing / if seen in Network tab
         'http://msftconnecttest.com',
         'http://www.msftconnecttest.com/',
-        # Your portal if self-calls: 'http://bf-network.duckdns.org'
+        # Add PORTAL_URL from captive-portal/.env to allowed_origins if self-calls occur
     ]
     
     acao_value = origin if origin in allowed_origins else '*'

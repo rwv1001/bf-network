@@ -159,5 +159,23 @@ services:
       db:
         condition: service_healthy
 
+  # Maintains a persistent reverse SSH tunnel through the Oracle VPS so that
+  # bf-network.duckdns.org (pointing at the VPS) reaches this Pi over CGNAT.
+  # The VPS must have GatewayPorts yes in /etc/ssh/sshd_config.
+  # Set ORACLE_VPS_ENABLED=false in .env to disable without removing this service.
+  tunnel:
+    image: alpine:latest
+    container_name: portal-tunnel
+    restart: unless-stopped
+    network_mode: host
+    entrypoint: ["/tunnel-entrypoint.sh"]
+    volumes:
+      - /home/admin/.ssh:/keys:ro
+      - ./tunnel-entrypoint.sh:/tunnel-entrypoint.sh:ro
+    environment:
+      ORACLE_VPS_HOST: ${ORACLE_VPS_HOST:-}
+      ORACLE_VPS_USER: ${ORACLE_VPS_USER:-ubuntu}
+      ORACLE_VPS_ENABLED: ${ORACLE_VPS_ENABLED:-true}
+
 # Note: Using host network mode so the portal is accessible on all Pi interfaces
 # This ensures devices on VLAN 99 (192.168.99.0/24) can reach it at 192.168.99.4:8080

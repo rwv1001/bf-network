@@ -1,0 +1,42 @@
+{
+  "env": {
+    "add": [
+      {
+        "key": "NPM_ADMIN_EMAIL",
+        "description": "Nginx Proxy Manager admin login email. Used by npm-setup to auto-configure the PORTAL_URL proxy host on first run.",
+        "required": false,
+        "sensitive": false,
+        "default": "admin@example.com"
+      },
+      {
+        "key": "NPM_ADMIN_PASSWORD",
+        "description": "Nginx Proxy Manager admin login password. Used by npm-setup to auto-configure the PORTAL_URL proxy host on first run.",
+        "required": false,
+        "sensitive": true,
+        "default": "changeme"
+      },
+      {
+        "key": "ORACLE_VPS_HOST",
+        "description": "Public IP or hostname of the Oracle VPS used for the reverse SSH tunnel. Required for the tunnel service to start. Leave empty to disable.",
+        "required": false,
+        "sensitive": false,
+        "default": ""
+      },
+      {
+        "key": "ORACLE_VPS_USER",
+        "description": "SSH username on the Oracle VPS (default: ubuntu).",
+        "required": false,
+        "sensitive": false,
+        "default": "ubuntu"
+      },
+      {
+        "key": "ORACLE_VPS_ENABLED",
+        "description": "Set to false to disable the reverse SSH tunnel container without removing it from docker-compose.",
+        "required": false,
+        "sensitive": false,
+        "default": "true"
+      }
+    ],
+    "remove": []
+  }
+}

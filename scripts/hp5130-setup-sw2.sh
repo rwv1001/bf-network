@@ -275,7 +275,7 @@ interface Vlan-interface99
 quit
 #
 portal web-server piportal
- url https://bf-network.duckdns.org/register/
+ url http://192.168.99.4:8080/register/
 quit
 web-auth server PI-PORTAL
  url http://192.168.99.4:8080/register/
