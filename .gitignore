@@ -42,6 +42,8 @@ postgres/
 **/postgres/
 captive-portal/data/postgres/
 
+
+
 # Kea DHCP sensitive files
 kea/leases/*
 kea/sockets/*
