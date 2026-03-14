@@ -32,6 +32,7 @@
 .btn-warn { background: #dd6b20; }
 .btn-warn:hover { background: #c05621; }
 .unavailable { background: #fff5f5; border: 1px solid #feb2b2; border-radius: 8px; padding: 20px; color: #c53030; }
+.badge-group { display:inline-block; background:#ebf8ff; color:#2b6cb0; border:1px solid #bee3f8; border-radius:3px; padding:1px 6px; font-size:.78em; margin:1px 2px; white-space:nowrap; }
 </style>
 
 <h1>Pi-Hole DNS Management</h1>
@@ -121,13 +122,24 @@
                 </div>
                 <div class="ph-row">
                     <input type="text" name="comment" placeholder="Reason (optional)" class="form-control">
-                    <button type="submit" class="btn btn-success">Allow</button>
                 </div>
+                {% if groups %}
+                <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-bottom:8px; padding:4px 8px; background:#c6f6d5; border-radius:4px;">
+                    <span style="font-size:.8em; color:#276749; white-space:nowrap;">Apply to groups:</span>
+                    {% for g in groups %}
+                    <label style="font-size:.82em; display:flex; align-items:center; gap:3px; white-space:nowrap; cursor:pointer;">
+                        <input type="checkbox" name="groups" value="{{ g.id }}" {{ 'checked' if g.name == 'Default' }}> {{ g.name }}
+                    </label>
+                    {% endfor %}
+                </div>
+                {% endif %}
+                <button type="submit" class="btn btn-success">Allow</button>
             </form>
         </div>
 
         <div style="flex:1; min-width:260px; background:#fff5f5; border:1px solid #feb2b2; border-radius:8px; padding:16px;">
             <h3 style="margin-top:0; color:#c53030;">Blacklist a Domain</h3>
+            <p style="font-size:.82em; color:#c53030; margin:0 0 8px;">Blocks the domain and all subdomains.</p>
             <form method="POST">
                 <input type="hidden" name="action" value="add_blacklist">
                 <div class="ph-row">
@@ -135,24 +147,60 @@
                 </div>
                 <div class="ph-row">
                     <input type="text" name="comment" placeholder="Reason (optional)" class="form-control">
-                    <button type="submit" class="btn btn-danger">Block</button>
                 </div>
+                {% if groups %}
+                <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-bottom:8px; padding:4px 8px; background:#fed7d7; border-radius:4px;">
+                    <span style="font-size:.8em; color:#c53030; white-space:nowrap;">Apply to groups:</span>
+                    {% for g in groups %}
+                    <label style="font-size:.82em; display:flex; align-items:center; gap:3px; white-space:nowrap; cursor:pointer;">
+                        <input type="checkbox" name="groups" value="{{ g.id }}" {{ 'checked' if g.name == 'Default' }}> {{ g.name }}
+                    </label>
+                    {% endfor %}
+                </div>
+                {% endif %}
+                <button type="submit" class="btn btn-danger">Block</button>
             </form>
         </div>
     </div>
 
-    {# Whitelist table #}
     <h3>Whitelist &mdash; {{ whitelist|length }} entr{{ 'y' if whitelist|length == 1 else 'ies' }}</h3>
     {% if whitelist %}
     <div class="table-responsive">
     <table>
-        <thead><tr><th>Domain</th><th>Comment</th><th>Kind</th><th></th></tr></thead>
+        <thead><tr><th>Domain</th><th>Comment</th><th>Kind</th><th>Groups</th><th></th></tr></thead>
         <tbody>
         {% for d in whitelist %}
+        {% set d_groups = d.groups | default([]) %}
         <tr>
             <td>{{ d.domain }}</td>
             <td>{{ d.comment or '' }}</td>
             <td>{{ d.kind | default('exact') }}</td>
+            <td style="min-width:120px;">
+                {% if groups %}
+                <details>
+                    <summary style="list-style:none; cursor:pointer; font-size:.8em;">
+                        {% for g in groups if g.id in d_groups %}
+                            <span class="badge-group">{{ g.name }}</span>
+                        {% else %}
+                            <span style="color:#a0aec0;">Default</span>
+                        {% endfor %}
+                        <span style="color:#a0aec0;"> &#9998;</span>
+                    </summary>
+                    <form method="POST" style="margin-top:4px; padding:6px; background:#f7fafc; border:1px solid #e2e8f0; border-radius:4px;">
+                        <input type="hidden" name="action" value="update_domain_groups">
+                        <input type="hidden" name="domain" value="{{ d.domain }}">
+                        <input type="hidden" name="type" value="allow">
+                        <input type="hidden" name="kind" value="{{ d.kind | default('exact') }}">
+                        {% for g in groups %}
+                        <label style="display:block; font-size:.8em; margin-bottom:3px; cursor:pointer;">
+                            <input type="checkbox" name="groups" value="{{ g.id }}" {{ 'checked' if g.id in d_groups }}> {{ g.name }}
+                        </label>
+                        {% endfor %}
+                        <button type="submit" class="btn btn-small" style="margin-top:4px;">Save</button>
+                    </form>
+                </details>
+                {% endif %}
+            </td>
             <td>
                 <form method="POST" style="display:inline;">
                     <input type="hidden" name="action" value="remove_domain">
@@ -177,13 +225,40 @@
     {% if blacklist %}
     <div class="table-responsive">
     <table>
-        <thead><tr><th>Domain</th><th>Comment</th><th>Kind</th><th></th></tr></thead>
+        <thead><tr><th>Domain</th><th>Pattern</th><th>Kind</th><th>Groups</th><th></th></tr></thead>
         <tbody>
         {% for d in blacklist %}
+        {% set d_groups = d.groups | default([]) %}
         <tr>
-            <td>{{ d.domain }}</td>
-            <td>{{ d.comment or '' }}</td>
+            <td>{{ d.comment or d.domain }}</td>
+            <td style="font-size:.8em; color:#718096; word-break:break-all;">{{ d.domain if d.kind == 'regex' else '' }}</td>
             <td>{{ d.kind | default('exact') }}</td>
+            <td style="min-width:120px;">
+                {% if groups %}
+                <details>
+                    <summary style="list-style:none; cursor:pointer; font-size:.8em;">
+                        {% for g in groups if g.id in d_groups %}
+                            <span class="badge-group">{{ g.name }}</span>
+                        {% else %}
+                            <span style="color:#a0aec0;">Default</span>
+                        {% endfor %}
+                        <span style="color:#a0aec0;"> &#9998;</span>
+                    </summary>
+                    <form method="POST" style="margin-top:4px; padding:6px; background:#f7fafc; border:1px solid #e2e8f0; border-radius:4px;">
+                        <input type="hidden" name="action" value="update_domain_groups">
+                        <input type="hidden" name="domain" value="{{ d.domain }}">
+                        <input type="hidden" name="type" value="deny">
+                        <input type="hidden" name="kind" value="{{ d.kind | default('exact') }}">
+                        {% for g in groups %}
+                        <label style="display:block; font-size:.8em; margin-bottom:3px; cursor:pointer;">
+                            <input type="checkbox" name="groups" value="{{ g.id }}" {{ 'checked' if g.id in d_groups }}> {{ g.name }}
+                        </label>
+                        {% endfor %}
+                        <button type="submit" class="btn btn-small" style="margin-top:4px;">Save</button>
+                    </form>
+                </details>
+                {% endif %}
+            </td>
             <td>
                 <form method="POST" style="display:inline;">
                     <input type="hidden" name="action" value="remove_domain">
@@ -212,19 +287,29 @@
         <strong>Update Gravity</strong> to download and apply the changes (takes ~1 min).
     </p>
 
-    <div class="ph-row" style="margin-bottom:12px;">
-        <form method="POST" style="display:flex; gap:8px; flex:1; flex-wrap:wrap;">
+    <div style="margin-bottom:12px;">
+        <form method="POST" style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end; margin-bottom:6px;">
             <input type="hidden" name="action" value="add_adlist">
             <input type="url" name="address" placeholder="https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
                 class="form-control" style="flex:2; min-width:300px;" required>
             <input type="text" name="comment" placeholder="Description (optional)"
                 class="form-control" style="flex:1; min-width:160px;">
+            {% if groups %}
+            <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center; padding:4px 8px; background:#f7fafc; border:1px solid #e2e8f0; border-radius:4px;">
+                <span style="font-size:.8em; color:#4a5568; white-space:nowrap;">Apply to groups:</span>
+                {% for g in groups %}
+                <label style="font-size:.82em; display:flex; align-items:center; gap:3px; white-space:nowrap; cursor:pointer;">
+                    <input type="checkbox" name="groups" value="{{ g.id }}" {{ 'checked' if g.name == 'Default' }}> {{ g.name }}
+                </label>
+                {% endfor %}
+            </div>
+            {% endif %}
             <button type="submit" class="btn">Add Blocklist</button>
         </form>
-        <form method="POST">
+        <form method="POST" style="display:inline;" id="gravity-form">
             <input type="hidden" name="action" value="update_gravity">
-            <button type="submit" class="btn btn-success"
-                onclick="return confirm('Re-download all blocklists now? Pi-Hole will remain active during the update.')">
+            <button type="submit" class="btn btn-success" id="gravity-btn"
+                onclick="if(!confirm('Re-download all blocklists now? This takes ~30–60 seconds.')) return false; this.disabled=true; this.textContent='⏳ Updating… please wait'; return true;">
                 &#8635; Update Gravity
             </button>
         </form>
@@ -245,20 +330,48 @@
                 <th>Comment</th>
                 <th style="text-align:center;">Enabled</th>
                 <th style="text-align:right;">Domains</th>
+                <th>Groups</th>
                 <th></th>
             </tr>
         </thead>
         <tbody>
         {% for a in adlists %}
+        {% set alist_groups = a.groups | default([]) %}
         <tr>
             <td style="word-break:break-all; font-size:.85em;">{{ a.address }}</td>
             <td>{{ a.comment or '' }}</td>
-            <td style="text-align:center;">{{ '&#10003;' if a.enabled else '&#10007;' }}</td>
+            <td style="text-align:center;">{{ '✓' if a.enabled else '✗' }}</td>
             <td style="text-align:right;">{{ "{:,}".format(a.number | default(0) | int) }}</td>
+            <td style="min-width:100px;">
+                {% if groups %}
+                <details>
+                    <summary style="list-style:none; cursor:pointer; font-size:.8em;">
+                        {% for g in groups if g.id in alist_groups %}
+                            <span class="badge-group">{{ g.name }}</span>
+                        {% else %}
+                            <span style="color:#a0aec0;">Default</span>
+                        {% endfor %}
+                        <span style="color:#a0aec0;"> &#9998;</span>
+                    </summary>
+                    <form method="POST" style="margin-top:4px; padding:6px; background:#f7fafc; border:1px solid #e2e8f0; border-radius:4px;">
+                        <input type="hidden" name="action" value="update_adlist_groups">
+                        <input type="hidden" name="address" value="{{ a.address }}">
+                        {% for g in groups %}
+                        <label style="display:block; font-size:.8em; margin-bottom:3px; white-space:nowrap; cursor:pointer;">
+                            <input type="checkbox" name="groups" value="{{ g.id }}" {{ 'checked' if g.id in alist_groups }}> {{ g.name }}
+                        </label>
+                        {% endfor %}
+                        <button type="submit" class="btn btn-small" style="margin-top:4px;">Save</button>
+                    </form>
+                </details>
+                {% else %}
+                <span style="color:#a0aec0; font-size:.8em;">&mdash;</span>
+                {% endif %}
+            </td>
             <td>
                 <form method="POST" style="display:inline;">
                     <input type="hidden" name="action" value="remove_adlist">
-                    <input type="hidden" name="list_id" value="{{ a.id }}">
+                    <input type="hidden" name="address" value="{{ a.address }}">
                     <button type="submit" class="btn btn-small btn-danger"
                         onclick="return confirm('Remove this adlist? Run Update Gravity afterwards.')">Remove</button>
                 </form>
@@ -272,6 +385,115 @@
     <p style="color:#718096; font-size:.9em;">No adlists configured. Add one above to start blocking content categories.</p>
     {% endif %}
 </div>
+
+{# ── Groups ── #}
+<div class="ph-section">
+    <h2>Groups</h2>
+    <p style="color:#4a5568; font-size:.9em; margin-bottom:12px;">
+        Groups are filtering policies. Assign blocklists to specific groups, then assign VLANs
+        to those groups. The <strong>Default</strong> group applies to every client with no explicit
+        assignment. A VLAN in multiple groups receives the combined blocklists of all its groups.
+    </p>
+    <form method="POST" class="ph-row" style="margin-bottom:16px;">
+        <input type="hidden" name="action" value="add_group">
+        <input type="text" name="name" placeholder="Group name (e.g. Restricted)" class="form-control" style="max-width:220px;" required>
+        <input type="text" name="comment" placeholder="Description (optional)" class="form-control" style="max-width:300px;">
+        <button type="submit" class="btn">Add Group</button>
+    </form>
+    {% if groups %}
+    <div class="table-responsive">
+    <table>
+        <thead><tr><th>Name</th><th>Description</th><th style="text-align:center;">Enabled</th><th>Content</th><th></th></tr></thead>
+        <tbody>
+        {% for g in groups %}
+        {% set gc = group_content.get(g.id, {}) %}
+        <tr>
+            <td>
+                <strong>{{ g.name }}</strong>
+                {% if g.name == 'Default' %}
+                <span style="font-size:.75em; background:#e2e8f0; color:#4a5568; border-radius:3px; padding:1px 5px; margin-left:4px;">built-in</span>
+                {% endif %}
+            </td>
+            <td>{{ g.comment or '' }}</td>
+            <td style="text-align:center;">{{ '✓' if g.enabled else '✗' }}</td>
+            <td style="font-size:.82em;">
+                <span class="badge-group">{{ gc.adlists | default(0) }} blocklist{{ 's' if gc.adlists != 1 }}</span>
+                <span class="badge-group" style="background:#f0fff4; color:#276749; border-color:#9ae6b4;">{{ gc.whitelist | default(0) }} whitelist</span>
+                <span class="badge-group" style="background:#fff5f5; color:#c53030; border-color:#feb2b2;">{{ gc.blacklist | default(0) }} blacklist</span>
+                <span style="color:#a0aec0; font-size:.9em;">— edit in sections below</span>
+            </td>
+            <td>
+                {% if g.name != 'Default' %}
+                <form method="POST" style="display:inline;">
+                    <input type="hidden" name="action" value="remove_group">
+                    <input type="hidden" name="name" value="{{ g.name }}">
+                    <button type="submit" class="btn btn-small btn-danger"
+                        onclick="return confirm('Delete group \'{{ g.name }}\'? Adlists and VLAN clients assigned only to this group will revert to Default.')">Delete</button>
+                </form>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+    {% endif %}
+</div>
+
+{# ── VLAN Policies ── #}
+{% if vlan_policies %}
+<div class="ph-section">
+    <h2>VLAN Policies</h2>
+    <p style="color:#4a5568; font-size:.9em; margin-bottom:12px;">
+        Assign each VLAN to one or more groups. VLANs with no explicit entry automatically
+        inherit the <strong>Default</strong> group. Tick multiple groups to stack their blocklists.
+        Use <strong>Reset</strong> to remove an explicit assignment and revert to Default.
+    </p>
+    <div class="table-responsive">
+    <table>
+        <thead>
+            <tr><th>VLAN</th><th>Subnet</th><th>Groups</th><th style="text-align:right;"></th></tr>
+        </thead>
+        <tbody>
+        {% for vp in vlan_policies %}
+        <tr>
+            <td><strong>VLAN {{ vp.vlan }}</strong></td>
+            <td><code>{{ vp.subnet }}</code></td>
+            <td>
+                <form method="POST" id="vlanform_{{ vp.vlan }}" style="margin:0;">
+                    <input type="hidden" name="action" value="set_vlan_client">
+                    <input type="hidden" name="subnet" value="{{ vp.subnet }}">
+                    {% if vp.client_id %}<input type="hidden" name="client_id" value="{{ vp.client_id }}">{% endif %}
+                    <input type="hidden" name="comment" value="VLAN {{ vp.vlan }}">
+                    <div style="display:flex; flex-wrap:wrap; gap:8px;">
+                        {% for g in groups %}
+                        <label style="font-size:.85em; display:flex; align-items:center; gap:3px; white-space:nowrap; cursor:pointer;">
+                            <input type="checkbox" name="groups" value="{{ g.id }}"
+                                {% if vp.groups %}{{ 'checked' if g.id in vp.groups }}{% elif g.name == 'Default' %}checked{% endif %}>
+                            {{ g.name }}
+                        </label>
+                        {% endfor %}
+                    </div>
+                </form>
+            </td>
+            <td style="text-align:right; white-space:nowrap;">
+                <button type="submit" form="vlanform_{{ vp.vlan }}" class="btn btn-small">Save</button>
+                {% if vp.client_id %}
+                <form method="POST" style="display:inline;">
+                    <input type="hidden" name="action" value="remove_vlan_client">
+                    <input type="hidden" name="client_id" value="{{ vp.client_id }}">
+                    <button type="submit" class="btn btn-small btn-warn"
+                        onclick="return confirm('Reset VLAN {{ vp.vlan }} to Default group only?')">Reset</button>
+                </form>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+</div>
+{% endif %}
 
 {% endif %}{# pihole_available #}
 {% endblock %}

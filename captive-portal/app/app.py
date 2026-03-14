@@ -8564,10 +8564,29 @@ def admin_reassign_device(device_id):
 
 # ─── Pi-Hole v6 API client ────────────────────────────────────────────────────
 # All API calls originate server-side; the admin never needs to know the
-# PIHOLE_WEBPASSWORD.  Session tokens are cached and refreshed automatically.
+# PIHOLE_WEBPASSWORD.  Session tokens are stored in Redis so all gunicorn
+# workers share a single Pi-Hole session (avoids exhausting max_sessions).
 
-_pihole_session_lock = threading.Lock()
-_pihole_session = {'sid': None, 'expires': 0.0}
+import redis as _redis_module
+
+_pihole_redis_lock = threading.Lock()
+_pihole_redis_client = None
+
+
+def _pihole_redis():
+    """Return a Redis client (lazily created, shared within the process)."""
+    global _pihole_redis_client
+    if _pihole_redis_client is None:
+        with _pihole_redis_lock:
+            if _pihole_redis_client is None:
+                url = os.getenv('REDIS_URL', 'redis://127.0.0.1:6379/0')
+                _pihole_redis_client = _redis_module.from_url(url, decode_responses=True)
+    return _pihole_redis_client
+
+
+_PIHOLE_SID_KEY = 'pihole:sid'
+_PIHOLE_EXP_KEY = 'pihole:expires'
+_PIHOLE_LOCK_KEY = 'pihole:auth_lock'
 
 
 def _pihole_base():
@@ -8576,20 +8595,27 @@ def _pihole_base():
     return f'http://{host}:{port}'
 
 
-def _pihole_auth():
+def _pihole_auth(old_sid=None):
+    """Authenticate with Pi-Hole, optionally logging out old_sid first."""
     password = os.getenv('PIHOLE_WEBPASSWORD', '')
+    base = _pihole_base()
+    # Explicitly logout the old session to free a seat
+    if old_sid:
+        try:
+            requests.delete(f'{base}/api/auth',
+                            headers={'X-FTL-SID': old_sid}, timeout=3)
+        except Exception:
+            pass
     try:
-        r = requests.post(
-            f'{_pihole_base()}/api/auth',
-            json={'password': password},
-            timeout=5,
-        )
+        r = requests.post(f'{base}/api/auth', json={'password': password}, timeout=5)
         if r.status_code == 200:
             data = r.json()
             sid = data.get('session', {}).get('sid')
             validity = int(data.get('session', {}).get('validity', 300))
-            _pihole_session['sid'] = sid
-            _pihole_session['expires'] = time.time() + validity - 30
+            expires = time.time() + validity - 30
+            rdb = _pihole_redis()
+            rdb.set(_PIHOLE_SID_KEY, sid, ex=int(validity))
+            rdb.set(_PIHOLE_EXP_KEY, str(expires), ex=int(validity))
             return sid
     except Exception as exc:
         logger.warning('Pi-Hole auth failed: %s', exc)
@@ -8597,11 +8623,24 @@ def _pihole_auth():
 
 
 def _pihole_headers():
-    with _pihole_session_lock:
-        if _pihole_session['sid'] and time.time() < _pihole_session['expires']:
-            sid = _pihole_session['sid']
+    """Return auth headers, using a Redis-shared session across all workers."""
+    try:
+        rdb = _pihole_redis()
+        sid = rdb.get(_PIHOLE_SID_KEY)
+        exp = rdb.get(_PIHOLE_EXP_KEY)
+        if sid and exp and time.time() < float(exp):
+            return {'X-FTL-SID': sid}
+        # Use a short Redis lock to prevent all workers re-authing simultaneously
+        lock = rdb.set('pihole:auth_lock', '1', nx=True, ex=10)
+        if lock:
+            sid = _pihole_auth(old_sid=sid)
         else:
-            sid = _pihole_auth()
+            # Another worker is authing — wait briefly then re-read
+            time.sleep(0.5)
+            sid = rdb.get(_PIHOLE_SID_KEY)
+    except Exception as exc:
+        logger.warning('Pi-Hole Redis session lookup failed: %s', exc)
+        sid = _pihole_auth()
     return {'X-FTL-SID': sid} if sid else None
 
 
@@ -8613,9 +8652,13 @@ def _pihole_retry(fn, path, **kwargs):
     try:
         r = fn(f'{_pihole_base()}{path}', headers=hdrs, timeout=8, **kwargs)
         if r.status_code == 401:
-            with _pihole_session_lock:
-                _pihole_session['sid'] = None
-                _pihole_session['expires'] = 0.0
+            # Invalidate the cached session and force re-auth
+            try:
+                rdb = _pihole_redis()
+                old_sid = rdb.get(_PIHOLE_SID_KEY)
+                rdb.delete(_PIHOLE_SID_KEY, _PIHOLE_EXP_KEY)
+            except Exception:
+                old_sid = None
             hdrs = _pihole_headers()
             if hdrs is None:
                 return None
@@ -8645,6 +8688,13 @@ def pihole_delete(path):
     return r is not None and r.status_code in (200, 204)
 
 
+def pihole_put(path, body=None):
+    r = _pihole_retry(requests.put, path, json=body)
+    if r and r.ok:
+        return r.json() if r.content else {}
+    return None
+
+
 # ─── Pi-Hole admin route ──────────────────────────────────────────────────────
 
 @app.route('/admin/pihole', methods=['GET', 'POST'])
@@ -8672,11 +8722,23 @@ def admin_pihole():
             comment = request.form.get('comment', '').strip()
             dtype = 'allow' if action == 'add_whitelist' else 'deny'
             list_label = 'whitelist' if action == 'add_whitelist' else 'blacklist'
+            groups_raw = request.form.getlist('groups')
+            groups = [int(g) for g in groups_raw if g.isdigit()]
             if not domain:
                 flash('Domain cannot be empty.', 'error')
             else:
-                ok = pihole_post(f'/api/domains/{dtype}/exact',
-                                 {'domain': domain, 'comment': comment, 'enabled': True})
+                if dtype == 'deny':
+                    import re as _re
+                    entry_kind = 'regex'
+                    entry_domain = rf'(\.|^){_re.escape(domain)}$'
+                    entry_comment = comment or domain
+                else:
+                    entry_kind = 'exact'
+                    entry_domain = domain
+                    entry_comment = comment
+                ok = pihole_post(f'/api/domains/{dtype}/{entry_kind}',
+                                 {'domain': entry_domain, 'comment': entry_comment, 'enabled': True,
+                                  'groups': groups if groups else [0]})
                 flash(f'"{domain}" added to {list_label}.' if ok is not None
                       else f'Failed to add domain to {list_label}.', 'success' if ok is not None else 'error')
 
@@ -8695,23 +8757,110 @@ def admin_pihole():
             if not address:
                 flash('Adlist URL cannot be empty.', 'error')
             else:
-                ok = pihole_post('/api/lists',
+                groups_raw = request.form.getlist('groups')
+                groups = [int(g) for g in groups_raw if g.isdigit()]
+                ok = pihole_post('/api/lists?type=block',
                                  {'address': address, 'comment': comment,
-                                  'type': 'block', 'enabled': True})
+                                  'enabled': True,
+                                  'groups': groups if groups else [0]})
                 flash('Adlist added. Click "Update Gravity" to activate it.' if ok is not None
                       else 'Failed to add adlist.', 'success' if ok is not None else 'error')
 
         elif action == 'remove_adlist':
-            list_id = request.form.get('list_id', '').strip()
-            if list_id:
-                ok = pihole_delete(f'/api/lists/{list_id}')
+            from urllib.parse import quote as _quote
+            address = request.form.get('address', '').strip()
+            if address:
+                ok = pihole_delete(f'/api/lists/{_quote(address, safe="")}?type=block')
                 flash('Adlist removed. Run "Update Gravity" to apply.' if ok
                       else 'Failed to remove adlist.', 'success' if ok else 'error')
 
         elif action == 'update_gravity':
-            ok = pihole_post('/api/action/gravity')
-            flash('Gravity update started — this takes ~1 minute.' if ok is not None
-                  else 'Failed to start gravity update.', 'success' if ok is not None else 'error')
+            # Gravity streams text/plain progress — consume entire body to wait for completion
+            hdrs = _pihole_headers()
+            ok = False
+            if hdrs:
+                try:
+                    r = requests.post(f'{_pihole_base()}/api/action/gravity',
+                                      headers=hdrs, timeout=(8, 180), stream=True)
+                    for _ in r.iter_content(chunk_size=4096):
+                        pass
+                    ok = r.ok
+                except Exception as exc:
+                    logger.warning('Gravity update request failed: %s', exc)
+            flash('Gravity update complete.' if ok
+                  else 'Failed to start gravity update.', 'success' if ok else 'error')
+
+        elif action == 'add_group':
+            name = request.form.get('name', '').strip()
+            comment = request.form.get('comment', '').strip()
+            if not name:
+                flash('Group name cannot be empty.', 'error')
+            else:
+                ok = pihole_post('/api/groups', {'name': name, 'comment': comment, 'enabled': True})
+                flash(f'Group "{name}" created.' if ok is not None else 'Failed to create group.',
+                      'success' if ok is not None else 'error')
+
+        elif action == 'remove_group':
+            from urllib.parse import quote as _quote
+            name = request.form.get('name', '').strip()
+            if name == 'Default':
+                flash('Cannot delete the Default group.', 'error')
+            elif name:
+                ok = pihole_delete(f'/api/groups/{_quote(name, safe="")}')
+                flash(f'Group "{name}" deleted.' if ok else 'Failed to delete group.',
+                      'success' if ok else 'error')
+
+        elif action == 'update_domain_groups':
+            from urllib.parse import quote as _quote
+            domain = request.form.get('domain', '').strip()
+            dtype = request.form.get('type', 'allow')
+            kind = request.form.get('kind', 'exact')
+            groups_raw = request.form.getlist('groups')
+            groups = [int(g) for g in groups_raw if g.isdigit()]
+            if domain:
+                ok = pihole_put(f'/api/domains/{dtype}/{kind}/{_quote(domain, safe="")}',
+                                {'groups': groups if groups else [0]})
+                flash('Domain groups updated.' if ok is not None else 'Failed to update domain groups.',
+                      'success' if ok is not None else 'error')
+
+        elif action == 'update_adlist_groups':
+            from urllib.parse import quote as _quote
+            address = request.form.get('address', '').strip()
+            groups_raw = request.form.getlist('groups')
+            groups = [int(g) for g in groups_raw if g.isdigit()]
+            if address:
+                ok = pihole_put(f'/api/lists/{_quote(address, safe="")}?type=block', {'groups': groups})
+                flash('Adlist groups updated.' if ok is not None else 'Failed to update adlist groups.',
+                      'success' if ok is not None else 'error')
+
+        elif action == 'set_vlan_client':
+            subnet = request.form.get('subnet', '').strip()
+            client_id = request.form.get('client_id', '').strip()
+            comment = request.form.get('comment', '').strip()
+            groups_raw = request.form.getlist('groups')
+            groups = [int(g) for g in groups_raw if g.isdigit()]
+            if not subnet:
+                flash('Subnet cannot be empty.', 'error')
+            else:
+                if not groups:
+                    groups = [0]
+                if client_id:
+                    ok = pihole_put(f'/api/clients/{client_id}',
+                                    {'groups': groups, 'comment': comment})
+                else:
+                    ok = pihole_post('/api/clients',
+                                     {'client': subnet, 'comment': comment,
+                                      'groups': groups, 'enabled': True})
+                flash(f'Policy for {subnet} updated.' if ok is not None
+                      else f'Failed to update policy for {subnet}.',
+                      'success' if ok is not None else 'error')
+
+        elif action == 'remove_vlan_client':
+            client_id = request.form.get('client_id', '').strip()
+            if client_id:
+                ok = pihole_delete(f'/api/clients/{client_id}')
+                flash('VLAN policy removed — subnet reverts to Default group.' if ok
+                      else 'Failed to remove VLAN policy.', 'success' if ok else 'error')
 
         return redirect(url_for('admin_pihole'))
 
@@ -8720,6 +8869,8 @@ def admin_pihole():
     blocking = pihole_get('/api/dns/blocking')
     domains_data = pihole_get('/api/domains')
     adlists_data = pihole_get('/api/lists?type=block')
+    groups_data = pihole_get('/api/groups')
+    clients_data = pihole_get('/api/clients')
 
     whitelist, blacklist = [], []
     if domains_data:
@@ -8727,6 +8878,32 @@ def admin_pihole():
             (whitelist if d.get('type') == 'allow' else blacklist).append(d)
 
     adlists = (adlists_data or {}).get('lists', [])
+    groups = (groups_data or {}).get('groups', [])
+    clients = (clients_data or {}).get('clients', [])
+
+    # Build per-group content summary for display in the Groups section
+    group_content = {}
+    for g in groups:
+        gid = g['id']
+        group_content[gid] = {
+            'adlists':   sum(1 for a in adlists   if gid in a.get('groups', [])),
+            'whitelist': sum(1 for d in whitelist  if gid in d.get('groups', [])),
+            'blacklist': sum(1 for d in blacklist  if gid in d.get('groups', [])),
+        }
+
+    # Build per-VLAN policy data keyed to VALID_VLANS env var
+    vlan_ids = [v.strip() for v in os.getenv('VALID_VLANS', '').split(',') if v.strip().isdigit()]
+    vlan_policies = []
+    for vlan_id in vlan_ids:
+        subnet = f'192.168.{vlan_id}.0/24'
+        entry = next((c for c in clients if c.get('client') == subnet), None)
+        vlan_policies.append({
+            'vlan': vlan_id,
+            'subnet': subnet,
+            'client_id': entry['id'] if entry else None,
+            'groups': entry.get('groups', []) if entry else [],
+            'comment': entry.get('comment', '') if entry else '',
+        })
 
     return render_template(
         'admin_pihole.html',
@@ -8735,6 +8912,9 @@ def admin_pihole():
         whitelist=whitelist,
         blacklist=blacklist,
         adlists=adlists,
+        groups=groups,
+        group_content=group_content,
+        vlan_policies=vlan_policies,
         pihole_available=(summary is not None),
     )
 

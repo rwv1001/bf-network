@@ -87,6 +87,7 @@ services:
       GIT_REPO_DIR: ${GIT_REPO_DIR:-/home/admin/bf-network}
       FIRMWARE_TEST_ENABLED: ${FIRMWARE_TEST_ENABLED:-false}
       RESTART_QUEUE_DIR: /restart-queue
+      PIHOLE_WEBPASSWORD: ${PIHOLE_WEBPASSWORD:-}
     volumes:
       - ./app:/app
       - ../shared/restart-queue:/restart-queue  # Queue for standalone docker-agent (bf-network/docker-agent/)
