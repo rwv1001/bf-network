@@ -57,7 +57,7 @@ class DNSParser:
         Returns: ('resolve', pid, domain, ip), ('forward', pid, domain), or None
         """
         # Extract dnsmasq process ID — same PID = same DNS query
-        pid_match = re.search(r'dnsmasq\[(\d+)\]:', line)
+        pid_match = re.search(r'(?:dnsmasq|pihole-FTL)\[(\d+)\]:', line)
         pid = pid_match.group(1) if pid_match else None
 
         # Match reply lines: "reply domain is IP" (IPv4 only)

@@ -59,6 +59,10 @@ freeradius/raddb/mods-config/files/authorize
 # Nginx Proxy Manager
 npm/data/
 npm/letsencrypt/
+
+# Pi-Hole runtime directories
+pihole/etc-pihole/
+pihole/logs/
 npmold/
 **/keys.json
 keys/

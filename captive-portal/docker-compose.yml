@@ -148,12 +148,12 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://${DB_USER:-portal_user}:${DB_PASSWORD:-change_this_password}@127.0.0.1:5432/${DB_NAME:-captive_portal}
-      LOG_FILE: /logs/dnsmasq-queries.log
+      LOG_FILE: /logs/pihole.log
       DNS_DEDUP_THRESHOLD_HOURS: ${DNS_DEDUP_THRESHOLD_HOURS:-12}
       DNS_CHECK_INTERVAL_SECONDS: ${DNS_CHECK_INTERVAL_SECONDS:-5}
       DNS_RETENTION_DAYS: ${DNS_RETENTION_DAYS:-90}
     volumes:
-      - ../dnsmasq/logs:/logs:ro
+      - ../pihole/logs:/logs:ro
     network_mode: host
     depends_on:
       db:

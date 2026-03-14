@@ -36,6 +36,7 @@ from email_service import (
 )
 from kea_integration import get_kea_client
 from urllib.parse import urlparse
+import requests
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -795,7 +796,8 @@ class AdminUser:
     def __init__(self, admin_id, username, can_manage_users=True, can_manage_vlans=False, 
                  can_view_traffic=False, can_manage_admins=False, traffic_viewer_settings=None, 
                  mfa_enabled=False, must_change_password=False, can_manage_switch_ports=False,
-                 can_manage_isp_routers=False, can_manage_firmware=False):
+                 can_manage_isp_routers=False, can_manage_firmware=False,
+                 can_manage_pihole=False):
         self.id = str(admin_id)  # Flask-Login requires string ID
         self.username = username
         self.can_manage_users = can_manage_users
@@ -805,6 +807,7 @@ class AdminUser:
         self.can_manage_switch_ports = can_manage_switch_ports
         self.can_manage_isp_routers = can_manage_isp_routers
         self.can_manage_firmware = can_manage_firmware
+        self.can_manage_pihole = can_manage_pihole
         self.traffic_viewer_settings = traffic_viewer_settings
         self.mfa_enabled = mfa_enabled
         self.must_change_password = must_change_password
@@ -846,7 +849,8 @@ def load_user(user_id):
                 getattr(admin, 'must_change_password', False),
                 getattr(admin, 'can_manage_switch_ports', False),
                 getattr(admin, 'can_manage_isp_routers', False),
-                getattr(admin, 'can_manage_firmware', False)
+                getattr(admin, 'can_manage_firmware', False),
+                can_manage_pihole=getattr(admin, 'can_manage_pihole', False)
             )
     except (ValueError, TypeError):
         pass
@@ -893,6 +897,9 @@ def permission_required(permission):
                 return redirect(url_for('admin_dashboard'))
             elif permission == 'manage_firmware' and not current_user.can_manage_firmware:
                 flash('You do not have permission to manage firmware.', 'error')
+                return redirect(url_for('admin_dashboard'))
+            elif permission == 'manage_pihole' and not current_user.can_manage_pihole:
+                flash('You do not have permission to manage Pi-Hole DNS.', 'error')
                 return redirect(url_for('admin_dashboard'))
             
             return f(*args, **kwargs)
@@ -4178,7 +4185,8 @@ def admin_login():
                 admin.mfa_enabled,
                 can_manage_switch_ports=getattr(admin, 'can_manage_switch_ports', False),
                 can_manage_isp_routers=getattr(admin, 'can_manage_isp_routers', False),
-                can_manage_firmware=getattr(admin, 'can_manage_firmware', False)
+                can_manage_firmware=getattr(admin, 'can_manage_firmware', False),
+                can_manage_pihole=getattr(admin, 'can_manage_pihole', False)
             )
             login_user(user)
             return redirect(url_for('admin_dashboard'))
@@ -4197,12 +4205,13 @@ def admin_login():
                     admin.can_manage_switch_ports = True
                     admin.can_manage_isp_routers = True
                     admin.can_manage_firmware = True
+                    admin.can_manage_pihole = True
                     db.session.add(admin)
                     db.session.commit()
                     logger.info(f"Migrated legacy admin '{username}' to database")
                 
                 # Log in with full permissions
-                user = AdminUser(admin.id, admin.username, True, True, True, True, can_manage_switch_ports=True, can_manage_isp_routers=True, can_manage_firmware=True)
+                user = AdminUser(admin.id, admin.username, True, True, True, True, can_manage_switch_ports=True, can_manage_isp_routers=True, can_manage_firmware=True, can_manage_pihole=True)
                 login_user(user)
                 return redirect(url_for('admin_dashboard'))
             
@@ -4319,7 +4328,8 @@ def admin_mfa_verify():
                 admin.mfa_enabled,
                 can_manage_switch_ports=getattr(admin, 'can_manage_switch_ports', False),
                 can_manage_isp_routers=getattr(admin, 'can_manage_isp_routers', False),
-                can_manage_firmware=getattr(admin, 'can_manage_firmware', False)
+                can_manage_firmware=getattr(admin, 'can_manage_firmware', False),
+                can_manage_pihole=getattr(admin, 'can_manage_pihole', False)
             )
             login_user(user)
             logger.info(f"Admin '{admin.username}' logged in with MFA")
@@ -4645,6 +4655,7 @@ def admin_manage_admins():
             'can_manage_switch_ports': admin.can_manage_switch_ports,
             'can_manage_isp_routers': getattr(admin, 'can_manage_isp_routers', False),
             'can_manage_firmware': getattr(admin, 'can_manage_firmware', False),
+            'can_manage_pihole': getattr(admin, 'can_manage_pihole', False),
             'created_at': admin.created_at,
             'last_login': admin.last_login,
             'is_current': is_current,
@@ -4670,6 +4681,7 @@ def admin_create_admin():
     can_manage_switch_ports = bool(request.form.get('can_manage_switch_ports'))
     can_manage_isp_routers = bool(request.form.get('can_manage_isp_routers'))
     can_manage_firmware = bool(request.form.get('can_manage_firmware'))
+    can_manage_pihole = bool(request.form.get('can_manage_pihole'))
     must_change_password = bool(request.form.get('must_change_password'))  # checkbox: present=True, absent=False
     
     if not username or not password:
@@ -4696,6 +4708,7 @@ def admin_create_admin():
     admin.can_manage_switch_ports = can_manage_switch_ports
     admin.can_manage_isp_routers = can_manage_isp_routers
     admin.can_manage_firmware = can_manage_firmware
+    admin.can_manage_pihole = can_manage_pihole
     admin.must_change_password = must_change_password
     admin.created_by = int(current_user.id)
     db.session.add(admin)
@@ -4720,6 +4733,7 @@ def admin_update_admin_permissions(admin_id):
     can_manage_switch_ports = bool(request.form.get('can_manage_switch_ports'))
     can_manage_isp_routers = bool(request.form.get('can_manage_isp_routers'))
     can_manage_firmware = bool(request.form.get('can_manage_firmware'))
+    can_manage_pihole = bool(request.form.get('can_manage_pihole'))
     
     # Check if this would remove the last super admin
     if admin.can_manage_admins and not can_manage_admins:
@@ -4735,6 +4749,7 @@ def admin_update_admin_permissions(admin_id):
     admin.can_manage_switch_ports = can_manage_switch_ports
     admin.can_manage_isp_routers = can_manage_isp_routers
     admin.can_manage_firmware = can_manage_firmware
+    admin.can_manage_pihole = can_manage_pihole
     db.session.commit()
     
     logger.info(f"Admin '{admin.username}' permissions updated by {current_user.username}")
@@ -8545,6 +8560,183 @@ def admin_reassign_device(device_id):
     logger.info(f"Admin reassigned device {device.mac_address} from {old_email} to {new_user.email}")
     flash(f'Device {device.mac_address} reassigned to {new_user.email}.', 'success')
     return redirect(url_for('admin_dashboard'))
+
+
+# ─── Pi-Hole v6 API client ────────────────────────────────────────────────────
+# All API calls originate server-side; the admin never needs to know the
+# PIHOLE_WEBPASSWORD.  Session tokens are cached and refreshed automatically.
+
+_pihole_session_lock = threading.Lock()
+_pihole_session = {'sid': None, 'expires': 0.0}
+
+
+def _pihole_base():
+    host = os.getenv('PIHOLE_HOST', '192.168.99.4')
+    port = os.getenv('PIHOLE_PORT', '8055')
+    return f'http://{host}:{port}'
+
+
+def _pihole_auth():
+    password = os.getenv('PIHOLE_WEBPASSWORD', '')
+    try:
+        r = requests.post(
+            f'{_pihole_base()}/api/auth',
+            json={'password': password},
+            timeout=5,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            sid = data.get('session', {}).get('sid')
+            validity = int(data.get('session', {}).get('validity', 300))
+            _pihole_session['sid'] = sid
+            _pihole_session['expires'] = time.time() + validity - 30
+            return sid
+    except Exception as exc:
+        logger.warning('Pi-Hole auth failed: %s', exc)
+    return None
+
+
+def _pihole_headers():
+    with _pihole_session_lock:
+        if _pihole_session['sid'] and time.time() < _pihole_session['expires']:
+            sid = _pihole_session['sid']
+        else:
+            sid = _pihole_auth()
+    return {'X-FTL-SID': sid} if sid else None
+
+
+def _pihole_retry(fn, path, **kwargs):
+    """Call fn(url, headers, **kwargs), retry once on 401."""
+    hdrs = _pihole_headers()
+    if hdrs is None:
+        return None
+    try:
+        r = fn(f'{_pihole_base()}{path}', headers=hdrs, timeout=8, **kwargs)
+        if r.status_code == 401:
+            with _pihole_session_lock:
+                _pihole_session['sid'] = None
+                _pihole_session['expires'] = 0.0
+            hdrs = _pihole_headers()
+            if hdrs is None:
+                return None
+            r = fn(f'{_pihole_base()}{path}', headers=hdrs, timeout=8, **kwargs)
+        return r
+    except Exception as exc:
+        logger.warning('Pi-Hole request to %s failed: %s', path, exc)
+        return None
+
+
+def pihole_get(path):
+    r = _pihole_retry(requests.get, path)
+    if r and r.ok:
+        return r.json()
+    return None
+
+
+def pihole_post(path, body=None):
+    r = _pihole_retry(requests.post, path, json=body)
+    if r and r.ok:
+        return r.json() if r.content else {}
+    return None
+
+
+def pihole_delete(path):
+    r = _pihole_retry(requests.delete, path)
+    return r is not None and r.status_code in (200, 204)
+
+
+# ─── Pi-Hole admin route ──────────────────────────────────────────────────────
+
+@app.route('/admin/pihole', methods=['GET', 'POST'])
+@login_required
+@permission_required('manage_pihole')
+def admin_pihole():
+    if request.method == 'POST':
+        action = request.form.get('action', '')
+
+        if action == 'enable_blocking':
+            ok = pihole_post('/api/dns/blocking', {'blocking': 'enabled'})
+            flash('Blocking re-enabled.' if ok is not None else 'Failed to communicate with Pi-Hole.', 'success' if ok is not None else 'error')
+
+        elif action == 'disable_blocking':
+            timer = int(request.form.get('timer', 0))
+            ok = pihole_post('/api/dns/blocking', {'blocking': 'disabled', 'timer': timer})
+            if ok is not None:
+                msg = 'Blocking disabled.' if timer == 0 else f'Blocking disabled for {timer // 60} minute(s).'
+                flash(msg, 'success')
+            else:
+                flash('Failed to communicate with Pi-Hole.', 'error')
+
+        elif action in ('add_whitelist', 'add_blacklist'):
+            domain = request.form.get('domain', '').strip().lower()
+            comment = request.form.get('comment', '').strip()
+            dtype = 'allow' if action == 'add_whitelist' else 'deny'
+            list_label = 'whitelist' if action == 'add_whitelist' else 'blacklist'
+            if not domain:
+                flash('Domain cannot be empty.', 'error')
+            else:
+                ok = pihole_post(f'/api/domains/{dtype}/exact',
+                                 {'domain': domain, 'comment': comment, 'enabled': True})
+                flash(f'"{domain}" added to {list_label}.' if ok is not None
+                      else f'Failed to add domain to {list_label}.', 'success' if ok is not None else 'error')
+
+        elif action == 'remove_domain':
+            from urllib.parse import quote as _quote
+            domain = request.form.get('domain', '').strip()
+            dtype = request.form.get('type', 'allow')
+            kind = request.form.get('kind', 'exact')
+            if domain:
+                ok = pihole_delete(f'/api/domains/{dtype}/{kind}/{_quote(domain, safe="")}')
+                flash(f'"{domain}" removed.' if ok else 'Failed to remove domain.', 'success' if ok else 'error')
+
+        elif action == 'add_adlist':
+            address = request.form.get('address', '').strip()
+            comment = request.form.get('comment', '').strip()
+            if not address:
+                flash('Adlist URL cannot be empty.', 'error')
+            else:
+                ok = pihole_post('/api/lists',
+                                 {'address': address, 'comment': comment,
+                                  'type': 'block', 'enabled': True})
+                flash('Adlist added. Click "Update Gravity" to activate it.' if ok is not None
+                      else 'Failed to add adlist.', 'success' if ok is not None else 'error')
+
+        elif action == 'remove_adlist':
+            list_id = request.form.get('list_id', '').strip()
+            if list_id:
+                ok = pihole_delete(f'/api/lists/{list_id}')
+                flash('Adlist removed. Run "Update Gravity" to apply.' if ok
+                      else 'Failed to remove adlist.', 'success' if ok else 'error')
+
+        elif action == 'update_gravity':
+            ok = pihole_post('/api/action/gravity')
+            flash('Gravity update started — this takes ~1 minute.' if ok is not None
+                  else 'Failed to start gravity update.', 'success' if ok is not None else 'error')
+
+        return redirect(url_for('admin_pihole'))
+
+    # GET — fetch all data from Pi-Hole
+    summary = pihole_get('/api/stats/summary')
+    blocking = pihole_get('/api/dns/blocking')
+    domains_data = pihole_get('/api/domains')
+    adlists_data = pihole_get('/api/lists?type=block')
+
+    whitelist, blacklist = [], []
+    if domains_data:
+        for d in domains_data.get('domains', []):
+            (whitelist if d.get('type') == 'allow' else blacklist).append(d)
+
+    adlists = (adlists_data or {}).get('lists', [])
+
+    return render_template(
+        'admin_pihole.html',
+        summary=summary or {},
+        blocking=blocking,
+        whitelist=whitelist,
+        blacklist=blacklist,
+        adlists=adlists,
+        pihole_available=(summary is not None),
+    )
 
 
 @app.route('/health')

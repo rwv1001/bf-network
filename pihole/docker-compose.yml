@@ -1,0 +1,47 @@
+services:
+  pihole:
+    image: pihole/pihole:latest
+    container_name: pihole
+    network_mode: host
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - NET_BIND_SERVICE
+    env_file:
+      - ../captive-portal/.env
+    environment:
+      # Pi-Hole v6: admin password (set PIHOLE_WEBPASSWORD in captive-portal/.env)
+      FTLCONF_webserver_api_password: ${PIHOLE_WEBPASSWORD:-changeme}
+      # Restrict DNS to the VLAN-99 registered-device IP only.
+      # See 99-local-bind.conf for the bind-level restriction.
+      FTLCONF_dns_listeningMode: SINGLE
+      FTLCONF_dns_interface: eth0.99
+      # Upstream resolvers – plain port 53. Pi-Hole originates from 192.168.99.4
+      # which is permitted unrestricted by HP5130 ACL 3099 rule 1, so all IPs
+      # and ports are allowed outbound from that source.
+      FTLCONF_dns_upstreams: '["8.8.8.8", "8.8.4.4"]'
+      # Web UI on 8055 – keeps 80/443 free for NPM / captive portal
+      FTLCONF_webserver_port: "8055"
+      # Used by FTL for stats/reverse-lookup labelling
+      FTLCONF_LOCAL_IPV4: "192.168.99.4"
+    volumes:
+      # Persistent Pi-Hole config (gravity DB, blocklists, custom.list, etc.)
+      - ./etc-pihole:/etc/pihole
+      # DNS query log – shared with dns-parser container
+      - ./logs:/var/log/pihole
+      # Explicit listen-address binding so Pi-Hole does NOT bind 192.168.99.5,
+      # which is reserved for dnsmasq-hijack on the same eth0.99 interface.
+      - ./99-local-bind.conf:/etc/dnsmasq.d/99-local-bind.conf:ro
+    # Write portal domain to custom.list before Pi-Hole starts, so the portal
+    # hostname resolves locally to 192.168.99.4 for all registered devices.
+    # PORTAL_URL is provided by env_file (captive-portal/.env).
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        if [ -n "${PORTAL_URL:-}" ]; then
+          PORTAL_DOMAIN=$(printf '%s' "$PORTAL_URL" | sed 's|https\?://||' | cut -d/ -f1 | cut -d: -f1)
+          mkdir -p /etc/pihole
+          printf '192.168.99.4 %s\n' "$PORTAL_DOMAIN" > /etc/pihole/custom.list
+        fi
+        exec /usr/bin/start.sh

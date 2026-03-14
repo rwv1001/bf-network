@@ -1,0 +1,26 @@
+{
+  "description": "Replace dnsmasq-normal with Pi-Hole; add can_manage_pihole admin permission",
+  "env": {
+    "add": [
+      {
+        "key": "PIHOLE_WEBPASSWORD",
+        "description": "Pi-Hole admin web UI password — used server-side for API calls; never exposed to portal admins",
+        "default": "",
+        "required": true,
+        "sensitive": true
+      }
+    ],
+    "remove": []
+  },
+  "db": {
+    "up": "migrate-add-pihole-permission.sh",
+    "down": "migrate-add-pihole-permission-down.sh",
+    "verify_up": [
+      {"type": "column", "table": "admins", "column": "can_manage_pihole"}
+    ],
+    "verify_down": [
+      {"type": "column_absent", "table": "admins", "column": "can_manage_pihole"}
+    ]
+  },
+  "notes": "Stop and remove the dnsmasq-normal container before restarting. Start pihole/ with 'docker compose up -d'. Restart dns-parser to pick up the new log path. Set a strong PIHOLE_WEBPASSWORD in .env before launching Pi-Hole."
+}

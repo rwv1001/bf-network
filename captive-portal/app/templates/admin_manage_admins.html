@@ -220,6 +220,10 @@ function changeEmail(adminId, username, currentEmail) {
                     <input type="checkbox" id="new_can_manage_firmware" name="can_manage_firmware" value="1">
                     <label for="new_can_manage_firmware">Firmware Updates</label>
                 </div>
+                <div class="permission-item">
+                    <input type="checkbox" id="new_can_manage_pihole" name="can_manage_pihole" value="1">
+                    <label for="new_can_manage_pihole">Pi-Hole DNS</label>
+                </div>
             </div>
         </div>
         
@@ -261,6 +265,7 @@ function changeEmail(adminId, username, currentEmail) {
                 <th style="text-align: center;">Switch<br>Ports</th>
                 <th style="text-align: center;">ISP<br>Routers</th>
                 <th style="text-align: center;">Firmware<br>Updates</th>
+                <th style="text-align: center;">Pi-Hole<br>DNS</th>
                 <th>Created</th>
                 <th>Last Login</th>
                 <th>Actions</th>
@@ -326,6 +331,11 @@ function changeEmail(adminId, username, currentEmail) {
                     <td style="text-align: center;">
                         <input type="checkbox" name="can_manage_firmware" value="1" 
                                {% if admin.can_manage_firmware %}checked{% endif %}
+                               onchange="updatePermissions({{ admin.id }})">
+                    </td>
+                    <td style="text-align: center;">
+                        <input type="checkbox" name="can_manage_pihole" value="1" 
+                               {% if admin.can_manage_pihole %}checked{% endif %}
                                onchange="updatePermissions({{ admin.id }})">
                     </td>
                 </form>

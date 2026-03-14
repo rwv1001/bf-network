@@ -1,0 +1,277 @@
+{% extends "base.html" %}
+{% block content %}
+<style>
+.ph-stats-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 24px;
+}
+.ph-stat {
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 16px 20px;
+    min-width: 140px;
+    flex: 1;
+    text-align: center;
+}
+.ph-stat .label { font-size: 0.78em; color: #718096; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 4px; }
+.ph-stat .value { font-size: 1.6em; font-weight: 700; color: #2d3748; }
+.ph-stat.status-ok  { border-color: #68d391; background: #f0fff4; }
+.ph-stat.status-ok  .value { color: #276749; }
+.ph-stat.status-warn { border-color: #f6ad55; background: #fffaf0; }
+.ph-stat.status-warn .value { color: #c05621; }
+.ph-section { margin-bottom: 30px; }
+.ph-section h2 { margin-bottom: 12px; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; }
+.ph-section h3 { margin: 16px 0 8px; font-size: 1em; color: #4a5568; }
+.ph-row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 8px; }
+.ph-row input[type=text], .ph-row input[type=url] { flex: 1; min-width: 180px; }
+.btn-success { background: #38a169; }
+.btn-success:hover { background: #276749; }
+.btn-warn { background: #dd6b20; }
+.btn-warn:hover { background: #c05621; }
+.unavailable { background: #fff5f5; border: 1px solid #feb2b2; border-radius: 8px; padding: 20px; color: #c53030; }
+</style>
+
+<h1>Pi-Hole DNS Management</h1>
+
+{% if not pihole_available %}
+<div class="unavailable">
+    <strong>Pi-Hole is not reachable.</strong> Check that the <code>pihole</code> container is running
+    (<code>docker compose -f pihole/docker-compose.yml ps</code>) and that
+    <code>PIHOLE_WEBPASSWORD</code> is set correctly in <code>.env</code>.
+</div>
+{% else %}
+
+{# ── Stats ── #}
+<div class="ph-stats-grid">
+    <div class="ph-stat">
+        <div class="label">Queries Today</div>
+        <div class="value">{{ "{:,}".format(summary.queries.total | default(0) | int) }}</div>
+    </div>
+    <div class="ph-stat">
+        <div class="label">Blocked Today</div>
+        <div class="value">{{ "{:,}".format(summary.queries.blocked | default(0) | int) }}</div>
+    </div>
+    <div class="ph-stat">
+        <div class="label">% Blocked</div>
+        <div class="value">{{ "%.1f"|format(summary.queries.percent_blocked | default(0) | float) }}%</div>
+    </div>
+    <div class="ph-stat">
+        <div class="label">Domains on Blocklist</div>
+        <div class="value">{{ "{:,}".format(summary.gravity.domains_being_blocked | default(0) | int) }}</div>
+    </div>
+    <div class="ph-stat">
+        <div class="label">Unique Clients</div>
+        <div class="value">{{ summary.clients.active | default(summary.clients.total | default(0)) | int }}</div>
+    </div>
+    {% if blocking %}
+    <div class="ph-stat {% if blocking.blocking == 'enabled' %}status-ok{% else %}status-warn{% endif %}">
+        <div class="label">Blocking</div>
+        <div class="value">{{ "ACTIVE" if blocking.blocking == "enabled" else "OFF" }}</div>
+        {% if blocking.blocking == 'disabled' and blocking.timer %}
+        <div style="font-size:.75em;color:#c05621;">{{ blocking.timer }}s left</div>
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+
+{# ── Blocking control ── #}
+<div class="ph-section">
+    <h2>Blocking Control</h2>
+    {% if blocking and blocking.blocking == 'disabled' %}
+    <form method="POST" style="display:inline;">
+        <input type="hidden" name="action" value="enable_blocking">
+        <button type="submit" class="btn btn-success">&#10003; Re-enable Blocking Now</button>
+    </form>
+    {% else %}
+    <form method="POST" style="display:inline;">
+        <input type="hidden" name="action" value="disable_blocking">
+        <input type="hidden" name="timer" value="1800">
+        <button type="submit" class="btn">Disable 30 min</button>
+    </form>
+    <form method="POST" style="display:inline;">
+        <input type="hidden" name="action" value="disable_blocking">
+        <input type="hidden" name="timer" value="3600">
+        <button type="submit" class="btn">Disable 1 hour</button>
+    </form>
+    <form method="POST" style="display:inline;">
+        <input type="hidden" name="action" value="disable_blocking">
+        <input type="hidden" name="timer" value="0">
+        <button type="submit" class="btn btn-warn"
+            onclick="return confirm('Disable blocking indefinitely? Use Re-enable when done.')">
+            Disable Indefinitely
+        </button>
+    </form>
+    {% endif %}
+</div>
+
+{# ── Domain rules ── #}
+<div class="ph-section">
+    <h2>Domain Rules</h2>
+    <div style="display:flex; gap:20px; flex-wrap:wrap; margin-bottom:20px;">
+
+        <div style="flex:1; min-width:260px; background:#f0fff4; border:1px solid #9ae6b4; border-radius:8px; padding:16px;">
+            <h3 style="margin-top:0; color:#276749;">Whitelist a Domain</h3>
+            <form method="POST">
+                <input type="hidden" name="action" value="add_whitelist">
+                <div class="ph-row">
+                    <input type="text" name="domain" placeholder="example.com" class="form-control" required>
+                </div>
+                <div class="ph-row">
+                    <input type="text" name="comment" placeholder="Reason (optional)" class="form-control">
+                    <button type="submit" class="btn btn-success">Allow</button>
+                </div>
+            </form>
+        </div>
+
+        <div style="flex:1; min-width:260px; background:#fff5f5; border:1px solid #feb2b2; border-radius:8px; padding:16px;">
+            <h3 style="margin-top:0; color:#c53030;">Blacklist a Domain</h3>
+            <form method="POST">
+                <input type="hidden" name="action" value="add_blacklist">
+                <div class="ph-row">
+                    <input type="text" name="domain" placeholder="example.com" class="form-control" required>
+                </div>
+                <div class="ph-row">
+                    <input type="text" name="comment" placeholder="Reason (optional)" class="form-control">
+                    <button type="submit" class="btn btn-danger">Block</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    {# Whitelist table #}
+    <h3>Whitelist &mdash; {{ whitelist|length }} entr{{ 'y' if whitelist|length == 1 else 'ies' }}</h3>
+    {% if whitelist %}
+    <div class="table-responsive">
+    <table>
+        <thead><tr><th>Domain</th><th>Comment</th><th>Kind</th><th></th></tr></thead>
+        <tbody>
+        {% for d in whitelist %}
+        <tr>
+            <td>{{ d.domain }}</td>
+            <td>{{ d.comment or '' }}</td>
+            <td>{{ d.kind | default('exact') }}</td>
+            <td>
+                <form method="POST" style="display:inline;">
+                    <input type="hidden" name="action" value="remove_domain">
+                    <input type="hidden" name="domain" value="{{ d.domain }}">
+                    <input type="hidden" name="type" value="allow">
+                    <input type="hidden" name="kind" value="{{ d.kind | default('exact') }}">
+                    <button type="submit" class="btn btn-small btn-danger"
+                        onclick="return confirm('Remove {{ d.domain }} from whitelist?')">Remove</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+    {% else %}
+    <p style="color:#718096; font-size:.9em;">No whitelist entries. Whitelisted domains are always resolved even if they match a blocklist.</p>
+    {% endif %}
+
+    {# Blacklist table #}
+    <h3>Blacklist &mdash; {{ blacklist|length }} entr{{ 'y' if blacklist|length == 1 else 'ies' }}</h3>
+    {% if blacklist %}
+    <div class="table-responsive">
+    <table>
+        <thead><tr><th>Domain</th><th>Comment</th><th>Kind</th><th></th></tr></thead>
+        <tbody>
+        {% for d in blacklist %}
+        <tr>
+            <td>{{ d.domain }}</td>
+            <td>{{ d.comment or '' }}</td>
+            <td>{{ d.kind | default('exact') }}</td>
+            <td>
+                <form method="POST" style="display:inline;">
+                    <input type="hidden" name="action" value="remove_domain">
+                    <input type="hidden" name="domain" value="{{ d.domain }}">
+                    <input type="hidden" name="type" value="deny">
+                    <input type="hidden" name="kind" value="{{ d.kind | default('exact') }}">
+                    <button type="submit" class="btn btn-small btn-danger"
+                        onclick="return confirm('Remove {{ d.domain }} from blacklist?')">Remove</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+    {% else %}
+    <p style="color:#718096; font-size:.9em;">No custom blacklist entries. Domains blocked via adlists are not shown here.</p>
+    {% endif %}
+</div>
+
+{# ── Adlists / Blocklists ── #}
+<div class="ph-section">
+    <h2>Blocklists (Adlists)</h2>
+    <p style="color:#4a5568; font-size:.9em; margin-bottom:12px;">
+        Add URLs to blocklist databases. After adding or removing a list, click
+        <strong>Update Gravity</strong> to download and apply the changes (takes ~1 min).
+    </p>
+
+    <div class="ph-row" style="margin-bottom:12px;">
+        <form method="POST" style="display:flex; gap:8px; flex:1; flex-wrap:wrap;">
+            <input type="hidden" name="action" value="add_adlist">
+            <input type="url" name="address" placeholder="https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
+                class="form-control" style="flex:2; min-width:300px;" required>
+            <input type="text" name="comment" placeholder="Description (optional)"
+                class="form-control" style="flex:1; min-width:160px;">
+            <button type="submit" class="btn">Add Blocklist</button>
+        </form>
+        <form method="POST">
+            <input type="hidden" name="action" value="update_gravity">
+            <button type="submit" class="btn btn-success"
+                onclick="return confirm('Re-download all blocklists now? Pi-Hole will remain active during the update.')">
+                &#8635; Update Gravity
+            </button>
+        </form>
+    </div>
+
+    <p style="font-size:.82em; color:#718096;">
+        Popular lists:
+        <code>https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts</code> (ads &amp; malware) &bull;
+        <code>https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/porn/hosts</code> (adult content)
+    </p>
+
+    {% if adlists %}
+    <div class="table-responsive">
+    <table>
+        <thead>
+            <tr>
+                <th>URL</th>
+                <th>Comment</th>
+                <th style="text-align:center;">Enabled</th>
+                <th style="text-align:right;">Domains</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for a in adlists %}
+        <tr>
+            <td style="word-break:break-all; font-size:.85em;">{{ a.address }}</td>
+            <td>{{ a.comment or '' }}</td>
+            <td style="text-align:center;">{{ '&#10003;' if a.enabled else '&#10007;' }}</td>
+            <td style="text-align:right;">{{ "{:,}".format(a.number | default(0) | int) }}</td>
+            <td>
+                <form method="POST" style="display:inline;">
+                    <input type="hidden" name="action" value="remove_adlist">
+                    <input type="hidden" name="list_id" value="{{ a.id }}">
+                    <button type="submit" class="btn btn-small btn-danger"
+                        onclick="return confirm('Remove this adlist? Run Update Gravity afterwards.')">Remove</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+    {% else %}
+    <p style="color:#718096; font-size:.9em;">No adlists configured. Add one above to start blocking content categories.</p>
+    {% endif %}
+</div>
+
+{% endif %}{# pihole_available #}
+{% endblock %}
