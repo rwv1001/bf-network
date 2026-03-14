@@ -2248,6 +2248,21 @@ def register():
         return response, 200
     mac_address = get_client_mac()
     ip_address = get_client_ip()
+
+    # Block remote access: if no MAC can be resolved the request came from outside
+    # the local network (e.g. someone clicking a link from outside). Registration
+    # requires a local network connection so we can identify the device.
+    if not mac_address and request.method == 'GET':
+        return render_template('error.html',
+            code='Remote Access Not Supported',
+            message=(
+                'This registration page can only be used when your device is '
+                'connected to the local network. '
+                'Please connect to the Wi-Fi or plug in an Ethernet cable, '
+                'then visit this page again.'
+            )
+        ), 200
+
     detected_mac = mac_address
     detected_ip = ip_address
     is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
@@ -2333,6 +2348,18 @@ def register():
                 )
 
     if request.method == 'POST':
+        # Reject POSTs with no resolvable MAC — submitted from outside the network
+        if not mac_address:
+            if is_ajax:
+                return jsonify({'status': 'error', 'message': 'Registration requires a local network connection. Please connect to Wi-Fi or Ethernet and try again.'}), 403
+            return render_template('error.html',
+                code='Remote Access Not Supported',
+                message=(
+                    'Registration requires a local network connection. '
+                    'Please connect to the Wi-Fi or plug in an Ethernet cable, '
+                    'then visit this page again.'
+                )
+            ), 403
         email = request.form.get('email').strip().lower()
         first_name = request.form.get('first_name').strip()
         last_name = request.form.get('last_name').strip()
