@@ -19,11 +19,15 @@ CREATE TABLE IF NOT EXISTS admins (
     must_change_password BOOLEAN DEFAULT FALSE NOT NULL,
     can_manage_switch_ports BOOLEAN DEFAULT FALSE NOT NULL,
     password_reset_token VARCHAR(255),
-    password_reset_expires TIMESTAMP
+    password_reset_expires TIMESTAMP,
+    can_manage_firmware BOOLEAN DEFAULT FALSE NOT NULL,
+    can_manage_isp_routers BOOLEAN DEFAULT FALSE NOT NULL,
+    can_manage_pihole BOOLEAN DEFAULT FALSE NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_admins_username ON admins(username);
 CREATE INDEX IF NOT EXISTS idx_admins_email ON admins(email);
+CREATE INDEX IF NOT EXISTS ix_admins_password_reset_token ON admins(password_reset_token);
 
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
@@ -52,6 +56,7 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS ix_users_network_password_set_token ON users(network_password_set_token);
 
 CREATE TABLE IF NOT EXISTS devices (
     id SERIAL PRIMARY KEY,
@@ -139,6 +144,18 @@ CREATE TABLE IF NOT EXISTS vlan_mappings (
     wired_enabled BOOLEAN DEFAULT FALSE NOT NULL,
     require_password BOOLEAN DEFAULT FALSE NOT NULL,
     isp_router_id INTEGER REFERENCES isp_routers(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS switch_ports (
+    id               SERIAL PRIMARY KEY,
+    switch_host      VARCHAR(255) NOT NULL,
+    port_name        VARCHAR(100) NOT NULL,
+    port_description TEXT         NOT NULL DEFAULT '',
+    port_role        VARCHAR(20)  NOT NULL DEFAULT 'unknown',
+    link_status      VARCHAR(10)  NOT NULL DEFAULT 'unknown',
+    last_discovered  TIMESTAMP,
+    last_updated     TIMESTAMP,
+    UNIQUE (switch_host, port_name)
 );
 
 CREATE TABLE IF NOT EXISTS domain_policies (

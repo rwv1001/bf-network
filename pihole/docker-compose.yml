@@ -42,9 +42,9 @@ services:
       - /bin/bash
       - -c
       - |
-        if [ -n "${PORTAL_URL:-}" ]; then
-          PORTAL_DOMAIN=$(printf '%s' "$PORTAL_URL" | sed 's|https\?://||' | cut -d/ -f1 | cut -d: -f1)
+        if [ -n "$${PORTAL_URL:-}" ]; then
+          PORTAL_DOMAIN=$$(printf '%s' "$$PORTAL_URL" | sed 's|https\?://||' | cut -d/ -f1 | cut -d: -f1)
           mkdir -p /etc/pihole
-          printf '192.168.99.4 %s\n' "$PORTAL_DOMAIN" > /etc/pihole/custom.list
+          printf '192.168.99.4 %s\n' "$$PORTAL_DOMAIN" > /etc/pihole/custom.list
         fi
         exec /usr/bin/start.sh

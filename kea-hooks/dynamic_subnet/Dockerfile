@@ -12,7 +12,6 @@ RUN apk add --no-cache \
     log4cplus-dev
 
 # Copy hook source
-COPY dynamic_subnet.cc /src/
 COPY dns_hijack_hook.cc /src/
 COPY CMakeLists.txt /src/
 
