@@ -3,12 +3,17 @@
 DNS Query Parser Service (Containerized)
 Parses dnsmasq query logs and stores domain->IP mappings in PostgreSQL.
 Deduplicates entries within 12-hour windows to reduce storage.
+Also polls the Pi-Hole v6 API for blocked queries and records them with
+user attribution via devices.ip_address → users.
 """
 
 import os
 import re
 import time
 import logging
+import urllib.request
+import urllib.error
+import json
 import psycopg2
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
@@ -20,6 +25,12 @@ DB_URL = os.getenv("DATABASE_URL", "postgresql://portal_user:change_this_passwor
 DEDUP_THRESHOLD_HOURS = int(os.getenv("DNS_DEDUP_THRESHOLD_HOURS", "12"))
 CHECK_INTERVAL_SECONDS = int(os.getenv("DNS_CHECK_INTERVAL_SECONDS", "5"))
 RETENTION_DAYS = int(os.getenv("DNS_RETENTION_DAYS", "90"))
+
+# Pi-Hole blocked query polling
+PIHOLE_BASE_URL = os.getenv("PIHOLE_BASE_URL", "http://127.0.0.1:8055")
+PIHOLE_PASSWORD  = os.getenv("PIHOLE_WEBPASSWORD", "")
+PIHOLE_POLL_INTERVAL_SECONDS = int(os.getenv("PIHOLE_POLL_INTERVAL_SECONDS", "30"))
+PIHOLE_BLOCKED_STATUSES = {"GRAVITY", "GRAVITY_CNAME", "BLOCKLIST", "REGEX", "WILDCARD", "DENYLIST"}
 
 # Logging setup
 logging.basicConfig(
@@ -36,6 +47,11 @@ class DNSParser:
         self.last_cleanup = None
         # CNAME chain tracking: pid -> (original_domain, timestamp)
         self.cname_pending = {}
+        # Pi-Hole blocked query polling state
+        self._pihole_sid = None
+        self._pihole_sid_expires = 0
+        self._pihole_last_cursor = None   # last Pi-Hole query id processed
+        self._pihole_last_poll = 0
         
     def connect_db(self):
         """Connect to PostgreSQL database"""
@@ -217,7 +233,166 @@ class DNSParser:
                 self.db_conn.rollback()
             except:
                 pass
-    
+
+    # ------------------------------------------------------------------ #
+    #  Pi-Hole blocked-query polling                                       #
+    # ------------------------------------------------------------------ #
+
+    def _pihole_request(self, path, *, method='GET', body=None):
+        """Make an authenticated request to the Pi-Hole v6 API."""
+        url = f"{PIHOLE_BASE_URL}{path}"
+        data = json.dumps(body).encode() if body is not None else None
+        headers = {'Content-Type': 'application/json'}
+        if self._pihole_sid and time.time() < self._pihole_sid_expires:
+            headers['sid'] = self._pihole_sid
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                return None  # signal re-auth needed
+            logger.debug("Pi-Hole API HTTP %s for %s", e.code, path)
+            return None
+        except Exception as e:
+            logger.debug("Pi-Hole API error for %s: %s", path, e)
+            return None
+
+    def _pihole_authenticate(self):
+        """Obtain a fresh session ID from Pi-Hole."""
+        if not PIHOLE_PASSWORD:
+            return False
+        result = self._pihole_request('/api/auth', method='POST',
+                                      body={'password': PIHOLE_PASSWORD})
+        if result and result.get('session', {}).get('valid'):
+            self._pihole_sid = result['session']['sid']
+            validity = result['session'].get('validity', 1800)
+            self._pihole_sid_expires = time.time() + validity - 60
+            logger.info("Pi-Hole authenticated (session valid %ds)", validity)
+            return True
+        logger.warning("Pi-Hole authentication failed")
+        return False
+
+    def _pihole_get(self, path):
+        """GET with automatic re-auth on 401."""
+        result = self._pihole_request(path)
+        if result is None:
+            if self._pihole_authenticate():
+                result = self._pihole_request(path)
+        return result
+
+    def _load_pihole_cursor(self):
+        """Load the last processed Pi-Hole query ID from DB."""
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute("""
+                    SELECT pihole_query_id FROM pihole_blocked_queries
+                    ORDER BY pihole_query_id DESC LIMIT 1
+                """)
+                row = cur.fetchone()
+                if row:
+                    self._pihole_last_cursor = row[0]
+                    logger.info("Pi-Hole poller resuming after query id %d", self._pihole_last_cursor)
+        except Exception as e:
+            logger.error("Failed to load Pi-Hole cursor: %s", e)
+            try:
+                self.db_conn.rollback()
+            except:
+                pass
+
+    def _resolve_client(self, client_ip):
+        """Return (device_id, user_id, mac_address) for a client IP.
+
+        The MAC is captured now (within 30s of the query) while the
+        IP→device binding is still current.  Storing it denormalised
+        means future DHCP reassignments cannot corrupt the historical record.
+        """
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, user_id, mac_address FROM devices
+                    WHERE ip_address = %s
+                    LIMIT 1
+                """, (client_ip,))
+                row = cur.fetchone()
+                if row:
+                    return row[0], row[1], row[2]
+        except Exception as e:
+            logger.debug("Device lookup failed for %s: %s", client_ip, e)
+            try:
+                self.db_conn.rollback()
+            except:
+                pass
+        return None, None, None
+
+    def poll_pihole_blocked(self):
+        """
+        Poll Pi-Hole /api/queries for newly blocked queries and store them.
+        Uses pihole_query_id as a cursor so restarts never double-count.
+        """
+        if not PIHOLE_PASSWORD:
+            return
+
+        now = time.time()
+        if now - self._pihole_last_poll < PIHOLE_POLL_INTERVAL_SECONDS:
+            return
+        self._pihole_last_poll = now
+
+        # Fetch up to 500 recent queries; we'll filter server-side
+        data = self._pihole_get('/api/queries?limit=500')
+        if not data:
+            return
+
+        queries = data.get('queries', [])
+        if not queries:
+            return
+
+        new_rows = 0
+        for q in reversed(queries):  # oldest-first so cursor advances correctly
+            qid = q.get('id')
+            if qid is None:
+                continue
+            if self._pihole_last_cursor and qid <= self._pihole_last_cursor:
+                continue
+            if q.get('status') not in PIHOLE_BLOCKED_STATUSES:
+                continue
+
+            domain = q.get('domain', '')
+            client_ip = (q.get('client') or {}).get('ip', '')
+            if not domain or not client_ip:
+                continue
+
+            blocked_at = datetime.fromtimestamp(q['time'])
+            query_type = q.get('type', 'A')
+            status = q.get('status', '')
+            list_id = q.get('list_id')
+
+            device_id, user_id, mac_address = self._resolve_client(client_ip)
+
+            try:
+                with self.db_conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO pihole_blocked_queries
+                            (pihole_query_id, blocked_at, domain, query_type,
+                             status, client_ip, mac_address, device_id, user_id, list_id)
+                        VALUES (%s, %s, %s, %s, %s, %s::inet, %s, %s, %s, %s)
+                        ON CONFLICT (pihole_query_id) DO NOTHING
+                    """, (qid, blocked_at, domain, query_type,
+                          status, client_ip, mac_address, device_id, user_id, list_id))
+                self.db_conn.commit()
+                self._pihole_last_cursor = qid
+                new_rows += 1
+            except Exception as e:
+                logger.error("Failed to insert blocked query id=%s: %s", qid, e)
+                try:
+                    self.db_conn.rollback()
+                except:
+                    pass
+
+        if new_rows:
+            logger.info("Pi-Hole: stored %d new blocked queries (cursor=%s)",
+                        new_rows, self._pihole_last_cursor)
+
     def run(self):
         """Main loop"""
         logger.info("DNS Parser Service starting...")
@@ -236,9 +411,15 @@ class DNSParser:
             logger.error("Failed to connect to database after retries, exiting")
             return
         
+        # Load Pi-Hole poll cursor (resume from last seen query id)
+        self._load_pihole_cursor()
+        if PIHOLE_PASSWORD:
+            self._pihole_authenticate()
+
         logger.info(f"Monitoring log file: {LOG_FILE}")
         logger.info(f"Deduplication threshold: {DEDUP_THRESHOLD_HOURS} hours")
         logger.info(f"DNS retention: {RETENTION_DAYS} days")
+        logger.info(f"Pi-Hole polling: {'enabled' if PIHOLE_PASSWORD else 'disabled (PIHOLE_WEBPASSWORD not set)'}")
         
         try:
             while True:
@@ -247,6 +428,9 @@ class DNSParser:
                 
                 # Cleanup old resolutions (runs once per day)
                 self.cleanup_old_resolutions()
+
+                # Poll Pi-Hole for blocked queries
+                self.poll_pihole_blocked()
                 
                 # Sleep before next check
                 time.sleep(CHECK_INTERVAL_SECONDS)

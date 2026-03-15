@@ -36,6 +36,9 @@
 </style>
 
 <h1>Pi-Hole DNS Management</h1>
+<p style="margin-bottom:16px;">
+    <a href="{{ url_for('admin_pihole_blocked_queries') }}" class="btn btn-secondary">&#128683; View Blocked Query Log</a>
+</p>
 
 {% if not pihole_available %}
 <div class="unavailable">

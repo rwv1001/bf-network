@@ -8919,7 +8919,134 @@ def admin_pihole():
     )
 
 
-@app.route('/health')
+@app.route('/admin/pihole/blocked-queries')
+@login_required
+@permission_required('manage_pihole')
+def admin_pihole_blocked_queries():
+    """Show the Pi-Hole blocked queries log with user attribution."""
+    from sqlalchemy import text
+
+    from datetime import datetime as _dt
+
+    page      = request.args.get('page', 1, type=int)
+    per_page  = 50
+    offset    = (page - 1) * per_page
+
+    user_filter      = request.args.get('user_id', '', type=str)
+    domain_filter    = request.args.get('domain', '', type=str).strip()
+    status_filter    = request.args.get('status', '', type=str).strip()
+    client_ip_filter = request.args.get('client_ip', '', type=str).strip()
+    mac_filter       = request.args.get('mac', '', type=str).strip()
+    date_from_str    = request.args.get('date_from', '', type=str).strip()
+    date_to_str      = request.args.get('date_to', '', type=str).strip()
+
+    # Parse date strings into datetime objects (dates are inclusive)
+    date_from = None
+    date_to   = None
+    try:
+        if date_from_str:
+            date_from = _dt.strptime(date_from_str, '%Y-%m-%d')
+    except ValueError:
+        date_from_str = ''
+    try:
+        if date_to_str:
+            # Include the entire end day
+            date_to = _dt.strptime(date_to_str, '%Y-%m-%d').replace(
+                hour=23, minute=59, second=59)
+    except ValueError:
+        date_to_str = ''
+
+    where_clauses = []
+    params = {}
+
+    if user_filter.isdigit():
+        where_clauses.append("pbq.user_id = :user_id")
+        params['user_id'] = int(user_filter)
+
+    if domain_filter:
+        where_clauses.append("pbq.domain ILIKE :domain")
+        params['domain'] = f"%{domain_filter}%"
+
+    if status_filter:
+        where_clauses.append("pbq.status = :status")
+        params['status'] = status_filter
+
+    if client_ip_filter:
+        where_clauses.append("pbq.client_ip::text ILIKE :client_ip")
+        params['client_ip'] = f"%{client_ip_filter}%"
+
+    if mac_filter:
+        where_clauses.append("pbq.mac_address ILIKE :mac")
+        params['mac'] = f"%{mac_filter}%"
+
+    if date_from:
+        where_clauses.append("pbq.blocked_at >= :date_from")
+        params['date_from'] = date_from
+
+    if date_to:
+        where_clauses.append("pbq.blocked_at <= :date_to")
+        params['date_to'] = date_to
+
+    where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+    rows = db.session.execute(text(f"""
+        SELECT
+            pbq.id,
+            pbq.blocked_at,
+            pbq.domain,
+            pbq.query_type,
+            pbq.status,
+            pbq.client_ip::text,
+            pbq.mac_address,
+            d.device_name,
+            u.id        AS user_id,
+            u.first_name,
+            u.last_name,
+            u.email
+        FROM pihole_blocked_queries pbq
+        LEFT JOIN devices d ON pbq.device_id = d.id
+        LEFT JOIN users   u ON pbq.user_id   = u.id
+        {where_sql}
+        ORDER BY pbq.blocked_at DESC
+        LIMIT :limit OFFSET :offset
+    """), {**params, 'limit': per_page, 'offset': offset}).fetchall()
+
+    total = db.session.execute(text(f"""
+        SELECT COUNT(*) FROM pihole_blocked_queries pbq {where_sql}
+    """), params).scalar()
+
+    total_pages = max(1, (total + per_page - 1) // per_page)
+
+    # User list for filter dropdown (only users who appear in the log)
+    users_in_log = db.session.execute(text("""
+        SELECT DISTINCT u.id, u.first_name, u.last_name, u.email
+        FROM pihole_blocked_queries pbq
+        JOIN users u ON pbq.user_id = u.id
+        ORDER BY u.last_name, u.first_name
+    """)).fetchall()
+
+    # Status list for filter dropdown
+    all_statuses = [r[0] for r in db.session.execute(text("""
+        SELECT DISTINCT status FROM pihole_blocked_queries ORDER BY status
+    """)).fetchall()]
+
+    return render_template(
+        'admin_pihole_blocked_queries.html',
+        rows=rows,
+        page=page,
+        total_pages=total_pages,
+        total=total,
+        per_page=per_page,
+        user_filter=user_filter,
+        domain_filter=domain_filter,
+        status_filter=status_filter,
+        client_ip_filter=client_ip_filter,
+        mac_filter=mac_filter,
+        date_from_str=date_from_str,
+        date_to_str=date_to_str,
+        users_in_log=users_in_log,
+        all_statuses=all_statuses,
+    )
 def health():
     """Health check endpoint"""
     try:

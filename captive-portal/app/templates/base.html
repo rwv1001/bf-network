@@ -379,6 +379,7 @@
             {% endif %}
             {% if current_user.can_manage_pihole %}
             <a href="{{ url_for('admin_pihole') }}" class="{% if request.endpoint == 'admin_pihole' %}active{% endif %}">Pi-Hole</a>
+            <a href="{{ url_for('admin_pihole_blocked_queries') }}" class="{% if request.endpoint == 'admin_pihole_blocked_queries' %}active{% endif %}">Blocked Queries</a>
             {% endif %}
             {% if current_user.can_manage_admins %}
             <a href="{{ url_for('admin_manage_admins') }}" class="{% if request.endpoint == 'admin_manage_admins' %}active{% endif %}">Manage Admins</a>

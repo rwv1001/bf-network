@@ -1,0 +1,27 @@
+{
+  "description": "Add Pi-Hole blocked query logging. New table pihole_blocked_queries records every blocked DNS lookup with client IP, MAC address (captured at poll time), device, and user attribution. The dns-parser service polls the Pi-Hole v6 API every 30 seconds and writes results. Admin page at /admin/pihole/blocked-queries.",
+  "env": {
+    "add": [
+      {
+        "key": "PIHOLE_POLL_INTERVAL_SECONDS",
+        "description": "How often (seconds) dns-parser polls Pi-Hole for blocked queries. Default 30.",
+        "required": false,
+        "sensitive": false,
+        "default": "30"
+      }
+    ],
+    "remove": []
+  },
+  "db": {
+    "up":   "commit-migrations/638fa9f-up.sh",
+    "down": "commit-migrations/638fa9f-down.sh",
+    "verify_up": [
+      {"type": "table",  "name": "pihole_blocked_queries"},
+      {"type": "column", "table": "pihole_blocked_queries", "column": "mac_address"}
+    ],
+    "verify_down": [
+      {"type": "table_absent", "name": "pihole_blocked_queries"}
+    ]
+  },
+  "notes": "Rebuild and restart the dns-parser container to pick up PIHOLE_BASE_URL, PIHOLE_WEBPASSWORD, and PIHOLE_POLL_INTERVAL_SECONDS env vars. PIHOLE_WEBPASSWORD must already be set in .env (added in manifest 3a81dfd). No new env vars are strictly required — the feature is silently disabled if PIHOLE_WEBPASSWORD is empty."
+}
