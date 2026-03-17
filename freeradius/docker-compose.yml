@@ -9,8 +9,14 @@ services:
     network_mode: host
 
     # Environment variables (loaded from .env file)
+    env_file:
+      - .env
+      - ../captive-portal/.env
     environment:
       - RADIUS_SECRET=${RADIUS_SECRET}
+      - SWITCH_HOST=${SWITCH_HOST:?}
+      - SW2_IP=${SW2_IP:-192.168.99.3}
+      - PORTAL_IP=${PORTAL_IP:?}
       - DB_HOST=${DB_HOST:-127.0.0.1}
       - DB_PORT=${DB_PORT:-5432}
       - DB_NAME=${DB_NAME:-captive_portal}

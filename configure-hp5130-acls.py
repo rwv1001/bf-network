@@ -13,6 +13,7 @@ Usage:
     python3 configure-hp5130-acls.py
 """
 
+import os
 from netmiko import ConnectHandler
 import sys
 import argparse
@@ -21,7 +22,7 @@ from getpass import getpass
 # Switch connection details
 SWITCH_CONFIG = {
     'device_type': 'hp_comware',
-    'host': '192.168.99.1',  # Your HP 5130 management IP
+    'host': os.environ['SWITCH_HOST'],
     'username': 'admin',      # Change as needed
     'password': '',           # Will prompt if not provided
     'session_log': 'hp5130_session.log',

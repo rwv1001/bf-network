@@ -202,7 +202,7 @@ class KeaSync:
         else:
             # Both unregistered pools use portal DNS
             client_class = "NEWLY_UNREGISTERED" if pool == 'newly_unregistered' else "OLD_UNREGISTERED"
-            dns_servers = f"192.168.{subnet_id}.4"
+            dns_servers = os.getenv('HIJACK_DNS_IP', os.getenv('PORTAL_IP', ''))
         
         reservation = {
             "hw-address": mac,

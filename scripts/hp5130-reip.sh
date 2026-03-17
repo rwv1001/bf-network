@@ -12,7 +12,8 @@
 
 set -euo pipefail
 
-SWITCH_IP="192.168.99.1"   # SSH via VLAN99 so we can change VLAN1 without losing session
+SWITCH_IP="${SWITCH_IP:-192.168.99.1}"   # SSH via VLAN99 so we can change VLAN1 without losing session
+SWITCH_NEW_IP="${SWITCH_HOST:-192.168.99.2}"  # New VLAN99 address after reip
 SWITCH_USER="robert"
 SWITCH_KEY="/home/admin/.ssh/id_rsa"
 SWITCH_SSH_PORT="22"
@@ -113,7 +114,7 @@ if [[ ! -f "$GW_NETWORK_FILE" ]]; then
   exit 1
 fi
 
-sudo sed -i 's/Gateway=192\.168\.99\.1/Gateway=192.168.99.2/' "$GW_NETWORK_FILE"
+sudo sed -i "s/Gateway=${SWITCH_IP}/Gateway=${SWITCH_NEW_IP}/" "$GW_NETWORK_FILE"
 echo "Gateway updated in ${GW_NETWORK_FILE}"
 
 echo "Reloading systemd-networkd..."
@@ -125,12 +126,12 @@ echo "=== Verifying new gateway ==="
 ip route show default
 echo ""
 
-echo "=== Testing connectivity to switch at new IP (192.168.99.2) ==="
-if ping -c 3 -W 2 192.168.99.2 &>/dev/null; then
-  echo "SUCCESS: Switch is reachable at 192.168.99.2"
+echo "=== Testing connectivity to switch at new IP (${SWITCH_NEW_IP}) ==="
+if ping -c 3 -W 2 "${SWITCH_NEW_IP}" &>/dev/null; then
+  echo "SUCCESS: Switch is reachable at ${SWITCH_NEW_IP}"
 else
-  echo "WARNING: Switch not yet responding at 192.168.99.2"
-  echo "It may still be saving/rebooting. Wait 30s and try: ping 192.168.99.2"
+  echo "WARNING: Switch not yet responding at ${SWITCH_NEW_IP}"
+  echo "It may still be saving/rebooting. Wait 30s and try: ping ${SWITCH_NEW_IP}"
 fi
 
 echo ""

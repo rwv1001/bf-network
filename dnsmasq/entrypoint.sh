@@ -1,21 +1,20 @@
 #!/bin/sh
-# Wrapper entrypoint for dnsmasq-normal.
-#
-# dnsmasq creates its log file with mode 660 (owner: dhcpcd, group: root),
-# which prevents the dns-parser container from reading it.  We can't chmod
-# before exec because dnsmasq recreates the file at startup.  Instead we
-# schedule a one-shot chmod 3 seconds after startup in a background subshell,
-# then exec dnsmasq so it becomes PID 1 and handles signals normally.
+# Wrapper entrypoint for dnsmasq-hijack.
+# Generates hijack config from PORTAL_IP and HIJACK_DNS_IP environment variables.
 
-(sleep 3 && chmod 644 /var/log/dnsmasq-queries.log) &
+PORTAL_IP="${PORTAL_IP:?PORTAL_IP required}"
+HIJACK_DNS_IP="${HIJACK_DNS_IP:?HIJACK_DNS_IP required}"
 
-# Derive the portal domain from PORTAL_URL and inject it as a dnsmasq address
-# record so the portal hostname resolves to 192.168.99.4 on VLAN 99.
-# PORTAL_URL comes from captive-portal/.env via the env_file in docker-compose.
-if [ -n "${PORTAL_URL:-}" ]; then
-    PORTAL_DOMAIN=$(printf '%s' "$PORTAL_URL" | sed 's|https\?://||' | cut -d/ -f1)
-    printf 'address=/%s/192.168.99.4\n' "$PORTAL_DOMAIN" > /tmp/portal-address.conf
-    exec dnsmasq "$@" --conf-file=/tmp/portal-address.conf
-else
-    exec dnsmasq "$@"
-fi
+# Generate hijack.conf from environment variables
+cat > /tmp/hijack.conf << EOF
+# DNS Hijacking DNSmasq Configuration (generated from environment)
+# This instance runs on ${HIJACK_DNS_IP} and redirects ALL domains to captive portal
+listen-address=${HIJACK_DNS_IP}
+bind-interfaces
+no-resolv
+address=/#/${PORTAL_IP}
+log-queries
+log-facility=/var/log/dnsmasq-hijack.log
+EOF
+
+exec dnsmasq -k --conf-file=/tmp/hijack.conf "$@"

@@ -38,17 +38,17 @@ services:
     environment:
       DATABASE_URL: postgresql://${DB_USER:-portal_user}:${DB_PASSWORD:-change_this_password}@127.0.0.1:5432/${DB_NAME:-captive_portal}
       REDIS_URL: redis://127.0.0.1:6379/0
-      SECRET_KEY: ${SECRET_KEY:-change_this_secret_key_in_production}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required – set it in .env}
       # Microsoft Graph API (for email via Microsoft 365)
       GRAPH_TENANT_ID: ${GRAPH_TENANT_ID}
       GRAPH_CLIENT_ID: ${GRAPH_CLIENT_ID}
       GRAPH_CLIENT_SECRET: ${GRAPH_CLIENT_SECRET}
       GRAPH_FROM_EMAIL: ${GRAPH_FROM_EMAIL}
       ADMIN_EMAIL: ${ADMIN_EMAIL}
-      RADIUS_SECRET: ${RADIUS_SECRET:-testing123}
-      RADIUS_SERVER: ${RADIUS_SERVER:-192.168.99.4}
-      RADIUS_NAS_IP: ${RADIUS_NAS_IP:-192.168.99.1}
-      PORTAL_URL: ${PORTAL_URL:-http://portal.local}
+      RADIUS_SECRET: ${RADIUS_SECRET:?RADIUS_SECRET is required – set it in .env}
+      RADIUS_SERVER: ${RADIUS_SERVER:?RADIUS_SERVER is required – set it in .env}
+      RADIUS_NAS_IP: ${RADIUS_NAS_IP:?RADIUS_NAS_IP is required – set it in .env}
+      PORTAL_URL: ${PORTAL_URL:?PORTAL_URL is required – set it in .env}
       INSTITUTION_URL: ${INSTITUTION_URL:-}
       INSTITUTION_BUTTON_TEXT: ${INSTITUTION_BUTTON_TEXT:-}
       USAGE_POLICY_TEXT: ${USAGE_POLICY_TEXT:-}
@@ -61,8 +61,10 @@ services:
       WIFI_CONFIRM_SWEEP_INTERVAL_SEC: ${WIFI_CONFIRM_SWEEP_INTERVAL_SEC:-30}
       TEST_ENV: ${TEST_ENV:-false}
       KEA_CONTROL_SOCKET: ${KEA_CONTROL_SOCKET:-/kea/sockets/kea4-ctrl-socket}
-      SWITCH_HOST: ${SWITCH_HOST:-192.168.99.2}
-      SWITCH_HOSTS: ${SWITCH_HOSTS:-192.168.99.2 192.168.99.3}
+      SWITCH_HOST: ${SWITCH_HOST:?SWITCH_HOST is required – set it in .env}
+      SWITCH_HOSTS: ${SWITCH_HOSTS:?SWITCH_HOSTS is required – set it in .env}
+      PORTAL_IP: ${PORTAL_IP:?PORTAL_IP is required – set it in .env}
+      HIJACK_DNS_IP: ${HIJACK_DNS_IP:?HIJACK_DNS_IP is required – set it in .env}
       SWITCH_USER: ${SWITCH_USER:-robert}
       SWITCH_PASS: ${SWITCH_PASS}
       SWITCH_PORT_LOOKUP_ENABLED: ${SWITCH_PORT_LOOKUP_ENABLED:-1}
@@ -84,7 +86,7 @@ services:
       DEFAULT_ISP_ROUTER_VLAN: ${DEFAULT_ISP_ROUTER_VLAN:-1}
       DEFAULT_ISP_ROUTER_PORT: ${DEFAULT_ISP_ROUTER_PORT:-}
       DEFAULT_ISP_ROUTER_DHCP_TRUST: ${DEFAULT_ISP_ROUTER_DHCP_TRUST:-true}
-      GIT_REPO_DIR: ${GIT_REPO_DIR:-/home/admin/bf-network}
+      GIT_REPO_DIR: ${GIT_REPO_DIR:?GIT_REPO_DIR is required – set it in .env}
       FIRMWARE_TEST_ENABLED: ${FIRMWARE_TEST_ENABLED:-false}
       RESTART_QUEUE_DIR: /restart-queue
       PIHOLE_WEBPASSWORD: ${PIHOLE_WEBPASSWORD:-}
@@ -100,7 +102,7 @@ services:
       - ../shared/acl-queue:/acl-queue
       - /home/admin/.ssh:/keys:ro  # SSH keys for switch access
       - /etc/systemd/network:/host-systemd-network
-      - ${GIT_REPO_DIR:-/home/admin/bf-network}:${GIT_REPO_DIR:-/home/admin/bf-network}  # git repo for firmware management
+      - ${GIT_REPO_DIR}:${GIT_REPO_DIR}  # git repo for firmware management
       - /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro  # docker compose plugin
     network_mode: host
     privileged: true  # Required for iptables manipulation from non-root user

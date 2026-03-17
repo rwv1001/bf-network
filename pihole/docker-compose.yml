@@ -32,12 +32,12 @@ services:
       - ./etc-pihole:/etc/pihole
       # DNS query log – shared with dns-parser container
       - ./logs:/var/log/pihole
-      # Explicit listen-address binding so Pi-Hole does NOT bind 192.168.99.5,
+      # Explicit listen-address binding so Pi-Hole does NOT bind HIJACK_DNS_IP,
       # which is reserved for dnsmasq-hijack on the same eth0.99 interface.
-      - ./99-local-bind.conf:/etc/dnsmasq.d/99-local-bind.conf:ro
-    # Write portal domain to custom.list before Pi-Hole starts, so the portal
-    # hostname resolves locally to 192.168.99.4 for all registered devices.
-    # PORTAL_URL is provided by env_file (captive-portal/.env).
+      # Generated at container startup by entrypoint below from PORTAL_IP env var.
+    # Write portal domain to custom.list and generate 99-local-bind.conf before
+    # Pi-Hole starts, so the portal hostname resolves locally for registered devices.
+    # PORTAL_IP and PORTAL_URL are provided by env_file (captive-portal/.env).
     entrypoint:
       - /bin/bash
       - -c
@@ -45,6 +45,8 @@ services:
         if [ -n "$${PORTAL_URL:-}" ]; then
           PORTAL_DOMAIN=$$(printf '%s' "$$PORTAL_URL" | sed 's|https\?://||' | cut -d/ -f1 | cut -d: -f1)
           mkdir -p /etc/pihole
-          printf '192.168.99.4 %s\n' "$$PORTAL_DOMAIN" > /etc/pihole/custom.list
+          printf '%s %s\n' "$${PORTAL_IP}" "$$PORTAL_DOMAIN" > /etc/pihole/custom.list
         fi
+        mkdir -p /etc/dnsmasq.d
+        printf 'bind-interfaces\nexcept-interface=eth0.99\nlisten-address=127.0.0.1\nlisten-address=%s\n' "$${PORTAL_IP}" > /etc/dnsmasq.d/99-local-bind.conf
         exec /usr/bin/start.sh

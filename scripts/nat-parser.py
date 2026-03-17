@@ -24,7 +24,7 @@ DB_NAME = os.getenv("DB_NAME", "captive_portal")
 DB_USER = os.getenv("DB_USER", "portal_user")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "change_this_password")
 
-UDM_HOST = "192.168.1.1"
+UDM_HOST = os.getenv("UDM_HOST", "192.168.1.1")
 UDM_SSH_KEY = os.path.expanduser("~/.ssh/udm_key")
 UDM_INSTALL_SCRIPT = "/home/admin/bf-network/scripts/udm-nat-logger-persist.sh"
 

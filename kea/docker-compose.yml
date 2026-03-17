@@ -16,8 +16,10 @@ services:
       - ../kea-hooks/dynamic_subnet/dhcp_dns_hijack.so:/usr/local/lib/kea/hooks/dhcp_dns_hijack.so:ro
       - /home/admin/.ssh:/keys:ro
     environment:
-      SWITCH_HOST: 192.168.99.2
-      SWITCH_HOSTS: "192.168.99.2 192.168.99.3"
+      PORTAL_IP: ${PORTAL_IP:?PORTAL_IP is required – set it in kea/.env}
+      HIJACK_DNS_IP: ${HIJACK_DNS_IP:?HIJACK_DNS_IP is required – set it in kea/.env}
+      SWITCH_HOST: ${SWITCH_HOST:?SWITCH_HOST is required – set it in kea/.env}
+      SWITCH_HOSTS: ${SWITCH_HOSTS:?SWITCH_HOSTS is required – set it in kea/.env}
       SWITCH_USER: ${SWITCH_USER:-robert}
       SWITCH_SSH_PORT: ${SWITCH_SSH_PORT:-22}
       SWITCH_KEY_PATH: ${SWITCH_KEY_PATH:-/keys/id_rsa}
@@ -35,9 +37,20 @@ services:
       DB_PORT: ${DB_PORT:-5432}
       DB_NAME: ${DB_NAME:-captive_portal}
       DB_USER: ${DB_USER:-portal_user}
-      DB_PASSWORD: ${DB_PASSWORD:-your_secure_database_password_here}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required – set it in kea/.env}
     entrypoint: |
       sh -c '
+      # Abort early if any required variable is missing
+      : ${DB_NAME:?DB_NAME is required – set it in kea/.env}
+      : ${DB_USER:?DB_USER is required – set it in kea/.env}
+      : ${DB_PASSWORD:?DB_PASSWORD is required – set it in kea/.env}
+      : ${DB_HOST:?DB_HOST is required – set it in kea/.env}
+      : ${DB_PORT:?DB_PORT is required – set it in kea/.env}
+      : ${PORTAL_IP:?PORTAL_IP is required – set it in kea/.env}
+      : ${HIJACK_DNS_IP:?HIJACK_DNS_IP is required – set it in kea/.env}
+      # Generate dhcp4.json from template (substitutes DB credentials and site IPs)
+      envsubst < /kea/config/dhcp4.json.template > /kea/config/dhcp4.json
+      echo "$(date -Iseconds) kea-entrypoint: dhcp4.json generated from template" >&2
       rm -f /usr/local/var/run/kea/dhcp4.kea-dhcp4.pid
       mkdir -p /usr/local/var/run/kea
       ln -sfn /usr/local/var/run/kea /run/kea

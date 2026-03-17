@@ -113,7 +113,7 @@ def main():
     print("="*70)
     
     # Get credentials
-    host = os.getenv('SWITCH_HOST', '192.168.99.1')
+    host = os.environ['SWITCH_HOST']
     user = os.getenv('SWITCH_USER', 'admin')
     password = os.getenv('SWITCH_PASS', '')
     

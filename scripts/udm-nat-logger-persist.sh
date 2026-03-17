@@ -4,6 +4,10 @@
 
 set -e
 
+PORTAL_IP="${PORTAL_IP:?PORTAL_IP required}"
+USER_VLAN_MIN="${USER_VLAN_MIN:-192.168.2.0}"
+USER_VLAN_MAX="${USER_VLAN_MAX:-192.168.95.255}"
+
 echo "=== UDM NAT Logger Persistent Installation ==="
 
 # 1. Create the NAT logger script in /mnt/data (persists across upgrades)
@@ -46,6 +50,13 @@ conntrack -E -o extended 2>/dev/null | while read -r line; do
     logger -t "$SYSLOG_TAG" -n "$REMOTE_SYSLOG" "SNAT: local_src=${src_ip}:${sport} dst=${dst_ip}:${dport}"
 done
 NATEOF
+
+# Substitute site-specific values from environment
+sed -i \
+    -e "s|REMOTE_SYSLOG=\"192.168.99.4\"|REMOTE_SYSLOG=\"${PORTAL_IP}\"|" \
+    -e "s|USER_VLAN_MIN=\"192.168.2.0\"|USER_VLAN_MIN=\"${USER_VLAN_MIN}\"|" \
+    -e "s|USER_VLAN_MAX=\"192.168.95.255\"|USER_VLAN_MAX=\"${USER_VLAN_MAX}\"|" \
+    /mnt/data/nat_logger.sh
 
 chmod +x /mnt/data/nat_logger.sh
 
@@ -103,7 +114,7 @@ echo "NAT Logger is now:"
 echo "  ✓ Running (PID $(cat /var/run/nat_logger.pid 2>/dev/null || echo 'unknown'))"
 echo "  ✓ Persistent across reboots (/mnt/data/on_boot.d/20-nat-logger.sh)"
 echo "  ✓ Persistent across upgrades (/mnt/data survives)"
-echo "  ✓ Forwarding to 192.168.99.4:514"
+echo "  ✓ Forwarding to ${PORTAL_IP}:514"
 echo ""
 echo "Check status:"
 echo "  ps aux | grep nat_logger"

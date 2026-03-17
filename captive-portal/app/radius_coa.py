@@ -13,9 +13,9 @@ import io
 logger = logging.getLogger(__name__)
 
 # RADIUS configuration
-RADIUS_SERVER = os.getenv('RADIUS_SERVER', '192.168.99.4')
-RADIUS_SECRET = os.getenv('RADIUS_SECRET', 'testing123').encode('utf-8')
-RADIUS_NAS_IP = os.getenv('RADIUS_NAS_IP', '192.168.99.1')
+RADIUS_SERVER = os.environ['RADIUS_SERVER']
+RADIUS_SECRET = os.environ['RADIUS_SECRET'].encode('utf-8')
+RADIUS_NAS_IP = os.environ['RADIUS_NAS_IP']
 COA_PORT = 3799
 
 # Create a minimal RADIUS dictionary

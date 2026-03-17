@@ -3,7 +3,7 @@
 
 # HP 5130 switch 1 - MAC authentication
 client hp5130-switch {
-        ipaddr = 192.168.99.2
+        ipaddr = ${SWITCH_HOST}
         secret = ${RADIUS_SECRET}
         shortname = hp5130-sw1
         nas_type = other
@@ -13,7 +13,7 @@ client hp5130-switch {
 
 # HP 5130 switch 2 - MAC authentication
 client hp5130-switch-2 {
-        ipaddr = 192.168.99.3
+        ipaddr = ${SW2_IP}
         secret = ${RADIUS_SECRET}
         shortname = hp5130-sw2
 	nas_type = other
@@ -23,7 +23,7 @@ client hp5130-switch-2 {
 
 # Captive Portal - CoA requests
 client captive-portal {
-	ipaddr = 192.168.99.4
+	ipaddr = ${PORTAL_IP}
 	secret = ${RADIUS_SECRET}
 	shortname = portal
 	

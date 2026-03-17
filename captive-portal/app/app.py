@@ -1366,8 +1366,8 @@ def reset_dns_hijack_rules():
         if "DNAT" not in line:
             continue
         if (
-            "--to-destination 192.168.99.5:53" not in line
-            and "--to-destination 192.168.99.4:8080" not in line
+            f"--to-destination {os.environ['HIJACK_DNS_IP']}:53" not in line
+            and f"--to-destination {os.environ['PORTAL_IP']}:8080" not in line
         ):
             continue
 
@@ -1669,8 +1669,8 @@ def cleanup_orphan_hijack_rules():
         if "DNAT" not in line:
             continue
         if (
-            "--to-destination 192.168.99.5:53" not in line
-            and "--to-destination 192.168.99.4:8080" not in line
+            f"--to-destination {os.environ['HIJACK_DNS_IP']}:53" not in line
+            and f"--to-destination {os.environ['PORTAL_IP']}:8080" not in line
         ):
             continue
 
@@ -1741,7 +1741,7 @@ def manage_switch_acl(action, ip_address, vlan_id):
             logger.warning("ACL queue script error for %s: %s", ip_address, exc)
 
     # Fallback: apply ACL directly via SSH
-    switch_host = os.getenv('SWITCH_HOST', '192.168.99.2')
+    switch_host = os.environ['SWITCH_HOST']
 
     if not vlan_id and ip_address:
         try:
@@ -1829,7 +1829,7 @@ def _switch_port_allowed(iface):
 def _get_switch_ssh_client():
     """Retained for backward compat; returns a host string instead of a paramiko client.
     All callers have been updated to use _run_switch_command() directly."""
-    return os.getenv('SWITCH_HOST', '192.168.99.2')
+    return os.environ['SWITCH_HOST']
 
 
 def _find_switch_port_for_mac(client_or_host, mac_address):
@@ -1837,7 +1837,7 @@ def _find_switch_port_for_mac(client_or_host, mac_address):
     client_or_host is either the SWITCH_HOST string or legacy paramiko client (ignored).
     Uses _run_switch_command via subprocess ssh, matching hp5130-port-lookup.sh behaviour.
     """
-    switch_host = os.getenv('SWITCH_HOST', '192.168.99.2')
+    switch_host = os.environ['SWITCH_HOST']
 
     normalized = _normalize_switch_mac(mac_address)
     if not normalized:
@@ -1950,7 +1950,7 @@ def replug_switch_port_for_mac(mac_address):
         _persist_switch_port(mac_address, port)
 
         logger.info("Replugging %s on port %s", mac_address, port)
-        switch_host = os.getenv('SWITCH_HOST', '192.168.99.2')
+        switch_host = os.environ['SWITCH_HOST']
         delay_raw = os.getenv('SWITCH_REPLUG_DELAY_SEC', '3')
         try:
             delay_sec = max(1, int(delay_raw))
@@ -5013,7 +5013,7 @@ def _run_firmware_script(action, stream=False, extra_args=None):
     The git repo ($GIT_REPO_DIR) and docker compose plugin are mounted into
     the container at their real host paths, so git/docker compose work natively.
     """
-    git_repo_dir = os.getenv('GIT_REPO_DIR', '/home/admin/bf-network')
+    git_repo_dir = os.environ['GIT_REPO_DIR']
     script_path = '/scripts/firmware-manager.sh'
     cmd = ['/bin/bash', script_path, action] + (extra_args or [])
     env = dict(os.environ)
@@ -5045,7 +5045,7 @@ def _load_commit_manifest(tree_hash, file_hash):
     """
     if not tree_hash or not file_hash:
         return None
-    git_repo_dir = os.getenv('GIT_REPO_DIR', '/home/admin/bf-network')
+    git_repo_dir = os.environ['GIT_REPO_DIR']
     # Try short hash (7 chars, conventional naming) first, then full hash as fallback.
     candidates = [file_hash[:7], file_hash]
     for name in candidates:
@@ -5064,7 +5064,7 @@ def _load_commit_manifest(tree_hash, file_hash):
 
 def _read_env_file():
     """Parse the captive-portal .env file and return a dict of current values."""
-    git_repo_dir = os.getenv('GIT_REPO_DIR', '/home/admin/bf-network')
+    git_repo_dir = os.environ['GIT_REPO_DIR']
     env_path = os.path.join(git_repo_dir, 'captive-portal', '.env')
     result = {}
     if not os.path.exists(env_path):
@@ -5084,7 +5084,7 @@ def _write_env_vars(new_vars):
     """
     if not new_vars:
         return
-    git_repo_dir = os.getenv('GIT_REPO_DIR', '/home/admin/bf-network')
+    git_repo_dir = os.environ['GIT_REPO_DIR']
     env_path = os.path.join(git_repo_dir, 'captive-portal', '.env')
     lines = []
     if os.path.exists(env_path):
@@ -5118,7 +5118,7 @@ def _remove_env_vars(keys):
     keys = set(keys)
     if not keys:
         return
-    git_repo_dir = os.getenv('GIT_REPO_DIR', '/home/admin/bf-network')
+    git_repo_dir = os.environ['GIT_REPO_DIR']
     env_path = os.path.join(git_repo_dir, 'captive-portal', '.env')
     if not os.path.exists(env_path):
         return
@@ -5371,7 +5371,7 @@ def admin_firmware_stream(action):
     from flask import stream_with_context, Response as FlaskResponse
 
     def generate():
-        git_repo_dir = os.getenv('GIT_REPO_DIR', '/home/admin/bf-network')
+        git_repo_dir = os.environ['GIT_REPO_DIR']
         script_env = dict(os.environ)
         script_env['GIT_REPO_DIR'] = git_repo_dir
 
@@ -8590,7 +8590,7 @@ _PIHOLE_LOCK_KEY = 'pihole:auth_lock'
 
 
 def _pihole_base():
-    host = os.getenv('PIHOLE_HOST', '192.168.99.4')
+    host = os.getenv('PIHOLE_HOST', os.environ['PORTAL_IP'])
     port = os.getenv('PIHOLE_PORT', '8055')
     return f'http://{host}:{port}'
 
@@ -9047,6 +9047,9 @@ def admin_pihole_blocked_queries():
         users_in_log=users_in_log,
         all_statuses=all_statuses,
     )
+
+
+@app.route('/health')
 def health():
     """Health check endpoint"""
     try:

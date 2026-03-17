@@ -36,7 +36,7 @@ NPM_EMAIL    = os.environ.get("NPM_ADMIN_EMAIL", "")
 NPM_PASS     = os.environ.get("NPM_ADMIN_PASSWORD", "")
 LE_EMAIL     = os.environ.get("ADMIN_EMAIL", "")
 PORTAL_URL   = os.environ.get("PORTAL_URL", "")
-FWD_HOST     = os.environ.get("PORTAL_FORWARD_HOST", "192.168.99.4")
+FWD_HOST     = os.environ.get("PORTAL_FORWARD_HOST") or os.environ["PORTAL_IP"]
 FWD_PORT     = int(os.environ.get("PORTAL_FORWARD_PORT", "8080"))
 
 

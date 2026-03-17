@@ -14,7 +14,7 @@
 #             RADIUS, CoA, PI_KEY / robert SSH user, NTP, default route, ACL 3000/3099,
 #             portal settings, trunk port on SW2, scheduler backup, save force
 #   Phase 2 – SSH to SW1 (key):      configure Ten-GigabitEthernet1/0/28 as trunk to SW2
-#   Phase 3 – Run hp5130-acl-baseline.sh against SW2 via key (now at 192.168.99.3)
+#   Phase 3 – Run hp5130-acl-baseline.sh against SW2 via key (now at SW2_IP / 192.168.99.3)
 #
 # Access ports (GigabitEthernet3/0/1..N) are NOT configured here.
 # Run hp5130-acl-baseline.sh first, then configure each port manually or via a
@@ -28,6 +28,12 @@ SW2_USER="${SW2_USER:-admin}"
 SW1_HOST="${SW1_HOST:-192.168.99.2}"
 SW1_USER="${SW1_USER:-robert}"
 KEY="${KEY:-/home/admin/.ssh/id_rsa}"
+
+# Site-specific IPs (must be set in environment or captive-portal/.env)
+PORTAL_IP="${PORTAL_IP:?PORTAL_IP required}"
+HIJACK_DNS_IP="${HIJACK_DNS_IP:?HIJACK_DNS_IP required}"
+SW2_IP="${SW2_IP:-192.168.99.3}"         # SW2 VLAN-99 management IP after reip
+MGMT_GATEWAY="${MGMT_GATEWAY:-192.168.1.1}" # Default gateway for management VLAN
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -87,7 +93,7 @@ irf member 1 priority 1
 #
 mac-authentication domain macauth
 #
-web-auth free-ip 192.168.99.4 255.255.255.255
+web-auth free-ip ${PORTAL_IP} 255.255.255.255
 #
 port-security enable
 #
@@ -197,7 +203,7 @@ interface Vlan-interface90
 quit
 interface Vlan-interface99
  description GW_VLAN99
- ip address 192.168.99.3 255.255.255.0
+ ip address ${SW2_IP} 255.255.255.0
 quit
 interface Vlan-interface250
  description GW_VLAN250
@@ -222,16 +228,16 @@ domain system
 quit
 #
 radius scheme rad1
- primary authentication 192.168.99.4
- primary accounting 192.168.99.4
+ primary authentication ${PORTAL_IP}
+ primary accounting ${PORTAL_IP}
  key authentication simple $RADIUS_SECRET
  key accounting simple $RADIUS_SECRET
  user-name-format without-domain
- nas-ip 192.168.99.3
+ nas-ip ${SW2_IP}
 quit
 #
 radius dynamic-author server
- client ip 192.168.99.4 key simple $RADIUS_SECRET
+ client ip ${PORTAL_IP} key simple $RADIUS_SECRET
 quit
 #
 domain macauth
@@ -248,19 +254,19 @@ domain default enable system
 acl number 3000 name PREAUTH
  rule 1 permit udp source-port eq bootpc destination-port eq bootps
  rule 2 permit udp source-port eq bootps destination-port eq bootpc
- rule 5 permit udp destination 192.168.99.4 0 destination-port eq dns
- rule 6 permit tcp destination 192.168.99.4 0 destination-port eq dns
- rule 7 permit udp destination 192.168.99.5 0 destination-port eq dns
- rule 8 permit tcp destination 192.168.99.5 0 destination-port eq dns
- rule 9 permit icmp destination 192.168.99.5 0
- rule 10 permit tcp destination 192.168.99.4 0 destination-port eq www
- rule 11 permit tcp destination 192.168.99.4 0 destination-port eq 443
+ rule 5 permit udp destination ${PORTAL_IP} 0 destination-port eq dns
+ rule 6 permit tcp destination ${PORTAL_IP} 0 destination-port eq dns
+ rule 7 permit udp destination ${HIJACK_DNS_IP} 0 destination-port eq dns
+ rule 8 permit tcp destination ${HIJACK_DNS_IP} 0 destination-port eq dns
+ rule 9 permit icmp destination ${HIJACK_DNS_IP} 0
+ rule 10 permit tcp destination ${PORTAL_IP} 0 destination-port eq www
+ rule 11 permit tcp destination ${PORTAL_IP} 0 destination-port eq 443
  rule 12 permit ip destination 192.168.250.4 0
  rule 100 deny ip
 quit
 acl number 3099 name VLAN99_EGRESS
  rule 0 permit ip source 192.168.99.0 0.0.0.255 destination 192.168.1.0 0.0.0.255
- rule 1 permit ip source 192.168.99.4 0
+ rule 1 permit ip source ${PORTAL_IP} 0
  rule 2 permit ip source 192.168.99.0 0.0.0.255
  rule 5 deny ip source 192.168.99.0 0.0.0.255
  rule 100 permit ip
@@ -275,22 +281,22 @@ interface Vlan-interface99
 quit
 #
 portal web-server piportal
- url http://192.168.99.4:8080/register/
+ url http://${PORTAL_IP}:8080/register/
 quit
 web-auth server PI-PORTAL
- url http://192.168.99.4:8080/register/
- ip 192.168.99.4 port 8080
+ url http://${PORTAL_IP}:8080/register/
+ ip ${PORTAL_IP} port 8080
 quit
-portal free-rule 30 destination ip 192.168.99.4 255.255.255.255 tcp 443
+portal free-rule 30 destination ip ${PORTAL_IP} 255.255.255.255 tcp 443
 #
 arp detection validate dst-mac ip src-mac
 #
 ntp-service enable
 ntp-service source Vlan-interface1
-ntp-service unicast-server 192.168.99.4
+ntp-service unicast-server ${PORTAL_IP}
 ntp-service unicast-server 162.159.200.1
 #
-ip route-static 0.0.0.0 0 192.168.1.1
+ip route-static 0.0.0.0 0 ${MGMT_GATEWAY}
 #
 ssh server enable
 scp server enable
@@ -337,7 +343,7 @@ netconf ssh server enable
 #
 scheduler job backup-config
  command 1 save safely force
- command 2 tftp 192.168.99.4 put flash:/startup.cfg 5130-startup-sw2.cfg
+ command 2 tftp ${PORTAL_IP} put flash:/startup.cfg 5130-startup-sw2.cfg
 quit
 scheduler schedule nightly-backup
  user-role network-admin
@@ -364,7 +370,7 @@ fi
 
 echo ""
 echo "=== Phase 1 complete. SW2 configured. SSH key installed. ==="
-echo "    SW2 management IP is now 192.168.99.3"
+echo "    SW2 management IP is now ${SW2_IP}"
 echo ""
 sleep 3   # Give the switch time to finish saving
 
@@ -402,9 +408,9 @@ echo "=== Phase 2 complete. SW1 trunk port Ten-GigabitEthernet1/0/28 configured.
 echo ""
 
 # ─── Phase 3: Run ACL baseline on SW2 ────────────────────────────────────────
-echo "=== Phase 3: Running ACL baseline against SW2 (192.168.99.3) ==="
+echo "=== Phase 3: Running ACL baseline against SW2 (${SW2_IP}) ==="
 
-SWITCH_HOST=192.168.99.3 \
+SWITCH_HOST=${SW2_IP} \
 SWITCH_USER=robert \
 SWITCH_KEY_PATH="$KEY" \
     bash "$SCRIPT_DIR/hp5130-acl-baseline.sh" || {
@@ -419,12 +425,12 @@ echo "================================================================"
 echo " Stage 2 complete!"
 echo ""
 echo " Summary:"
-echo "   SW2 VLAN99 management IP : 192.168.99.3"
-echo "   SW2 VLAN1 management IP  : 192.168.1.3"
-echo "   SSH as robert (key auth) : ssh -i $KEY -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa robert@192.168.99.3"
+echo "   SW2 VLAN99 management IP : ${SW2_IP}"
+echo "   SW2 VLAN1 management IP  : $SW2_HOST"
+echo "   SSH as robert (key auth) : ssh -i $KEY -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa robert@${SW2_IP}"
 echo ""
 echo " Next steps:"
-echo "   1. Verify: ssh robert@192.168.99.3 and run 'display version'"
+echo "   1. Verify: ssh robert@${SW2_IP} and run 'display version'"
 echo "   2. Configure access ports (GigabitEthernet3/0/1..N) for mac-auth"
 echo "      (see SW1's running config as a template)"
 echo "   3. Connect APs and test WiFi registration via SW2"

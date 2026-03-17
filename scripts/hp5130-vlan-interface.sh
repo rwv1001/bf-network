@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-SWITCH_HOST="${SWITCH_HOST:-192.168.1.3}"
+SWITCH_HOST="${SWITCH_HOST:?SWITCH_HOST required}"
 SWITCH_USER="${SWITCH_USER:-robert}"
 SWITCH_SSH_PORT="${SWITCH_SSH_PORT:-22}"
 SWITCH_KEY_PATH="${SWITCH_KEY_PATH:-/home/admin/.ssh/id_rsa}"

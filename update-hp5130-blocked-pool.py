@@ -13,6 +13,7 @@ Pool structure:
 - .224-.254  : BLOCKED (walled garden + blocked message)
 """
 
+import os
 from netmiko import ConnectHandler
 import argparse
 from getpass import getpass
@@ -20,7 +21,7 @@ from getpass import getpass
 # Switch connection details
 SWITCH_CONFIG = {
     'device_type': 'hp_comware',
-    'host': '192.168.99.1',
+    'host': os.environ['SWITCH_HOST'],
     'username': 'admin',
     'password': '',
     'session_log': 'hp5130_acl_update.log',
