@@ -5,8 +5,8 @@
 set -e
 
 PORTAL_IP="${PORTAL_IP:?PORTAL_IP required}"
-USER_VLAN_MIN="${USER_VLAN_MIN:-192.168.2.0}"
-USER_VLAN_MAX="${USER_VLAN_MAX:-192.168.95.255}"
+USER_VLAN_MIN="${USER_VLAN_MIN:?USER_VLAN_MIN is required}"
+USER_VLAN_MAX="${USER_VLAN_MAX:?USER_VLAN_MAX is required}"
 
 echo "=== UDM NAT Logger Persistent Installation ==="
 

@@ -1,0 +1,23 @@
+{
+  "description": "Replace all hardcoded 192.168 network prefixes with NETWORK_OCTET env var; derive DHCP pool sizes from VLAN_PREFIX_MAP; generate dhcp4.json via generate-kea-config.py instead of envsubst template.",
+  "env": {
+    "add": [
+      {
+        "key": "NETWORK_OCTET",
+        "description": "Two-octet network prefix used for all VLANs (e.g. 192.168). Change only if your subnets use a different class-B prefix.",
+        "default": "192.168",
+        "required": false,
+        "sensitive": false
+      },
+      {
+        "key": "VLAN_PREFIX_MAP",
+        "description": "Bootstrap VLAN-to-prefix-length mapping used by generate-kea-config.py when the database has no prefix entries yet. Format: VLAN_ID:prefix_length,... (e.g. 10:24,20:22,30:23). Once you have saved the VLAN config page the database becomes the source of truth and this value is only a fallback.",
+        "default": "10:24,20:22,30:23,40:24,50:24,60:24,70:24,250:24",
+        "required": false,
+        "sensitive": false
+      }
+    ],
+    "remove": []
+  },
+  "notes": "After upgrading: (1) set NETWORK_OCTET and VLAN_PREFIX_MAP in both captive-portal/.env and kea/.env, (2) rebuild and restart the kea container — generate-kea-config.py will regenerate dhcp4.json from scratch; the old dhcp4.json template is no longer used. NETWORK_OCTET defaults to 192.168 so no action is needed if your network uses that prefix."
+}

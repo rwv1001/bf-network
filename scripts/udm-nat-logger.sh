@@ -2,7 +2,7 @@
 # UDM NAT Logger - Detailed conntrack monitoring
 # Logs: Internal_IP:Port ↔ UDM_WAN_IP:Port mapping to syslog
 
-UDM_WAN="${UDM_WAN:-192.168.0.50}"     # UDM WAN interface IP
+UDM_WAN="${UDM_WAN:?UDM_WAN is required}"     # UDM WAN interface IP
 SYSLOG_SERVER="${PORTAL_IP:?PORTAL_IP required}" # Pi rsyslog server
 STATE_FILE="/tmp/udm_nat_state"
 

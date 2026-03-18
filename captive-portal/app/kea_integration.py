@@ -21,6 +21,10 @@ from typing import Optional, Dict, Any, List
 logger = logging.getLogger(__name__)
 
 
+def _net_octet() -> str:
+    return os.getenv('NETWORK_OCTET', '192.168')
+
+
 def _parse_vlan_prefix_map(raw: str) -> Dict[int, int]:
     mapping: Dict[int, int] = {}
     if not raw:
@@ -44,7 +48,10 @@ def _parse_vlan_prefix_map(raw: str) -> Dict[int, int]:
 def _pool_bounds_for_prefix(prefix: int) -> Dict[str, int]:
     total = 2 ** (32 - prefix)
     block_size = 40 * (2 ** (24 - prefix))
-    registered_start = 5
+    # Always start the pool at offset 1 (offset 0 is the network address and
+    # Kea never allocates it). Infrastructure IPs are protected by ghost host
+    # reservations baked into dhcp4.json by generate-kea-config.py.
+    registered_start = 1
     registered_end = total - block_size - 1
     blocked_start = registered_end + 1
     blocked_end = total - 1
@@ -240,7 +247,7 @@ class KeaIntegration:
                 # Only set IP if explicitly provided (for manual assignments)
                 prefix = _prefix_for_vlan(vlan)
                 bounds = _pool_bounds_for_prefix(prefix)
-                network = ipaddress.IPv4Network(f"192.168.{vlan}.0/{prefix}", strict=False)
+                network = ipaddress.IPv4Network(f"{_net_octet()}.{vlan}.0/{prefix}", strict=False)
                 try:
                     ip_value = ipaddress.IPv4Address(ip_address)
                 except Exception:
@@ -249,6 +256,7 @@ class KeaIntegration:
                 if ip_value not in network:
                     logger.error(f"IP {ip_address} not in VLAN {vlan} subnet {network}")
                     return False
+
                 offset = int(ip_value) - int(network.network_address)
                 if not (bounds["registered_start"] <= offset <= bounds["registered_end"]):
                     logger.error(f"IP {ip_address} not in registered pool range for VLAN {vlan}")
@@ -543,7 +551,7 @@ class KeaIntegration:
         try:
             prefix = _prefix_for_vlan(vlan)
             bounds = _pool_bounds_for_prefix(prefix)
-            network = ipaddress.IPv4Network(f"192.168.{vlan}.0/{prefix}", strict=False)
+            network = ipaddress.IPv4Network(f"{_net_octet()}.{vlan}.0/{prefix}", strict=False)
             
             # Get all current leases and reservations
             command = {
@@ -594,7 +602,7 @@ class KeaIntegration:
         try:
             prefix = _prefix_for_vlan(vlan)
             bounds = _pool_bounds_for_prefix(prefix)
-            network = ipaddress.IPv4Network(f"192.168.{vlan}.0/{prefix}", strict=False)
+            network = ipaddress.IPv4Network(f"{_net_octet()}.{vlan}.0/{prefix}", strict=False)
 
             command = {
                 "command": "lease4-get-all",

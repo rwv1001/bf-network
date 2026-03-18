@@ -301,7 +301,7 @@
         "option-data": [
           {
             "name": "routers",
-            "data": "192.168.250.2"
+            "data": "${UNREGISTERED_GW}"
           },
           {
             "name": "domain-name-servers",
@@ -322,7 +322,7 @@
         "option-data": [
           {
             "name": "routers",
-            "data": "192.168.99.2"
+            "data": "${SWITCH_HOST}"
           },
           {
             "name": "domain-name-servers",

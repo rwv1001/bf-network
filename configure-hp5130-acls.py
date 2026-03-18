@@ -30,16 +30,17 @@ SWITCH_CONFIG = {
 }
 
 # VLANs to configure
+_NET = os.getenv('NETWORK_OCTET', '192.168')
 VLANS = [
-    {'id': 10, 'network': '192.168.10', 'name': 'VLAN10'},
-    {'id': 20, 'network': '192.168.20', 'name': 'VLAN20'},
-    {'id': 30, 'network': '192.168.30', 'name': 'VLAN30'},
-    {'id': 40, 'network': '192.168.40', 'name': 'VLAN40'},
-    {'id': 50, 'network': '192.168.50', 'name': 'VLAN50'},
-    {'id': 60, 'network': '192.168.60', 'name': 'VLAN60'},
-    {'id': 70, 'network': '192.168.70', 'name': 'VLAN70'},
-    {'id': 80, 'network': '192.168.80', 'name': 'VLAN80'},
-    {'id': 90, 'network': '192.168.90', 'name': 'VLAN90'},
+    {'id': 10, 'network': f'{_NET}.10', 'name': 'VLAN10'},
+    {'id': 20, 'network': f'{_NET}.20', 'name': 'VLAN20'},
+    {'id': 30, 'network': f'{_NET}.30', 'name': 'VLAN30'},
+    {'id': 40, 'network': f'{_NET}.40', 'name': 'VLAN40'},
+    {'id': 50, 'network': f'{_NET}.50', 'name': 'VLAN50'},
+    {'id': 60, 'network': f'{_NET}.60', 'name': 'VLAN60'},
+    {'id': 70, 'network': f'{_NET}.70', 'name': 'VLAN70'},
+    {'id': 80, 'network': f'{_NET}.80', 'name': 'VLAN80'},
+    {'id': 90, 'network': f'{_NET}.90', 'name': 'VLAN90'},
 ]
 
 # Portal IP suffix (e.g., .4 means 192.168.X.4)

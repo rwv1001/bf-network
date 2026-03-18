@@ -35,7 +35,7 @@ def update_acl_for_blocked_pool(connection, vlan_id):
     """Update ACL to add rules for blocked pool (.224-.254)"""
     
     acl_num = 3000 + (vlan_id * 10)
-    network = f"192.168.{vlan_id}"
+    network = f"{os.getenv('NETWORK_OCTET', '192.168')}.{vlan_id}"
     
     commands = []
     

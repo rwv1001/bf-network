@@ -23,7 +23,7 @@ DB_URL = os.getenv("DATABASE_URL", "postgresql://portal_user:change_this_passwor
 KEA_LEASES_FILE = os.getenv("KEA_LEASES_FILE", "/kea/leases/kea-leases4.csv")
 POSITION_FILE = os.getenv("POSITION_FILE", "/state/nat-parser.pos")
 
-UDM_HOST = os.getenv("UDM_HOST", "192.168.1.1")
+UDM_HOST = os.environ['UDM_HOST']
 UDM_SSH_KEY = os.getenv("UDM_SSH_KEY", "/config/udm_key")
 UDM_INSTALL_SCRIPT = os.getenv("UDM_INSTALL_SCRIPT", "/scripts/udm-nat-logger-persist.sh")
 

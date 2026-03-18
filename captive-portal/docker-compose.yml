@@ -82,7 +82,7 @@ services:
       ACL_QUEUE_GID: ${PORTAL_GID:-1000}
       PI_NETWORK_DIR: /host-systemd-network
       DEFAULT_ISP_ROUTER_NAME: ${DEFAULT_ISP_ROUTER_NAME:-UDM}
-      DEFAULT_ISP_ROUTER_SUBNET: ${DEFAULT_ISP_ROUTER_SUBNET:-192.168.1.0/24}
+      DEFAULT_ISP_ROUTER_SUBNET: ${DEFAULT_ISP_ROUTER_SUBNET:?DEFAULT_ISP_ROUTER_SUBNET is required}
       DEFAULT_ISP_ROUTER_VLAN: ${DEFAULT_ISP_ROUTER_VLAN:-1}
       DEFAULT_ISP_ROUTER_PORT: ${DEFAULT_ISP_ROUTER_PORT:-}
       DEFAULT_ISP_ROUTER_DHCP_TRUST: ${DEFAULT_ISP_ROUTER_DHCP_TRUST:-true}
@@ -125,7 +125,7 @@ services:
       DATABASE_URL: postgresql://${DB_USER:-portal_user}:${DB_PASSWORD:-change_this_password}@127.0.0.1:5432/${DB_NAME:-captive_portal}
       LOG_FILE: /logs/remote-syslog.log
       KEA_LEASES_FILE: /kea/leases/kea-leases4.csv
-      UDM_HOST: ${UDM_HOST:-192.168.1.1}
+      UDM_HOST: ${UDM_HOST:?UDM_HOST is required}
       UDM_SSH_KEY: /config/udm_key
       UDM_INSTALL_SCRIPT: /scripts/udm-nat-logger-persist.sh
       SESSION_GAP_SECONDS: ${NAT_SESSION_GAP_SECONDS:-60}

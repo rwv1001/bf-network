@@ -12,8 +12,8 @@
 
 set -euo pipefail
 
-SWITCH_IP="${SWITCH_IP:-192.168.99.1}"   # SSH via VLAN99 so we can change VLAN1 without losing session
-SWITCH_NEW_IP="${SWITCH_HOST:-192.168.99.2}"  # New VLAN99 address after reip
+SWITCH_IP="${SWITCH_IP:?SWITCH_IP is required}"   # SSH target – current switch IP before reip
+SWITCH_NEW_IP="${SWITCH_HOST:?SWITCH_HOST is required}"  # New VLAN99 address after reip
 SWITCH_USER="robert"
 SWITCH_KEY="/home/admin/.ssh/id_rsa"
 SWITCH_SSH_PORT="22"

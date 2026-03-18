@@ -5,8 +5,13 @@ Database models for Captive Portal
 from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash, check_password_hash
+import os
 
 db = SQLAlchemy()
+
+
+def _net_octet() -> str:
+    return os.getenv('NETWORK_OCTET', '192.168')
 
 
 class Admin(db.Model):
@@ -220,13 +225,13 @@ class ISPRouter(db.Model):
 
     @property
     def gateway_ip(self):
-        """LAN IP of the router: 192.168.<vlan_id>.1"""
-        return f"192.168.{self.vlan_id}.1"
+        """LAN IP of the router: <NETWORK_OCTET>.<vlan_id>.1"""
+        return f"{_net_octet()}.{self.vlan_id}.1"
 
     def switch_host_ip(self, switch_host):
         """Per-switch VLAN interface IP based on the last octet of switch_host."""
         last_octet = switch_host.split('.')[-1]
-        return f"192.168.{self.vlan_id}.{last_octet}"
+        return f"{_net_octet()}.{self.vlan_id}.{last_octet}"
 
     def __repr__(self):
         return f'<ISPRouter {self.name} vlan={self.vlan_id}>'

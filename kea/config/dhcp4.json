@@ -10,8 +10,7 @@
         "eth0.50",
         "eth0.60",
         "eth0.70",
-        "eth0.80",
-        "eth0.90",
+        "eth0.250",
         "eth0.250",
         "eth0.99"
       ],
@@ -83,14 +82,14 @@
     ],
     "subnet4": [
       {
-        "subnet": "192.168.10.0/24",
+        "subnet": "192.168.8.0/22",
         "id": 10,
         "pools": [
           {
-            "pool": "192.168.10.5 - 192.168.10.215"
+            "pool": "192.168.8.1 - 192.168.11.95"
           },
           {
-            "pool": "192.168.10.216 - 192.168.10.255",
+            "pool": "192.168.11.96 - 192.168.11.255",
             "client-classes": [
               "BLOCKED"
             ]
@@ -103,14 +102,43 @@
             "data": "192.168.10.2"
           }
         ],
-        "reservations": []
+        "reservations": [
+          {
+            "hw-address": "02:00:c0:a8:0a:01",
+            "ip-address": "192.168.10.1",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:0a:02",
+            "ip-address": "192.168.10.2",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:0a:03",
+            "ip-address": "192.168.10.3",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:0a:04",
+            "ip-address": "192.168.10.4",
+            "user-context": {
+              "infra-ghost": true
+            }
+          }
+        ]
       },
       {
         "subnet": "192.168.20.0/22",
         "id": 20,
         "pools": [
           {
-            "pool": "192.168.20.5 - 192.168.23.95"
+            "pool": "192.168.20.1 - 192.168.23.95"
           },
           {
             "pool": "192.168.23.96 - 192.168.23.255",
@@ -126,14 +154,43 @@
             "data": "192.168.20.2"
           }
         ],
-        "reservations": []
+        "reservations": [
+          {
+            "hw-address": "02:00:c0:a8:14:01",
+            "ip-address": "192.168.20.1",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:14:02",
+            "ip-address": "192.168.20.2",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:14:03",
+            "ip-address": "192.168.20.3",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:14:04",
+            "ip-address": "192.168.20.4",
+            "user-context": {
+              "infra-ghost": true
+            }
+          }
+        ]
       },
       {
         "subnet": "192.168.30.0/23",
         "id": 30,
         "pools": [
           {
-            "pool": "192.168.30.5 - 192.168.31.175"
+            "pool": "192.168.30.1 - 192.168.31.175"
           },
           {
             "pool": "192.168.31.176 - 192.168.31.255",
@@ -149,14 +206,43 @@
             "data": "192.168.30.2"
           }
         ],
-        "reservations": []
+        "reservations": [
+          {
+            "hw-address": "02:00:c0:a8:1e:01",
+            "ip-address": "192.168.30.1",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:1e:02",
+            "ip-address": "192.168.30.2",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:1e:03",
+            "ip-address": "192.168.30.3",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:1e:04",
+            "ip-address": "192.168.30.4",
+            "user-context": {
+              "infra-ghost": true
+            }
+          }
+        ]
       },
       {
         "subnet": "192.168.40.0/24",
         "id": 40,
         "pools": [
           {
-            "pool": "192.168.40.5 - 192.168.40.215"
+            "pool": "192.168.40.1 - 192.168.40.215"
           },
           {
             "pool": "192.168.40.216 - 192.168.40.255",
@@ -172,14 +258,43 @@
             "data": "192.168.40.2"
           }
         ],
-        "reservations": []
+        "reservations": [
+          {
+            "hw-address": "02:00:c0:a8:28:01",
+            "ip-address": "192.168.40.1",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:28:02",
+            "ip-address": "192.168.40.2",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:28:03",
+            "ip-address": "192.168.40.3",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:28:04",
+            "ip-address": "192.168.40.4",
+            "user-context": {
+              "infra-ghost": true
+            }
+          }
+        ]
       },
       {
         "subnet": "192.168.50.0/24",
         "id": 50,
         "pools": [
           {
-            "pool": "192.168.50.5 - 192.168.50.215"
+            "pool": "192.168.50.1 - 192.168.50.215"
           },
           {
             "pool": "192.168.50.216 - 192.168.50.255",
@@ -195,14 +310,43 @@
             "data": "192.168.50.2"
           }
         ],
-        "reservations": []
+        "reservations": [
+          {
+            "hw-address": "02:00:c0:a8:32:01",
+            "ip-address": "192.168.50.1",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:32:02",
+            "ip-address": "192.168.50.2",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:32:03",
+            "ip-address": "192.168.50.3",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:32:04",
+            "ip-address": "192.168.50.4",
+            "user-context": {
+              "infra-ghost": true
+            }
+          }
+        ]
       },
       {
         "subnet": "192.168.60.0/24",
         "id": 60,
         "pools": [
           {
-            "pool": "192.168.60.5 - 192.168.60.215"
+            "pool": "192.168.60.1 - 192.168.60.215"
           },
           {
             "pool": "192.168.60.216 - 192.168.60.255",
@@ -218,14 +362,43 @@
             "data": "192.168.60.2"
           }
         ],
-        "reservations": []
+        "reservations": [
+          {
+            "hw-address": "02:00:c0:a8:3c:01",
+            "ip-address": "192.168.60.1",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:3c:02",
+            "ip-address": "192.168.60.2",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:3c:03",
+            "ip-address": "192.168.60.3",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:3c:04",
+            "ip-address": "192.168.60.4",
+            "user-context": {
+              "infra-ghost": true
+            }
+          }
+        ]
       },
       {
         "subnet": "192.168.70.0/24",
         "id": 70,
         "pools": [
           {
-            "pool": "192.168.70.5 - 192.168.70.215"
+            "pool": "192.168.70.1 - 192.168.70.215"
           },
           {
             "pool": "192.168.70.216 - 192.168.70.255",
@@ -241,60 +414,95 @@
             "data": "192.168.70.2"
           }
         ],
-        "reservations": []
-      },
-      {
-        "subnet": "192.168.80.0/24",
-        "id": 80,
-        "pools": [
+        "reservations": [
           {
-            "pool": "192.168.80.5 - 192.168.80.215"
+            "hw-address": "02:00:c0:a8:46:01",
+            "ip-address": "192.168.70.1",
+            "user-context": {
+              "infra-ghost": true
+            }
           },
           {
-            "pool": "192.168.80.216 - 192.168.80.255",
-            "client-classes": [
-              "BLOCKED"
-            ]
-          }
-        ],
-        "interface": "eth0.80",
-        "option-data": [
-          {
-            "name": "routers",
-            "data": "192.168.80.2"
-          }
-        ],
-        "reservations": []
-      },
-      {
-        "subnet": "192.168.90.0/24",
-        "id": 90,
-        "pools": [
-          {
-            "pool": "192.168.90.5 - 192.168.90.215"
+            "hw-address": "02:00:c0:a8:46:02",
+            "ip-address": "192.168.70.2",
+            "user-context": {
+              "infra-ghost": true
+            }
           },
           {
-            "pool": "192.168.90.216 - 192.168.90.255",
-            "client-classes": [
-              "BLOCKED"
-            ]
-          }
-        ],
-        "interface": "eth0.90",
-        "option-data": [
+            "hw-address": "02:00:c0:a8:46:03",
+            "ip-address": "192.168.70.3",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
           {
-            "name": "routers",
-            "data": "192.168.90.2"
+            "hw-address": "02:00:c0:a8:46:04",
+            "ip-address": "192.168.70.4",
+            "user-context": {
+              "infra-ghost": true
+            }
           }
-        ],
-        "reservations": []
+        ]
       },
       {
         "subnet": "192.168.250.0/24",
         "id": 250,
         "pools": [
           {
-            "pool": "192.168.250.5 - 192.168.250.255"
+            "pool": "192.168.250.1 - 192.168.250.215"
+          },
+          {
+            "pool": "192.168.250.216 - 192.168.250.255",
+            "client-classes": [
+              "BLOCKED"
+            ]
+          }
+        ],
+        "interface": "eth0.250",
+        "option-data": [
+          {
+            "name": "routers",
+            "data": "192.168.250.2"
+          }
+        ],
+        "reservations": [
+          {
+            "hw-address": "02:00:c0:a8:fa:01",
+            "ip-address": "192.168.250.1",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:fa:02",
+            "ip-address": "192.168.250.2",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:fa:03",
+            "ip-address": "192.168.250.3",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:fa:04",
+            "ip-address": "192.168.250.4",
+            "user-context": {
+              "infra-ghost": true
+            }
+          }
+        ]
+      },
+      {
+        "subnet": "192.168.250.0/24",
+        "id": 250,
+        "pools": [
+          {
+            "pool": "192.168.250.1 - 192.168.250.255"
           }
         ],
         "interface": "eth0.250",

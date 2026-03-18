@@ -15,7 +15,7 @@ services:
     environment:
       - RADIUS_SECRET=${RADIUS_SECRET}
       - SWITCH_HOST=${SWITCH_HOST:?}
-      - SW2_IP=${SW2_IP:-192.168.99.3}
+      - SW2_IP=${SW2_IP:?SW2_IP is required}
       - PORTAL_IP=${PORTAL_IP:?}
       - DB_HOST=${DB_HOST:-127.0.0.1}
       - DB_PORT=${DB_PORT:-5432}

@@ -23,17 +23,17 @@
 set -euo pipefail
 
 # ─── Config ──────────────────────────────────────────────────────────────────
-SW2_HOST="${SW2_HOST:-192.168.1.3}"
+SW2_HOST="${SW2_HOST:?SW2_HOST is required}"
 SW2_USER="${SW2_USER:-admin}"
-SW1_HOST="${SW1_HOST:-192.168.99.2}"
+SW1_HOST="${SW1_HOST:?SW1_HOST is required}"
 SW1_USER="${SW1_USER:-robert}"
 KEY="${KEY:-/home/admin/.ssh/id_rsa}"
 
 # Site-specific IPs (must be set in environment or captive-portal/.env)
 PORTAL_IP="${PORTAL_IP:?PORTAL_IP required}"
 HIJACK_DNS_IP="${HIJACK_DNS_IP:?HIJACK_DNS_IP required}"
-SW2_IP="${SW2_IP:-192.168.99.3}"         # SW2 VLAN-99 management IP after reip
-MGMT_GATEWAY="${MGMT_GATEWAY:-192.168.1.1}" # Default gateway for management VLAN
+SW2_IP="${SW2_IP:?SW2_IP is required}"         # SW2 VLAN-99 management IP after reip
+MGMT_GATEWAY="${MGMT_GATEWAY:?MGMT_GATEWAY is required}" # Default gateway for management VLAN
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 

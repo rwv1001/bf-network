@@ -5,7 +5,7 @@
 set -e
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-UDM_HOST="${UDM_HOST:-192.168.1.1}"
+UDM_HOST="${UDM_HOST:?UDM_HOST is required}"
 UDM_SSH_KEY="$HOME/.ssh/udm_key"
 
 # Source credentials from captive-portal .env if not already set in environment
@@ -97,7 +97,7 @@ scp -i "$UDM_SSH_KEY" -o StrictHostKeyChecking=no "$UDM_SCRIPT" "root@$UDM_HOST:
 
 echo "Executing installation on UDM..."
 ssh -i "$UDM_SSH_KEY" -o StrictHostKeyChecking=no "root@$UDM_HOST" \
-    "PORTAL_IP='${PORTAL_IP:?PORTAL_IP required}' USER_VLAN_MIN='${USER_VLAN_MIN:-192.168.2.0}' USER_VLAN_MAX='${USER_VLAN_MAX:-192.168.95.255}' bash /tmp/udm-nat-logger-persist.sh"
+    "PORTAL_IP='${PORTAL_IP:?PORTAL_IP required}' USER_VLAN_MIN='${USER_VLAN_MIN:?USER_VLAN_MIN is required}' USER_VLAN_MAX='${USER_VLAN_MAX:?USER_VLAN_MAX is required}' bash /tmp/udm-nat-logger-persist.sh"
 
 echo "✓ UDM NAT logger deployed and started"
 echo ""

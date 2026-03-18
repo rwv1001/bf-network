@@ -319,6 +319,27 @@
     </div>
 </form>
 
+<div class="section-container" style="margin-top: 2rem;">
+    <h2>Current Kea DHCP Config</h2>
+    {% if kea_config_json %}
+    <pre id="kea-config-pre" style="
+        background: #1e1e1e;
+        color: #d4d4d4;
+        font-family: 'Consolas', 'Menlo', monospace;
+        font-size: 12px;
+        line-height: 1.5;
+        padding: 1rem;
+        border-radius: 6px;
+        overflow: auto;
+        max-height: 500px;
+        white-space: pre;
+        tab-size: 2;
+    ">{{ kea_config_json | e }}</pre>
+    {% else %}
+    <p style="color: #888;">Config file not found ({{ kea_config_path if kea_config_path is defined else '/kea/config/dhcp4.json' }}).</p>
+    {% endif %}
+</div>
+
 <script>
     const form = document.getElementById('vlan-config-form');
     const saveButton = document.getElementById('save-config-button');
