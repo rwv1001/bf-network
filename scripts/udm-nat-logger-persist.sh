@@ -40,9 +40,10 @@ conntrack -E -o extended 2>/dev/null | while read -r line; do
     dport=$(echo "$line" | grep -o 'dport=[0-9]*' | cut -d= -f2 | head -1)
     proto=$(echo "$line" | awk '{print $1}')
 
-    # Skip if src_ip is not in user VLAN range (192.168.2-67, 69-95)
-    # Excludes VLAN 1 (management) and VLAN 68 (Teltonika WAN)
-    if ! echo "$src_ip" | grep -qE '^192\.168\.([2-9]|[1-5][0-9]|6[0-7]|69|[7-8][0-9]|9[0-5])\.'; then
+    # Skip if src_ip is not in the user VLAN range (USER_VLAN_MIN..USER_VLAN_MAX)
+    if ! awk -v ip="$src_ip" -v min="$USER_VLAN_MIN" -v max="$USER_VLAN_MAX" \
+        'function ip2i(a,  p){split(a,p,".");return((p[1]*256+p[2])*256+p[3])*256+p[4]}
+         BEGIN{exit !(ip2i(ip)>=ip2i(min) && ip2i(ip)<=ip2i(max))}' /dev/null; then
         continue
     fi
 

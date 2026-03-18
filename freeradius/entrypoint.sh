@@ -9,13 +9,31 @@ echo "Starting FreeRADIUS with environment variable substitution..."
 # Substitute variables in clients.conf using sed
 if [ -f /etc/freeradius/clients.conf.template ]; then
     echo "Generating clients.conf from template..."
+    # Base stanzas (portal + localhost)
     sed \
         -e "s/\${RADIUS_SECRET}/${RADIUS_SECRET}/g" \
-        -e "s/\${SWITCH_HOST}/${SWITCH_HOST}/g" \
-        -e "s/\${SW2_IP}/${SW2_IP}/g" \
         -e "s/\${PORTAL_IP}/${PORTAL_IP}/g" \
         /etc/freeradius/clients.conf.template > /etc/freeradius/clients.conf
-    echo "clients.conf generated with vars from environment"
+
+    # One client stanza per switch in SWITCH_HOSTS
+    idx=0
+    for sw_ip in ${SWITCH_HOSTS}; do
+        idx=$((idx + 1))
+        echo "" >> /etc/freeradius/clients.conf
+        cat >> /etc/freeradius/clients.conf <<EOF
+# HP 5130 switch ${idx} - MAC authentication
+client hp5130-sw${idx} {
+        ipaddr = ${sw_ip}
+        secret = ${RADIUS_SECRET}
+        shortname = hp5130-sw${idx}
+        nas_type = other
+        require_message_authenticator = false
+        limit_proxy_state = true
+}
+EOF
+        echo "  Added RADIUS client for switch ${idx}: ${sw_ip}"
+    done
+    echo "clients.conf generated (${idx} switch(es))"
 else
     echo "Warning: No clients.conf.template found, using existing clients.conf"
 fi

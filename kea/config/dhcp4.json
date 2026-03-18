@@ -11,7 +11,6 @@
         "eth0.60",
         "eth0.70",
         "eth0.250",
-        "eth0.250",
         "eth0.99"
       ],
       "dhcp-socket-type": "raw"
@@ -439,58 +438,6 @@
           {
             "hw-address": "02:00:c0:a8:46:04",
             "ip-address": "192.168.70.4",
-            "user-context": {
-              "infra-ghost": true
-            }
-          }
-        ]
-      },
-      {
-        "subnet": "192.168.250.0/24",
-        "id": 250,
-        "pools": [
-          {
-            "pool": "192.168.250.1 - 192.168.250.215"
-          },
-          {
-            "pool": "192.168.250.216 - 192.168.250.255",
-            "client-classes": [
-              "BLOCKED"
-            ]
-          }
-        ],
-        "interface": "eth0.250",
-        "option-data": [
-          {
-            "name": "routers",
-            "data": "192.168.250.2"
-          }
-        ],
-        "reservations": [
-          {
-            "hw-address": "02:00:c0:a8:fa:01",
-            "ip-address": "192.168.250.1",
-            "user-context": {
-              "infra-ghost": true
-            }
-          },
-          {
-            "hw-address": "02:00:c0:a8:fa:02",
-            "ip-address": "192.168.250.2",
-            "user-context": {
-              "infra-ghost": true
-            }
-          },
-          {
-            "hw-address": "02:00:c0:a8:fa:03",
-            "ip-address": "192.168.250.3",
-            "user-context": {
-              "infra-ghost": true
-            }
-          },
-          {
-            "hw-address": "02:00:c0:a8:fa:04",
-            "ip-address": "192.168.250.4",
             "user-context": {
               "infra-ghost": true
             }

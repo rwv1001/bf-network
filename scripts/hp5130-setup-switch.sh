@@ -44,7 +44,7 @@ PORTAL_IP="${PORTAL_IP:?PORTAL_IP required}"
 HIJACK_DNS_IP="${HIJACK_DNS_IP:?HIJACK_DNS_IP required}"
 TARGET_IP="${TARGET_IP:?TARGET_IP is required (final VLAN-99 management IP for this switch)}"
 MGMT_GATEWAY="${MGMT_GATEWAY:?MGMT_GATEWAY is required}" # Default gateway for management VLAN
-NET="${NETWORK_OCTET:-192.168}"                  # Two-octet network prefix
+NET="${NETWORK_WORD:-192.168}"                  # Two-octet network prefix
 SW_OCTET="$(echo "${TARGET_IP}" | awk -F. '{print $NF}')"   # Host octet derived from TARGET_IP
 SW_SYSNAME="AccessSW-$(printf '%02d' "${SW_OCTET}")"
 
@@ -182,45 +182,45 @@ interface Vlan-interface1
 quit
 interface Vlan-interface10
  description GW_VLAN10
- ip address ${NET}.10.${SW2_OCTET} 255.255.255.0
+ ip address ${NET}.10.${SW_OCTET} 255.255.255.0
 quit
 interface Vlan-interface20
  description GW_VLAN20
- ip address ${NET}.20.${SW2_OCTET} 255.255.252.0
+ ip address ${NET}.20.${SW_OCTET} 255.255.252.0
 quit
 interface Vlan-interface30
  description GW_VLAN30
- ip address ${NET}.30.${SW2_OCTET} 255.255.254.0
+ ip address ${NET}.30.${SW_OCTET} 255.255.254.0
 quit
 interface Vlan-interface40
  description GW_VLAN40
- ip address ${NET}.40.${SW2_OCTET} 255.255.255.0
+ ip address ${NET}.40.${SW_OCTET} 255.255.255.0
 quit
 interface Vlan-interface50
  description GW_VLAN50
- ip address ${NET}.50.${SW2_OCTET} 255.255.255.0
+ ip address ${NET}.50.${SW_OCTET} 255.255.255.0
 quit
 interface Vlan-interface60
  description GW_VLAN60
- ip address ${NET}.60.${SW2_OCTET} 255.255.255.0
+ ip address ${NET}.60.${SW_OCTET} 255.255.255.0
 quit
 interface Vlan-interface70
  description GW_VLAN70
- ip address ${NET}.70.${SW2_OCTET} 255.255.255.0
+ ip address ${NET}.70.${SW_OCTET} 255.255.255.0
 quit
 interface Vlan-interface80
  description GW_VLAN80
- ip address ${NET}.80.${SW2_OCTET} 255.255.255.0
+ ip address ${NET}.80.${SW_OCTET} 255.255.255.0
 quit
 interface Vlan-interface90
 quit
 interface Vlan-interface99
  description GW_VLAN99
- ip address ${SW2_IP} 255.255.255.0
+ ip address ${TARGET_IP} 255.255.255.0
 quit
 interface Vlan-interface250
  description GW_VLAN250
- ip address ${NET}.250.${SW2_OCTET} 255.255.255.0
+ ip address ${NET}.250.${SW_OCTET} 255.255.255.0
 quit
 #
 interface Ten-GigabitEthernet3/0/52
@@ -246,7 +246,7 @@ radius scheme rad1
  key authentication simple $RADIUS_SECRET
  key accounting simple $RADIUS_SECRET
  user-name-format without-domain
- nas-ip ${SW2_IP}
+ nas-ip ${TARGET_IP}
 quit
 #
 radius dynamic-author server
@@ -448,5 +448,5 @@ echo "   1. Verify: ssh robert@${TARGET_IP} and run 'display version'"
 echo "   2. Add ${TARGET_IP} to SWITCH_HOSTS in captive-portal/.env and kea/.env"
 echo "   3. Configure access ports (GigabitEthernet3/0/1..N) for mac-auth"
 echo "      (see SW1's running config as a template)"
-echo "   3. Connect APs and test WiFi registration via SW2"
+echo "   3. Connect APs and test WiFi registration via ${SW_SYSNAME}"
 echo "================================================================"

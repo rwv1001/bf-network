@@ -21,8 +21,8 @@ from typing import Optional, Dict, Any, List
 logger = logging.getLogger(__name__)
 
 
-def _net_octet() -> str:
-    return os.getenv('NETWORK_OCTET', '192.168')
+def _net_word() -> str:
+    return os.getenv('NETWORK_WORD', '192.168')
 
 
 def _parse_vlan_prefix_map(raw: str) -> Dict[int, int]:
@@ -247,7 +247,7 @@ class KeaIntegration:
                 # Only set IP if explicitly provided (for manual assignments)
                 prefix = _prefix_for_vlan(vlan)
                 bounds = _pool_bounds_for_prefix(prefix)
-                network = ipaddress.IPv4Network(f"{_net_octet()}.{vlan}.0/{prefix}", strict=False)
+                network = ipaddress.IPv4Network(f"{_net_word()}.{vlan}.0/{prefix}", strict=False)
                 try:
                     ip_value = ipaddress.IPv4Address(ip_address)
                 except Exception:
@@ -551,7 +551,7 @@ class KeaIntegration:
         try:
             prefix = _prefix_for_vlan(vlan)
             bounds = _pool_bounds_for_prefix(prefix)
-            network = ipaddress.IPv4Network(f"{_net_octet()}.{vlan}.0/{prefix}", strict=False)
+            network = ipaddress.IPv4Network(f"{_net_word()}.{vlan}.0/{prefix}", strict=False)
             
             # Get all current leases and reservations
             command = {
@@ -602,7 +602,7 @@ class KeaIntegration:
         try:
             prefix = _prefix_for_vlan(vlan)
             bounds = _pool_bounds_for_prefix(prefix)
-            network = ipaddress.IPv4Network(f"{_net_octet()}.{vlan}.0/{prefix}", strict=False)
+            network = ipaddress.IPv4Network(f"{_net_word()}.{vlan}.0/{prefix}", strict=False)
 
             command = {
                 "command": "lease4-get-all",

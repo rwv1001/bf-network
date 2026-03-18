@@ -259,7 +259,7 @@
                             ⚠️ <strong>Router configuration required:</strong>
                             <ul>
                                 <li>Set the router's LAN IP to <code id="hint-edit-{{ router.id }}-gw"></code></li>
-                                <li>Add a static route on the router: Target <code>{{ network_octet }}.0.0</code> &nbsp;Mask <code>255.255.0.0</code> &nbsp;Gateway <code id="hint-edit-{{ router.id }}-sw"></code></li>
+                                <li>Add a static route on the router: Target <code>{{ network_word }}.0.0</code> &nbsp;Mask <code>255.255.0.0</code> &nbsp;Gateway <code id="hint-edit-{{ router.id }}-sw"></code></li>
                             </ul>
                         </div>
                         <div class="form-footer">
@@ -318,7 +318,7 @@
                 ⚠️ <strong>Router configuration required:</strong>
                 <ul>
                     <li>Set the router's LAN IP to <code id="hint-add-gw"></code></li>
-                    <li>Add a static route on the router: Target <code>{{ network_octet }}.0.0</code> &nbsp;Mask <code>255.255.0.0</code> &nbsp;Gateway <code id="hint-add-sw"></code></li>
+                    <li>Add a static route on the router: Target <code>{{ network_word }}.0.0</code> &nbsp;Mask <code>255.255.0.0</code> &nbsp;Gateway <code id="hint-add-sw"></code></li>
                 </ul>
             </div>
             <div class="form-footer">
@@ -345,8 +345,8 @@ function updateHint(key) {
         hintBox.style.display = 'none';
         return;
     }
-    const gw  = '{{ network_octet }}.' + vlanId + '.1';
-    const sw  = '{{ network_octet }}.' + vlanId + '.2';
+    const gw  = '{{ network_word }}.' + vlanId + '.1';
+    const sw  = '{{ network_word }}.' + vlanId + '.2';
     const gwEl = document.getElementById('hint-' + key + '-gw');
     const swEl = document.getElementById('hint-' + key + '-sw');
     if (gwEl) gwEl.textContent = gw;

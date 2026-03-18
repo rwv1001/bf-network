@@ -45,6 +45,7 @@ captive-portal/data/postgres/
 
 
 # Kea DHCP sensitive files
+kea/config/dhcp4.json
 kea/leases/*
 kea/sockets/*
 !kea/leases/.gitkeep

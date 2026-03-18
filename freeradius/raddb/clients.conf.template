@@ -1,25 +1,6 @@
 # FreeRADIUS clients configuration
-# This template file uses environment variables
-
-# HP 5130 switch 1 - MAC authentication
-client hp5130-switch {
-        ipaddr = ${SWITCH_HOST}
-        secret = ${RADIUS_SECRET}
-        shortname = hp5130-sw1
-        nas_type = other
-        require_message_authenticator = false
-        limit_proxy_state = true
-}
-
-# HP 5130 switch 2 - MAC authentication
-client hp5130-switch-2 {
-        ipaddr = ${SW2_IP}
-        secret = ${RADIUS_SECRET}
-        shortname = hp5130-sw2
-	nas_type = other
-	require_message_authenticator = false
-	limit_proxy_state = true
-}
+# Switch client stanzas are generated dynamically from SWITCH_HOSTS by entrypoint.sh
+# — do not add per-switch entries here.
 
 # Captive Portal - CoA requests
 client captive-portal {

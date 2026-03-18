@@ -30,7 +30,7 @@ SWITCH_CONFIG = {
 }
 
 # VLANs to configure
-_NET = os.getenv('NETWORK_OCTET', '192.168')
+_NET = os.getenv('NETWORK_WORD', '192.168')
 VLANS = [
     {'id': 10, 'network': f'{_NET}.10', 'name': 'VLAN10'},
     {'id': 20, 'network': f'{_NET}.20', 'name': 'VLAN20'},

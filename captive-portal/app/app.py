@@ -23,8 +23,8 @@ from sqlalchemy import text
 import secrets
 
 
-def _net_octet() -> str:
-    return os.getenv('NETWORK_OCTET', '192.168')
+def _net_word() -> str:
+    return os.getenv('NETWORK_WORD', '192.168')
 
 from models import db, Admin, User, Device, RegistrationRequest, VlanMapping, ISPRouter, Setting, UnregisteredLease, DomainPolicy
 from radius_coa import send_coa_disconnect, send_coa_change
@@ -555,7 +555,7 @@ def _ip_from_offset(network, offset):
 
 
 def _build_pools_for_vlan(vlan_id, prefix):
-    network = ipaddress.IPv4Network(f"{_net_octet()}.{vlan_id}.0/{prefix}", strict=False)
+    network = ipaddress.IPv4Network(f"{_net_word()}.{vlan_id}.0/{prefix}", strict=False)
     total = network.num_addresses
     block_size = 40 * (2 ** (24 - prefix))
     registered_start = 1
@@ -1035,7 +1035,7 @@ def _vlan_from_ip(ip_address):
         if vlan_id == 99:
             continue
         try:
-            network = ipaddress.IPv4Network(f"{_net_octet()}.{vlan_id}.0/{prefix}", strict=False)
+            network = ipaddress.IPv4Network(f"{_net_word()}.{vlan_id}.0/{prefix}", strict=False)
         except Exception:
             continue
         if ip in network:
@@ -1056,7 +1056,7 @@ def _vlan_from_ip_any(ip_address, prefix_by_id=None):
 
     for vlan_id, prefix in prefix_by_id.items():
         try:
-            network = ipaddress.IPv4Network(f"{_net_octet()}.{vlan_id}.0/{prefix}", strict=False)
+            network = ipaddress.IPv4Network(f"{_net_word()}.{vlan_id}.0/{prefix}", strict=False)
         except Exception:
             continue
         if ip in network:
@@ -1609,7 +1609,7 @@ def _is_blocked_pool_ip(ip_address):
     prefix_by_id = _get_vlan_prefix_by_id()
     for vlan_id, prefix in prefix_by_id.items():
         try:
-            network = ipaddress.IPv4Network(f"{_net_octet()}.{vlan_id}.0/{prefix}", strict=False)
+            network = ipaddress.IPv4Network(f"{_net_word()}.{vlan_id}.0/{prefix}", strict=False)
         except Exception:
             continue
         if ip not in network:
@@ -3193,7 +3193,7 @@ def _is_registered_pool_ip(ip_address, vlan_id):
     prefix_by_id = _get_vlan_prefix_by_id()
     prefix = prefix_by_id.get(int(vlan_id), 24)
     try:
-        network = ipaddress.IPv4Network(f"{_net_octet()}.{vlan_id}.0/{prefix}", strict=False)
+        network = ipaddress.IPv4Network(f"{_net_word()}.{vlan_id}.0/{prefix}", strict=False)
     except Exception:
         return False
     if ip not in network:
@@ -4874,7 +4874,7 @@ def admin_isp_routers():
             except ValueError:
                 flash('VLAN ID must be an integer.', 'error')
                 return redirect(url_for('admin_isp_routers'))
-            subnet = f'{_net_octet()}.{vlan_id}.0/24'
+            subnet = f'{_net_word()}.{vlan_id}.0/24'
             dhcp_trust = (vlan_id == 1)
             if ISPRouter.query.filter_by(name=name).first():
                 flash(f'A router named "{name}" already exists.', 'error')
@@ -4891,8 +4891,8 @@ def admin_isp_routers():
             flash(
                 f'ISP router "{name}" added. '
                 f'⚠ Set the router LAN IP to {router.gateway_ip} and add a '
-                f'static route: Target {_net_octet()}.0.0 / Mask 255.255.0.0 / '
-                f'Gateway {_net_octet()}.{vlan_id}.2 on the router.',
+                f'static route: Target {_net_word()}.0.0 / Mask 255.255.0.0 / '
+                f'Gateway {_net_word()}.{vlan_id}.2 on the router.',
                 'success'
             )
             return redirect(url_for('admin_isp_routers'))
@@ -4912,7 +4912,7 @@ def admin_isp_routers():
                 except (ValueError, TypeError):
                     pass
             # Always derive subnet from VLAN ID
-            router.subnet = f'{_net_octet()}.{router.vlan_id}.0/24'
+            router.subnet = f'{_net_word()}.{router.vlan_id}.0/24'
             new_port = request.form.get('switch_port', '').strip() or None
             router.switch_port = new_port
             router.dhcp_snooping_trust = (router.vlan_id == 1)
@@ -4924,7 +4924,7 @@ def admin_isp_routers():
             # permit node before rebuilding, then remove the stale VLAN/interface
             vlan_changed = old_vlan_id != router.vlan_id
             if vlan_changed:
-                old_gateway_ip = f'{_net_octet()}.{old_vlan_id}.1'
+                old_gateway_ip = f'{_net_word()}.{old_vlan_id}.1'
                 switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
                 switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
                 for host in switch_hosts:
@@ -4991,7 +4991,7 @@ def admin_isp_routers():
     return render_template('admin_isp_routers.html', routers=routers,
                            switch_ports=switch_ports_list,
                            used_vlan_ids=used_vlan_ids,
-                           network_octet=_net_octet())
+                           network_word=_net_word())
 
 
 # ---------------------------------------------------------------------------
@@ -6198,10 +6198,10 @@ def admin_dashboard():
             continue
         prefix = prefix_by_id.get(vlan_id, 24)
         try:
-            network = ipaddress.IPv4Network(f"{_net_octet()}.{vlan_id}.0/{prefix}", strict=False)
+            network = ipaddress.IPv4Network(f"{_net_word()}.{vlan_id}.0/{prefix}", strict=False)
             subnet_cidr = str(network)
         except Exception:
-            subnet_cidr = f"{_net_octet()}.{vlan_id}.0/{prefix}"
+            subnet_cidr = f"{_net_word()}.{vlan_id}.0/{prefix}"
         display_name = (entry.display_name or entry.status or '').strip()
         if not display_name:
             display_name = f"VLAN {vlan_id}"
@@ -6907,7 +6907,7 @@ def _build_port_config(port_name, role, description=''):
 def _build_isp_router_switch_config(router, switch_host):
     """Generate HP5130 config for an ISP router uplink VLAN, interface, and PBR."""
     last_octet = switch_host.split('.')[-1]
-    host_ip = f"{_net_octet()}.{router.vlan_id}.{last_octet}"
+    host_ip = f"{_net_word()}.{router.vlan_id}.{last_octet}"
     pbr_name = router.pbr_name
     name_upper = router.name.upper().replace(' ', '_')
     lines = [
@@ -6922,7 +6922,7 @@ def _build_isp_router_switch_config(router, switch_host):
         'quit',
         'acl advanced 3001',
         ' description PBR-local-traffic-normal-routing',
-        f' rule 10 permit ip any {_net_octet()}.0.0 0.0.255.255',
+        f' rule 10 permit ip any {_net_word()}.0.0 0.0.255.255',
         'quit',
         # Undo the whole PBR first so stale nodes/next-hops don't accumulate
         f'undo policy-based-route {pbr_name}',
@@ -8896,7 +8896,7 @@ def admin_pihole():
     vlan_ids = [v.strip() for v in os.getenv('VALID_VLANS', '').split(',') if v.strip().isdigit()]
     vlan_policies = []
     for vlan_id in vlan_ids:
-        subnet = f'{_net_octet()}.{vlan_id}.0/24'
+        subnet = f'{_net_word()}.{vlan_id}.0/24'
         entry = next((c for c in clients if c.get('client') == subnet), None)
         vlan_policies.append({
             'vlan': vlan_id,

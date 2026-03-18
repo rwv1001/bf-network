@@ -54,7 +54,7 @@ def ip_at_offset(network: ipaddress.IPv4Network, offset: int) -> str:
     return str(ipaddress.IPv4Address(int(network.network_address) + offset))
 
 
-def infra_ghost_reservations(network_octet: str, vlan: int, switch_hosts_raw: str) -> list:
+def infra_ghost_reservations(network_word: str, vlan: int, switch_hosts_raw: str) -> list:
     """Build ghost host reservations for infrastructure IPs in this VLAN's /24 block.
 
     These prevent Kea's allocator from ever handing out:
@@ -85,14 +85,14 @@ def infra_ghost_reservations(network_octet: str, vlan: int, switch_hosts_raw: st
         ghost_mac = f"02:00:c0:a8:{vlan & 0xff:02x}:{octet:02x}"
         reservations.append({
             "hw-address": ghost_mac,
-            "ip-address": f"{network_octet}.{vlan}.{octet}",
+            "ip-address": f"{network_word}.{vlan}.{octet}",
             "user-context": {"infra-ghost": True},
         })
     return reservations
 
 
-def make_vlan_subnet(network_octet: str, vlan: int, prefix: int, switch_hosts_raw: str) -> dict:
-    network = ipaddress.IPv4Network(f"{network_octet}.{vlan}.0/{prefix}", strict=False)
+def make_vlan_subnet(network_word: str, vlan: int, prefix: int, switch_hosts_raw: str) -> dict:
+    network = ipaddress.IPv4Network(f"{network_word}.{vlan}.0/{prefix}", strict=False)
     bounds = pool_bounds(prefix)
     return {
         "subnet": str(network),
@@ -116,14 +116,14 @@ def make_vlan_subnet(network_octet: str, vlan: int, prefix: int, switch_hosts_ra
         ],
         "interface": f"eth0.{vlan}",
         "option-data": [
-            {"name": "routers", "data": f"{network_octet}.{vlan}.2"}
+            {"name": "routers", "data": f"{network_word}.{vlan}.2"}
         ],
-        "reservations": infra_ghost_reservations(network_octet, vlan, switch_hosts_raw),
+        "reservations": infra_ghost_reservations(network_word, vlan, switch_hosts_raw),
     }
 
 
 def main():
-    network_octet   = require_env("NETWORK_OCTET")
+    network_word   = require_env("NETWORK_WORD")
 
     # Prefer a prefix-map file written by the captive portal (kept up-to-date
     # when the admin changes subnet sizes via the UI) over the env var, which
@@ -155,17 +155,21 @@ def main():
     unregistered_gw  = require_env("UNREGISTERED_GW")
     switch_hosts_raw = os.environ.get("SWITCH_HOSTS", switch_host)
 
+    # VLANs 250 (unregistered) and 99 (management) are handled by the explicit
+    # blocks below with their own pool/DNS/gateway config — skip them here.
+    SPECIAL_VLANS = {99, 250}
     subnet4 = [
-        make_vlan_subnet(network_octet, vlan, prefix, switch_hosts_raw)
+        make_vlan_subnet(network_word, vlan, prefix, switch_hosts_raw)
         for vlan, prefix in sorted(vlan_prefix_map.items())
+        if vlan not in SPECIAL_VLANS
     ]
 
     # Unregistered clients — single pool, no blocked split, hijack DNS
     subnet4.append({
-        "subnet": f"{network_octet}.250.0/24",
+        "subnet": f"{network_word}.250.0/24",
         "id": 250,
         "pools": [
-            {"pool": f"{network_octet}.250.1 - {network_octet}.250.255"}
+            {"pool": f"{network_word}.250.1 - {network_word}.250.255"}
         ],
         "interface": "eth0.250",
         "option-data": [
@@ -177,10 +181,10 @@ def main():
 
     # Management VLAN — lower range reserved for static infra, public DNS
     subnet4.append({
-        "subnet": f"{network_octet}.99.0/24",
+        "subnet": f"{network_word}.99.0/24",
         "id": 99,
         "pools": [
-            {"pool": f"{network_octet}.99.100 - {network_octet}.99.254"}
+            {"pool": f"{network_word}.99.100 - {network_word}.99.254"}
         ],
         "interface": "eth0.99",
         "option-data": [
@@ -191,7 +195,7 @@ def main():
     })
 
     interfaces = (
-        [f"eth0.{v}" for v in sorted(vlan_prefix_map)]
+        [f"eth0.{v}" for v in sorted(vlan_prefix_map) if v not in SPECIAL_VLANS]
         + ["eth0.250", "eth0.99"]
     )
 

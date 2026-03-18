@@ -11,6 +11,8 @@ import os
 import re
 import time
 import logging
+import struct
+import socket
 import urllib.request
 import urllib.error
 import json
@@ -306,12 +308,45 @@ class DNSParser:
         The MAC is captured now (within 30s of the query) while the
         IP→device binding is still current.  Storing it denormalised
         means future DHCP reassignments cannot corrupt the historical record.
+
+        Strategy:
+        1. Look up the live Kea lease in lease4 (same DB) — this is the
+           authoritative mapping of IP→MAC at this instant.
+        2. Use that MAC to find the device row.
+        3. Fall back to devices.ip_address only if no active lease exists
+           (e.g. the device is on an unmanaged subnet or the lease just expired).
         """
         try:
+            ip_int = struct.unpack('!I', socket.inet_aton(client_ip))[0]
+        except Exception:
+            return None, None, None
+
+        try:
             with self.db_conn.cursor() as cur:
+                # Primary: authoritative lease lookup
+                cur.execute("""
+                    SELECT hwaddr FROM lease4
+                    WHERE address = %s
+                      AND expire > NOW()
+                """, (ip_int,))
+                lease_row = cur.fetchone()
+                if lease_row and lease_row[0]:
+                    mac_str = ':'.join(f'{b:02x}' for b in lease_row[0])
+                    cur.execute("""
+                        SELECT id, user_id, mac_address FROM devices
+                        WHERE mac_address = %s
+                    """, (mac_str,))
+                    dev_row = cur.fetchone()
+                    if dev_row:
+                        return dev_row[0], dev_row[1], dev_row[2]
+                    # Lease exists but device not in portal DB (e.g. unregistered)
+                    return None, None, mac_str
+
+                # Fallback: use cached ip_address field; prefer most recently seen
                 cur.execute("""
                     SELECT id, user_id, mac_address FROM devices
                     WHERE ip_address = %s
+                    ORDER BY last_seen DESC NULLS LAST
                     LIMIT 1
                 """, (client_ip,))
                 row = cur.fetchone()

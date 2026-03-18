@@ -1,9 +1,9 @@
 {
-  "description": "Replace all hardcoded 192.168 network prefixes with NETWORK_OCTET env var; derive DHCP pool sizes from VLAN_PREFIX_MAP; generate dhcp4.json via generate-kea-config.py instead of envsubst template.",
+  "description": "Replace all hardcoded 192.168 network prefixes with NETWORK_WORD env var; derive DHCP pool sizes from VLAN_PREFIX_MAP; generate dhcp4.json via generate-kea-config.py instead of envsubst template.",
   "env": {
     "add": [
       {
-        "key": "NETWORK_OCTET",
+        "key": "NETWORK_WORD",
         "description": "Two-octet network prefix used for all VLANs (e.g. 192.168). Change only if your subnets use a different class-B prefix.",
         "default": "192.168",
         "required": false,
@@ -17,7 +17,14 @@
         "sensitive": false
       }
     ],
-    "remove": []
+    "remove": [
+      {
+        "key": "SW2_IP",
+        "description": "Hardcoded second-switch management IP, replaced by SWITCH_HOSTS which lists all switch IPs. On rollback, re-add SW2_IP with the VLAN-99 IP of your second switch.",
+        "required": false,
+        "sensitive": false
+      }
+    ]
   },
-  "notes": "After upgrading: (1) set NETWORK_OCTET and VLAN_PREFIX_MAP in both captive-portal/.env and kea/.env, (2) rebuild and restart the kea container — generate-kea-config.py will regenerate dhcp4.json from scratch; the old dhcp4.json template is no longer used. NETWORK_OCTET defaults to 192.168 so no action is needed if your network uses that prefix."
+  "notes": "After upgrading: (1) set NETWORK_WORD and VLAN_PREFIX_MAP in both captive-portal/.env and kea/.env, (2) rebuild and restart the kea container — generate-kea-config.py will regenerate dhcp4.json from scratch; the old dhcp4.json template is no longer used. NETWORK_WORD defaults to 192.168 so no action is needed if your network uses that prefix."
 }

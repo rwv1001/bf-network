@@ -14,6 +14,8 @@ set -euo pipefail
 
 SWITCH_IP="${SWITCH_IP:?SWITCH_IP is required}"   # SSH target – current switch IP before reip
 SWITCH_NEW_IP="${SWITCH_HOST:?SWITCH_HOST is required}"  # New VLAN99 address after reip
+NET="${NETWORK_WORD:-192.168}"                          # Two-octet network prefix
+SW_OCTET="$(echo "${SWITCH_HOST}" | awk -F. '{print $NF}')"   # Host octet from SWITCH_HOST
 SWITCH_USER="robert"
 SWITCH_KEY="/home/admin/.ssh/id_rsa"
 SWITCH_SSH_PORT="22"
@@ -30,63 +32,63 @@ SSH_OPTS=(
 )
 
 echo "=== HP5130 IP Renumbering Script ==="
-echo "Will change all VLAN IPs from 192.168.n.1 → 192.168.n.2"
+echo "Will change all VLAN IPs from ${NET}.n.1 → ${NET}.n.${SW_OCTET}"
 echo "SSHing to switch at ${SWITCH_IP} ..."
 echo ""
 
 # Send all config commands in one SSH session.
 # VLAN99 is changed LAST; 'save force' runs before that so all other
 # changes are persisted even if the session drops mid-VLAN99-change.
-ssh "${SSH_OPTS[@]}" "${SWITCH_USER}@${SWITCH_IP}" << 'SWITCH_EOF' || true
+ssh "${SSH_OPTS[@]}" "${SWITCH_USER}@${SWITCH_IP}" << SWITCH_EOF || true
 system-view
 
 interface Vlan-interface1
- ip address 192.168.1.2 255.255.255.0
+ ip address ${NET}.1.${SW_OCTET} 255.255.255.0
 quit
 
 interface Vlan-interface10
- ip address 192.168.10.2 255.255.255.0
+ ip address ${NET}.10.${SW_OCTET} 255.255.255.0
 quit
 
 interface Vlan-interface20
- ip address 192.168.20.2 255.255.252.0
+ ip address ${NET}.20.${SW_OCTET} 255.255.252.0
 quit
 
 interface Vlan-interface30
- ip address 192.168.30.2 255.255.254.0
+ ip address ${NET}.30.${SW_OCTET} 255.255.254.0
 quit
 
 interface Vlan-interface40
- ip address 192.168.40.2 255.255.255.0
+ ip address ${NET}.40.${SW_OCTET} 255.255.255.0
 quit
 
 interface Vlan-interface50
- ip address 192.168.50.2 255.255.255.0
+ ip address ${NET}.50.${SW_OCTET} 255.255.255.0
 quit
 
 interface Vlan-interface60
- ip address 192.168.60.2 255.255.255.0
+ ip address ${NET}.60.${SW_OCTET} 255.255.255.0
 quit
 
 interface Vlan-interface70
- ip address 192.168.70.2 255.255.255.0
+ ip address ${NET}.70.${SW_OCTET} 255.255.255.0
 quit
 
 interface Vlan-interface80
- ip address 192.168.80.2 255.255.255.0
+ ip address ${NET}.80.${SW_OCTET} 255.255.255.0
 quit
 
 interface Vlan-interface250
- ip address 192.168.250.2 255.255.255.0
+ ip address ${NET}.250.${SW_OCTET} 255.255.255.0
 quit
 
 acl number 3000 name PREAUTH
  undo rule 12
- rule 12 permit ip destination 192.168.250.2 0
+ rule 12 permit ip destination ${NET}.250.${SW_OCTET} 0
 quit
 
 radius scheme rad1
- nas-ip 192.168.99.2
+ nas-ip ${SWITCH_HOST}
 quit
 
 return
@@ -94,7 +96,7 @@ save force
 
 system-view
 interface Vlan-interface99
- ip address 192.168.99.2 255.255.255.0
+ ip address ${SWITCH_HOST} 255.255.255.0
 return
 
 SWITCH_EOF

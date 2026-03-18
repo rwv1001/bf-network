@@ -21,7 +21,7 @@ services:
       SWITCH_HOST: ${SWITCH_HOST:?SWITCH_HOST is required – set it in kea/.env}
       UNREGISTERED_GW: ${UNREGISTERED_GW:?UNREGISTERED_GW is required – set it in kea/.env}
       SWITCH_HOSTS: ${SWITCH_HOSTS:?SWITCH_HOSTS is required – set it in kea/.env}
-      NETWORK_OCTET: ${NETWORK_OCTET:?NETWORK_OCTET is required – set it in kea/.env}
+      NETWORK_WORD: ${NETWORK_WORD:?NETWORK_WORD is required – set it in kea/.env}
       VLAN_PREFIX_MAP: ${VLAN_PREFIX_MAP:?VLAN_PREFIX_MAP is required – set it in kea/.env}
       SWITCH_USER: ${SWITCH_USER:-robert}
       SWITCH_SSH_PORT: ${SWITCH_SSH_PORT:-22}
@@ -51,7 +51,7 @@ services:
       : ${DB_PORT:?DB_PORT is required – set it in kea/.env}
       : ${PORTAL_IP:?PORTAL_IP is required – set it in kea/.env}
       : ${HIJACK_DNS_IP:?HIJACK_DNS_IP is required – set it in kea/.env}
-      : ${NETWORK_OCTET:?NETWORK_OCTET is required – set it in kea/.env}
+      : ${NETWORK_WORD:?NETWORK_WORD is required – set it in kea/.env}
       : ${VLAN_PREFIX_MAP:?VLAN_PREFIX_MAP is required – set it in kea/.env}
       # Generate dhcp4.json — pool bounds computed from VLAN_PREFIX_MAP
       python3 /scripts/generate-kea-config.py > /kea/config/dhcp4.json

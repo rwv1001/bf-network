@@ -8,21 +8,9 @@ services:
     # host networking keeps UDP 1812/1813 simple
     network_mode: host
 
-    # Environment variables (loaded from .env file)
+    # Environment variables (loaded from captive-portal .env)
     env_file:
-      - .env
       - ../captive-portal/.env
-    environment:
-      - RADIUS_SECRET=${RADIUS_SECRET}
-      - SWITCH_HOST=${SWITCH_HOST:?}
-      - SW2_IP=${SW2_IP:?SW2_IP is required}
-      - PORTAL_IP=${PORTAL_IP:?}
-      - DB_HOST=${DB_HOST:-127.0.0.1}
-      - DB_PORT=${DB_PORT:-5432}
-      - DB_NAME=${DB_NAME:-captive_portal}
-      - DB_USER=${DB_USER:-portal_user}
-      - DB_PASSWORD=${DB_PASSWORD:-change_this_password}
-
     volumes:
       - ./raddb/clients.conf.template:/etc/freeradius/clients.conf.template:ro
       - ./raddb/proxy.conf.template:/etc/freeradius/proxy.conf.template:ro
