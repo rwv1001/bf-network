@@ -26,7 +26,7 @@ import secrets
 def _net_word() -> str:
     return os.getenv('NETWORK_WORD', '192.168')
 
-from models import db, Admin, User, Device, RegistrationRequest, VlanMapping, ISPRouter, Setting, UnregisteredLease, DomainPolicy
+from models import db, Admin, User, Device, RegistrationRequest, VlanMapping, ISPRouter, Setting, UnregisteredLease, DomainPolicy, DeviceOwnership, IPLease
 from radius_coa import send_coa_disconnect, send_coa_change
 from email_service import (
     send_verification_email,
@@ -37,7 +37,9 @@ from email_service import (
     send_admin_password_reset_email,
     send_network_password_set_email,
     send_network_password_reset_email,
+    send_admin_unblock_request,
 )
+from flask_wtf.csrf import CSRFProtect
 from kea_integration import get_kea_client
 from urllib.parse import urlparse
 import requests
@@ -64,6 +66,11 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
     'pool_recycle': 300,
     'pool_reset_on_return': None,
 }
+# Make csrf_token() available in all templates without enforcing
+# automatic token checking on every POST (many existing routes don't
+# carry a token field and would break if enforcement were on).
+app.config['WTF_CSRF_CHECK_DEFAULT'] = False
+csrf = CSRFProtect(app)
 
 
 @app.context_processor
@@ -199,6 +206,41 @@ def _start_wifi_confirmation_sweeper():
     if not _env_truthy('WIFI_CONFIRM_SWEEP_ENABLED', True):
         return
     thread = threading.Thread(target=_sweep_expired_wifi_confirmations, daemon=True)
+    thread.start()
+
+
+def _sweep_expired_ip_leases():
+    """Background thread: clean up DNS hijacks/ACLs for expired IPLease rows."""
+    interval = int(os.getenv('IP_LEASE_SWEEP_INTERVAL', '20'))
+    while True:
+        try:
+            with app.app_context():
+                now = datetime.utcnow()
+                expired = IPLease.query.filter(
+                    IPLease.lease_expiry <= now,
+                    IPLease.dns_hijacked == True,  # noqa: E712
+                ).all()
+                for lease in expired:
+                    try:
+                        manage_dns_hijack('unhijack', lease.ip_address)
+                        if lease.vlan_id:
+                            manage_switch_acl('unblock', lease.ip_address, lease.vlan_id)
+                        lease.dns_hijacked = False
+                        logger.info(
+                            "Lease sweep: unhijacked %s (VLAN %s) — lease expired at %s",
+                            lease.ip_address, lease.vlan_id, lease.lease_expiry,
+                        )
+                    except Exception as exc:
+                        logger.warning("Lease sweep cleanup failed for %s: %s", lease.ip_address, exc)
+                if expired:
+                    db.session.commit()
+        except Exception as exc:
+            logger.warning("IP lease sweep failed: %s", exc)
+        time.sleep(interval)
+
+
+def _start_ip_lease_sweeper():
+    thread = threading.Thread(target=_sweep_expired_ip_leases, daemon=True)
     thread.start()
 
 
@@ -779,6 +821,7 @@ def _env_truthy(name, default=False):
 
 
 _start_wifi_confirmation_sweeper()
+_start_ip_lease_sweeper()
 
 
 class AdminUser:
@@ -1123,6 +1166,10 @@ def _load_adoptable_leases(vlan_ids):
         for lease in UnregisteredLease.query.all()
     }
 
+    # Pre-load the VLAN prefix map once so _vlan_from_ip_any doesn't hit the DB
+    # once per line (the CSV can have tens of thousands of historical entries).
+    prefix_by_id = _get_vlan_prefix_by_id()
+
     try:
         with open(lease_file, 'r') as f:
             for line in f:
@@ -1133,7 +1180,15 @@ def _load_adoptable_leases(vlan_ids):
                     continue
                 ip_address = fields[0]
                 mac_address = fields[1].lower()
-                vlan_id = _vlan_from_ip(ip_address)
+                # Skip expired and declined leases (state field index 9; 0=active).
+                # This avoids processing tens of thousands of historical rows.
+                expire_raw = fields[4].strip() if len(fields) > 4 else ''
+                try:
+                    if expire_raw and int(expire_raw) < now.timestamp():
+                        continue
+                except (ValueError, TypeError):
+                    pass
+                vlan_id = _vlan_from_ip_any(ip_address, prefix_by_id)
                 if not vlan_id or vlan_id not in vlan_ids:
                     continue
 
@@ -1190,7 +1245,11 @@ def _current_user_from_device():
     if not mac_address:
         return None, None
     device = Device.query.filter_by(mac_address=mac_address).first()
-    if not device or device.registration_status != 'registered':
+    if not device:
+        return None, None
+    # Accept either the new ownership-based check or the legacy registration_status
+    ownership = _get_active_ownership(mac_address)
+    if not ownership and device.registration_status != 'registered':
         return None, None
     if not device.user or device.user.blocked or not device.user.is_active:
         return None, None
@@ -1546,6 +1605,8 @@ def reset_test_data():
                 logger.warning("Kea unregister failed for %s vlan %s: %s", device.mac_address, vlan_id, exc)
 
     db.session.query(RegistrationRequest).delete(synchronize_session=False)
+    db.session.query(DeviceOwnership).delete(synchronize_session=False)
+    db.session.query(IPLease).delete(synchronize_session=False)
     db.session.query(Device).delete(synchronize_session=False)
     db.session.query(User).delete(synchronize_session=False)
     db.session.query(UnregisteredLease).delete(synchronize_session=False)
@@ -1554,12 +1615,34 @@ def reset_test_data():
     # Clear Kea tables
     db.session.execute(text("DELETE FROM hosts"))
     db.session.execute(text("DELETE FROM lease4"))
-    
+
     # Clear NAT and DNS logging tables
     db.session.execute(text("DELETE FROM nat_sessions"))
     db.session.execute(text("DELETE FROM dns_resolutions"))
     db.session.execute(text("DELETE FROM mac_port_cache"))
     db.session.commit()
+
+    # Truncate the Kea CSV lease file so Kea's in-memory allocator starts
+    # fresh and re-issues IPs from .1 rather than skipping historical addresses.
+    lease_file = '/kea/leases/kea-leases4.csv'
+    try:
+        with open(lease_file, 'w') as _f:
+            _f.write(
+                'address,hwaddr,client_id,valid_lifetime,expire,'
+                'subnet_id,fqdn_fwd,fqdn_rev,hostname,state,user_context,pool_id\n'
+            )
+        logger.info("Kea CSV lease file truncated: %s", lease_file)
+    except Exception as exc:
+        logger.warning("Failed to truncate Kea lease file %s: %s", lease_file, exc)
+
+    # Restart Kea so it re-reads the now-empty CSV and clears its in-memory
+    # lease cache.  Without this restart Kea continues to skip previously
+    # issued IPs even though the CSV and DB are empty.
+    try:
+        _restart_kea_container()
+        logger.info("Kea container restarted after test reset")
+    except Exception as exc:
+        logger.warning("Failed to restart Kea after test reset: %s", exc)
 
 
 def upsert_unregistered_lease(mac_address, ip_address, expires_at, commit=True):
@@ -1588,6 +1671,146 @@ def clear_unregistered_lease(mac_address):
     if lease:
         db.session.delete(lease)
         db.session.commit()
+
+
+# ── Spec Table 9 helpers (DeviceOwnership) ────────────────────────────────────
+
+def _get_active_ownership(mac_address):
+    """Return the active DeviceOwnership row for mac_address, or None."""
+    return DeviceOwnership.query.filter_by(
+        mac_address=mac_address, end_datetime=None
+    ).first()
+
+
+def _close_ownership(mac_address, commit=True):
+    """Close the active DeviceOwnership for mac_address (set end_datetime=now)."""
+    o = _get_active_ownership(mac_address)
+    if o:
+        o.end_datetime = datetime.utcnow()
+        if commit:
+            db.session.commit()
+    return o
+
+
+def _open_ownership(mac_address, user_id, commit=True):
+    """Open a new DeviceOwnership row for mac_address/user_id."""
+    o = DeviceOwnership(
+        mac_address=mac_address,
+        user_id=user_id,
+        start_datetime=datetime.utcnow(),
+    )
+    db.session.add(o)
+    if commit:
+        db.session.commit()
+    return o
+
+
+# ── Spec Table 7 helpers (IPLease) ────────────────────────────────────────────
+
+def _get_active_iplease(mac_address):
+    """Return the most recent non-expired IPLease for mac_address, or None."""
+    return (
+        IPLease.query
+        .filter(
+            IPLease.mac_address == mac_address,
+            IPLease.lease_expiry > datetime.utcnow(),
+        )
+        .order_by(IPLease.lease_start.desc())
+        .first()
+    )
+
+
+def _upsert_iplease(mac_address, ip_address, vlan_id, lease_start, lease_expiry,
+                    from_blocked_pool=False, dns_hijacked=False, commit=True):
+    """Create or update an IPLease row for (mac_address, ip_address)."""
+    lease = IPLease.query.filter_by(
+        mac_address=mac_address, ip_address=ip_address
+    ).first()
+    if lease:
+        lease.vlan_id = vlan_id
+        lease.lease_start = lease_start
+        lease.lease_expiry = lease_expiry
+        lease.from_blocked_pool = from_blocked_pool
+        lease.dns_hijacked = dns_hijacked
+    else:
+        lease = IPLease(
+            ip_address=ip_address,
+            vlan_id=vlan_id,
+            mac_address=mac_address,
+            lease_start=lease_start,
+            lease_expiry=lease_expiry,
+            from_blocked_pool=from_blocked_pool,
+            dns_hijacked=dns_hijacked,
+        )
+        db.session.add(lease)
+    if commit:
+        db.session.commit()
+    return lease
+
+
+def _expire_iplease(mac_address, ip_address, commit=True):
+    """Mark a specific IPLease as expired (set lease_expiry to now)."""
+    lease = IPLease.query.filter_by(
+        mac_address=mac_address, ip_address=ip_address
+    ).first()
+    if lease:
+        lease.lease_expiry = datetime.utcnow()
+        if commit:
+            db.session.commit()
+    return lease
+
+
+# ── Spec Table 6 state helpers ────────────────────────────────────────────────
+
+def _sync_registration_status(device):
+    """Keep registration_status consistent with the new orthogonal fields.
+
+    Rules:
+    - internet_blocked=True  → 'blocked'
+    - internet_accessible=True and assigned_vlan set → 'registered'
+    - anything else → 'pending'
+    """
+    if device.internet_blocked:
+        device.registration_status = 'blocked'
+    elif device.internet_accessible and device.assigned_vlan:
+        device.registration_status = 'registered'
+    else:
+        device.registration_status = 'pending'
+
+
+def _set_internet_accessible(device, value, commit=True):
+    """Set internet_accessible and keep registration_status in sync."""
+    device.internet_accessible = value
+    _sync_registration_status(device)
+    if commit:
+        db.session.commit()
+
+
+def _set_internet_blocked(device, value, commit=True):
+    """Set internet_blocked and keep registration_status in sync."""
+    device.internet_blocked = value
+    if value:
+        device.internet_accessible = None
+    _sync_registration_status(device)
+    if commit:
+        db.session.commit()
+
+
+def _should_have_internet(device):
+    """Return True if all conditions are met for the device to have internet access.
+
+    Conditions (spec 4b.ii.2.a.ii):
+    - device.assigned_vlan is set
+    - device.current_vlan == device.assigned_vlan
+    - if the VLAN requires a password, ownership_validated must be True
+    """
+    if not device.assigned_vlan:
+        return False
+    if device.current_vlan != device.assigned_vlan:
+        return False
+    if _vlan_requires_password(device.assigned_vlan) and not device.ownership_validated:
+        return False
+    return True
 
 
 def _get_iptables_base_cmd():
@@ -1961,14 +2184,22 @@ def replug_switch_port_for_mac(mac_address):
 
 
 def apply_device_block(device, flash_messages=False):
-    """Block a device (DB status, Kea, ACL, DNS hijack)."""
-    device.registration_status = 'blocked'
+    """Block a device per spec B/C: set internet_blocked=True, internet_accessible=null,
+    apply DNS hijack and ACL block to the device's current IP.
+
+    If the device's current IP is in the blocked pool, Kea's block-status is still
+    set so future leases will also come from the blocked pool.  No new hijack/ACL is
+    needed in that case because blocked-pool IPs always have blanket rules.
+    """
+    _set_internet_blocked(device, True, commit=False)
     db.session.commit()
     clear_unregistered_lease(device.mac_address)
 
+    # Ask Kea to flag this MAC for the blocked pool so future renewals land there.
     kea = get_kea()
     if kea and device.current_vlan:
-        kea.set_block_status(device.mac_address, device.current_vlan, True, blocked_ip=device.ip_address)
+        kea.set_block_status(device.mac_address, device.current_vlan, True,
+                             blocked_ip=device.ip_address)
         if device.ip_address:
             kea.force_lease_renewal(device.mac_address, device.ip_address)
         new_ip = kea.get_lease_ip_for_mac(device.mac_address, subnet_id=device.current_vlan)
@@ -1982,29 +2213,44 @@ def apply_device_block(device, flash_messages=False):
         db.session.commit()
 
     if device.ip_address and device.current_vlan:
-        acl_success = manage_switch_acl('block', device.ip_address, device.current_vlan)
-        if _should_hijack_vlan(device.current_vlan):
+        # Only apply per-IP rules if the IP is NOT already in the blocked pool
+        # (blocked-pool IPs are covered by blanket ranges).
+        acl_success = True
+        if not _is_blocked_pool_ip(device.ip_address):
             manage_dns_hijack('hijack', device.ip_address)
+            acl_success = manage_switch_acl('block', device.ip_address, device.current_vlan)
+            # Update IPLease record
+            lease = _get_active_iplease(device.mac_address)
+            if lease:
+                lease.dns_hijacked = True
+                db.session.commit()
         if flash_messages:
             if acl_success:
                 flash(f'Device {device.mac_address} blocked. Internet access denied.', 'success')
             else:
                 flash(f'Device {device.mac_address} marked as blocked, but ACL update failed.', 'warning')
-        logger.info(f"Blocked device {device.mac_address} at {device.ip_address} (acl_success={acl_success})")
+        logger.info("Blocked device %s at %s (acl_success=%s)", device.mac_address,
+                    device.ip_address, acl_success)
     else:
         if flash_messages:
-            flash(f'Device {device.mac_address} marked as blocked, but no IP/VLAN found.', 'warning')
-        logger.warning(f"No IP/VLAN for device {device.mac_address}, cannot apply ACL")
+            flash(f'Device {device.mac_address} marked as blocked (no active IP found).', 'warning')
+        logger.warning("Block: no IP/VLAN for device %s", device.mac_address)
 
     cleanup_orphan_hijack_rules()
 
 
 def apply_device_unblock(device, flash_messages=False):
-    """Unblock a device (DB status, Kea, ACL, DNS hijack)."""
-    device.registration_status = 'registered'
+    """Unblock a device per spec B/C:
+    - Clear internet_blocked.
+    - If conditions for internet access are met (correct VLAN, ownership validated),
+      remove DNS hijack and ACL block, then set internet_accessible=True.
+    - Otherwise set internet_accessible=False (wrong VLAN or unvalidated password VLAN).
+    """
+    _set_internet_blocked(device, None, commit=False)
     db.session.commit()
     clear_unregistered_lease(device.mac_address)
 
+    # Ask Kea to remove the block-pool flag so future leases come from the main pool.
     kea = get_kea()
     blocked_ip = None
     if kea and device.current_vlan:
@@ -2020,70 +2266,207 @@ def apply_device_unblock(device, flash_messages=False):
         device.ip_address = latest_ip
         db.session.commit()
 
-    if device.ip_address and device.current_vlan:
-        acl_success = manage_switch_acl('unblock', device.ip_address, device.current_vlan)
-        if _should_hijack_vlan(device.current_vlan):
-            manage_dns_hijack('unhijack', device.ip_address)
-        if blocked_ip and blocked_ip != device.ip_address:
-            manage_switch_acl('unblock', blocked_ip, device.current_vlan)
-            if _should_hijack_vlan(device.current_vlan):
-                manage_dns_hijack('unhijack', blocked_ip)
+    lease = _get_active_iplease(device.mac_address)
+    ip_in_blocked_pool = (
+        _is_blocked_pool_ip(device.ip_address) or
+        (lease and lease.from_blocked_pool)
+    )
 
+    if _should_have_internet(device) and not ip_in_blocked_pool:
+        # Remove DNS hijack and ACL block synchronously, then mark accessible.
+        acl_success = True
+        if device.ip_address and device.current_vlan:
+            if _should_hijack_vlan(device.current_vlan):
+                manage_dns_hijack('unhijack', device.ip_address)
+            acl_success = manage_switch_acl('unblock', device.ip_address, device.current_vlan)
+            if blocked_ip and blocked_ip != device.ip_address:
+                manage_switch_acl('unblock', blocked_ip, device.current_vlan)
+                if _should_hijack_vlan(device.current_vlan):
+                    manage_dns_hijack('unhijack', blocked_ip)
+            # Update IPLease
+            if lease:
+                lease.dns_hijacked = False
+                db.session.commit()
+        _set_internet_accessible(device, True, commit=True)
         if flash_messages:
             if acl_success:
                 flash(f'Device {device.mac_address} unblocked. Internet access restored.', 'success')
             else:
-                flash(f'Device {device.mac_address} marked as registered, but ACL removal failed.', 'warning')
-        logger.info(f"Unblocked device {device.mac_address} at {device.ip_address} (acl_success={acl_success})")
+                flash(f'Device {device.mac_address} unblocked, but ACL removal failed.', 'warning')
+        logger.info("Unblocked device %s at %s", device.mac_address, device.ip_address)
     else:
+        # Can't grant internet yet: wrong VLAN, unvalidated password, or blocked pool.
+        _set_internet_accessible(device, False if device.assigned_vlan else None, commit=True)
         if flash_messages:
-            flash(f'Device {device.mac_address} marked as registered, but no IP/VLAN found.', 'warning')
-        logger.warning(f"No IP/VLAN for device {device.mac_address}")
+            if ip_in_blocked_pool:
+                flash(
+                    f'Device {device.mac_address} unblocked. '
+                    'It is in the blocked pool — disconnect and reconnect to regain access.',
+                    'info',
+                )
+            else:
+                flash(
+                    f'Device {device.mac_address} unblocked, but it is on the wrong VLAN '
+                    f'or still needs password validation.',
+                    'info',
+                )
+        logger.info("Unblocked device %s: conditions not yet met for internet access", device.mac_address)
 
     cleanup_orphan_hijack_rules()
 
 
+
+
 @app.route('/', methods=['GET', 'POST', 'OPTIONS'])
 def index():
-    origin = request.headers.get('Origin', '')  # Get the request's Origin
-    
-    
-    # Optional: Validate against a whitelist (add expected origins)
-    allowed_origins = [
-        'http://www.msftconnecttest.com',
-        'http://connectivitycheck.gstatic.com',
-        'http://captive.apple.com',
-        # Add others as needed
-    ]
-    if origin and origin not in allowed_origins:
-        origin = ''  # Deny if not allowed; fallback to no ACAO or '*'
-    
+    """Spec section 4: captive portal root page.
+
+    4a – No MAC found → not on local network → redirect to /login.
+    4b – MAC found → check ownership/access state and redirect accordingly.
+    """
     if request.method == 'OPTIONS':
         response = app.make_response('')
-        if origin:
-            response.headers['Access-Control-Allow-Origin'] = origin
-        else:
-            response.headers['Access-Control-Allow-Origin'] = '*'  # Fallback
+        response.headers['Access-Control-Allow-Origin'] = '*'
         response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
         response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-Requested-With'
         response.headers['Vary'] = 'Origin'
         return response, 200
 
-    """Landing page - check if device is blocked, otherwise redirect to registration"""
-    ip_address = request.remote_addr
     mac_address = get_client_mac()
-    
-    # Check if device is blocked
-    if mac_address:
-        device = Device.query.filter_by(mac_address=mac_address).first()
-        if device and device.registration_status == 'blocked':
-            return redirect(_build_portal_url(url_for('blocked_page')))
 
-        if device and device.registration_status == 'registered' and device.user:
-            if not device.user.require_approval_every_device:
-                return redirect(_build_portal_url(url_for('adopt_devices')))
-    
+    # Spec 4a: device not on local network → redirect to login
+    if not mac_address:
+        return redirect(_build_portal_url(url_for('user_login')))
+
+    # Spec 4b: device is on local network
+    device    = Device.query.filter_by(mac_address=mac_address).first()
+    ownership = _get_active_ownership(mac_address) if device else None
+
+    # Blocked device always goes to blocked page.
+    if device and device.internet_blocked:
+        return redirect(_build_portal_url(url_for('blocked_page')))
+
+    # No active ownership → show registration form (spec 4b.i)
+    if not ownership:
+        return redirect(_build_portal_url(url_for('register')))
+
+    # Active ownership → show register route which renders the status page (spec 4b.ii)
     return redirect(_build_portal_url(url_for('register')))
+
+
+@app.route('/api/device-status')
+def api_device_status():
+    """Polling endpoint for the captive portal status page (spec 4b.ii).
+
+    Returns JSON describing the current internet-access state for the calling
+    device so the client-side JS can update its UI without a full page reload.
+    """
+    mac_address = get_client_mac()
+    if not mac_address:
+        return jsonify({'status': 'no_mac'}), 200
+
+    device    = Device.query.filter_by(mac_address=mac_address).first()
+    ownership = _get_active_ownership(mac_address) if device else None
+
+    if not device or not ownership:
+        return jsonify({'status': 'unregistered'}), 200
+
+    # Get latest active lease for blocked-pool and dns_hijacked info.
+    lease = _get_active_iplease(mac_address)
+
+    # Determine selected/detected VLAN and password requirements.
+    ip_address  = get_client_ip()
+    _, detected_vlan, _ = detect_connection_type(ip_address)
+    selected_vlan = device.assigned_vlan or detected_vlan
+    password_required  = _vlan_requires_password(selected_vlan) if selected_vlan else False
+
+    # Spec 4b.ii.1: password VLAN, not yet ownership_validated
+    if password_required and not device.ownership_validated:
+        return jsonify({
+            'status':            'need_password',
+            'has_password':      device.user.has_network_password if device.user else False,
+            'selected_vlan':     selected_vlan,
+        })
+
+    # Spec 4b.ii.2
+    assigned_vlan = device.assigned_vlan
+
+    if device.internet_blocked:
+        return jsonify({'status': 'blocked'})
+
+    if assigned_vlan is None:
+        return jsonify({
+            'status':        'pending_approval',
+            'selected_vlan': selected_vlan,
+        })
+
+    if assigned_vlan != detected_vlan:
+        from models import VlanMapping as _VM
+        assigned_ssid = get_ssid_for_vlan(assigned_vlan)
+        return jsonify({
+            'status':         'wrong_vlan',
+            'assigned_vlan':  assigned_vlan,
+            'assigned_ssid':  assigned_ssid,
+            'detected_vlan':  detected_vlan,
+        })
+
+    # assigned_vlan == detected_vlan
+    if device.internet_accessible is True:
+        user_home_url = _build_portal_url(url_for('user_home'))
+        return jsonify({
+            'status':              'accessible',
+            'user_home_url':       user_home_url,
+            'ownership_validated': bool(device.ownership_validated),
+        })
+
+    if device.internet_accessible is False:
+        return jsonify({
+            'status': 'access_refused',
+            'notes':  getattr(device, 'admin_notes', None),
+        })
+
+    # internet_accessible is None: provisioning in progress
+    from_blocked_pool = lease.from_blocked_pool if lease else False
+    if from_blocked_pool:
+        return jsonify({'status': 'blocked_pool', 'assigned_vlan': assigned_vlan})
+
+    # None + not blocked pool + dns_hijacked → should we auto-complete the grant?
+    # Perform the unhijack here if conditions are met (spec 4b.ii.2.a.ii.3c).
+    if lease and lease.dns_hijacked and not from_blocked_pool:
+        if _should_have_internet(device):
+            ip_addr = lease.ip_address
+            if ip_addr:
+                if _should_hijack_vlan(assigned_vlan):
+                    manage_dns_hijack('unhijack', ip_addr)
+                manage_switch_acl('unblock', ip_addr, assigned_vlan)
+            lease.dns_hijacked = False
+            db.session.commit()
+            _set_internet_accessible(device, True, commit=True)
+            # spec 4b.ii.2.a.ii.1.c.i: send ownership-confirmation email if
+            # ownership has not yet been validated via a password.
+            if not device.ownership_validated and device.user:
+                _u = device.user
+                _unreg = _build_unregister_url(device.unregister_token)
+                _curl, _ctimeout = _set_wifi_confirmation(device)
+                send_wifi_registration_confirmation(
+                    _u.email,
+                    _u.first_name or 'there',
+                    get_ssid_for_vlan(assigned_vlan) or 'Network',
+                    device.mac_address,
+                    _unreg,
+                    confirm_url=_curl,
+                    confirm_timeout_sec=_ctimeout,
+                    registration_details={},
+                )
+            return jsonify({
+                'status':              'accessible',
+                'user_home_url':       _build_portal_url(url_for('user_home')),
+                'ownership_validated': bool(device.ownership_validated),
+            })
+
+    return jsonify({'status': 'pending'})
+
+
 
 
 @app.route('/blocked', methods=['GET', 'POST', 'OPTIONS'])
@@ -2127,6 +2510,37 @@ def blocked_page():
 
 
 # Captive portal detection endpoints
+@app.route('/api/request-unblock', methods=['POST', 'OPTIONS'])
+def api_request_unblock():
+    """Send an unblock request email to all manage_users admins on behalf of the
+    connecting device (spec 4b.ii.2.a.i — blocked device contact-admin link)."""
+    if request.method == 'OPTIONS':
+        resp = app.make_response('')
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+        resp.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+        resp.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-Requested-With'
+        return resp, 200
+
+    mac_address = get_client_mac()
+    ip_address  = get_client_ip()
+    device = Device.query.filter_by(mac_address=mac_address).first() if mac_address else None
+    user   = device.user if device else None
+
+    try:
+        send_admin_unblock_request(
+            mac_address  or 'Unknown',
+            ip_address   or 'Unknown',
+            user_name    = f"{user.first_name} {user.last_name}".strip() if user else None,
+            user_email   = user.email if user else None,
+        )
+    except Exception as exc:
+        logger.warning("Failed to send unblock request email: %s", exc)
+
+    response = jsonify({'status': 'ok', 'message': 'Your request has been sent to the administrator.'})
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    return response
+
+
 @app.route('/generate_204')
 @app.route('/gen_204')
 def android_captive_portal_detection():
@@ -2147,27 +2561,27 @@ def access_check():
         return ('', 204)
     return ('', 409)
 
+
 @app.route('/hotspot-detect.html')
 def ios_captive_portal_detection():
-    """iOS captive portal detection - MUST NOT return Success or iOS won't show portal"""
+    """iOS captive portal detection - return 302 to show portal"""
     mac_address = get_client_mac()
-    
-    # Check if device is already registered
     if mac_address:
         device = Device.query.filter_by(mac_address=mac_address).first()
-        if device and device.registration_status == 'registered':
-            return redirect(_build_portal_url(url_for('status'))), 302
-        elif device and device.registration_status == 'blocked':
-            # Device is blocked - show blocked page
+        if device and device.internet_blocked:
             return redirect(_build_portal_url(url_for('blocked_page'))), 302
-    
-    # Device not registered - redirect to portal (triggers iOS captive portal UI)
     return redirect(_build_portal_url(url_for('register'))), 302
+
 
 @app.route('/library/test/success.html')
 def ios_captive_success():
-    """iOS success check after authentication"""
-    return redirect(_build_portal_url(url_for('status'))), 302
+    """iOS captive portal success check"""
+    mac_address = get_client_mac()
+    if mac_address:
+        device = Device.query.filter_by(mac_address=mac_address).first()
+        if device and device.internet_blocked:
+            return redirect(_build_portal_url(url_for('blocked_page'))), 302
+    return redirect(_build_portal_url(url_for('register'))), 302
 
 @app.route('/ncsi.txt')
 @app.route('/connecttest.txt')
@@ -2211,6 +2625,12 @@ def windows_captive_portal_detection():
 
 @app.route('/register', methods=['GET', 'POST', 'OPTIONS'])
 def register():
+    """Spec section 4b: captive portal reached from a device on the local network.
+
+    GET  – Show registration form (unregistered device) or status page
+           (owned device that doesn't yet have internet access).
+    POST – Handle form submission per spec 4b.i.
+    """
     if request.method == 'GET' and _portal_host_mismatch():
         qs = request.query_string.decode('utf-8', errors='ignore')
         target = _build_portal_url(url_for('register'))
@@ -2218,756 +2638,293 @@ def register():
             target = f"{target}?{qs}"
         return redirect(target)
 
-    logger.info("Test message")
-    logger.warning(f"Full headers: {request.headers}")
-    origin = request.headers.get('Origin', '')  # Get the request's Origin
-    
-    
-    # Optional: Validate against a whitelist (add expected origins)
-    allowed_origins = [
-        'http://www.msftconnecttest.com',
-        'http://connectivitycheck.gstatic.com',
-        'http://captive.apple.com',
-        # Add others as needed
-    ]
-    if origin and origin not in allowed_origins:
-        origin = ''  # Deny if not allowed; fallback to no ACAO or '*'
-    
+    # ── OPTIONS pre-flight ────────────────────────────────────────────────────
     if request.method == 'OPTIONS':
         response = app.make_response('')
-        if origin:
-            response.headers['Access-Control-Allow-Origin'] = origin
-        else:
-            response.headers['Access-Control-Allow-Origin'] = '*'  # Fallback
+        response.headers['Access-Control-Allow-Origin'] = '*'
         response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
         response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-Requested-With'
         response.headers['Vary'] = 'Origin'
         return response, 200
-    mac_address = get_client_mac()
-    ip_address = get_client_ip()
 
-    # Block remote access: if no MAC can be resolved the request came from outside
-    # the local network (e.g. someone clicking a link from outside). Registration
-    # requires a local network connection so we can identify the device.
+    mac_address = get_client_mac()
+    ip_address  = get_client_ip()
+    is_ajax     = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+
+    # Remote access guard: no MAC means device is not on the local network.
     if not mac_address and request.method == 'GET':
-        return render_template('error.html',
+        return render_template(
+            'error.html',
             code='Remote Access Not Supported',
             message=(
                 'This registration page can only be used when your device is '
-                'connected to the local network. '
-                'Please connect to the Wi-Fi or plug in an Ethernet cable, '
-                'then visit this page again.'
+                'connected to the local network.  Please connect to the Wi-Fi '
+                'or plug in an Ethernet cable, then visit this page again.'
             )
         ), 200
 
     detected_mac = mac_address
-    detected_ip = ip_address
-    is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+    detected_ip  = ip_address
 
-    prefill = _build_prefill_from_request()  # Use your existing function for GET prefill
-    current_connection, current_vlan, current_ssid = detect_connection_type(ip_address)
+    # Detect connection / VLAN
+    connection_type, detected_vlan, ssid = detect_connection_type(ip_address)
     wired_unregistered_vlan = _get_wired_unregistered_vlan_id()
-    is_wired_unregistered = bool(current_connection == 'wired' and current_vlan == wired_unregistered_vlan)
+    is_wired_unregistered   = (connection_type == 'wired' and
+                                detected_vlan == wired_unregistered_vlan)
     wired_vlan_options = [
         {
             'vlan_id': entry.vlan_id,
-            'label': _label_for_vlan(entry.vlan_id, get_vlan_map()),
+            'label':   _label_for_vlan(entry.vlan_id, get_vlan_map()),
         }
         for entry in _get_wired_assignable_entries()
     ]
 
+    # ── GET: determine whether to show form or status ─────────────────────────
     if request.method == 'GET' and mac_address:
-        device = Device.query.filter_by(mac_address=mac_address).first()
-        device = normalize_device_status(device)
-        if device and device.registration_status == 'registered' and device.user:
-            if device.user.is_active and not device.user.blocked:
-                vlan_map = get_vlan_map()
-                access_label = _label_for_vlan(device.current_vlan, vlan_map) or 'network access'
+        device    = Device.query.filter_by(mac_address=mac_address).first()
+        ownership = _get_active_ownership(mac_address) if device else None
 
-                current_ip = detected_ip
-                current_connection, current_vlan, _ = detect_connection_type(current_ip)
-                network_mismatch = bool(
-                    current_connection == 'wifi'
-                    and current_vlan
-                    and device.current_vlan
-                    and current_vlan != device.current_vlan
-                )
+        # Device IS registered (has an active ownership record)
+        if device and ownership:
+            device = normalize_device_status(device)
+            # Build prefill from the device's user so the hidden form fields
+            # carry valid data when the JS password-entry prompt submits.
+            _user_pf = device.user
+            prefill_data = {
+                'email':        _user_pf.email        or '' if _user_pf else '',
+                'first_name':   _user_pf.first_name   or '' if _user_pf else '',
+                'last_name':    _user_pf.last_name    or '' if _user_pf else '',
+                'phone_number': _user_pf.phone_number or '' if _user_pf else '',
+                'device_type':  device.device_name    or '',
+            } if _user_pf else {}
+            user_home_url = _build_portal_url(url_for('user_home'))
+            return render_template(
+                'register.html',
+                show_status=True,
+                device=device,
+                prefill=prefill_data,
+                detected_mac=detected_mac,
+                detected_ip=detected_ip,
+                wired_vlan_required=False,
+                wired_vlan_options=wired_vlan_options,
+                user_home_url=user_home_url,
+            )
 
-                if current_ip and not network_mismatch and not _is_blocked_pool_ip(current_ip):
-                    if _should_hijack_vlan(current_vlan or device.current_vlan):
-                        manage_dns_hijack('unhijack', current_ip)
-                    if current_vlan or device.current_vlan:
-                        manage_switch_acl('unblock', current_ip, current_vlan or device.current_vlan)
+    # Fall through to registration form for GET (unregistered) or POST.
+    prefill = _build_prefill_from_request()
 
-                if current_connection == 'wifi' and device.current_vlan:
-                    _cache_key = (device.mac_address, device.current_vlan)
-                    _now = time.monotonic()
-                    with _kea_reservation_check_lock:
-                        _last = _kea_reservation_check_cache.get(_cache_key, 0)
-                        _due = (_now - _last) >= KEA_RESERVATION_CHECK_TTL_SEC
-                        if _due:
-                            _kea_reservation_check_cache[_cache_key] = _now
-                    if _due:
-                        kea = get_kea()
-                        if kea:
-                            try:
-                                reservation = kea.get_reservation(device.mac_address, device.current_vlan)
-                                if not reservation:
-                                    hostname = device.device_name or 'device'
-                                    success = kea.register_mac(
-                                        mac=device.mac_address,
-                                        vlan=device.current_vlan,
-                                        hostname=hostname,
-                                        ip_address=None,
-                                    )
-                                    if success and current_ip:
-                                        kea.force_lease_renewal(device.mac_address, current_ip)
-                            except Exception as exc:
-                                with _kea_reservation_check_lock:
-                                    _kea_reservation_check_cache.pop(_cache_key, None)
-                                logger.warning(
-                                    "Kea reservation check failed for %s: %s",
-                                    device.mac_address,
-                                    exc,
-                                )
-
-                clear_unregistered_lease(device.mac_address)
-
-                return render_template(
-                    'register.html',
-                    show_wait=True,
-                    detected_mac=detected_mac,
-                    detected_ip=detected_ip,
-                    access_label=access_label,
-                    device=device,
-                    wired_vlan_required=is_wired_unregistered,
-                    wired_vlan_options=wired_vlan_options,
-                )
-
+    # ── POST: process registration form submission ────────────────────────────
     if request.method == 'POST':
-        # Reject POSTs with no resolvable MAC — submitted from outside the network
         if not mac_address:
             if is_ajax:
-                return jsonify({'status': 'error', 'message': 'Registration requires a local network connection. Please connect to Wi-Fi or Ethernet and try again.'}), 403
-            return render_template('error.html',
-                code='Remote Access Not Supported',
-                message=(
-                    'Registration requires a local network connection. '
-                    'Please connect to the Wi-Fi or plug in an Ethernet cable, '
-                    'then visit this page again.'
-                )
-            ), 403
-        email = request.form.get('email').strip().lower()
-        first_name = request.form.get('first_name').strip()
-        last_name = request.form.get('last_name').strip()
-        phone_number = request.form.get('phone_number').strip()
-        device_type = request.form.get('device_type').strip()
-        wired_vlan_raw = (request.form.get('wired_vlan_id') or '').strip()
+                return jsonify({'status': 'error', 'message': 'Unable to determine your MAC address.'}), 400
+            flash('Unable to determine your device MAC address. Please ensure you are on the local network.', 'error')
+            return redirect(url_for('register'))
+
+        # ── Field extraction ──────────────────────────────────────────────────
+        email        = (request.form.get('email')        or '').strip().lower()
+        first_name   = (request.form.get('first_name')   or '').strip()
+        last_name    = (request.form.get('last_name')    or '').strip()
+        phone_number = (request.form.get('phone_number') or '').strip()
+        device_type  = (request.form.get('device_type')  or '').strip()
+        password_input = (request.form.get('network_password') or '').strip()
+
+        # Wired VLAN selection (only applies when device is on wired_unregistered VLAN)
         wired_vlan_id = None
-        if wired_vlan_raw:
-            try:
-                wired_vlan_id = int(wired_vlan_raw)
-            except ValueError:
-                wired_vlan_id = None
-
-        # Validate required fields (your existing logic)
-        if not all([email, first_name, last_name, device_type]):
-            if is_ajax:
-                return jsonify({'status': 'error', 'message': 'All required fields must be filled'})
-            else:
-                flash('All required fields must be filled', 'error')
-                prefill = {
-                    'email': email,
-                    'first_name': first_name,
-                    'last_name': last_name,
-                    'phone_number': phone_number,
-                    'device_type': device_type
-                }
-                return render_template(
-                    'register.html',
-                    prefill=prefill,
-                    detected_mac=detected_mac,
-                    detected_ip=detected_ip,
-                    wired_vlan_required=is_wired_unregistered,
-                    wired_vlan_options=wired_vlan_options,
-                )
-
         if is_wired_unregistered:
-            wired_assignable = _get_wired_assignable_vlan_ids()
-            if not wired_vlan_id or wired_vlan_id not in wired_assignable:
-                message = 'Please select a valid wired VLAN.'
+            raw = (request.form.get('wired_vlan_id') or '').strip()
+            try:
+                wired_vlan_id = int(raw)
+            except ValueError:
+                pass
+            # Fallback: for password re-submission the dropdown isn't present;
+            # use the VLAN the device chose on its original registration.
+            if not wired_vlan_id:
+                _dev_for_vlan = Device.query.filter_by(mac_address=mac_address).first()
+                if _dev_for_vlan and _dev_for_vlan.wired_target_vlan:
+                    wired_vlan_id = _dev_for_vlan.wired_target_vlan
+            if not wired_vlan_id or wired_vlan_id not in _get_wired_assignable_vlan_ids():
+                msg = 'Please select a valid wired VLAN.'
                 if is_ajax:
-                    return jsonify({'status': 'error', 'message': message})
-                flash(message, 'error')
+                    return jsonify({'status': 'error', 'message': msg}), 400
+                flash(msg, 'error')
                 return render_template(
-                    'register.html',
-                    prefill=prefill,
-                    detected_mac=detected_mac,
-                    detected_ip=detected_ip,
-                    wired_vlan_required=is_wired_unregistered,
-                    wired_vlan_options=wired_vlan_options,
+                    'register.html', prefill=prefill,
+                    detected_mac=detected_mac, detected_ip=detected_ip,
+                    wired_vlan_required=True, wired_vlan_options=wired_vlan_options,
                 )
 
-        # Check if user exists (your existing logic)
-        user = User.query.filter_by(email=email).first()
+        # ── Basic validation ──────────────────────────────────────────────────
+        if not email or '@' not in email:
+            msg = 'A valid email address is required.'
+            if is_ajax:
+                return jsonify({'status': 'error', 'message': msg}), 400
+            flash(msg, 'error')
+            return render_template(
+                'register.html', prefill=prefill,
+                detected_mac=detected_mac, detected_ip=detected_ip,
+                wired_vlan_required=is_wired_unregistered,
+                wired_vlan_options=wired_vlan_options,
+            )
 
-        if user:
-            # Existing user - register device immediately unless VLAN requires approval
-            vlan_map = get_vlan_map()
-            connection_type, detected_vlan, ssid = detect_connection_type(ip_address)
-            wired_unregistered_vlan = _get_wired_unregistered_vlan_id()
-            is_wired_unregistered = bool(connection_type == 'wired' and detected_vlan == wired_unregistered_vlan)
-            current_ssid = ssid or (get_ssid_for_vlan(detected_vlan) if detected_vlan else None)
+        # The VLAN the user wants to join.
+        selected_vlan = wired_vlan_id if is_wired_unregistered else detected_vlan
 
-            domain_policy_map = _load_domain_policy_map()
-            allowed_vlans, _ = _get_effective_vlans_for_user(user, domain_policy_map)
-            default_vlan = _default_vlan_for_user(allowed_vlans, vlan_map)
-
-            vlan_allowed = bool(detected_vlan and detected_vlan in allowed_vlans)
-            needs_approval = bool(user.require_approval_every_device)
-
-            if is_wired_unregistered:
-                target_vlan = wired_vlan_id if wired_vlan_id in allowed_vlans and not user.require_approval_every_device else None
-                expected_ssid = None
-                network_mismatch = False
-                if not target_vlan:
-                    needs_approval = True
-            elif connection_type == 'wifi' and detected_vlan:
-                if not allowed_vlans:
-                    network_mismatch = False
-                    expected_ssid = get_ssid_for_vlan(detected_vlan)
-                    needs_approval = True
-                    target_vlan = None
-                else:
-                    network_mismatch = not vlan_allowed
-                    expected_ssid = get_ssid_for_vlan(detected_vlan if vlan_allowed else default_vlan)
-                    if not vlan_allowed:
-                        needs_approval = True
-                    target_vlan = detected_vlan if vlan_allowed and not user.require_approval_every_device else None
-            else:
-                target_vlan = default_vlan if not user.require_approval_every_device else None
-                expected_ssid = get_ssid_for_vlan(target_vlan) if target_vlan else None
-                network_mismatch = False
-                if not target_vlan:
-                    needs_approval = True
-            existing_device = Device.query.filter_by(mac_address=mac_address).first()
-            previous_profile = {
-                "first_name": user.first_name or "",
-                "last_name": user.last_name or "",
-                "phone_number": user.phone_number or ""
-            }
-            new_profile = {
-                "first_name": first_name or user.first_name or "",
-                "last_name": last_name or user.last_name or "",
-                "phone_number": phone_number or user.phone_number or ""
-            }
-            profile_changed = previous_profile != new_profile
-            if profile_changed:
-                user.first_name = new_profile["first_name"] or None
-                user.last_name = new_profile["last_name"] or None
-                user.phone_number = new_profile["phone_number"] or None
+        # ── Profile snapshot for unregister rollback ──────────────────────────
+        existing_user_before = User.query.filter_by(email=email).first()
+        profile_snapshot = None
+        if existing_user_before:
             profile_snapshot = json.dumps({
-                "previous": previous_profile,
-                "new": new_profile
-            }) if profile_changed else None
+                'previous': {
+                    'first_name':   existing_user_before.first_name or '',
+                    'last_name':    existing_user_before.last_name  or '',
+                    'phone_number': existing_user_before.phone_number or '',
+                },
+                'new': {
+                    'first_name':   first_name,
+                    'last_name':    last_name,
+                    'phone_number': phone_number,
+                },
+            })
 
-            # If the VLAN requires a network password and the user already has one set,
-            # bypass the needs_approval flow so the password-check section handles it.
-            # We save original_needs_approval so that after a correct password entry the
-            # normal VLAN-based approval logic can still be applied (unless this is the
-            # first use of a freshly admin-set password, which is always auto-approved).
-            _pwd_check_vlan = target_vlan or detected_vlan
-            original_needs_approval = needs_approval
-            if needs_approval and _vlan_requires_password(_pwd_check_vlan) and user.has_network_password:
-                needs_approval = False
-                if not target_vlan:
-                    target_vlan = _pwd_check_vlan  # ensure downstream code has a non-None VLAN
+        # ── Spec step 1/2: upsert User (Table 8) ─────────────────────────────
+        user = User.query.filter_by(email=email).first()
+        if user:
+            # Update name/phone but not email or registration date.
+            user.first_name   = first_name   or user.first_name
+            user.last_name    = last_name    or user.last_name
+            user.phone_number = phone_number or user.phone_number
+            db.session.commit()
+        else:
+            user = User(
+                email=email,
+                first_name=first_name,
+                last_name=last_name,
+                phone_number=phone_number,
+                begin_date=datetime.utcnow().date(),
+                created_by='registration',
+            )
+            db.session.add(user)
+            db.session.flush()
 
-            if needs_approval:
-                pending_request = (
-                    RegistrationRequest.query.filter_by(
-                        mac_address=mac_address,
-                        email=email,
-                        status='pending'
+        # ── Spec step 3: get/upsert Device (Table 6) ─────────────────────────
+        device = Device.query.filter_by(mac_address=mac_address).first()
+        if not device:
+            device = Device(
+                mac_address=mac_address,
+                first_seen=datetime.utcnow(),
+            )
+            db.session.add(device)
+
+        network_mismatch = bool(
+            connection_type == 'wifi'
+            and detected_vlan
+            and device.current_vlan
+            and detected_vlan != device.current_vlan
+        )
+
+        device.device_name      = device_type or device.device_name
+        device.user_id          = user.id
+        device.ip_address       = ip_address
+        device.connection_type  = connection_type
+        device.ssid             = ssid
+        device.is_wired         = connection_type == 'wired'
+        device.current_vlan     = detected_vlan
+        device.profile_snapshot = profile_snapshot
+        if not device.unregister_token:
+            device.unregister_token = secrets.token_urlsafe(32)
+        if is_wired_unregistered:
+            device.wired_target_vlan = wired_vlan_id
+
+        db.session.commit()
+
+        # ── Spec step 6: ensure DeviceOwnership (Table 9) is active ──────────
+        # Open new ownership if none exists or if previously owned by a different user.
+        active_ownership = _get_active_ownership(mac_address)
+        if active_ownership and active_ownership.user_id != user.id:
+            _close_ownership(mac_address, commit=True)
+            active_ownership = None
+        if not active_ownership:
+            _open_ownership(mac_address, user.id, commit=True)
+
+        # ── Password-required VLAN handling (spec 4b.ii.1) ───────────────────
+        if selected_vlan and _vlan_requires_password(selected_vlan) and not device.ownership_validated:
+            if not user.has_network_password:
+                # No password set yet – send set-password email and wait.
+                if not user.network_password_set_token:
+                    user.network_password_set_token = secrets.token_urlsafe(32)
+                    user.network_password_set_token_expires = (
+                        datetime.utcnow() + timedelta(hours=24)
                     )
-                    .order_by(RegistrationRequest.submitted_at.desc())
-                    .first()
+                    db.session.commit()
+                set_password_url = _build_set_password_url(user.network_password_set_token)
+                send_network_password_set_email(
+                    email, first_name or 'there', set_password_url,
+                    network_name=ssid or 'Wired Network',
                 )
-                if pending_request:
-                    pending_request.first_name = first_name
-                    pending_request.last_name = last_name
-                    pending_request.phone_number = phone_number
-                    pending_request.device_type = device_type
-                    pending_request.ip_address = ip_address
-                    if is_wired_unregistered:
-                        pending_request.requested_vlan = wired_vlan_id
-                    pending_request.submitted_at = datetime.utcnow()
-                    reg_request = pending_request
-                else:
-                    reg_request = RegistrationRequest(
-                        mac_address=mac_address,
-                        ip_address=ip_address,
-                        email=email,
-                        first_name=first_name,
-                        last_name=last_name,
-                        phone_number=phone_number,
-                        device_type=device_type,
-                        requested_vlan=wired_vlan_id if is_wired_unregistered else None,
-                        status='pending',
-                        approval_token=secrets.token_urlsafe(32)
-                    )
-                    db.session.add(reg_request)
-
-                domain_policy = _load_domain_policy_map().get(_email_domain(user.email))
-                allowed_items = _allowed_vlans_display_items(user, vlan_map, domain_policy)
-                note_parts = [
-                    f"Existing user allowed VLANs: {_format_vlan_items_text(allowed_items) or 'none'}",
-                    f"Detected VLAN: {detected_vlan}",
-                    f"Detected SSID: {current_ssid or 'unknown'}"
-                ]
-                if is_wired_unregistered and wired_vlan_id:
-                    note_parts.append(f"Requested VLAN: {wired_vlan_id}")
-                reg_request.notes = " | ".join(note_parts)
-
-                if profile_changed:
-                    user.first_name = new_profile["first_name"] or None
-                    user.last_name = new_profile["last_name"] or None
-                    user.phone_number = new_profile["phone_number"] or None
-                db.session.commit()
-
-                portal_url = os.getenv('PORTAL_URL')
-                if portal_url:
-                    parsed = urlparse(portal_url)
-                    approval_url = f"{parsed.scheme}://{parsed.netloc}{url_for('admin_approve_request', token=reg_request.approval_token)}"
-                else:
-                    approval_url = url_for('admin_approve_request', token=reg_request.approval_token, _external=True)
-
-                send_admin_notification(reg_request, approval_url, detected_vlan, current_ssid)
-
                 if is_ajax:
                     return jsonify({
-                        'status': 'pending',
-                        'message': 'Registration request submitted for review.',
-                        'prefill': {
-                            'email': email,
-                            'first_name': first_name,
-                            'last_name': last_name,
-                            'phone_number': phone_number,
-                            'device_type': device_type
-                        }
+                        'status': 'pending_password',
+                        'message': 'A network password is required for this VLAN. '
+                                   'Please check your email for a link to set your password.',
                     })
                 return redirect(url_for('pending_approval'))
 
-            # --- Network password check for password-required VLANs (existing user) ---
-            vlan_pwd_required = _vlan_requires_password(target_vlan)
-            if vlan_pwd_required:
-                if not user.has_network_password:
-                    # User has no password yet - needs admin to set one first
-                    pending_pwd_request = (
-                        RegistrationRequest.query.filter_by(
-                            mac_address=mac_address,
-                            email=email,
-                            status='pending_password'
-                        )
-                        .order_by(RegistrationRequest.submitted_at.desc())
-                        .first()
-                    )
-                    # Generate or refresh set-password token for the user
-                    user.network_password_set_token = secrets.token_urlsafe(32)
-                    user.network_password_set_token_expires = datetime.utcnow() + timedelta(hours=24)
-                    if not pending_pwd_request:
-                        pending_pwd_request = RegistrationRequest(
-                            mac_address=mac_address,
-                            ip_address=ip_address,
-                            email=email,
-                            first_name=first_name,
-                            last_name=last_name,
-                            phone_number=phone_number,
-                            device_type=device_type,
-                            requested_vlan=target_vlan,
-                            status='pending_password',
-                            approval_token=secrets.token_urlsafe(32)
-                        )
-                        db.session.add(pending_pwd_request)
-                        db.session.commit()
-                        portal_url = os.getenv('PORTAL_URL')
-                        if portal_url:
-                            parsed = urlparse(portal_url)
-                            approval_url = f"{parsed.scheme}://{parsed.netloc}{url_for('admin_approve_request', token=pending_pwd_request.approval_token)}"
-                        else:
-                            approval_url = url_for('admin_approve_request', token=pending_pwd_request.approval_token, _external=True)
-                        admin_set_pwd_url = _build_admin_set_password_url(pending_pwd_request.approval_token)
-                        send_admin_password_setup_email(pending_pwd_request, admin_set_pwd_url, target_vlan, current_ssid)
-                    else:
-                        db.session.commit()
-                    # Send the user an email with their set-password link
-                    set_password_url = _build_set_password_url(user.network_password_set_token)
-                    send_network_password_set_email(
-                        user.email,
-                        user.first_name or first_name or 'there',
-                        set_password_url,
-                        network_name=current_ssid or 'Wired Network',
-                    )
-                    if is_ajax:
-                        return jsonify({
-                            'status': 'pending_password',
-                            'message': 'A network password is required to access this network. Please check your email for a link to set your password.'
-                        })
-                    return redirect(url_for('pending_approval'))
-                else:
-                    # User has a password - verify it before registering
-                    network_password = (request.form.get('network_password') or '').strip()
-                    if not network_password:
-                        if is_ajax:
-                            return jsonify({'status': 'password_required'})
-                        return render_template(
-                            'register.html',
-                            prefill={
-                                'email': email,
-                                'first_name': first_name,
-                                'last_name': last_name,
-                                'phone_number': phone_number,
-                                'device_type': device_type,
-                            },
-                            show_password_field=True,
-                            detected_mac=detected_mac,
-                            detected_ip=detected_ip,
-                            wired_vlan_required=is_wired_unregistered,
-                            wired_vlan_options=wired_vlan_options,
-                        )
-                    if not user.check_network_password(network_password):
-                        if is_ajax:
-                            return jsonify({'status': 'error', 'message': 'Incorrect network password. Please try again.'})
-                        flash('Incorrect network password.', 'error')
-                        return render_template(
-                            'register.html',
-                            prefill={
-                                'email': email,
-                                'first_name': first_name,
-                                'last_name': last_name,
-                                'phone_number': phone_number,
-                                'device_type': device_type,
-                            },
-                            show_password_field=True,
-                            detected_mac=detected_mac,
-                            detected_ip=detected_ip,
-                            wired_vlan_required=is_wired_unregistered,
-                            wired_vlan_options=wired_vlan_options,
-                        )
-                    # Password correct.
-                    # 'first_use': first device registered after an admin set the password –
-                    # always auto-register regardless of VLAN rules, then clear the flag.
-                    if user.network_password_approval_mode == 'first_use':
-                        user.network_password_approval_mode = None
-                        db.session.commit()
-                        # fall through to registration below
-                    elif original_needs_approval:
-                        # Password correct, but normal VLAN rules say this user/VLAN still
-                        # needs admin approval – send the standard approval email.
-                        _admin_req = RegistrationRequest(
-                            mac_address=mac_address,
-                            ip_address=ip_address,
-                            email=email,
-                            first_name=first_name,
-                            last_name=last_name,
-                            phone_number=phone_number,
-                            device_type=device_type,
-                            requested_vlan=target_vlan,
-                            status='pending',
-                            approval_token=secrets.token_urlsafe(32),
-                            notes='Password verified; awaiting admin approval'
-                        )
-                        db.session.add(_admin_req)
-                        db.session.commit()
-                        _portal_url = os.getenv('PORTAL_URL')
-                        if _portal_url:
-                            _parsed = urlparse(_portal_url)
-                            _appr_url = f"{_parsed.scheme}://{_parsed.netloc}{url_for('admin_approve_request', token=_admin_req.approval_token)}"
-                        else:
-                            _appr_url = url_for('admin_approve_request', token=_admin_req.approval_token, _external=True)
-                        send_admin_notification(_admin_req, _appr_url, detected_vlan, current_ssid)
-                        # Close the pending_password request for this MAC now that the
-                        # password has been verified and an admin-approval request raised.
-                        RegistrationRequest.query.filter_by(
-                            mac_address=mac_address, status='pending_password'
-                        ).update(
-                            {'status': 'approved', 'processed_at': datetime.utcnow(),
-                             'processed_by': 'user-portal-verified'},
-                            synchronize_session=False
-                        )
-                        db.session.commit()
-                        if is_ajax:
-                            return jsonify({
-                                'status': 'pending',
-                                'message': 'Password accepted. Your registration has been submitted for admin approval.',
-                                'prefill': {'email': email, 'first_name': first_name, 'last_name': last_name,
-                                            'phone_number': phone_number, 'device_type': device_type}
-                            })
-                        return redirect(url_for('pending_approval'))
-                    # else: VLAN is auto-approved for this user – fall through to registration below
-
-            if existing_device:
-                existing_device.user_id = user.id
-                existing_device.device_name = device_type
-                existing_device.ip_address = ip_address
-                existing_device.registration_status = 'registered'
-                existing_device.current_vlan = target_vlan
-                existing_device.connection_type = connection_type
-                existing_device.ssid = ssid
-                existing_device.is_wired = connection_type == 'wired'
-                existing_device.wired_target_vlan = target_vlan if connection_type == 'wired' else None
-                existing_device.unregister_token = existing_device.unregister_token or secrets.token_urlsafe(32)
-                existing_device.profile_snapshot = profile_snapshot
-                device = existing_device
-            else:
-                device = Device(
-                    mac_address=mac_address,
-                    user_id=user.id,
-                    device_name=device_type,
-                    ip_address=ip_address,
-                    registration_status='registered',
-                    current_vlan=target_vlan,
-                    connection_type=connection_type,
-                    ssid=ssid,
-                    is_wired=connection_type == 'wired',
-                    wired_target_vlan=target_vlan if connection_type == 'wired' else None,
-                    unregister_token=secrets.token_urlsafe(32),
-                    profile_snapshot=profile_snapshot
-                )
-                db.session.add(device)
-
-            db.session.commit()
-
-            # Close any pending_password request for this MAC – the user has now
-            # verified their password on the portal and the device is being registered.
-            RegistrationRequest.query.filter_by(
-                mac_address=mac_address, status='pending_password'
-            ).update(
-                {'status': 'approved', 'processed_at': datetime.utcnow(),
-                 'processed_by': 'user-portal-registered'},
-                synchronize_session=False
-            )
-            db.session.commit()
-
-            # Register in network (your existing logic)
-            if connection_type == 'wifi':
-                kea = get_kea()
-                if kea:
-                    kea.register_mac(mac=mac_address, vlan=target_vlan, hostname=f"{first_name.lower()}-{last_name.lower()}-{device_type}", ip_address=None)
-                    if ip_address and not network_mismatch:
-                        kea.force_lease_renewal(mac_address, ip_address)
-            else:
-                send_coa_change(mac_address, target_vlan)
-                replug_switch_port_for_mac(mac_address)
-
-            if ip_address and not network_mismatch and _should_hijack_vlan(target_vlan or detected_vlan):
-                manage_dns_hijack('unhijack', ip_address)
-            clear_unregistered_lease(mac_address)
-            if ip_address and detected_vlan and not network_mismatch:
-                manage_switch_acl('unblock', ip_address, detected_vlan)
-
-            unregister_url = _build_unregister_url(device.unregister_token)
-            confirm_url = None
-            confirm_timeout_sec = None
-            confirm_url, confirm_timeout_sec = _set_wifi_confirmation(device)
-
-            ssid_display = ssid or "Wired Network"
-            send_wifi_registration_confirmation(
-                user.email,
-                user.first_name or first_name,
-                ssid_display,
-                mac_address,
-                unregister_url,
-                confirm_url=confirm_url,
-                confirm_timeout_sec=confirm_timeout_sec,
-                registration_details={
-                    "email": user.email,
-                    "first_name": new_profile["first_name"],
-                    "last_name": new_profile["last_name"],
-                    "phone_number": new_profile["phone_number"],
-                    "device_type": device_type,
-                    "ip_address": ip_address,
-                    "ssid": ssid_display
-                }
-            )
-
-
-            if is_ajax:
-                return jsonify({
-                    'status': 'registered',
-                    'message': 'Device registered successfully',
-                    'current_vlan': detected_vlan,
-                    'current_ssid': current_ssid,
-                    'expected_vlan': target_vlan,
-                    'expected_ssid': expected_ssid,
-                    'network_mismatch': network_mismatch
-                })
-            else:
-                return redirect(url_for('registered'))
-
-        else:
-            # New user - auto-approve if domain allows, otherwise create pending request
-            vlan_map = get_vlan_map()
-            connection_type, detected_vlan, ssid = detect_connection_type(ip_address)
-            wired_unregistered_vlan = _get_wired_unregistered_vlan_id()
-            is_wired_unregistered = bool(connection_type == 'wired' and detected_vlan == wired_unregistered_vlan)
-            domain_policy = _load_domain_policy_map().get(_email_domain(email))
-            allowed_vlans = _parse_allowed_vlans(domain_policy.allowed_vlans) if domain_policy else set()
-            default_vlan = _default_vlan_for_user(allowed_vlans, vlan_map)
-
-            if is_wired_unregistered:
-                vlan_allowed = bool(wired_vlan_id and wired_vlan_id in allowed_vlans)
-                can_auto_approve = bool(allowed_vlans) and vlan_allowed
-            else:
-                vlan_allowed = bool(detected_vlan and detected_vlan in allowed_vlans)
-                can_auto_approve = bool(allowed_vlans) and (
-                    connection_type != 'wifi' or vlan_allowed
-                )
-
-            if can_auto_approve:
-                if is_wired_unregistered:
-                    target_vlan = wired_vlan_id
-                else:
-                    target_vlan = detected_vlan if connection_type == 'wifi' else default_vlan
-
-                # Check if target VLAN requires a network password (new user, auto-approve domain)
-                if _vlan_requires_password(target_vlan):
-                    # Create the user now (domain policy allows them) but hold off on device
-                    new_user = User(
-                        email=email,
-                        first_name=first_name,
-                        last_name=last_name,
-                        phone_number=phone_number,
-                        begin_date=datetime.utcnow().date(),
-                        notes='Auto-approved via domain policy – awaiting network password',
-                        created_by='domain-policy',
-                        network_password_set_token=secrets.token_urlsafe(32),
-                        network_password_set_token_expires=datetime.utcnow() + timedelta(hours=24),
-                    )
-                    db.session.add(new_user)
-                    db.session.flush()  # get new_user.id without committing
-                    reg_request = RegistrationRequest(
-                        mac_address=mac_address,
-                        ip_address=ip_address,
-                        email=email,
-                        first_name=first_name,
-                        last_name=last_name,
-                        phone_number=phone_number,
-                        device_type=device_type,
-                        requested_vlan=target_vlan,
-                        status='pending_password',
-                        approval_token=secrets.token_urlsafe(32)
-                    )
-                    db.session.add(reg_request)
-                    db.session.commit()
-                    # Send user the set-password email
-                    set_password_url = _build_set_password_url(new_user.network_password_set_token)
-                    send_network_password_set_email(
-                        email,
-                        first_name or 'there',
-                        set_password_url,
-                        network_name=ssid or 'Wired Network',
-                    )
-                    # Also notify admin with the set-password-for-user link
-                    admin_set_pwd_url = _build_admin_set_password_url(reg_request.approval_token)
-                    send_admin_password_setup_email(reg_request, admin_set_pwd_url, target_vlan, ssid)
-                    if is_ajax:
-                        return jsonify({
-                            'status': 'pending_password',
-                            'message': 'A network password is required to access this network. Please check your email for a link to set your password.'
-                        })
-                    return redirect(url_for('pending_approval'))
-
-                user = User(
-                    email=email,
-                    first_name=first_name,
-                    last_name=last_name,
-                    phone_number=phone_number,
-                    begin_date=datetime.utcnow().date(),
-                    notes='Auto-approved via domain policy',
-                    created_by='domain-policy'
-                )
-                db.session.add(user)
-                db.session.flush()
-
-                device = Device(
-                    mac_address=mac_address,
-                    user_id=user.id,
-                    device_name=device_type,
-                    ip_address=ip_address,
-                    registration_status='registered',
-                    current_vlan=target_vlan,
-                    connection_type=connection_type,
-                    ssid=ssid,
-                    is_wired=connection_type == 'wired',
-                    wired_target_vlan=target_vlan if connection_type == 'wired' else None,
-                    unregister_token=secrets.token_urlsafe(32)
-                )
-                db.session.add(device)
-                db.session.commit()
-
-                if connection_type == 'wifi':
-                    kea = get_kea()
-                    if kea:
-                        kea.register_mac(
-                            mac=mac_address,
-                            vlan=target_vlan,
-                            hostname=f"{first_name.lower()}-{last_name.lower()}-{device_type}",
-                            ip_address=None,
-                        )
-                        if ip_address:
-                            kea.force_lease_renewal(mac_address, ip_address)
-                else:
-                    send_coa_change(mac_address, target_vlan)
-                    replug_switch_port_for_mac(mac_address)
-
-                if ip_address and _should_hijack_vlan(target_vlan or detected_vlan):
-                    manage_dns_hijack('unhijack', ip_address)
-                clear_unregistered_lease(mac_address)
-                if ip_address and detected_vlan:
-                    manage_switch_acl('unblock', ip_address, detected_vlan)
-
-                unregister_url = _build_unregister_url(device.unregister_token)
-                confirm_url = None
-                confirm_timeout_sec = None
-                confirm_url, confirm_timeout_sec = _set_wifi_confirmation(device)
-                ssid_display = ssid or "Wired Network"
-                send_wifi_registration_confirmation(
-                    user.email,
-                    user.first_name or first_name or "there",
-                    ssid_display,
-                    mac_address,
-                    unregister_url,
-                    confirm_url=confirm_url,
-                    confirm_timeout_sec=confirm_timeout_sec,
-                    registration_details={
-                        "email": user.email,
-                        "first_name": user.first_name or first_name,
-                        "last_name": user.last_name or last_name,
-                        "phone_number": user.phone_number or phone_number,
-                        "device_type": device_type,
-                        "ip_address": ip_address,
-                        "ssid": ssid_display
-                    }
-                )
-
+            # Password exists – check submitted password.
+            if not password_input:
+                # Form didn't include a password; show the password entry page.
                 if is_ajax:
                     return jsonify({
-                        'status': 'registered',
-                        'message': 'Device registered successfully',
-                        'current_vlan': detected_vlan,
-                        'current_ssid': ssid,
-                        'expected_vlan': target_vlan,
-                        'expected_ssid': get_ssid_for_vlan(target_vlan)
+                        'status': 'need_password',
+                        'message': 'Please enter your network password.',
                     })
-                return redirect(url_for('registered'))
+                return render_template(
+                    'register.html',
+                    show_password_form=True,
+                    prefill=prefill,
+                    detected_mac=detected_mac,
+                    detected_ip=detected_ip,
+                    wired_vlan_required=is_wired_unregistered,
+                    wired_vlan_options=wired_vlan_options,
+                )
 
-            # If the VLAN this user needs requires a network password, flag as pending_password
-            # This applies even when admin approval is required (not just auto-approve domains)
-            _vlan_for_pw_check = wired_vlan_id if is_wired_unregistered else detected_vlan
-            _request_needs_password = bool(_vlan_for_pw_check and _vlan_requires_password(_vlan_for_pw_check))
-            _request_status = 'pending_password' if _request_needs_password else 'pending'
+            if not user.check_network_password(password_input):
+                msg = 'Incorrect network password.'
+                if is_ajax:
+                    return jsonify({'status': 'error', 'message': msg}), 400
+                flash(msg, 'error')
+                return render_template(
+                    'register.html',
+                    show_password_form=True,
+                    prefill=prefill,
+                    detected_mac=detected_mac,
+                    detected_ip=detected_ip,
+                    wired_vlan_required=is_wired_unregistered,
+                    wired_vlan_options=wired_vlan_options,
+                )
 
+            # Correct password: mark ownership validated.
+            device.ownership_validated = True
+            db.session.commit()
+
+        # ── Spec steps 4/5: determine approval requirement ────────────────────
+        # Auto-approve when the selected VLAN is in the user's effective_allowed set.
+        domain_policy_map = _load_domain_policy_map()
+        effective_allowed, _ = _get_effective_vlans_for_user(user, domain_policy_map)
+        needs_approval = bool(selected_vlan and selected_vlan not in effective_allowed)
+
+        if needs_approval:
+            # ── Needs admin approval (spec step 4) ────────────────────────────
+            # assigned_vlan stays null until admin approves.
+            # Close any stale pending request for this MAC first.
+            RegistrationRequest.query.filter(
+                RegistrationRequest.mac_address == mac_address,
+                RegistrationRequest.status == 'pending',
+            ).update(
+                {'status': 'superseded', 'processed_at': datetime.utcnow(),
+                 'processed_by': 'superseded-by-new-submission'},
+                synchronize_session=False,
+            )
             reg_request = RegistrationRequest(
                 mac_address=mac_address,
                 ip_address=ip_address,
@@ -2976,74 +2933,137 @@ def register():
                 last_name=last_name,
                 phone_number=phone_number,
                 device_type=device_type,
-                requested_vlan=wired_vlan_id if is_wired_unregistered else (detected_vlan if _request_needs_password else None),
-                status=_request_status,
-                approval_token=secrets.token_urlsafe(32)
+                requested_vlan=selected_vlan,
+                status='pending',
+                approval_token=secrets.token_urlsafe(32),
             )
             db.session.add(reg_request)
             db.session.commit()
+
             portal_url = os.getenv('PORTAL_URL')
             if portal_url:
                 parsed = urlparse(portal_url)
-                approval_url = f"{parsed.scheme}://{parsed.netloc}{url_for('admin_approve_request', token=reg_request.approval_token)}"
-            else:
-                approval_url = url_for('admin_approve_request', token=reg_request.approval_token, _external=True)
-
-            prefill_data = {
-                'email': email,
-                'first_name': first_name,
-                'last_name': last_name,
-                'phone_number': phone_number,
-                'device_type': device_type
-            }
-
-            if _request_needs_password:
-                admin_set_pwd_url = _build_admin_set_password_url(reg_request.approval_token)
-                send_admin_password_setup_email(reg_request, admin_set_pwd_url, detected_vlan, ssid)
-                # Also send the registering user a direct set-password email so they don't
-                # need to wait for an admin action before they can set their own password.
-                from models import User as _RegUser
-                _pwd_user = _RegUser.query.filter_by(email=email).first()
-                if not _pwd_user:
-                    _pwd_user = _RegUser(
-                        email=email,
-                        first_name=first_name,
-                        last_name=last_name,
-                        phone_number=phone_number,
-                        begin_date=datetime.utcnow().date(),
-                        notes='Created via pending_password registration',
-                        created_by='registration',
-                    )
-                    db.session.add(_pwd_user)
-                    db.session.flush()
-                _pwd_user.network_password_set_token = secrets.token_urlsafe(32)
-                _pwd_user.network_password_set_token_expires = datetime.utcnow() + timedelta(hours=24)
-                db.session.commit()
-                send_network_password_set_email(
-                    email,
-                    first_name or 'there',
-                    _build_set_password_url(_pwd_user.network_password_set_token),
-                    network_name=ssid or 'Wired Network',
+                approval_url = (
+                    f"{parsed.scheme}://{parsed.netloc}"
+                    f"{url_for('admin_approve_request', token=reg_request.approval_token)}"
                 )
             else:
-                send_admin_notification(reg_request, approval_url, detected_vlan, ssid)
+                approval_url = url_for(
+                    'admin_approve_request',
+                    token=reg_request.approval_token,
+                    _external=True,
+                )
+            send_admin_notification(reg_request, approval_url, selected_vlan,
+                                    ssid or 'Wired Network')
 
             if is_ajax:
-                if _request_needs_password:
-                    return jsonify({
-                        'status': 'pending_password',
-                        'message': 'This network requires a network password. '
-                                   'An administrator has been notified and will be in touch to help get you set up.',
-                    })
                 return jsonify({
                     'status': 'pending',
-                    'message': 'Registration request submitted. Waiting for approval...',
-                    'prefill': prefill_data
+                    'message': 'Registration request submitted. Waiting for admin approval.',
+                    'prefill': {
+                        'email': email, 'first_name': first_name,
+                        'last_name': last_name, 'phone_number': phone_number,
+                        'device_type': device_type,
+                    },
                 })
-            else:
-                return redirect(url_for('pending_approval'))
+            return redirect(url_for('pending_approval'))
 
-    # GET request (your existing logic)
+        # ── Auto-approve (spec step 5) ─────────────────────────────────────────
+        # Set assigned_vlan, remove hijack/ACL, set internet_accessible=True.
+        device.assigned_vlan = selected_vlan
+        device.current_vlan  = selected_vlan if not is_wired_unregistered else detected_vlan
+
+        db.session.commit()
+
+        # Network changes
+        if connection_type == 'wifi':
+            kea = get_kea()
+            if kea:
+                kea.register_mac(
+                    mac=mac_address,
+                    vlan=selected_vlan,
+                    hostname=f"{(first_name or 'device').lower()}-{(last_name or '').lower()}",
+                    ip_address=None,
+                )
+                if ip_address and not network_mismatch:
+                    kea.force_lease_renewal(mac_address, ip_address)
+        else:
+            send_coa_change(mac_address, selected_vlan)
+            replug_switch_port_for_mac(mac_address)
+
+        # Remove DNS hijack and ACL block (synchronous) then mark accessible.
+        if ip_address and not network_mismatch and not _is_blocked_pool_ip(ip_address):
+            if _should_hijack_vlan(selected_vlan or detected_vlan):
+                manage_dns_hijack('unhijack', ip_address)
+            if detected_vlan:
+                manage_switch_acl('unblock', ip_address, detected_vlan)
+            # Update IPLease record.
+            lease = _get_active_iplease(mac_address)
+            if lease:
+                lease.dns_hijacked = False
+                db.session.commit()
+            _set_internet_accessible(device, True, commit=True)
+        else:
+            # Blocked-pool IP or VLAN mismatch – can't grant access yet.
+            _set_internet_accessible(device, None, commit=True)
+
+        clear_unregistered_lease(mac_address)
+
+        # Close any outstanding registration requests for this MAC.
+        RegistrationRequest.query.filter(
+            RegistrationRequest.mac_address == mac_address,
+            RegistrationRequest.status.in_(['pending', 'pending_password']),
+        ).update(
+            {'status': 'approved', 'processed_at': datetime.utcnow(),
+             'processed_by': 'auto-approved'},
+            synchronize_session=False,
+        )
+        db.session.commit()
+
+        # Confirmation email
+        unregister_url = _build_unregister_url(device.unregister_token)
+        # spec 4b.ii.2.a.ii.1.c.i: the ownership-confirmation email ("please confirm
+        # this acceptance") is only sent when ownership_validated is False.  If the
+        # user entered the correct VLAN password above, ownership_validated is already
+        # True — no confirmation timer or confirm link should be started.
+        if not device.ownership_validated:
+            confirm_url, confirm_timeout_sec = _set_wifi_confirmation(device)
+        else:
+            confirm_url = None
+            confirm_timeout_sec = None
+        ssid_display = ssid or 'Wired Network'
+        send_wifi_registration_confirmation(
+            user.email,
+            user.first_name or first_name or 'there',
+            ssid_display,
+            mac_address,
+            unregister_url,
+            confirm_url=confirm_url,
+            confirm_timeout_sec=confirm_timeout_sec,
+            registration_details={
+                'email':        user.email,
+                'first_name':   user.first_name or first_name,
+                'last_name':    user.last_name  or last_name,
+                'phone_number': user.phone_number or phone_number,
+                'device_type':  device_type,
+                'ip_address':   ip_address,
+                'ssid':         ssid_display,
+            },
+        )
+
+        if is_ajax:
+            return jsonify({
+                'status': 'registered',
+                'message': 'Device registered successfully.',
+                'current_vlan':   detected_vlan,
+                'current_ssid':   ssid,
+                'expected_vlan':  selected_vlan,
+                'expected_ssid':  get_ssid_for_vlan(selected_vlan),
+                'network_mismatch': network_mismatch,
+            })
+        return redirect(url_for('registered'))
+
+    # ── GET: show registration form ───────────────────────────────────────────
     return render_template(
         'register.html',
         prefill=prefill,
@@ -3052,6 +3072,9 @@ def register():
         wired_vlan_required=is_wired_unregistered,
         wired_vlan_options=wired_vlan_options,
     )
+
+# END register()
+
 
 @app.route('/verify')
 def verify():
@@ -3451,18 +3474,19 @@ def adopt_device():
 
     if existing:
         existing.user_id = user.id
-        existing.registration_status = 'registered'
         existing.current_vlan = target_vlan
         existing.connection_type = 'wired' if vlan_id == wired_unregistered_vlan else 'wifi'
         existing.ssid = get_ssid_for_vlan(target_vlan)
         existing.is_wired = vlan_id == wired_unregistered_vlan
         existing.wired_target_vlan = target_vlan if vlan_id == wired_unregistered_vlan else None
+        existing.assigned_vlan = target_vlan
+        existing.ownership_validated = True
         if device_label:
             existing.device_name = device_label
         if ip_address:
             existing.ip_address = ip_address
         existing.unregister_token = existing.unregister_token or secrets.token_urlsafe(32)
-        db.session.commit()
+        db.session.flush()
         adopted_device = existing
     else:
         adopted_device = Device(
@@ -3470,16 +3494,22 @@ def adopt_device():
             user_id=user.id,
             device_name=device_label or 'adopted-device',
             ip_address=ip_address,
-            registration_status='registered',
             current_vlan=target_vlan,
             connection_type='wired' if vlan_id == wired_unregistered_vlan else 'wifi',
             ssid=get_ssid_for_vlan(target_vlan),
             is_wired=vlan_id == wired_unregistered_vlan,
             wired_target_vlan=target_vlan if vlan_id == wired_unregistered_vlan else None,
+            assigned_vlan=target_vlan,
+            ownership_validated=True,
             unregister_token=secrets.token_urlsafe(32),
         )
         db.session.add(adopted_device)
-        db.session.commit()
+        db.session.flush()
+
+    # Create DeviceOwnership record
+    _close_ownership(mac_address, commit=False)
+    _open_ownership(mac_address, user.id, commit=False)
+    db.session.commit()
 
     if ip_address:
         manage_switch_acl('unblock', ip_address, vlan_id)
@@ -3510,6 +3540,7 @@ def adopt_device():
     if vlan_id == wired_unregistered_vlan:
         send_coa_change(mac_address, target_vlan)
 
+    _set_internet_accessible(adopted_device, True)
     clear_unregistered_lease(mac_address)
 
     unregister_url = _build_unregister_url(adopted_device.unregister_token)
@@ -3669,6 +3700,231 @@ def admin_set_user_password(token):
                            reg_request=reg_request, user=user)
 
 
+# ── User-facing login and home page (spec 4a, 5) ──────────────────────────────
+
+@app.route('/login', methods=['GET', 'POST'])
+def user_login():
+    """Spec 4a: Users who access the portal from outside the local network.
+
+    Presents an email + password login form.  On success, redirects to /user_home.
+    """
+    if request.method == 'POST':
+        email    = (request.form.get('email')    or '').strip().lower()
+        password = (request.form.get('password') or '').strip()
+
+        user = User.query.filter_by(email=email).first()
+        if user and user.check_network_password(password):
+            # Store user id in session so user_home can identify the caller.
+            session['portal_user_id'] = user.id
+            return redirect(url_for('user_home'))
+
+        flash('Invalid email or password.', 'error')
+        return render_template('user_login.html', prefill_email=email)
+
+    # If coming from local network, try device-based auto-auth scoped to this session.
+    mac_address = get_client_mac()
+    if mac_address:
+        _dev = Device.query.filter_by(mac_address=mac_address).first()
+        if _dev:
+            _own = _get_active_ownership(mac_address)
+            if _own and _own.user_id and _dev.ownership_validated:
+                _u = User.query.get(_own.user_id)
+                if _u:
+                    session['portal_user_id'] = _u.id
+                    return redirect(url_for('user_home'))
+
+    return render_template('user_login.html')
+
+
+@app.route('/user_home', methods=['GET', 'POST'])
+def user_home():
+    """Spec section 5: user home page.
+
+    The user can reach this page:
+    - From outside the local network (session['portal_user_id'] set after login).
+    - From inside the local network when their device has internet access
+      (ownership_validated=True for the calling device).
+    """
+    # Determine the user from session or from the calling device.
+    portal_user_id = session.get('portal_user_id')
+    user = None
+    calling_device = None
+
+    if portal_user_id:
+        user = User.query.get(portal_user_id)
+
+    if not user:
+        mac_address = get_client_mac()
+        if mac_address:
+            calling_device = Device.query.filter_by(mac_address=mac_address).first()
+            if calling_device:
+                ownership = _get_active_ownership(mac_address)
+                if ownership and ownership.user_id:
+                    user = User.query.get(ownership.user_id)
+
+    if not user:
+        return redirect(url_for('user_login'))
+
+    vlan_map = get_vlan_map()
+    domain_policy_map = _load_domain_policy_map()
+
+    # Owned devices (active ownerships for this user)
+    owned_ownerships = DeviceOwnership.query.filter_by(
+        user_id=user.id, end_datetime=None
+    ).all()
+    owned_macs = [o.mac_address for o in owned_ownerships]
+    owned_devices = Device.query.filter(Device.mac_address.in_(owned_macs)).all() if owned_macs else []
+
+    owned_device_rows = []
+    for dev in owned_devices:
+        lease = _get_active_iplease(dev.mac_address)
+        owned_device_rows.append({
+            'device': dev,
+            'ip_address':   lease.ip_address if lease else dev.ip_address,
+            'lease_expiry': lease.lease_expiry if lease else None,
+            'vlan_label':   _label_for_vlan(dev.assigned_vlan or dev.current_vlan, vlan_map),
+        })
+
+    # Unregistered devices the user may adopt (spec 5).
+    # effective_adoptable: VLANs adoptable without admin approval (show MAC).
+    # effective_allowed:   VLANs adoptable only with admin approval (hide MAC).
+    effective_allowed, effective_adoptable = _get_effective_vlans_for_user(user, domain_policy_map)
+    wired_unregistered_vlan = _get_wired_unregistered_vlan_id()
+    all_interaction_vlan_ids = (effective_allowed | effective_adoptable) - {wired_unregistered_vlan}
+    adoptable_leases = _load_adoptable_leases(all_interaction_vlan_ids) if all_interaction_vlan_ids else []
+
+    # Filter out devices that are already owned by someone.
+    unregistered_rows = []
+    for entry in adoptable_leases:
+        mac = entry.get('mac_address')
+        if not mac:
+            continue
+        if _get_active_ownership(mac):
+            continue
+        vlan_id = entry.get('vlan_id')
+        unregistered_rows.append({
+            'mac_address':    mac,
+            'show_mac':       vlan_id in effective_adoptable,
+            'ip_address':     entry.get('ip_address'),
+            'vlan_id':        vlan_id,
+            'vlan_label':     _label_for_vlan(vlan_id, vlan_map),
+            'first_seen':     entry.get('first_seen'),
+            'needs_approval': vlan_id not in effective_adoptable,
+        })
+
+    if request.method == 'POST':
+        action = request.form.get('action', '')
+
+        # ── Profile update ────────────────────────────────────────────────────
+        if action == 'update_profile':
+            user.first_name   = (request.form.get('first_name')   or '').strip() or user.first_name
+            user.last_name    = (request.form.get('last_name')    or '').strip() or user.last_name
+            user.phone_number = (request.form.get('phone_number') or '').strip() or user.phone_number
+            db.session.commit()
+            flash('Profile updated.', 'success')
+
+        # ── Password change ───────────────────────────────────────────────────
+        elif action == 'change_password':
+            current_pw = (request.form.get('current_password') or '').strip()
+            new_pw     = (request.form.get('new_password')     or '').strip()
+            if not user.check_network_password(current_pw):
+                flash('Current password is incorrect.', 'error')
+            elif len(new_pw) < 8:
+                flash('New password must be at least 8 characters.', 'error')
+            else:
+                user.set_network_password(new_pw)
+                db.session.commit()
+                flash('Password changed.', 'success')
+
+        # ── Abandon a device (spec 5a) ─────────────────────────────────────────
+        elif action == 'abandon':
+            mac_to_abandon = (request.form.get('mac_address') or '').strip().lower()
+            if mac_to_abandon in owned_macs:
+                dev_to_abandon = Device.query.filter_by(mac_address=mac_to_abandon).first()
+                if dev_to_abandon:
+                    # Block the device before abandoning.
+                    lease = _get_active_iplease(mac_to_abandon)
+                    if lease and not lease.from_blocked_pool:
+                        if _should_hijack_vlan(dev_to_abandon.current_vlan):
+                            manage_dns_hijack('hijack', lease.ip_address)
+                            lease.dns_hijacked = True
+                        if dev_to_abandon.current_vlan:
+                            manage_switch_acl('block', lease.ip_address, dev_to_abandon.current_vlan)
+                    # Reset Table 6 fields.
+                    dev_to_abandon.user_id            = None
+                    dev_to_abandon.assigned_vlan      = None
+                    dev_to_abandon.ownership_validated = None
+                    dev_to_abandon.device_name        = None
+                    dev_to_abandon.first_seen         = datetime.utcnow()
+                    _set_internet_accessible(dev_to_abandon, None, commit=False)
+                    _set_internet_blocked(dev_to_abandon, None, commit=False)
+                    db.session.commit()
+                # Close ownership.
+                _close_ownership(mac_to_abandon, commit=True)
+                # Remove from RADIUS for wired devices.
+                kea = get_kea()
+                if kea and dev_to_abandon and dev_to_abandon.current_vlan:
+                    kea.unregister_mac(mac_to_abandon, dev_to_abandon.current_vlan)
+                flash(f'Device {mac_to_abandon} abandoned.', 'success')
+
+        # ── Adopt request (spec 5b — admin approval required) ─────────────────
+        elif action == 'adopt_request':
+            mac_to_adopt = (request.form.get('mac_address') or '').strip().lower()
+            vlan_raw     = (request.form.get('vlan_id')     or '').strip()
+            try:
+                adopt_vlan_id = int(vlan_raw)
+            except ValueError:
+                flash('Invalid VLAN for adoption request.', 'error')
+                return redirect(url_for('user_home'))
+
+            _eff_allowed, _eff_adoptable = _get_effective_vlans_for_user(user)
+            if adopt_vlan_id not in _eff_allowed:
+                flash('You do not have permission to request adoption for that network.', 'error')
+                return redirect(url_for('user_home'))
+            if adopt_vlan_id in _eff_adoptable:
+                flash('You can adopt this device directly without approval.', 'info')
+                return redirect(url_for('adopt_devices'))
+
+            # Look up current lease IP if available.
+            _adopt_lease = UnregisteredLease.query.filter_by(mac_address=mac_to_adopt).first()
+            _adopt_ip = _adopt_lease.ip_address if _adopt_lease else None
+
+            pending = RegistrationRequest(
+                mac_address=mac_to_adopt,
+                ip_address=_adopt_ip,
+                email=user.email,
+                first_name=user.first_name or '',
+                last_name=user.last_name or '',
+                phone_number=user.phone_number or '',
+                device_type='adopted-device',
+                status='pending',
+                approval_token=secrets.token_urlsafe(32),
+            )
+            db.session.add(pending)
+            db.session.commit()
+
+            _portal_url = os.getenv('PORTAL_URL')
+            if _portal_url:
+                _parsed = urlparse(_portal_url)
+                _approval_url = f"{_parsed.scheme}://{_parsed.netloc}{url_for('admin_approve_request', token=pending.approval_token)}"
+            else:
+                _approval_url = url_for('admin_approve_request', token=pending.approval_token, _external=True)
+
+            send_admin_notification(pending, _approval_url, adopt_vlan_id,
+                                    get_ssid_for_vlan(adopt_vlan_id))
+            flash('Your adoption request has been sent to the administrator for approval.', 'info')
+
+        return redirect(url_for('user_home'))
+
+    return render_template(
+        'user_home.html',
+        user=user,
+        owned_devices=owned_device_rows,
+        unregistered_devices=unregistered_rows,
+        calling_device=calling_device,
+    )
+
+
 @app.route('/set-network-password/<token>', methods=['GET', 'POST'])
 def set_network_password(token):
     """Allow a user to set their network password via emailed token."""
@@ -3710,7 +3966,8 @@ def set_network_password(token):
 
 @app.route('/forgot-network-password', methods=['POST'])
 def forgot_network_password():
-    """Send a password-reset link to a user who has a network password but has forgotten it."""
+    """Send a password-set/reset link to any registered user, whether or not they
+    already have a network password.  Used from the /login page."""
     from models import User as _User
     email = (request.form.get('email') or '').strip().lower()
     is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
@@ -3725,18 +3982,26 @@ def forgot_network_password():
         return redirect(url_for('register'))
 
     user = _User.query.filter_by(email=email).first()
-    if user and user.has_network_password:
-        # Generate / refresh reset token
+    if user:
+        # Generate / refresh token regardless of whether a password exists.
         user.network_password_set_token = secrets.token_urlsafe(32)
         user.network_password_set_token_expires = datetime.utcnow() + timedelta(hours=24)
         db.session.commit()
         set_password_url = _build_set_password_url(user.network_password_set_token)
         try:
-            send_network_password_reset_email(
-                user.email,
-                user.first_name or 'there',
-                set_password_url,
-            )
+            if user.has_network_password:
+                send_network_password_reset_email(
+                    user.email,
+                    user.first_name or 'there',
+                    set_password_url,
+                )
+            else:
+                send_network_password_set_email(
+                    user.email,
+                    user.first_name or 'there',
+                    set_password_url,
+                    network_name='Portal',
+                )
         except Exception as exc:
             logger.warning('forgot-network-password email failed for %s: %s', email, exc)
 
@@ -3909,12 +4174,44 @@ def registration_status():
     device = Device.query.filter_by(mac_address=mac_address).first()
     device = normalize_device_status(device)
     device = _enforce_wifi_confirmation(device)
+    # Per spec: a device is only considered registered when there is an active
+    # Table 9 (device_ownership) entry with end_datetime IS NULL.
+    # A devices row created solely by the Kea DHCP hook (no ownership) must
+    # still be treated as unregistered so the registration form is shown.
+    if device and not _get_active_ownership(mac_address):
+        response = jsonify({'status': 'unregistered', 'message': 'Not registered'})
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        return response
     if device:
         current_ip = get_client_ip()
         current_connection, current_vlan, detected_ssid = detect_connection_type(current_ip)
         current_ssid = get_ssid_for_vlan(current_vlan) or detected_ssid
         expected_ssid = get_ssid_for_vlan(device.current_vlan) or device.ssid
         network_mismatch = bool(current_connection == 'wifi' and current_vlan and device.current_vlan and current_vlan != device.current_vlan)
+
+        # ── Spec 4b.ii.1: password-VLAN state check ──────────────────────────
+        # If the selected VLAN requires a password and ownership_validated is
+        # not yet set, return the password state regardless of registration_status
+        # so the captive portal shows the correct UI (not "Awaiting approval").
+        _selected_vlan_r = device.assigned_vlan or current_vlan
+        _pw_required_r = _vlan_requires_password(_selected_vlan_r) if _selected_vlan_r else False
+        if _pw_required_r and not device.ownership_validated:
+            _has_pwd_r = device.user.has_network_password if device.user else False
+            if not _has_pwd_r:
+                _pw_resp = jsonify({
+                    'status': 'pending_password',
+                    'message': (
+                        'A network password is required for this network. '
+                        'An email has been sent to you with a link to set your password.'
+                    ),
+                })
+            else:
+                _pw_resp = jsonify({
+                    'status': 'enter_password',
+                    'message': 'Please enter your network password to continue.',
+                })
+            _pw_resp.headers['Access-Control-Allow-Origin'] = '*'
+            return _pw_resp
 
         if device.registration_status == 'registered' and not network_mismatch and current_ip:
             if not _is_blocked_pool_ip(current_ip):
@@ -4008,111 +4305,104 @@ def api_block_status():
 
 @app.route('/unregister/<token>')
 def unregister(token):
-    """
-    Unregister a device via email token.
-    
-    This removes the device from the registered pool and returns it to
-    the walled garden (unregistered pool) with restricted access.
+    """Unregister a device via email token (spec 8).
+
+    Closes the DeviceOwnership record, resets Device Table-6 fields, removes
+    the Kea/RADIUS entry, and (if the device currently has internet access and
+    a usable lease) applies hijack/ACL so the user loses access for the
+    remainder of the lease.
     """
     if not token:
         flash('Invalid unregister link', 'error')
         return redirect(url_for('index'))
-    
-    # Find device by unregister token
+
     device = Device.query.filter_by(unregister_token=token).first()
-    
     if not device:
         flash('Invalid or expired unregister token', 'error')
         return redirect(url_for('index'))
-    
+
     mac_address = device.mac_address
     connection_type = device.connection_type
     vlan_id = device.current_vlan
     user = device.user
     user_email = user.email if user else 'Unknown'
 
+    # Optionally roll back any profile changes stored in snapshot
     if user and device.profile_snapshot:
         try:
             snapshot = json.loads(device.profile_snapshot)
         except Exception:
             snapshot = None
-
         if snapshot:
             previous = snapshot.get("previous") or {}
-            new = snapshot.get("new") or {}
-
+            new_snap = snapshot.get("new") or {}
             current_profile = {
                 "first_name": user.first_name or "",
                 "last_name": user.last_name or "",
-                "phone_number": user.phone_number or ""
+                "phone_number": user.phone_number or "",
             }
-
             if current_profile == {
-                "first_name": new.get("first_name", ""),
-                "last_name": new.get("last_name", ""),
-                "phone_number": new.get("phone_number", "")
+                "first_name": new_snap.get("first_name", ""),
+                "last_name": new_snap.get("last_name", ""),
+                "phone_number": new_snap.get("phone_number", ""),
             }:
                 user.first_name = previous.get("first_name") or None
                 user.last_name = previous.get("last_name") or None
                 user.phone_number = previous.get("phone_number") or None
-    
-    # Remove device registration
+
+    # Cut off internet access if the device currently has it
+    ip_address = device.ip_address
+    if device.internet_accessible and ip_address and not _is_blocked_pool_ip(ip_address):
+        lease_expiry = get_lease_expiry_for_mac(mac_address, subnet_id=vlan_id)
+        if lease_expiry and lease_expiry > datetime.utcnow():
+            if vlan_id:
+                manage_switch_acl('block', ip_address, vlan_id)
+            if _should_hijack_vlan(vlan_id):
+                manage_dns_hijack('hijack', ip_address)
+            _upsert_iplease(
+                mac=mac_address, ip=ip_address, vlan=vlan_id,
+                lease_start=datetime.utcnow(), lease_expiry=lease_expiry,
+                from_blocked_pool=False,
+                dns_hijacked=bool(_should_hijack_vlan(vlan_id)),
+            )
+            logger.info(
+                "Blocked %s at %s until %s after self-unregister",
+                mac_address, ip_address, lease_expiry,
+            )
+
+    # Unregister from Kea / RADIUS
     if connection_type == 'wifi':
-        # Remove from Kea
         kea = get_kea()
         if kea and vlan_id:
-            success = kea.unregister_mac(mac=mac_address, vlan=vlan_id)
-            if success:
-                logger.info(f"WiFi device {mac_address} unregistered from VLAN {vlan_id}")
-            else:
-                logger.warning(f"Failed to unregister WiFi device {mac_address} from Kea")
-    
+            if not kea.unregister_mac(mac=mac_address, vlan=vlan_id):
+                logger.warning("Kea unregister failed for %s", mac_address)
     elif connection_type == 'wired':
-        # Send RADIUS CoA to move to unregistered VLAN
         vlan_map = get_vlan_map()
-        success = send_coa_change(mac_address, vlan_map['unregistered'])
-        if success:
-            logger.info(f"Wired device {mac_address} moved to unregistered VLAN")
-        else:
-            logger.warning(f"Failed to send CoA for wired device {mac_address}")
-    
-    # Update device status in database
-    device.registration_status = 'unregistered'
-    device.unregister_token = None  # Invalidate token
-    device.user_id = None  # Remove user association
+        if not send_coa_change(mac_address, vlan_map['unregistered']):
+            logger.warning("CoA failed for wired device %s on unregister", mac_address)
+
+    # Close DeviceOwnership record
+    _close_ownership(mac_address, commit=False)
+
+    # Reset Table-6 fields
+    device.user_id = None
+    device.device_name = None
+    device.assigned_vlan = None
+    device.internet_accessible = None
+    device.internet_blocked = None
+    device.ownership_validated = None
+    device.unregister_token = None
     device.profile_snapshot = None
+    _sync_registration_status(device)
     db.session.commit()
 
-    # Keep DNS hijack + ACL block active while the current lease is valid
-    if device.ip_address and not _is_blocked_pool_ip(device.ip_address):
-        lease_expiry = get_lease_expiry_for_mac(mac_address, subnet_id=vlan_id)
-        if not lease_expiry:
-            lease_expiry = datetime.utcnow() + timedelta(minutes=5)
+    flash(
+        f'Device {mac_address} has been unregistered successfully. '
+        'Access has been restricted.',
+        'success',
+    )
+    logger.info("Device %s (user: %s) unregistered via email token", mac_address, user_email)
 
-        upsert_unregistered_lease(mac_address, device.ip_address, lease_expiry)
-
-        if vlan_id:
-            manage_switch_acl('block', device.ip_address, vlan_id)
-
-        if _should_hijack_vlan(vlan_id):
-            manage_dns_hijack('hijack', device.ip_address)
-            logger.info(
-                "DNS hijacked/ACL blocked for unregistered device %s at %s until %s",
-                mac_address,
-                device.ip_address,
-                lease_expiry,
-            )
-        else:
-            logger.info(
-                "ACL blocked for unregistered device %s at %s until %s",
-                mac_address,
-                device.ip_address,
-                lease_expiry,
-            )
-    
-    flash(f'Device {mac_address} has been unregistered successfully. Access has been restricted.', 'success')
-    logger.info(f"Device {mac_address} (user: {user_email}) unregistered via email token")
-    
     return render_template('status.html', device=device, unregistered=True)
 
 
@@ -6219,13 +6509,17 @@ def admin_dashboard():
         user.allowed_vlans_display_items = _allowed_vlans_display_items(user, vlan_map, domain_policy, include_denied=True)
         user.adoptable_vlans_display_items = _adoptable_vlans_display_items(user, vlan_map, domain_policy, include_denied=True)
     
-    # Get devices with their users for display with search filter
-    devices_query = db.session.query(Device, User).join(User, Device.user_id == User.id, isouter=True)
-    
+    # Spec Section C: Registered devices — entries in device_ownership (Table 9) with active ownership
+    # Active = end_datetime IS NULL, joined with Device (Table 6) and User
+    devices_query = db.session.query(DeviceOwnership, Device, User)\
+        .join(Device, DeviceOwnership.mac_address == Device.mac_address, isouter=True)\
+        .outerjoin(User, DeviceOwnership.user_id == User.id)\
+        .filter(DeviceOwnership.end_datetime.is_(None))
+
     if devices_search:
         devices_query = devices_query.filter(
             db.or_(
-                Device.mac_address.ilike(f'%{devices_search}%'),
+                DeviceOwnership.mac_address.ilike(f'%{devices_search}%'),
                 Device.device_name.ilike(f'%{devices_search}%'),
                 Device.connection_type.ilike(f'%{devices_search}%'),
                 Device.ssid.ilike(f'%{devices_search}%'),
@@ -6235,42 +6529,37 @@ def admin_dashboard():
                 User.last_name.ilike(f'%{devices_search}%')
             )
         )
-    
+
     # Apply sorting to devices
     if devices_sort == 'user_name':
-        # Sort by user's first name
         if devices_order == 'desc':
             devices_query = devices_query.order_by(User.first_name.desc())
         else:
             devices_query = devices_query.order_by(User.first_name.asc())
     elif devices_sort == 'user_email':
-        # Sort by user's email
         if devices_order == 'desc':
             devices_query = devices_query.order_by(User.email.desc())
         else:
             devices_query = devices_query.order_by(User.email.asc())
     else:
-        # Sort by device field
         sort_column = getattr(Device, devices_sort, Device.first_seen)
         if devices_order == 'desc':
             devices_query = devices_query.order_by(sort_column.desc())
         else:
             devices_query = devices_query.order_by(sort_column.asc())
-    
+
     devices_total = devices_query.count()
     devices = devices_query.offset((devices_page - 1) * devices_per_page).limit(devices_per_page).all()
 
-    # Refresh IPs from Kea lease file for devices on the current page
+    # Refresh IPs from Kea for registered devices on the current page
+    # Each row is a (DeviceOwnership, Device, User) tuple
     ip_updated = False
     kea = get_kea()
     for row in devices:
-        device = row
-        # Unwrap SQLAlchemy Row (Device, User) tuples
-        if not hasattr(device, "mac_address"):
-            try:
-                device = row[0]
-            except Exception:
-                device = row
+        try:
+            device = row[1]  # Device is the second element of (DeviceOwnership, Device, User)
+        except (TypeError, IndexError):
+            device = row if hasattr(row, "mac_address") else None
 
         if device and getattr(device, "mac_address", None):
             latest_ip = None
@@ -6299,8 +6588,14 @@ def admin_dashboard():
         cleanup_orphan_hijack_rules()
     devices_pages = (devices_total + devices_per_page - 1) // devices_per_page if devices_per_page > 0 else 0
 
-    unregistered_leases = UnregisteredLease.query.order_by(UnregisteredLease.expires_at.asc()).all()
-    unregistered_total = len(unregistered_leases)
+    # Spec Section A: Unregistered devices — Device rows with no active device_ownership entry
+    active_ownership_macs = db.session.query(DeviceOwnership.mac_address).filter(
+        DeviceOwnership.end_datetime.is_(None)
+    ).subquery()
+    unregistered_devices = db.session.query(Device).filter(
+        ~Device.mac_address.in_(active_ownership_macs)
+    ).order_by(Device.last_seen.desc()).all()
+    unregistered_total = len(unregistered_devices)
     
     # Check if this is an AJAX request
     is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
@@ -6345,7 +6640,7 @@ def admin_dashboard():
         pending_search=pending_search,
         pending_sort=pending_sort,
         pending_order=pending_order,
-        unregistered_leases=unregistered_leases,
+        unregistered_devices=unregistered_devices,
         unregistered_total=unregistered_total,
         vlan_map=vlan_map,
         wired_vlan_choices=[
@@ -7954,17 +8249,22 @@ def admin_edit_user(user_id):
 @login_required
 @permission_required('manage_users')
 def admin_block_user(user_id):
-    """Block all devices for a user"""
+    """Spec B.a: block all currently-owned devices for a user."""
     user = User.query.get_or_404(user_id)
     user.blocked = True
     db.session.commit()
 
-    devices = Device.query.filter_by(user_id=user.id).all()
+    # Only block devices with active ownership (end_datetime is null).
+    active_macs = [
+        o.mac_address for o in
+        DeviceOwnership.query.filter_by(user_id=user.id, end_datetime=None).all()
+    ]
+    devices = Device.query.filter(Device.mac_address.in_(active_macs)).all() if active_macs else []
     for device in devices:
         apply_device_block(device, flash_messages=False)
 
     flash(f'User {user.email} blocked. {len(devices)} device(s) blocked.', 'success')
-    logger.info(f"Admin blocked user {user.email} ({len(devices)} devices)")
+    logger.info("Admin blocked user %s (%d devices)", user.email, len(devices))
     return redirect(url_for('admin_dashboard'))
 
 
@@ -7972,17 +8272,21 @@ def admin_block_user(user_id):
 @login_required
 @permission_required('manage_users')
 def admin_unblock_user(user_id):
-    """Unblock all devices for a user"""
+    """Spec B.b: unblock all currently-owned devices for a user."""
     user = User.query.get_or_404(user_id)
     user.blocked = False
     db.session.commit()
 
-    devices = Device.query.filter_by(user_id=user.id).all()
+    active_macs = [
+        o.mac_address for o in
+        DeviceOwnership.query.filter_by(user_id=user.id, end_datetime=None).all()
+    ]
+    devices = Device.query.filter(Device.mac_address.in_(active_macs)).all() if active_macs else []
     for device in devices:
         apply_device_unblock(device, flash_messages=False)
 
     flash(f'User {user.email} unblocked. {len(devices)} device(s) unblocked.', 'success')
-    logger.info(f"Admin unblocked user {user.email} ({len(devices)} devices)")
+    logger.info("Admin unblocked user %s (%d devices)", user.email, len(devices))
     return redirect(url_for('admin_dashboard'))
 
 
@@ -7990,97 +8294,133 @@ def admin_unblock_user(user_id):
 @login_required
 @permission_required('manage_users')
 def admin_assign_device():
-    """Assign an unregistered device to a specific user"""
-    mac_address = request.form.get('mac_address', '').strip().lower()
-    user_id = request.form.get('user_id', '').strip()
-    device_name = request.form.get('device_name', '').strip()
-    vlan_id = request.form.get('vlan_id', '').strip()
-    
-    if not mac_address or not user_id or not vlan_id:
+    """Spec dashboard A: assign an unregistered device to a user + VLAN.
+
+    Sets ownership_validated=True and, when connectivity conditions allow,
+    removes the DNS hijack / ACL block and sets internet_accessible=True.
+    """
+    mac_address = (request.form.get('mac_address') or '').strip().lower()
+    user_id_raw = (request.form.get('user_id')     or '').strip()
+    device_name = (request.form.get('device_name') or '').strip()
+    vlan_id_raw = (request.form.get('vlan_id')     or '').strip()
+
+    if not mac_address or not user_id_raw or not vlan_id_raw:
         flash('MAC address, user, and VLAN are required.', 'error')
         return redirect(url_for('admin_dashboard'))
-    
+
     try:
-        user_id = int(user_id)
-        vlan_id = int(vlan_id)
+        user_id = int(user_id_raw)
+        vlan_id = int(vlan_id_raw)
     except ValueError:
         flash('Invalid user ID or VLAN ID.', 'error')
         return redirect(url_for('admin_dashboard'))
-    
+
     user = User.query.get(user_id)
     if not user:
         flash('User not found.', 'error')
         return redirect(url_for('admin_dashboard'))
-    
-    # Check if MAC already registered
-    existing = Device.query.filter_by(mac_address=mac_address).first()
-    if existing and existing.registration_status == 'registered':
-        flash(f'Device {mac_address} is already registered to {existing.user.email if existing.user else "another user"}.', 'error')
-        return redirect(url_for('admin_dashboard'))
-    
-    # Get current lease/IP for the MAC
-    lease = UnregisteredLease.query.filter_by(mac_address=mac_address).first()
-    ip_address = lease.ip_address if lease else None
-    
+
+    # Resolve current IP for the MAC.
+    ip_lease = _get_active_iplease(mac_address)
+    ip_address = ip_lease.ip_address if ip_lease else None
     if not ip_address:
-        # Try to get from Kea
+        ul = UnregisteredLease.query.filter_by(mac_address=mac_address).first()
+        ip_address = ul.ip_address if ul else None
+    if not ip_address:
         kea = get_kea()
         if kea:
             try:
                 ip_address = kea.get_lease_ip_for_mac(mac_address, subnet_id=vlan_id)
-            except Exception as e:
-                logger.error(f"Error querying Kea for {mac_address}: {e}")
-        
-        # Fallback to database lease table
-        if not ip_address:
-            ip_address = get_ip_for_mac(mac_address, subnet_id=vlan_id)
-    
-    # Create or update device
-    if existing:
-        existing.user_id = user.id
-        existing.registration_status = 'registered'
-        existing.current_vlan = vlan_id
-        if device_name:
-            existing.device_name = device_name
-        if ip_address:
-            existing.ip_address = ip_address
-        if not existing.unregister_token:
-            existing.unregister_token = secrets.token_urlsafe(32)
-        db.session.commit()
-        device = existing
-    else:
+            except Exception as exc:
+                logger.error("Kea lookup failed for %s: %s", mac_address, exc)
+    if not ip_address:
+        ip_address = get_ip_for_mac(mac_address, subnet_id=vlan_id)
+
+    # Get/create Device record.
+    device = Device.query.filter_by(mac_address=mac_address).first()
+    if not device:
         device = Device(
             mac_address=mac_address,
-            user_id=user.id,
-            device_name=device_name or 'admin-assigned',
-            ip_address=ip_address,
-            registration_status='registered',
-            current_vlan=vlan_id,
-            connection_type='unknown',
-            unregister_token=secrets.token_urlsafe(32)
+            first_seen=datetime.utcnow(),
         )
         db.session.add(device)
-        db.session.commit()
-    
-    # Remove ACL block and DNS hijack
-    if ip_address:
+
+    # Detect which VLAN the device is currently on.
+    _, detected_vlan, _ = detect_connection_type(ip_address) if ip_address else (None, None, None)
+
+    device.user_id           = user.id
+    device.device_name       = device_name or device.device_name or 'admin-assigned'
+    device.ip_address        = ip_address
+    device.assigned_vlan     = vlan_id
+    device.current_vlan      = detected_vlan or vlan_id
+    device.ownership_validated = True  # Admin-assigned devices are considered validated.
+    device.connection_type   = device.connection_type or 'unknown'
+    if not device.unregister_token:
+        device.unregister_token = secrets.token_urlsafe(32)
+    db.session.commit()
+
+    # Ensure DeviceOwnership is correct.
+    _close_ownership(mac_address, commit=True)
+    _open_ownership(mac_address, user.id, commit=True)
+
+    # Spec A.a.ii / A.b: determine whether to unblock now.
+    same_vlan = (detected_vlan == vlan_id) if detected_vlan else False
+    lease_usable = (
+        ip_lease and ip_lease.lease_expiry > datetime.utcnow()
+        and not ip_lease.from_blocked_pool
+    )
+
+    if same_vlan and lease_usable and ip_address:
+        # Remove DNS hijack and ACL block synchronously, then mark accessible.
+        if _should_hijack_vlan(vlan_id):
+            manage_dns_hijack('unhijack', ip_address)
         manage_switch_acl('unblock', ip_address, vlan_id)
-        manage_dns_hijack('unhijack', ip_address)
-    
-    # Add Kea reservation
+        if ip_lease:
+            ip_lease.dns_hijacked = False
+            db.session.commit()
+        _set_internet_accessible(device, True, commit=True)
+        _sync_registration_status(device)
+        db.session.commit()
+    else:
+        # Wrong VLAN or blocked-pool IP — device will get access when it reconnects.
+        _set_internet_accessible(device, False if vlan_id else None, commit=True)
+        _sync_registration_status(device)
+        db.session.commit()
+
+    # Register with Kea for WiFi, or update RADIUS for wired.
     kea = get_kea()
-    if kea and ip_address:
+    if kea:
         try:
-            kea.register_mac(mac=mac_address, vlan=vlan_id, fixed_ip=ip_address)
-            logger.info(f"Admin assigned device {mac_address} to user {user.email} with IP {ip_address}")
+            kea.register_mac(mac=mac_address, vlan=vlan_id,
+                              hostname=device.device_name or 'admin-assigned',
+                              ip_address=ip_address if same_vlan else None)
         except Exception as exc:
-            logger.error(f"Kea reservation failed for admin-assigned device {mac_address}: {exc}")
-    
-    # Clear unregistered lease
+            logger.error("Kea reservation failed for %s: %s", mac_address, exc)
+
     clear_unregistered_lease(mac_address)
-    
-    flash(f'Device {mac_address} successfully assigned to {user.email}.', 'success')
-    logger.info(f"Admin assigned device {mac_address} to user {user.email}")
+
+    # Send email notification to user.
+    if device.unregister_token:
+        unregister_url = _build_unregister_url(device.unregister_token)
+        send_wifi_registration_confirmation(
+            user.email,
+            user.first_name or 'there',
+            get_ssid_for_vlan(vlan_id) or 'Network',
+            mac_address,
+            unregister_url,
+            registration_details={
+                'email':        user.email,
+                'first_name':   user.first_name or '',
+                'last_name':    user.last_name  or '',
+                'phone_number': user.phone_number or '',
+                'device_type':  device.device_name,
+                'ip_address':   ip_address,
+                'ssid':         get_ssid_for_vlan(vlan_id) or 'Network',
+            },
+        )
+
+    flash(f'Device {mac_address} assigned to {user.email} on VLAN {vlan_id}.', 'success')
+    logger.info("Admin assigned device %s to user %s (vlan=%s)", mac_address, user.email, vlan_id)
     return redirect(url_for('admin_dashboard'))
 
 
@@ -8141,7 +8481,6 @@ def admin_process_request(request_id):
     
     if action == 'approve':
         vlan_id_raw = request.form.get('vlan_id')
-        
         notes = request.form.get('notes', '').strip()
         vlan_map = get_vlan_map()
         try:
@@ -8160,41 +8499,10 @@ def admin_process_request(request_id):
             user = existing_user
             if notes:
                 user.notes = f"{user.notes}\n{notes}" if user.notes else notes
-
-            device = Device.query.filter_by(mac_address=reg_request.mac_address).first()
-            if device:
-                device.user_id = user.id
-                device.device_name = reg_request.device_type or device.device_name or 'unknown'
-                device.ip_address = reg_request.ip_address
-                device.registration_status = 'registered'
-                device.current_vlan = target_vlan
-                device.connection_type = connection_type
-                device.ssid = ssid
-                device.is_wired = connection_type == 'wired'
-                device.wired_target_vlan = target_vlan if connection_type == 'wired' else None
-                device.unregister_token = device.unregister_token or secrets.token_urlsafe(32)
-            else:
-                device = Device(
-                    mac_address=reg_request.mac_address,
-                    user_id=user.id,
-                    device_name=reg_request.device_type or 'unknown',
-                    ip_address=reg_request.ip_address,
-                    registration_status='registered',
-                    current_vlan=target_vlan,
-                    connection_type=connection_type,
-                    ssid=ssid,
-                    is_wired=connection_type == 'wired',
-                    wired_target_vlan=target_vlan if connection_type == 'wired' else None,
-                    unregister_token=secrets.token_urlsafe(32)
-                )
-                db.session.add(device)
-
-            # No bulk updates; allowed VLANs control future auto-approvals.
         else:
             begin_date = datetime.strptime(request.form.get('begin_date'), '%Y-%m-%d').date()
             expiry_date_str = request.form.get('expiry_date', '').strip()
             expiry_date = datetime.strptime(expiry_date_str, '%Y-%m-%d').date() if expiry_date_str else None
-
             user = User(
                 email=reg_request.email,
                 first_name=reg_request.first_name,
@@ -8203,88 +8511,89 @@ def admin_process_request(request_id):
                 begin_date=begin_date,
                 expiry_date=expiry_date,
                 notes=notes,
-                created_by=current_user.username
+                created_by=current_user.username,
             )
             db.session.add(user)
             db.session.flush()
 
+        # Get or create Device row (Table 6)
+        device = Device.query.filter_by(mac_address=reg_request.mac_address).first()
+        if device:
+            device.user_id = user.id
+            device.device_name = reg_request.device_type or device.device_name or 'unknown'
+            device.ip_address = reg_request.ip_address
+            device.current_vlan = target_vlan
+            device.connection_type = connection_type
+            device.ssid = ssid
+            device.is_wired = connection_type == 'wired'
+            device.wired_target_vlan = target_vlan if connection_type == 'wired' else None
+            device.unregister_token = device.unregister_token or secrets.token_urlsafe(32)
+        else:
             device = Device(
                 mac_address=reg_request.mac_address,
                 user_id=user.id,
                 device_name=reg_request.device_type or 'unknown',
                 ip_address=reg_request.ip_address,
-                registration_status='registered',
                 current_vlan=target_vlan,
                 connection_type=connection_type,
                 ssid=ssid,
                 is_wired=connection_type == 'wired',
                 wired_target_vlan=target_vlan if connection_type == 'wired' else None,
-                unregister_token=secrets.token_urlsafe(32)
+                unregister_token=secrets.token_urlsafe(32),
             )
             db.session.add(device)
-        
+            db.session.flush()
+
+        # Spec: admin approval sets assigned_vlan; ownership_validated = True
+        device.assigned_vlan = target_vlan
+        device.ownership_validated = True
+
+        # Ensure DeviceOwnership record exists
+        existing_ownership = _get_active_ownership(device.mac_address)
+        if not existing_ownership or existing_ownership.user_id != user.id:
+            _close_ownership(device.mac_address, commit=False)
+            _open_ownership(device.mac_address, user.id, commit=False)
+
         # Mark ALL pending requests for this MAC as approved
-        all_mac_requests = RegistrationRequest.query.filter_by(
-            mac_address=reg_request.mac_address, 
-            status='pending'
-        ).all()
-        
-        for req in all_mac_requests:
+        for req in RegistrationRequest.query.filter_by(mac_address=reg_request.mac_address, status='pending').all():
             req.status = 'approved'
             req.processed_at = datetime.now()
             req.processed_by = current_user.username
-        
+
         db.session.commit()
-        
-        # Register in network based on connection type
+
+        # Network registration
         if device.connection_type == 'wifi':
-            # WiFi: Register MAC in Kea DHCP
             kea = get_kea()
             if kea:
                 success = kea.register_mac(
                     mac=device.mac_address,
                     vlan=target_vlan,
-                    hostname=f"{user.first_name.lower()}-{user.last_name.lower()}-device",
-                    ip_address=None  # Let Kea assign from registered pool
+                    hostname=f"{(user.first_name or 'device').lower()}-device",
+                    ip_address=None,
                 )
-                if success and device.ip_address:
-                    # Delete the old lease to force device to get new IP from registered pool
+                if success and device.ip_address and not network_mismatch:
                     try:
-                        if not network_mismatch:
-                            kea.force_lease_renewal(device.mac_address, device.ip_address)
-                    except Exception as e:
-                        logger.warning(f"Could not force lease renewal: {e}")
-                if not success:
-                    logger.error(f"Failed to register MAC {device.mac_address} in Kea after approval")
-                    # Still unhijack even if Kea registration fails (might already be registered)
-                    if device.ip_address and not network_mismatch and _should_hijack_vlan(target_vlan):
-                        manage_dns_hijack('unhijack', device.ip_address)
-                else:
-                    # Successfully registered, remove DNS hijacking
-                    if device.ip_address and not network_mismatch and _should_hijack_vlan(target_vlan):
-                        manage_dns_hijack('unhijack', device.ip_address)
-            else:
-                logger.error("Kea client unavailable for WiFi device registration")
-                # Unhijack anyway if we have an IP
-                if device.ip_address and not network_mismatch and _should_hijack_vlan(target_vlan):
-                    manage_dns_hijack('unhijack', device.ip_address)
+                        kea.force_lease_renewal(device.mac_address, device.ip_address)
+                    except Exception as exc:
+                        logger.warning("Could not force lease renewal: %s", exc)
         else:
-            # Wired: Use RADIUS CoA
             send_coa_change(device.mac_address, target_vlan)
             replug_switch_port_for_mac(device.mac_address)
-            # Remove DNS hijacking for wired devices too
+
+        # Unhijack / unblock only if device is currently on the right VLAN
+        if not network_mismatch:
             if device.ip_address and _should_hijack_vlan(target_vlan):
                 manage_dns_hijack('unhijack', device.ip_address)
+            manage_switch_acl('unblock', reg_request.ip_address, detected_vlan)
+            _set_internet_accessible(device, True)
+        else:
+            # device on wrong VLAN — will get access when it reconnects to target_vlan
+            _set_internet_accessible(device, False)
 
         clear_unregistered_lease(device.mac_address)
-        
-        # NEW: Unblock the original IP address from the unregistered VLAN
-        if not network_mismatch:
-            manage_switch_acl('unblock', reg_request.ip_address, detected_vlan)
 
         unregister_url = _build_unregister_url(device.unregister_token)
-        confirm_url = None
-        confirm_timeout_sec = None
         confirm_url, confirm_timeout_sec = _set_wifi_confirmation(device)
         if device.connection_type == 'wired':
             ssid_display = "Wired Network"
@@ -8305,12 +8614,12 @@ def admin_process_request(request_id):
                 "phone_number": user.phone_number or reg_request.phone_number,
                 "device_type": device.device_name,
                 "ip_address": device.ip_address,
-                "ssid": ssid_display
-            }
+                "ssid": ssid_display,
+            },
         )
-        
-        flash(f'Request approved and user {user.email} created', 'success')
-        logger.info(f"Admin approved registration request for {user.email}")
+
+        flash(f'Request approved and user {user.email} registered', 'success')
+        logger.info("Admin approved registration request for %s", user.email)
         
     elif action == 'reject':
         notes = request.form.get('notes', '').strip()
@@ -8461,61 +8770,66 @@ def admin_change_devices_vlan():
 @app.route('/admin/device/<int:device_id>/delete', methods=['POST'])
 @login_required
 def admin_delete_device(device_id):
-    """Delete a device registration"""
+    """Unregister a device (admin-side spec C.d).
+
+    The Device row is kept (Table 6 stays) but all ownership/access fields are
+    reset.  If the device currently has internet access (internet_accessible=True)
+    and has a usable IP lease, a DNS hijack + ACL block is applied so the user
+    loses access immediately for the remainder of the lease.
+    """
     device = Device.query.get_or_404(device_id)
     mac_address = device.mac_address
     ip_address = device.ip_address
     vlan_id = device.current_vlan
-    
-    # Remove any ACL/DNS hijack tied to the device IP before deletion
-    if ip_address and vlan_id:
-        manage_switch_acl('unblock', ip_address, vlan_id)
-        if _should_hijack_vlan(vlan_id):
-            manage_dns_hijack('unhijack', ip_address)
 
-    # Unregister from network first
-    if device.connection_type == 'wifi':
-        kea = get_kea()
-        if kea:
-            kea.unregister_mac(device.mac_address, device.current_vlan)
-    elif device.connection_type == 'wired':
-        send_coa_disconnect(device.mac_address)
-
-    # For deleted devices, keep DNS hijack + ACL while lease is active
-    if ip_address and not _is_blocked_pool_ip(ip_address):
+    # Step 1: If device currently has internet → cut off access immediately
+    if device.internet_accessible and ip_address and not _is_blocked_pool_ip(ip_address):
         lease_expiry = get_lease_expiry_for_mac(mac_address, subnet_id=vlan_id)
-        if not lease_expiry:
-            lease_expiry = datetime.utcnow() + timedelta(minutes=5)
-
-        upsert_unregistered_lease(mac_address, ip_address, lease_expiry)
-
-        if vlan_id:
-            manage_switch_acl('block', ip_address, vlan_id)
-
-        if _should_hijack_vlan(vlan_id):
-            manage_dns_hijack('hijack', ip_address)
-            logger.info(
-                "DNS hijacked/ACL blocked for deleted device %s at %s until %s",
-                mac_address,
-                ip_address,
-                lease_expiry,
+        if lease_expiry and lease_expiry > datetime.utcnow():
+            if vlan_id:
+                manage_switch_acl('block', ip_address, vlan_id)
+            if _should_hijack_vlan(vlan_id):
+                manage_dns_hijack('hijack', ip_address)
+            _upsert_iplease(
+                mac=mac_address, ip=ip_address, vlan=vlan_id,
+                lease_start=datetime.utcnow(), lease_expiry=lease_expiry,
+                from_blocked_pool=False, dns_hijacked=bool(_should_hijack_vlan(vlan_id)),
             )
-        else:
             logger.info(
-                "ACL blocked for deleted device %s at %s until %s",
-                mac_address,
-                ip_address,
-                lease_expiry,
+                "Admin unregistered %s — blocked at %s until %s",
+                mac_address, ip_address, lease_expiry,
             )
-    
-    db.session.delete(device)
+
+    # Step 2: Unregister from Kea/RADIUS
+    kea = get_kea()
+    if kea:
+        try:
+            kea.unregister_mac(mac_address, vlan_id)
+        except Exception as exc:
+            logger.warning("Kea unregister failed for %s: %s", mac_address, exc)
+
+    if device.connection_type == 'wired':
+        send_coa_disconnect(mac_address)
+
+    # Step 3: Close active DeviceOwnership
+    _close_ownership(mac_address, commit=False)
+
+    # Step 4: Reset Table-6 fields (keep mac_address / ip_address / current_vlan row)
+    device.user_id = None
+    device.device_name = None
+    device.assigned_vlan = None
+    device.internet_accessible = None
+    device.internet_blocked = None
+    device.ownership_validated = None
+    device.first_seen = device.first_seen  # unchanged
+    _sync_registration_status(device)
     db.session.commit()
 
     cleanup_orphan_hijack_rules()
-    
-    flash(f'Device {mac_address} has been deleted', 'success')
-    logger.info(f"Admin deleted device {mac_address}")
-    
+
+    flash(f'Device {mac_address} has been unregistered', 'success')
+    logger.info("Admin unregistered device %s", mac_address)
+
     return redirect(url_for('admin_dashboard'))
 
 
@@ -8540,7 +8854,7 @@ def admin_delete_user(user_id):
 @login_required
 @permission_required('manage_users')
 def admin_reassign_device(device_id):
-    """Reassign a registered device to a different user."""
+    """Reassign a registered device to a different user (spec C.a)."""
     device = Device.query.get_or_404(device_id)
     user_id = request.form.get('user_id', '').strip()
     if not user_id:
@@ -8556,9 +8870,19 @@ def admin_reassign_device(device_id):
         flash('User not found.', 'error')
         return redirect(url_for('admin_dashboard'))
     old_email = device.user.email if device.user else 'unowned'
+
+    # Update ownership history
+    _close_ownership(device.mac_address, commit=False)
+    _open_ownership(device.mac_address, new_user.id, commit=False)
+
+    # Update convenience foreign key; keep assigned_vlan / internet_accessible unchanged
     device.user_id = new_user.id
     db.session.commit()
-    logger.info(f"Admin reassigned device {device.mac_address} from {old_email} to {new_user.email}")
+
+    logger.info(
+        "Admin reassigned device %s from %s to %s",
+        device.mac_address, old_email, new_user.email,
+    )
     flash(f'Device {device.mac_address} reassigned to {new_user.email}.', 'success')
     return redirect(url_for('admin_dashboard'))
 

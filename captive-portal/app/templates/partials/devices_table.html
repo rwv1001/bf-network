@@ -1,6 +1,6 @@
 <div id="devices-table-section">
 <div class="section-pane-header">
-    <h2>&#128241; All Registered Devices ({{ devices_total }})</h2>
+    <h2>&#128241; Registered Devices ({{ devices_total }})</h2>
 </div>
 <div class="section-pane-body">
 {% if wired_vlan_choices %}
@@ -120,7 +120,7 @@
         </tr>
     </thead>
     <tbody>
-        {% for device, user in devices %}
+        {% for ownership, device, user in devices %}
         <tr {% if device.registration_status == 'blocked' %}style="background: #ffebee;"{% endif %}>
             <td style="font-family: monospace; font-size: 12px;">{{ device.mac_address }}</td>
             <td style="font-family: monospace; font-size: 12px;">

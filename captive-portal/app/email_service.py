@@ -223,6 +223,60 @@ def send_user_blocked_device_notice(to_email, first_name, mac_address, device_na
     return send_email(to_email, subject, html_body, text_body)
 
 
+def send_admin_unblock_request(mac_address, ip_address, user_name=None, user_email=None):
+    """
+    Notify all manage_users admins that a blocked device's user is requesting removal of the block.
+    """
+    from models import Admin
+
+    admins = Admin.query.filter(
+        Admin.can_manage_users == True,
+        Admin.email != None,
+        Admin.email != ''
+    ).all()
+
+    if not admins:
+        if not ADMIN_EMAIL:
+            logger.warning("No admin emails configured for unblock request")
+            return 0
+        admins_to_email = [{'email': ADMIN_EMAIL, 'username': 'Admin'}]
+    else:
+        admins_to_email = [{'email': a.email, 'username': a.username} for a in admins]
+
+    user_display = user_name or user_email or 'Unknown user'
+    subject = f"Unblock Request from {user_display}"
+
+    emails_sent = 0
+    for admin_info in admins_to_email:
+        html_body = f"""
+        <html>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+            <h2>Unblock Request</h2>
+            <p>Hello {admin_info['username']},</p>
+            <p>A blocked device is requesting removal of its internet block.</p>
+            <table style="border-collapse: collapse; margin: 20px 0;">
+                <tr><td style="padding:8px;font-weight:bold;background:#f5f5f5;">MAC Address:</td>
+                    <td style="padding:8px;font-family:monospace;">{mac_address}</td></tr>
+                <tr><td style="padding:8px;font-weight:bold;background:#f5f5f5;">IP Address:</td>
+                    <td style="padding:8px;">{ip_address or 'Unknown'}</td></tr>
+                <tr><td style="padding:8px;font-weight:bold;background:#f5f5f5;">User:</td>
+                    <td style="padding:8px;">{user_display}</td></tr>
+            </table>
+            <p>Please log in to the admin dashboard to review and respond to this request.</p>
+            <hr style="margin:30px 0;border:none;border-top:1px solid #ddd;">
+            <p style="color:#666;font-size:12px;">This is an automated message from the Network Access Portal.</p>
+        </body>
+        </html>
+        """
+        text_body = (
+            f"Unblock Request\n\nMAC: {mac_address}\nIP: {ip_address or 'Unknown'}\n"
+            f"User: {user_display}\n\nPlease log in to the admin dashboard to review."
+        )
+        if send_email(admin_info['email'], subject, html_body, text_body):
+            emails_sent += 1
+    return emails_sent
+
+
 def send_admin_notification(registration_request, approval_url, current_vlan=None, current_ssid=None):
     """
     Send notification to all admins with manage_users permission about new registration request

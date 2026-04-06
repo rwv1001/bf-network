@@ -24,7 +24,7 @@ fi
 
 case "$ACTION" in
     hijack-blocked-pools|unhijack-blocked-pools)
-        # No IP required for blocked pool range rules
+        # No IP required for pool/VLAN-wide rules
         ;;
     *)
         if [ -z "$IP_ADDRESS" ]; then

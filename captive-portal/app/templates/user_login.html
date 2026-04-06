@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+
+{% block title %}Sign In - Blackfriars Network Portal{% endblock %}
+
+{% block header %}Blackfriars Captive Portal{% endblock %}
+
+{% block subheader %}
+<p style="margin-top: 10px; opacity: 0.9;">Sign in to manage your devices</p>
+{% endblock %}
+
+{% block content %}
+<form method="POST" action="{{ url_for('user_login') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+    <div class="form-group">
+        <label for="email">Email address</label>
+        <input type="email" id="email" name="email" class="form-control"
+               value="{{ prefill_email or '' }}" required autofocus>
+    </div>
+
+    <div class="form-group">
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" class="form-control" required>
+    </div>
+
+    <button type="submit" class="btn btn-primary btn-full">Sign In</button>
+</form>
+
+<p style="margin-top: 20px; text-align: center; font-size: 0.9em; color: #666;">
+    Don't have an account yet?
+    <a href="{{ url_for('register') }}">Register your device</a>
+</p>
+
+<details style="margin-top: 20px; font-size: 0.9em; color: #666; border: 1px solid #ddd; border-radius: 5px; padding: 10px;">
+    <summary style="cursor: pointer; font-weight: 500;">Forgotten your password or never set one?</summary>
+    <div style="margin-top: 10px;">
+        <p style="margin-bottom: 10px;">Enter your email address below and we will send you a link to set or reset your portal password.</p>
+        <form method="POST" action="{{ url_for('forgot_network_password') }}" id="forgotForm">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                <input type="email" name="email" class="form-control" placeholder="your@email.com"
+                       style="flex: 1; min-width: 200px;" required>
+                <button type="submit" class="btn" style="white-space: nowrap;">Send reset link</button>
+            </div>
+        </form>
+        <p id="forgotMsg" style="display:none; margin-top: 8px; color: #4CAF50;"></p>
+    </div>
+</details>
+
+<script>
+document.getElementById('forgotForm').addEventListener('submit', function(e) {
+    e.preventDefault();
+    var email = this.querySelector('[name=email]').value;
+    var csrf  = this.querySelector('[name=csrf_token]').value;
+    var btn   = this.querySelector('button');
+    btn.disabled = true;
+    btn.textContent = 'Sending…';
+    fetch('/forgot-network-password', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded',
+                  'X-Requested-With': 'XMLHttpRequest'},
+        body: 'email=' + encodeURIComponent(email) + '&csrf_token=' + encodeURIComponent(csrf)
+    })
+    .then(r => r.json().catch(() => ({})))
+    .then(d => {
+        var msg = document.getElementById('forgotMsg');
+        msg.textContent = d.message || 'If that email is registered, a link has been sent.';
+        msg.style.display = 'block';
+        btn.textContent = 'Sent';
+    })
+    .catch(() => { btn.disabled = false; btn.textContent = 'Send reset link'; });
+});
+</script>
+{% endblock %}

@@ -1,0 +1,26 @@
+{
+  "description": "Add spec Table 6 columns (internet_accessible, internet_blocked, assigned_vlan, ownership_validated) to devices; create device_ownership (Table 9) and ip_leases (Table 7) tables.",
+
+  "db": {
+    "up":   "migrate-spec-tables-up.sh",
+    "down": "migrate-spec-tables-down.sh",
+    "verify_up": [
+      {"type": "column", "table": "devices",          "column": "internet_accessible"},
+      {"type": "column", "table": "devices",          "column": "internet_blocked"},
+      {"type": "column", "table": "devices",          "column": "assigned_vlan"},
+      {"type": "column", "table": "devices",          "column": "ownership_validated"},
+      {"type": "table",  "name":  "device_ownership"},
+      {"type": "table",  "name":  "ip_leases"}
+    ],
+    "verify_down": [
+      {"type": "column_absent", "table": "devices", "column": "internet_accessible"},
+      {"type": "column_absent", "table": "devices", "column": "internet_blocked"},
+      {"type": "column_absent", "table": "devices", "column": "assigned_vlan"},
+      {"type": "column_absent", "table": "devices", "column": "ownership_validated"},
+      {"type": "table_absent",  "name":  "device_ownership"},
+      {"type": "table_absent",  "name":  "ip_leases"}
+    ]
+  },
+
+  "notes": "Backfills internet_accessible/internet_blocked/assigned_vlan/ownership_validated from existing registration_status values. Existing device-user associations are migrated into device_ownership. Existing unregistered_leases are copied into ip_leases."
+}

@@ -271,7 +271,7 @@ function searchTable(tableType, searchValue) {
     <span style="font-size:13px;font-weight:600;color:#555;margin-right:4px;">Show sections:</span>
     <button onclick="toggleSection('lease-stats-section','lease_stats',this)" class="toggle-btn{% if 'lease_stats' not in dashboard_hidden_sections %} active{% endif %}">&#128202; Active Leases</button>
     <button onclick="toggleSection('unregistered-table-section','unregistered',this)" class="toggle-btn{% if 'unregistered' not in dashboard_hidden_sections %} active{% endif %}">&#128721; Unregistered Devices</button>
-    <button onclick="toggleSection('users-table-section','users',this)" class="toggle-btn{% if 'users' not in dashboard_hidden_sections %} active{% endif %}">&#128101; Authorized Users</button>
+    <button onclick="toggleSection('users-table-section','users',this)" class="toggle-btn{% if 'users' not in dashboard_hidden_sections %} active{% endif %}">&#128101; Users</button>
     <button onclick="toggleSection('devices-table-section','devices',this)" class="toggle-btn{% if 'devices' not in dashboard_hidden_sections %} active{% endif %}">&#128241; All Devices</button>
     <button onclick="toggleSection('domain-policies-section','domain_policies',this)" class="toggle-btn{% if 'domain_policies' not in dashboard_hidden_sections %} active{% endif %}">&#128231; Domain Policies</button>
 </div>
@@ -421,21 +421,21 @@ function searchTable(tableType, searchValue) {
         <tr>
             <th>MAC Address</th>
             <th>IP Address</th>
-            <th>Lease Expires</th>
+            <th>Last Seen</th>
             {% if current_user.can_manage_users %}
             <th>Assign to User</th>
             {% endif %}
         </tr>
     </thead>
     <tbody>
-        {% for lease in unregistered_leases %}
+        {% for device in unregistered_devices %}
         <tr>
-            <td style="font-family: monospace;">{{ lease.mac_address }}</td>
-            <td>{{ lease.ip_address }}</td>
-            <td>{{ lease.expires_at }}</td>
+            <td style="font-family: monospace;">{{ device.mac_address }}</td>
+            <td>{{ device.ip_address or '-' }}</td>
+            <td>{{ device.last_seen.strftime('%Y-%m-%d %H:%M') if device.last_seen else '-' }}</td>
             {% if current_user.can_manage_users %}
             <td>
-                <button onclick="showAssignForm('{{ lease.mac_address }}', '{{ lease.ip_address }}')" 
+                <button onclick="showAssignForm('{{ device.mac_address }}', '{{ device.ip_address or '' }}')" 
                         class="btn btn-small" style="background: #2c7a7b; font-size: 12px; padding: 4px 8px;">
                     Assign
                 </button>
@@ -590,7 +590,7 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
 
 <div id="users-table-section" class="section-pane" {% if 'users' in dashboard_hidden_sections %}style="display:none"{% endif %}>
 <div class="section-pane-header">
-    <h2>&#128101; Authorized Users ({{ users_total }})</h2>
+    <h2>&#128101; Users ({{ users_total }})</h2>
     {% if current_user.can_manage_users %}
     <div style="display:flex; gap:8px;">
         <a href="{{ url_for('admin_import_users') }}" class="btn-pane btn">&#8679; Import Users</a>
@@ -782,7 +782,7 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
 
 <div id="devices-table-section" class="section-pane" {% if 'devices' in dashboard_hidden_sections %}style="display:none"{% endif %}>
 <div class="section-pane-header">
-    <h2>&#128241; All Registered Devices ({{ devices_total }})</h2>
+    <h2>&#128241; Registered Devices ({{ devices_total }})</h2>
 </div>
 <div class="section-pane-body">
 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 15px; flex-wrap: wrap;">
@@ -887,7 +887,7 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
         </tr>
     </thead>
     <tbody>
-        {% for device, user in devices %}
+        {% for ownership, device, user in devices %}
         <tr {% if device.registration_status == 'blocked' %}style="background: #ffebee;"{% endif %}>
             <td style="font-family: monospace; font-size: 12px;">{{ device.mac_address }}</td>
             <td style="font-family: monospace; font-size: 12px;">

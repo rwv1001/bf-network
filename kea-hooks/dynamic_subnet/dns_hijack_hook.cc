@@ -20,6 +20,8 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <fcntl.h>
+#include <cstdio>
+#include <cctype>
 
 using namespace isc::hooks;
 using namespace isc::dhcp;
@@ -298,6 +300,133 @@ void spawn_port_lookup(const std::string& mac_colon) {
     waitpid(pid, &status, 0);
 }
 
+// Helper: fire-and-forget lease event notification for Table 6 + Table 7 writes.
+// Calls /scripts/kea-lease-event.sh asynchronously via double-fork so Kea
+// never blocks waiting for the DB write to complete.
+void manage_lease_event(const std::string& action,
+                        const std::string& mac_colon,
+                        const std::string& ip_address,
+                        uint32_t           vlan_id,
+                        int                lease_seconds,
+                        bool               from_blocked_pool,
+                        bool               dns_hijacked) {
+    static const char* script = "/scripts/kea-lease-event.sh";
+    std::string vlan_str   = std::to_string(vlan_id);
+    std::string secs_str   = std::to_string(lease_seconds);
+    std::string pool_str   = from_blocked_pool ? "true" : "false";
+    std::string hijack_str = dns_hijacked      ? "true" : "false";
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        std::cerr << "DNS Hijack Hook: manage_lease_event fork failed: "
+                  << std::strerror(errno) << std::endl;
+        return;
+    }
+    if (pid == 0) {
+        // First child: fork again then exit immediately so Kea reaps it instantly.
+        pid_t pid2 = fork();
+        if (pid2 != 0) _exit(0);
+        // Grandchild: detach from Kea and exec the script.
+        setsid();
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) {
+            dup2(devnull, STDIN_FILENO);
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            if (devnull > STDERR_FILENO) close(devnull);
+        }
+        for (int fd = 3; fd < 256; fd++) close(fd);
+        // Local arrays for execv args (stack-allocated in grandchild).
+        char a_action[16], a_mac[32], a_ip[20], a_vlan[12],
+             a_secs[12],   a_pool[8], a_hijack[8];
+        std::strncpy(a_action,  action.c_str(),        sizeof(a_action)  - 1);
+        std::strncpy(a_mac,     mac_colon.c_str(),     sizeof(a_mac)     - 1);
+        std::strncpy(a_ip,      ip_address.c_str(),    sizeof(a_ip)      - 1);
+        std::strncpy(a_vlan,    vlan_str.c_str(),      sizeof(a_vlan)    - 1);
+        std::strncpy(a_secs,    secs_str.c_str(),      sizeof(a_secs)    - 1);
+        std::strncpy(a_pool,    pool_str.c_str(),      sizeof(a_pool)    - 1);
+        std::strncpy(a_hijack,  hijack_str.c_str(),    sizeof(a_hijack)  - 1);
+        a_action[sizeof(a_action)-1] = a_mac[sizeof(a_mac)-1] = a_ip[sizeof(a_ip)-1] = '\0';
+        a_vlan[sizeof(a_vlan)-1]     = a_secs[sizeof(a_secs)-1] = '\0';
+        a_pool[sizeof(a_pool)-1]     = a_hijack[sizeof(a_hijack)-1] = '\0';
+        char* const args[] = {
+            const_cast<char*>(script),
+            a_action, a_mac, a_ip, a_vlan, a_secs, a_pool, a_hijack,
+            nullptr
+        };
+        execv(script, args);
+        _exit(127);
+    }
+    // Reap first child immediately (it exits right away).
+    int wstatus;
+    waitpid(pid, &wstatus, 0);
+}
+
+// Synchronously query the portal DB to check whether a registered device's
+// assigned_vlan matches the VLAN subnet being allocated.
+// Returns true if there is a mismatch (device is on the wrong network segment
+// and should have DNS hijack applied despite having a registered reservation).
+// Only called for non-blocked registered devices; uses popen(psql).
+// Latency: ~10-50 ms on a local PostgreSQL instance.
+bool is_assigned_vlan_mismatch(const std::string& mac_colon, uint32_t lease_vlan_id) {
+    // Input validation: MAC must contain only hex digits and colons.
+    if (mac_colon.size() > 17) return false;
+    for (char c : mac_colon) {
+        if (!isxdigit(static_cast<unsigned char>(c)) && c != ':') return false;
+    }
+
+    const char* db_host = std::getenv("DB_HOST");
+    const char* db_port = std::getenv("DB_PORT");
+    const char* db_name = std::getenv("DB_NAME");
+    const char* db_user = std::getenv("DB_USER");
+    const char* db_pass = std::getenv("DB_PASSWORD");
+    if (!db_host || !db_name || !db_user || !db_pass) return false;
+
+    // Expose DB_PASSWORD as PGPASSWORD so psql authenticates without .pgpass.
+    setenv("PGPASSWORD", db_pass, 1);
+
+    std::stringstream cmd;
+    cmd << "psql -h " << db_host
+        << " -p " << (db_port ? db_port : "5432")
+        << " -U " << db_user
+        << " -d " << db_name
+        << " -t -A -q"
+        << " -c \"SELECT assigned_vlan FROM devices"
+        << " WHERE mac_address='" << mac_colon << "'"
+        << " AND assigned_vlan IS NOT NULL LIMIT 1\""
+        << " 2>/dev/null";
+
+    FILE* pipe = popen(cmd.str().c_str(), "r");
+    if (!pipe) return false;
+
+    char buf[32] = {};
+    bool got_data = (fgets(buf, sizeof(buf) - 1, pipe) != nullptr);
+    pclose(pipe);
+    if (!got_data) return false;
+
+    // Trim trailing whitespace / newline.
+    std::string result(buf);
+    while (!result.empty() &&
+           (result.back() == '\n' || result.back() == '\r' || result.back() == ' ')) {
+        result.pop_back();
+    }
+    if (result.empty()) return false;  // No assigned_vlan set — no mismatch.
+
+    try {
+        int assigned = std::stoi(result);
+        if (assigned <= 0) return false;
+        bool mismatch = (static_cast<uint32_t>(assigned) != lease_vlan_id);
+        if (mismatch) {
+            std::cout << "DNS Hijack Hook: VLAN mismatch for " << mac_colon
+                      << " (assigned=" << assigned
+                      << " lease_vlan=" << lease_vlan_id << ")" << std::endl;
+        }
+        return mismatch;
+    } catch (...) {
+        return false;
+    }
+}
+
 int lease4_select(CalloutHandle& handle) {
     try {
         // Get the lease that was selected
@@ -322,25 +451,27 @@ int lease4_select(CalloutHandle& handle) {
 
         // Async switch port lookup (non-blocking; result written to mac_port_cache)
         spawn_port_lookup(hwaddr->toText(false));
-        
+
         // Get the allocated IP address
-        std::string ip_address = lease->addr_.toText();
-        std::string mac_address = hwaddr->toText();
-        int lease_seconds = static_cast<int>(lease->valid_lft_);
-        
-        std::cout << "DNS Hijack Hook: Lease allocated - MAC: " << mac_address 
+        std::string ip_address  = lease->addr_.toText();
+        std::string mac_address = hwaddr->toText();          // "hwtype=1 aa:bb:cc:dd:ee:ff"
+        std::string mac_clean   = hwaddr->toText(false);     // "aa:bb:cc:dd:ee:ff" (for DB queries)
+        int         lease_seconds      = static_cast<int>(lease->valid_lft_);
+        bool        ip_is_blocked_pool = is_blocked_pool_ip(ip_address);
+
+        std::cout << "DNS Hijack Hook: Lease allocated - MAC: " << mac_address
                   << " IP: " << ip_address << std::endl;
-        
+
         // Cleanup expired unregistered leases on every allocation
         manage_unregistered_lease("cleanup", "", "", 0);
 
         // Check if device has a reservation (is registered)
         ConstHostPtr host;
-        
+
         // Check global reservations
         host = HostMgr::instance().get4Any(SUBNET_ID_GLOBAL, Host::IDENT_HWADDR,
                                           &hwaddr->hwaddr_[0], hwaddr->hwaddr_.size());
-        
+
         // Check subnet-specific reservations if not found globally
         if (!host) {
             ConstSubnet4Ptr subnet;
@@ -350,7 +481,8 @@ int lease4_select(CalloutHandle& handle) {
                                                    &hwaddr->hwaddr_[0], hwaddr->hwaddr_.size());
             }
         }
-        
+
+        bool do_hijack = false;  // track for lease event
         if (host) {
             bool blocked = is_blocked_host(host);
             std::string blocked_ip = get_blocked_ip_from_reservation(host);
@@ -369,16 +501,35 @@ int lease4_select(CalloutHandle& handle) {
             if (blocked) {
                 std::cout << "DNS Hijack Hook: Device " << mac_address
                           << " is BLOCKED - enabling DNS hijack" << std::endl;
-                if (is_blocked_pool_ip(ip_address)) {
+                if (ip_is_blocked_pool) {
                     std::cout << "DNS Hijack Hook: [DEBUG] Ensuring blocked-pool DNS hijack ranges" << std::endl;
                     manage_dns_hijack_pools("hijack-blocked-pools");
+                } else {
+                    // Unusual: Kea should have put a BLOCKED device in the blocked pool.
+                    std::cerr << "DNS Hijack Hook WARNING: blocked device " << mac_clean
+                              << " received non-blocked-pool IP " << ip_address
+                              << " (subnet_id=" << lease->subnet_id_ << ")" << std::endl;
                 }
                 manage_dns_hijack("hijack", ip_address);
+                do_hijack = true;
             } else {
-                std::cout << "DNS Hijack Hook: Device " << mac_address
-                          << " is REGISTERED - removing DNS hijack" << std::endl;
-                manage_dns_hijack("unhijack", ip_address);
-                manage_acl("unblock", ip_address);
+                // Registered (non-blocked) device.
+                // Check assigned_vlan: if the device is on the wrong network segment,
+                // restrict access even though it has a valid registration.
+                if (is_assigned_vlan_mismatch(mac_clean, lease->subnet_id_)) {
+                    std::cout << "DNS Hijack Hook: Device " << mac_clean
+                              << " registered but on wrong VLAN (subnet "
+                              << lease->subnet_id_ << ") - restricting access" << std::endl;
+                    manage_dns_hijack("hijack", ip_address);
+                    manage_acl("block", ip_address);
+                    do_hijack = true;
+                } else {
+                    std::cout << "DNS Hijack Hook: Device " << mac_address
+                              << " is REGISTERED - removing DNS hijack" << std::endl;
+                    manage_dns_hijack("unhijack", ip_address);
+                    manage_acl("unblock", ip_address);
+                    do_hijack = false;
+                }
             }
 
             manage_unregistered_lease("remove", mac_address, ip_address, 0);
@@ -393,16 +544,22 @@ int lease4_select(CalloutHandle& handle) {
                 manage_dns_hijack("unhijack", blocked_ip);
             }
         } else {
-            std::cout << "DNS Hijack Hook: Device " << mac_address 
+            std::cout << "DNS Hijack Hook: Device " << mac_address
                       << " is UNREGISTERED - enabling DNS hijack" << std::endl;
             manage_dns_hijack("hijack", ip_address);
             manage_acl("block", ip_address);
             manage_unregistered_lease("upsert", mac_address, ip_address, lease_seconds);
+            do_hijack = true;
         }
-        
+
+        // Table 6 + Table 7: record this new lease in the portal DB (async).
+        manage_lease_event("new_lease", mac_clean, ip_address,
+                           lease->subnet_id_, lease_seconds,
+                           ip_is_blocked_pool, do_hijack);
+
         handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
         return 0;
-        
+
     } catch (const std::exception& ex) {
         std::cout << "DNS Hijack Hook ERROR: " << ex.what() << std::endl;
         handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
@@ -414,111 +571,60 @@ int lease4_select(CalloutHandle& handle) {
 int lease4_renew(CalloutHandle& handle) {
     std::cout << "DNS Hijack Hook: [DEBUG] lease4_renew ENTRY" << std::endl;
     std::cout.flush();
-    
+
     try {
-        std::cout << "DNS Hijack Hook: [DEBUG] Getting lease4" << std::endl;
-        std::cout.flush();
-        
         Lease4Ptr lease;
         handle.getArgument("lease4", lease);
-        
-        std::cout << "DNS Hijack Hook: [DEBUG] Got lease4, checking if NULL" << std::endl;
-        std::cout.flush();
-        
+
         if (!lease) {
-            std::cout << "DNS Hijack Hook: [DEBUG] lease4 is NULL, returning" << std::endl;
-            std::cout.flush();
             handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
             return 0;
         }
-        
-        std::cout << "DNS Hijack Hook: [DEBUG] Getting hwaddr from lease" << std::endl;
-        std::cout.flush();
-        
+
         // Get hardware address from lease
         HWAddrPtr hwaddr = lease->hwaddr_;
-        
-        std::cout << "DNS Hijack Hook: [DEBUG] Got hwaddr, checking if NULL" << std::endl;
-        std::cout.flush();
-        
         if (!hwaddr) {
-            std::cout << "DNS Hijack Hook: [DEBUG] hwaddr is NULL, returning" << std::endl;
-            std::cout.flush();
             handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
             return 0;
         }
 
         // Async switch port lookup (non-blocking; result written to mac_port_cache)
         spawn_port_lookup(hwaddr->toText(false));
-        
-        std::cout << "DNS Hijack Hook: [DEBUG] Converting IP to text" << std::endl;
-        std::cout.flush();
-        
-        std::string ip_address = lease->addr_.toText();
-        int lease_seconds = static_cast<int>(lease->valid_lft_);
-        
-        std::cout << "DNS Hijack Hook: [DEBUG] IP: " << ip_address << std::endl;
-        std::cout.flush();
-        
-        std::cout << "DNS Hijack Hook: [DEBUG] Converting MAC to text" << std::endl;
-        std::cout.flush();
-        
-        std::string mac_address = hwaddr->toText(false);
-        
-        std::cout << "DNS Hijack Hook: [DEBUG] MAC: " << mac_address << std::endl;
-        std::cout.flush();
-        
-        std::cout << "DNS Hijack Hook: Lease renewal - MAC: " << mac_address 
+
+        std::string ip_address        = lease->addr_.toText();
+        std::string mac_address       = hwaddr->toText(false);  // clean colon format
+        int         lease_seconds     = static_cast<int>(lease->valid_lft_);
+        bool        ip_is_blocked_pool = is_blocked_pool_ip(ip_address);
+
+        std::cout << "DNS Hijack Hook: Lease renewal - MAC: " << mac_address
                   << " IP: " << ip_address << std::endl;
         std::cout.flush();
-        
-        std::cout << "DNS Hijack Hook: [DEBUG] Checking for reservation" << std::endl;
-        std::cout.flush();
-        
+
         // Cleanup expired unregistered leases on every renewal
         manage_unregistered_lease("cleanup", "", "", 0);
 
-        // Check if device has a reservation (is registered)
+        // Check if device has a reservation (registered or blocked)
         ConstHostPtr host;
-        
-        std::cout << "DNS Hijack Hook: [DEBUG] Checking global reservations" << std::endl;
-        std::cout.flush();
-        
-        // Check global reservations
+
+        // Check global reservations first
         host = HostMgr::instance().get4Any(SUBNET_ID_GLOBAL, Host::IDENT_HWADDR,
                                           &hwaddr->hwaddr_[0], hwaddr->hwaddr_.size());
-        
-        std::cout << "DNS Hijack Hook: [DEBUG] Global check done, host=" 
-                  << (host ? "FOUND" : "NULL") << std::endl;
-        std::cout.flush();
-        
-        // Check subnet-specific reservations if not found globally
+
+        // Fall back to subnet-specific reservations
         if (!host) {
-            std::cout << "DNS Hijack Hook: [DEBUG] Checking subnet reservations" << std::endl;
-            std::cout.flush();
-            
             ConstSubnet4Ptr subnet;
             handle.getArgument("subnet4", subnet);
-            
-            std::cout << "DNS Hijack Hook: [DEBUG] Got subnet4" << std::endl;
-            std::cout.flush();
-            
             if (subnet) {
-                std::cout << "DNS Hijack Hook: [DEBUG] Subnet valid, querying HostMgr" << std::endl;
-                std::cout.flush();
-                
                 host = HostMgr::instance().get4Any(subnet->getID(), Host::IDENT_HWADDR,
                                                    &hwaddr->hwaddr_[0], hwaddr->hwaddr_.size());
-                
-                std::cout << "DNS Hijack Hook: [DEBUG] Subnet check done, host=" 
-                          << (host ? "FOUND" : "NULL") << std::endl;
-                std::cout.flush();
             }
         }
-        
-        std::cout << "DNS Hijack Hook: [DEBUG] Reservation check complete" << std::endl;
+
+        std::cout << "DNS Hijack Hook: [DEBUG] Reservation check complete, host="
+                  << (host ? "FOUND" : "NULL") << std::endl;
         std::cout.flush();
-        
+
+        bool do_hijack = false;
         if (host) {
             bool blocked = is_blocked_host(host);
             std::string blocked_ip = get_blocked_ip_from_reservation(host);
@@ -537,25 +643,74 @@ int lease4_renew(CalloutHandle& handle) {
                 std::cout.flush();
             }
 
+            // ── Pool mismatch detection: force DHCP NAK so the client re-discovers ──
+            //
+            // Case 1: Device is BLOCKED (BLOCKED Kea class) but is renewing a
+            // non-blocked-pool IP — it was blocked after the lease was issued.
+            // NAK the renewal so the client re-DHCPs and gets a blocked-pool IP.
+            if (blocked && !ip_is_blocked_pool) {
+                std::cout << "DNS Hijack Hook: Pool mismatch - BLOCKED device "
+                          << mac_address << " renewing non-blocked IP "
+                          << ip_address << " - sending NAK" << std::endl;
+                std::cout.flush();
+                // Apply hijack while the client waits for re-DHCP.
+                manage_dns_hijack_pools("hijack-blocked-pools");
+                manage_dns_hijack("hijack", ip_address);
+                manage_acl("block", ip_address);
+                manage_lease_event("expire", mac_address, ip_address,
+                                   lease->subnet_id_, 0, false, true);
+                handle.setStatus(CalloutHandle::NEXT_STEP_DROP);
+                return 0;
+            }
+
+            // Case 2: Device is now registered (no BLOCKED class) but is renewing a
+            // stale blocked-pool IP from when it was previously blocked.
+            // NAK so the client re-DHCPs and gets a regular-pool IP.
+            if (!blocked && ip_is_blocked_pool) {
+                std::cout << "DNS Hijack Hook: Pool mismatch - registered device "
+                          << mac_address << " renewing blocked-pool IP "
+                          << ip_address << " - sending NAK" << std::endl;
+                std::cout.flush();
+                // Remove the hijack so the fresh DHCPDISCOVER can succeed.
+                manage_dns_hijack("unhijack", ip_address);
+                manage_acl("unblock", ip_address);
+                manage_lease_event("expire", mac_address, ip_address,
+                                   lease->subnet_id_, 0, true, false);
+                handle.setStatus(CalloutHandle::NEXT_STEP_DROP);
+                return 0;
+            }
+
             if (blocked) {
                 std::cout << "DNS Hijack Hook: Device " << mac_address
                           << " is BLOCKED - enabling DNS hijack" << std::endl;
                 std::cout.flush();
 
-                if (is_blocked_pool_ip(ip_address)) {
+                if (ip_is_blocked_pool) {
                     std::cout << "DNS Hijack Hook: [DEBUG] Ensuring blocked-pool DNS hijack ranges" << std::endl;
                     std::cout.flush();
                     manage_dns_hijack_pools("hijack-blocked-pools");
                 }
 
                 manage_dns_hijack("hijack", ip_address);
+                do_hijack = true;
             } else {
-                std::cout << "DNS Hijack Hook: Device " << mac_address
-                          << " is REGISTERED - removing DNS hijack" << std::endl;
-                std::cout.flush();
-
-                manage_dns_hijack("unhijack", ip_address);
-                manage_acl("unblock", ip_address);
+                // Registered device — check whether it's on its assigned VLAN.
+                if (is_assigned_vlan_mismatch(mac_address, lease->subnet_id_)) {
+                    std::cout << "DNS Hijack Hook: Device " << mac_address
+                              << " registered but on wrong VLAN (subnet "
+                              << lease->subnet_id_ << ") - restricting access" << std::endl;
+                    std::cout.flush();
+                    manage_dns_hijack("hijack", ip_address);
+                    manage_acl("block", ip_address);
+                    do_hijack = true;
+                } else {
+                    std::cout << "DNS Hijack Hook: Device " << mac_address
+                              << " is REGISTERED - removing DNS hijack" << std::endl;
+                    std::cout.flush();
+                    manage_dns_hijack("unhijack", ip_address);
+                    manage_acl("unblock", ip_address);
+                    do_hijack = false;
+                }
             }
 
             manage_unregistered_lease("remove", mac_address, ip_address, 0);
@@ -572,30 +727,26 @@ int lease4_renew(CalloutHandle& handle) {
                 manage_dns_hijack("unhijack", blocked_ip);
             }
         } else {
-            std::cout << "DNS Hijack Hook: Device " << mac_address 
+            std::cout << "DNS Hijack Hook: Device " << mac_address
                       << " is UNREGISTERED - enabling DNS hijack" << std::endl;
             std::cout.flush();
-            
-            std::cout << "DNS Hijack Hook: [DEBUG] Calling manage_dns_hijack(hijack)" << std::endl;
-            std::cout.flush();
-            
             manage_dns_hijack("hijack", ip_address);
             manage_acl("block", ip_address);
             manage_unregistered_lease("upsert", mac_address, ip_address, lease_seconds);
-            
-            std::cout << "DNS Hijack Hook: [DEBUG] manage_dns_hijack(hijack) returned" << std::endl;
-            std::cout.flush();
+            do_hijack = true;
         }
-        
-        std::cout << "DNS Hijack Hook: [DEBUG] Setting NEXT_STEP_CONTINUE" << std::endl;
-        std::cout.flush();
-        
+
+        // Table 6 + Table 7: update the portal DB with renewal info (async).
+        manage_lease_event("renew", mac_address, ip_address,
+                           lease->subnet_id_, lease_seconds,
+                           ip_is_blocked_pool, do_hijack);
+
         handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
-        
+
         std::cout << "DNS Hijack Hook: [DEBUG] lease4_renew EXIT (success)" << std::endl;
         std::cout.flush();
         return 0;
-        
+
     } catch (const std::exception& ex) {
         std::cout << "DNS Hijack Hook ERROR in lease4_renew: " << ex.what() << std::endl;
         std::cout.flush();
@@ -627,6 +778,9 @@ int lease4_expire(CalloutHandle& handle) {
         manage_dns_hijack("unhijack", ip_address);
         if (!mac_address.empty()) {
             manage_unregistered_lease("expire", mac_address, ip_address, 0);
+            // Table 7: mark lease as expired in portal DB (async).
+            manage_lease_event("expire", mac_address, ip_address,
+                               lease->subnet_id_, 0, false, false);
         }
 
         handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);

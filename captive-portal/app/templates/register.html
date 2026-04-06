@@ -128,7 +128,16 @@
 })();
 </script>
 {% else %}
-<form method="POST" action="{{ url_for('register') }}">
+{% if show_status %}
+<div id="statusCheckLoading" style="text-align:center;padding:20px;color:#555;">
+  <strong>Checking your connection status&hellip;</strong>
+</div>
+{% endif %}
+<form method="POST" action="{{ url_for('register') }}"
+    {%- if show_status %} style="display:none"{% endif %}>
+    {% if show_status and device and device.wired_target_vlan %}
+    <input type="hidden" name="wired_vlan_id" value="{{ device.wired_target_vlan }}">
+    {% endif %}
     <div class="form-group">
         <label for="email">Email Address <span class="required">*</span></label>
         <input type="email" id="email" name="email" required placeholder="your.email@example.com" value="{{ prefill.email if prefill else '' }}">
@@ -214,6 +223,7 @@
 
 <div id="statusMessage" style="display: none; margin-top: 20px; padding: 15px; border-radius: 8px; text-align: center;"></div>
 <div id="institutionLink" style="display: none; margin-top: 8px; text-align: center;"></div>
+<div id="userHomeLink" style="display: {% if show_status and device and device.internet_accessible == True and user_home_url %}block{% else %}none{% endif %}; margin-top: 8px; text-align: center;">{% if show_status and device and device.internet_accessible == True and user_home_url %}<a href="{{ user_home_url }}" class="btn" style="display:inline-block;">Go to your home page</a>{% if not device.ownership_validated %}<p style="margin-top:8px;font-size:0.9em;color:#555;">(You will be asked to enter your password)</p>{% endif %}{% endif %}</div>
 
 <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e0e0e0; text-align: center;">
     <a href="{{ url_for('status') }}" style="color: #667eea; text-decoration: none;">
@@ -229,6 +239,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const validationBox = document.getElementById('validationBox');
     const validationList = document.getElementById('validationList');
     const institutionLink = document.getElementById('institutionLink');
+    const userHomeLink = document.getElementById('userHomeLink');
     const institutionUrl = "{{ institution_url|e }}";
     const institutionButtonText = "{{ institution_button_text|e }}";
     const usagePolicyText = "{{ usage_policy_text|e }}";
@@ -249,6 +260,7 @@ document.addEventListener('DOMContentLoaded', function() {
         return preferred;
     })();
     const apiUrl = (path) => `${pollBase}${path}`;
+    const showStatusMode = {{ 'true' if show_status else 'false' }};
     const detectedIpEl = document.getElementById('detectedIp');
     let pollInterval = null;
     let accessInterval = null;
@@ -445,8 +457,8 @@ document.addEventListener('DOMContentLoaded', function() {
                 return;
             }
 
-            if (status === 'password_required') {
-                showNetworkPasswordPrompt('A network password is required to access this network. Please enter your password below.');
+            if (status === 'password_required' || status === 'need_password') {
+                showNetworkPasswordPrompt(data.message || 'A network password is required to access this network. Please enter your password below.');
                 return;
             }
 
@@ -673,6 +685,25 @@ document.addEventListener('DOMContentLoaded', function() {
                         mismatchInterval = null;
                     }
                     showStatus('You now have full internet access.', 'success');
+                    // Spec 4b.ii.2.a.ii.2: show user_home link once internet is confirmed.
+                    // We fetch device-status to get ownership_validated so we can show
+                    // the password note when needed.
+                    if (userHomeLink && !userHomeLink.querySelector('a')) {
+                        fetch(apiUrl('/api/device-status'))
+                            .then(r => r.json())
+                            .then(d => {
+                                const url = (d && d.user_home_url) || (portalBase + '/user_home');
+                                const note = (d && d.ownership_validated === false)
+                                    ? '<p style="margin-top:8px;font-size:0.9em;color:#555;">(You will be asked to enter your password)</p>'
+                                    : '';
+                                userHomeLink.innerHTML = `<a href="${url}" class="btn" style="display:inline-block;">Go to your home page</a>${note}`;
+                                userHomeLink.style.display = 'block';
+                            })
+                            .catch(() => {
+                                userHomeLink.innerHTML = `<a href="${portalBase}/user_home" class="btn" style="display:inline-block;">Go to your home page</a>`;
+                                userHomeLink.style.display = 'block';
+                            });
+                    }
                 })
                 .catch(() => {
                     if (attempts >= maxAttempts) {
@@ -720,6 +751,8 @@ document.addEventListener('DOMContentLoaded', function() {
         fetch(apiUrl('/api/registration-status'))
             .then(response => response.json())
             .then(data => {
+                const loadingEl = document.getElementById('statusCheckLoading');
+                if (loadingEl) loadingEl.style.display = 'none';
                 if (accessConfirmed) {
                     return;
                 }
@@ -742,15 +775,152 @@ document.addEventListener('DOMContentLoaded', function() {
                 } else if (data.status === 'enter_password') {
                     showNetworkPasswordPrompt(data.message || 'Your administrator has set a password. Please enter it to continue.');
                 } else if (data.status === 'pending_password') {
-                    showStatus(data.message || 'A network password is required. An administrator will be in touch to help you set up your password.', 'info');
+                    showStatus(data.message || 'A network password is required. Please check your email for a link to set your password.', 'info');
                     form.style.display = 'none';
                     startPolling();
+                } else {
+                    // Unknown status — reveal the registration form as a fallback
+                    form.style.display = 'block';
                 }
             })
-            .catch(() => {});
+            .catch(() => {
+                const loadingEl = document.getElementById('statusCheckLoading');
+                if (loadingEl) loadingEl.style.display = 'none';
+                form.style.display = 'block';
+            });
     };
 
-    checkInitialStatus();
+    if (showStatusMode) {
+        startDeviceStatusPolling();
+    } else {
+        checkInitialStatus();
+    }
+
+    // ── Spec 4b.ii.2 status-page polling (used when device already has ownership) ──
+    function startDeviceStatusPolling() {
+        let devicePollInterval = null;
+        let devicePollStopped  = false;
+        const loadingEl = document.getElementById('statusCheckLoading');
+
+        const stopDevicePoll = () => {
+            devicePollStopped = true;
+            if (devicePollInterval) { clearInterval(devicePollInterval); devicePollInterval = null; }
+        };
+
+        const handleDeviceStatus = (data) => {
+            if (loadingEl) loadingEl.style.display = 'none';
+            switch (data.status) {
+                case 'need_password':
+                    showNetworkPasswordPrompt(
+                        data.has_password
+                            ? 'Please enter your network password to continue.'
+                            : 'You need to set a password before accessing this network. An email has been sent to you with a link to set your password.'
+                    );
+                    stopDevicePoll();
+                    break;
+
+                case 'pending_approval': {
+                    const vlanLabel = data.selected_vlan ? `VLAN ${data.selected_vlan}` : 'your requested network';
+                    showStatus(`Please wait for the administrator to review your request for access to ${vlanLabel}.`, 'info');
+                    break;
+                }
+
+                case 'blocked':
+                    showStatus(
+                        'Your device has been blocked from accessing the internet. This may be because a usage policy has been violated or due to an administrative decision. If you believe this is an error, you can request that the administrator remove the block.',
+                        'error'
+                    );
+                    (function() {
+                        const btnDiv = document.createElement('div');
+                        btnDiv.style.marginTop = '12px';
+                        const btn = document.createElement('button');
+                        btn.type = 'button';
+                        btn.className = 'btn';
+                        btn.textContent = 'Request administrator to remove block';
+                        btn.style.background = '#888';
+                        btn.addEventListener('click', function() {
+                            btn.disabled = true;
+                            btn.textContent = 'Sending...';
+                            fetch(apiUrl('/api/request-unblock'), {
+                                method: 'POST',
+                                credentials: 'same-origin',
+                                headers: { 'X-Requested-With': 'XMLHttpRequest' }
+                            })
+                            .then(r => r.json().catch(() => ({})))
+                            .then(d => { btn.textContent = d.message || 'Request sent.'; })
+                            .catch(() => { btn.textContent = 'Could not send request. Please try again.'; btn.disabled = false; });
+                        });
+                        btnDiv.appendChild(btn);
+                        statusMessage.appendChild(btnDiv);
+                    })();
+                    stopDevicePoll();
+                    break;
+
+                case 'blocked_pool':
+                    showStatus(
+                        'The block on your device has been removed. To regain full access to the internet, please disconnect and reconnect to the WiFi, or unplug and replug your ethernet cable.',
+                        'info'
+                    );
+                    break;
+
+                case 'pending':
+                    showStatus('Please wait while we connect you to the internet…', 'info');
+                    break;
+
+                case 'accessible': {
+                    showStatus('Your device now has full internet access.', 'success');
+                    // showStatus sets institutionLink to the institution URL button;
+                    // use the separate userHomeLink div so it isn't overwritten.
+                    if (data.user_home_url) {
+                        const note = data.ownership_validated === false
+                            ? '<p style="margin-top:8px;font-size:0.9em;color:#555;">(You will be asked to enter your password)</p>'
+                            : '';
+                        userHomeLink.innerHTML = `<a href="${data.user_home_url}" class="btn" style="display:inline-block;">Go to your home page</a>${note}`;
+                        userHomeLink.style.display = 'block';
+                    }
+                    stopDevicePoll();
+                    startAccessCheck();
+                    break;
+                }
+
+                case 'access_refused': {
+                    let msg = 'The administrator has refused to grant internet access to this device.';
+                    if (data.notes) msg += ` Reason: ${data.notes}`;
+                    showStatus(msg, 'error');
+                    stopDevicePoll();
+                    break;
+                }
+
+                case 'wrong_vlan': {
+                    const assigned = data.assigned_ssid || (data.assigned_vlan ? `VLAN ${data.assigned_vlan}` : 'the assigned network');
+                    showStatus(
+                        `The administrator has not granted you access to this network, but has instead granted you access to ${assigned}. Please connect to that network.`,
+                        'error'
+                    );
+                    // Keep polling — user may reconnect to the correct network.
+                    break;
+                }
+
+                default:
+                    break;
+            }
+        };
+
+        // Immediate first check
+        fetch(apiUrl('/api/device-status'))
+            .then(r => r.json())
+            .then(handleDeviceStatus)
+            .catch(() => { if (loadingEl) loadingEl.style.display = 'none'; });
+
+        // Then poll every 3 seconds
+        devicePollInterval = setInterval(() => {
+            if (devicePollStopped) return;
+            fetch(apiUrl('/api/device-status'))
+                .then(r => r.json())
+                .then(handleDeviceStatus)
+                .catch(() => {});
+        }, 3000);
+    }
 
     function startMismatchPolling() {
         if (mismatchPolling) {

@@ -42,7 +42,7 @@ class Admin(db.Model):
     
     def set_password(self, password):
         """Hash and set password"""
-        self.password_hash = generate_password_hash(password)
+        self.password_hash = generate_password_hash(password, method='pbkdf2:sha256')
     
     def check_password(self, password):
         """Check password against hash"""
@@ -96,7 +96,7 @@ class User(db.Model):
     
     def set_network_password(self, password):
         """Hash and store the user's network (portal) password."""
-        self.network_password_hash = generate_password_hash(password)
+        self.network_password_hash = generate_password_hash(password, method='pbkdf2:sha256')
 
     def check_network_password(self, password):
         """Verify the user's network (portal) password."""
@@ -137,6 +137,12 @@ class Device(db.Model):
     first_seen = db.Column(db.DateTime, default=datetime.utcnow, index=True)  # For pool assignment
     last_seen = db.Column(db.DateTime)
     ip_address = db.Column(db.String(45))
+
+    # Spec Table 6 fields: orthogonal internet access state
+    internet_accessible = db.Column(db.Boolean, nullable=True)   # True/False/None
+    internet_blocked = db.Column(db.Boolean, nullable=True)      # True means admin-blocked
+    assigned_vlan = db.Column(db.Integer, nullable=True)         # VLAN admin/auto-approved
+    ownership_validated = db.Column(db.Boolean, nullable=True)   # Password confirmed by user
     
     # WiFi-specific fields
     connection_type = db.Column(db.String(10), default='unknown')  # 'wifi' or 'wired'
@@ -312,3 +318,46 @@ class UnregisteredLease(db.Model):
 
     def __repr__(self):
         return f'<UnregisteredLease {self.mac_address} {self.ip_address}>'
+
+
+class DeviceOwnership(db.Model):
+    """Spec Table 9 — historical record of which user owns which MAC address.
+
+    An active ownership is a row where end_datetime IS NULL.  When a device is
+    reassigned or unregistered, end_datetime is set to the current time and a
+    new row (or no row) is created as appropriate.
+    """
+    __tablename__ = 'device_ownership'
+
+    id = db.Column(db.Integer, primary_key=True)
+    mac_address = db.Column(db.String(17), nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    start_datetime = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    end_datetime = db.Column(db.DateTime, nullable=True)
+
+    user = db.relationship('User', backref=db.backref('ownerships', lazy=True))
+
+    def __repr__(self):
+        return f'<DeviceOwnership mac={self.mac_address} user={self.user_id} active={self.end_datetime is None}>'
+
+
+class IPLease(db.Model):
+    """Spec Table 7 — IP address lease tracking with blocked-pool and DNS-hijack state.
+
+    One row per (mac_address, ip_address) pair.  Multiple rows may exist for the
+    same MAC if the device has held different IPs over time; the most recent
+    non-expired row represents the current lease.
+    """
+    __tablename__ = 'ip_leases'
+
+    id = db.Column(db.Integer, primary_key=True)
+    ip_address = db.Column(db.String(45), nullable=False, index=True)
+    vlan_id = db.Column(db.Integer, nullable=True)
+    mac_address = db.Column(db.String(17), nullable=True, index=True)
+    lease_start = db.Column(db.DateTime, nullable=False)
+    lease_expiry = db.Column(db.DateTime, nullable=False, index=True)
+    from_blocked_pool = db.Column(db.Boolean, nullable=False, default=False)
+    dns_hijacked = db.Column(db.Boolean, nullable=False, default=False)
+
+    def __repr__(self):
+        return f'<IPLease {self.ip_address} mac={self.mac_address} blocked={self.from_blocked_pool}>'

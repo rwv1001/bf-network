@@ -1,0 +1,174 @@
+{% extends "base.html" %}
+
+{% block title %}My Devices - Blackfriars Network Portal{% endblock %}
+
+{% block header %}Blackfriars Captive Portal{% endblock %}
+
+{% block subheader %}
+<p style="margin-top: 10px; opacity: 0.9;">Manage your registered devices</p>
+<p style="margin-top: 6px; font-size: 0.9em; opacity: 0.8;">{{ user.email }}</p>
+{% endblock %}
+
+{% block content %}
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% for category, message in messages %}
+    <div class="alert alert-{{ category }}" style="margin-bottom: 16px;">{{ message }}</div>
+  {% endfor %}
+{% endwith %}
+
+{# ── Owned devices ──────────────────────────────────────────────────────── #}
+<h2 style="font-size: 1.1em; margin-bottom: 12px; color: #3a4a3a;">Your Devices</h2>
+
+{% if owned_devices %}
+  {% for row in owned_devices %}
+  {% set dev = row.device %}
+  <div class="info-box" style="margin-bottom: 16px;">
+    <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 8px;">
+      <div>
+        <strong>{{ dev.device_name or dev.mac_address }}</strong>
+        {% if dev.device_name %}
+          <span style="font-size: 0.85em; color: #666;"> — {{ dev.mac_address }}</span>
+        {% endif %}
+      </div>
+      <div>
+        {% if dev.internet_blocked %}
+          <span style="background:#f44336; color:white; padding:2px 8px; border-radius:4px; font-size:0.8em;">BLOCKED</span>
+        {% elif dev.internet_accessible %}
+          <span style="background:#4CAF50; color:white; padding:2px 8px; border-radius:4px; font-size:0.8em;">CONNECTED</span>
+        {% elif dev.assigned_vlan and dev.assigned_vlan != dev.current_vlan %}
+          <span style="background:#ff9800; color:white; padding:2px 8px; border-radius:4px; font-size:0.8em;">WRONG VLAN</span>
+        {% else %}
+          <span style="background:#9e9e9e; color:white; padding:2px 8px; border-radius:4px; font-size:0.8em;">PENDING</span>
+        {% endif %}
+      </div>
+    </div>
+
+    <div style="margin-top: 8px; font-size: 0.9em; color: #555;">
+      {% if row.ip_address %}
+        <div>IP: {{ row.ip_address }}</div>
+      {% endif %}
+      {% if row.vlan_label %}
+        <div>Network: {{ row.vlan_label }}</div>
+      {% endif %}
+      {% if row.lease_expiry %}
+        <div>Lease expires: {{ row.lease_expiry.strftime('%Y-%m-%d %H:%M') }} UTC</div>
+      {% endif %}
+    </div>
+
+    {% if not dev.internet_blocked %}
+    <form method="POST" action="{{ url_for('user_home') }}" style="margin-top: 12px;"
+          onsubmit="return confirm('If you abandon this device, it will lose access to the internet. Continue?');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="action" value="abandon">
+      <input type="hidden" name="mac_address" value="{{ dev.mac_address }}">
+      <button type="submit" class="btn" style="background:#e57373; color:white; font-size:0.85em; padding:6px 14px;">
+        Abandon device
+      </button>
+    </form>
+    {% endif %}
+  </div>
+  {% endfor %}
+{% else %}
+  <div class="info-box" style="color: #666; font-style: italic;">
+    You have no registered devices.
+  </div>
+{% endif %}
+
+{# ── Profile section ────────────────────────────────────────────────────── #}
+<h2 style="font-size: 1.1em; margin: 24px 0 12px; color: #3a4a3a;">Your Profile</h2>
+<div class="info-box">
+  <form method="POST" action="{{ url_for('user_home') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="action" value="update_profile">
+
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+      <div class="form-group" style="margin-bottom: 0;">
+        <label>First name</label>
+        <input type="text" name="first_name" class="form-control" value="{{ user.first_name or '' }}">
+      </div>
+      <div class="form-group" style="margin-bottom: 0;">
+        <label>Last name</label>
+        <input type="text" name="last_name" class="form-control" value="{{ user.last_name or '' }}">
+      </div>
+    </div>
+
+    <div class="form-group" style="margin-top: 12px; margin-bottom: 0;">
+      <label>Phone number</label>
+      <input type="tel" name="phone_number" class="form-control" value="{{ user.phone_number or '' }}">
+    </div>
+
+    <button type="submit" class="btn btn-primary" style="margin-top: 14px;">Save changes</button>
+  </form>
+</div>
+
+{# ── Password change ─────────────────────────────────────────────────────── #}
+{% if user.has_network_password %}
+<h2 style="font-size: 1.1em; margin: 24px 0 12px; color: #3a4a3a;">Change Password</h2>
+<div class="info-box">
+  <form method="POST" action="{{ url_for('user_home') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="action" value="change_password">
+
+    <div class="form-group">
+      <label>Current password</label>
+      <input type="password" name="current_password" class="form-control" required>
+    </div>
+    <div class="form-group" style="margin-bottom: 0;">
+      <label>New password</label>
+      <input type="password" name="new_password" class="form-control" required minlength="8">
+    </div>
+
+    <button type="submit" class="btn btn-primary" style="margin-top: 14px;">Change password</button>
+  </form>
+</div>
+{% endif %}
+
+{# ── Adoptable unregistered devices ─────────────────────────────────────── #}
+{% if unregistered_devices %}
+<h2 style="font-size: 1.1em; margin: 24px 0 12px; color: #3a4a3a;">
+  Unregistered Devices on Your Networks
+</h2>
+  {% for row in unregistered_devices %}
+  <div class="info-box" style="margin-bottom: 12px; border-left: 3px solid {% if row.needs_approval %}#aaa{% else %}#ff9800{% endif %};">
+    <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 8px;">
+      <div>
+        {% if row.show_mac %}
+          <strong>{{ row.mac_address }}</strong>
+          {% if row.ip_address %}
+            <span style="font-size: 0.85em; color: #666;"> — {{ row.ip_address }}</span>
+          {% endif %}
+        {% else %}
+          {# MAC hidden per spec: admin approval required for this VLAN #}
+          <strong style="color: #888;">MAC address not shown</strong>
+        {% endif %}
+      </div>
+      <span style="font-size: 0.8em; color: #666;">{{ row.vlan_label or ('VLAN ' ~ row.vlan_id) }}</span>
+    </div>
+    {% if row.first_seen %}
+    <div style="font-size: 0.85em; color: #888; margin-top: 6px;">
+      First seen: {{ row.first_seen.strftime('%Y-%m-%d %H:%M') }} UTC
+    </div>
+    {% endif %}
+    {% if not row.needs_approval %}
+    {# Direct adoption — no admin approval required #}
+    <a href="{{ url_for('adopt_devices') }}?mac={{ row.mac_address }}&vlan={{ row.vlan_id }}"
+       class="btn btn-primary" style="margin-top: 10px; font-size: 0.85em; padding: 6px 14px; display: inline-block;">
+      Register this device
+    </a>
+    {% else %}
+    {# Admin approval required — submit an adoption request #}
+    <form method="POST" action="{{ url_for('user_home') }}" style="display: inline; margin-top: 10px;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="action" value="adopt_request">
+      <input type="hidden" name="mac_address" value="{{ row.mac_address }}">
+      <input type="hidden" name="vlan_id" value="{{ row.vlan_id }}">
+      <button type="submit" class="btn" style="background:#888; color:white; font-size:0.85em; padding:6px 14px; margin-top: 10px;">
+        Request adoption (admin approval required)
+      </button>
+    </form>
+    {% endif %}
+  </div>
+  {% endfor %}
+{% endif %}
+
+{% endblock %}
