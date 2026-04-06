@@ -81,7 +81,11 @@ CREATE TABLE IF NOT EXISTS devices (
     confirmation_confirmed_at TIMESTAMP,
     profile_snapshot TEXT,
     switch_iface VARCHAR(100),
-    switch_iface_seen_at TIMESTAMP WITH TIME ZONE
+    switch_iface_seen_at TIMESTAMP WITH TIME ZONE,
+    internet_accessible  BOOLEAN,
+    internet_blocked     BOOLEAN,
+    assigned_vlan        INTEGER,
+    ownership_validated  BOOLEAN
 );
 
 CREATE INDEX IF NOT EXISTS idx_devices_mac ON devices(mac_address);
@@ -393,4 +397,34 @@ CREATE INDEX IF NOT EXISTS idx_pbq_blocked_at  ON pihole_blocked_queries(blocked
 CREATE INDEX IF NOT EXISTS idx_pbq_client_ip   ON pihole_blocked_queries(client_ip);
 CREATE INDEX IF NOT EXISTS idx_pbq_user_id     ON pihole_blocked_queries(user_id);
 CREATE INDEX IF NOT EXISTS idx_pbq_domain      ON pihole_blocked_queries(domain);
+
+-- ── Table 9: DeviceOwnership history ────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS device_ownership (
+    id             SERIAL PRIMARY KEY,
+    mac_address    VARCHAR(17)  NOT NULL,
+    user_id        INTEGER      REFERENCES users(id) ON DELETE SET NULL,
+    start_datetime TIMESTAMP    NOT NULL DEFAULT NOW(),
+    end_datetime   TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_do_mac        ON device_ownership(mac_address);
+CREATE INDEX IF NOT EXISTS idx_do_user_id    ON device_ownership(user_id);
+CREATE INDEX IF NOT EXISTS idx_do_mac_active ON device_ownership(mac_address)
+    WHERE end_datetime IS NULL;
+
+-- ── Table 7: IPLease tracking ────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS ip_leases (
+    id                SERIAL PRIMARY KEY,
+    ip_address        VARCHAR(45)  NOT NULL,
+    vlan_id           INTEGER,
+    mac_address       VARCHAR(17),
+    lease_start       TIMESTAMP    NOT NULL,
+    lease_expiry      TIMESTAMP    NOT NULL,
+    from_blocked_pool BOOLEAN      NOT NULL DEFAULT FALSE,
+    dns_hijacked      BOOLEAN      NOT NULL DEFAULT FALSE
+);
+
+CREATE INDEX IF NOT EXISTS idx_il_mac    ON ip_leases(mac_address);
+CREATE INDEX IF NOT EXISTS idx_il_ip     ON ip_leases(ip_address);
+CREATE INDEX IF NOT EXISTS idx_il_expiry ON ip_leases(lease_expiry);
 
