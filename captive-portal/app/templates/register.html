@@ -811,12 +811,20 @@ document.addEventListener('DOMContentLoaded', function() {
             if (loadingEl) loadingEl.style.display = 'none';
             switch (data.status) {
                 case 'need_password':
-                    showNetworkPasswordPrompt(
-                        data.has_password
-                            ? 'Please enter your network password to continue.'
-                            : 'You need to set a password before accessing this network. An email has been sent to you with a link to set your password.'
-                    );
-                    stopDevicePoll();
+                    if (data.has_password) {
+                        showNetworkPasswordPrompt('Please enter your network password to continue.');
+                        stopDevicePoll();
+                    } else {
+                        // Password not yet set — show info message only (no input form).
+                        // Keep polling so we detect when the user sets the password via email.
+                        showStatus(
+                            'You need to set a password before accessing this network. ' +
+                            'An email has been sent to you with a link to set your password.',
+                            'info'
+                        );
+                        form.style.display = 'none';
+                        // Don't stop polling — next poll will detect has_password=true
+                    }
                     break;
 
                 case 'pending_approval': {

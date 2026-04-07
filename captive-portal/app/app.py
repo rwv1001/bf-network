@@ -3546,7 +3546,8 @@ def adopt_device():
     unregister_url = _build_unregister_url(adopted_device.unregister_token)
     confirm_url = None
     confirm_timeout_sec = None
-    confirm_url, confirm_timeout_sec = _set_wifi_confirmation(adopted_device)
+    if not adopted_device.ownership_validated:
+        confirm_url, confirm_timeout_sec = _set_wifi_confirmation(adopted_device)
     if vlan_id == wired_unregistered_vlan:
         ssid_display = "Wired Network"
     else:
@@ -4303,9 +4304,12 @@ def api_block_status():
     return jsonify({'blocked': False, 'message': 'Device is not blocked'})
 
 
-@app.route('/unregister/<token>')
+@app.route('/unregister/<token>', methods=['GET', 'POST'])
 def unregister(token):
     """Unregister a device via email token (spec 8).
+
+    GET  – show a confirmation page (safe for email scanner pre-fetch).
+    POST – perform the actual unregister.
 
     Closes the DeviceOwnership record, resets Device Table-6 fields, removes
     the Kea/RADIUS entry, and (if the device currently has internet access and
@@ -4318,8 +4322,15 @@ def unregister(token):
 
     device = Device.query.filter_by(unregister_token=token).first()
     if not device:
-        flash('Invalid or expired unregister token', 'error')
-        return redirect(url_for('index'))
+        return render_template('unregister_confirmation.html', success=False)
+
+    # GET: just show the confirmation page — do NOT perform any action yet.
+    if request.method == 'GET':
+        return render_template('unregister_confirmation.html', confirm=True, token=token)
+
+    # POST: only accept requests that came from the JS button (not form scanners).
+    if request.form.get('js') != '1':
+        return render_template('unregister_confirmation.html', confirm=True, token=token)
 
     mac_address = device.mac_address
     connection_type = device.connection_type
@@ -4360,7 +4371,7 @@ def unregister(token):
             if _should_hijack_vlan(vlan_id):
                 manage_dns_hijack('hijack', ip_address)
             _upsert_iplease(
-                mac=mac_address, ip=ip_address, vlan=vlan_id,
+                mac_address=mac_address, ip_address=ip_address, vlan_id=vlan_id,
                 lease_start=datetime.utcnow(), lease_expiry=lease_expiry,
                 from_blocked_pool=False,
                 dns_hijacked=bool(_should_hijack_vlan(vlan_id)),
@@ -4396,14 +4407,9 @@ def unregister(token):
     _sync_registration_status(device)
     db.session.commit()
 
-    flash(
-        f'Device {mac_address} has been unregistered successfully. '
-        'Access has been restricted.',
-        'success',
-    )
     logger.info("Device %s (user: %s) unregistered via email token", mac_address, user_email)
 
-    return render_template('status.html', device=device, unregistered=True)
+    return render_template('unregister_confirmation.html', success=True)
 
 
 @app.route('/confirm/<token>')
@@ -4435,6 +4441,8 @@ def confirm_device(token):
 @app.route('/admin/login', methods=['GET', 'POST'])
 def admin_login():
     """Admin login page"""
+    if current_user and current_user.is_authenticated:
+        return redirect(url_for('admin_dashboard'))
     if request.method == 'POST':
         username = request.form.get('username')
         password = request.form.get('password')
@@ -8594,7 +8602,11 @@ def admin_process_request(request_id):
         clear_unregistered_lease(device.mac_address)
 
         unregister_url = _build_unregister_url(device.unregister_token)
-        confirm_url, confirm_timeout_sec = _set_wifi_confirmation(device)
+        if not device.ownership_validated:
+            confirm_url, confirm_timeout_sec = _set_wifi_confirmation(device)
+        else:
+            confirm_url = None
+            confirm_timeout_sec = None
         if device.connection_type == 'wired':
             ssid_display = "Wired Network"
         else:
@@ -8791,7 +8803,7 @@ def admin_delete_device(device_id):
             if _should_hijack_vlan(vlan_id):
                 manage_dns_hijack('hijack', ip_address)
             _upsert_iplease(
-                mac=mac_address, ip=ip_address, vlan=vlan_id,
+                mac_address=mac_address, ip_address=ip_address, vlan_id=vlan_id,
                 lease_start=datetime.utcnow(), lease_expiry=lease_expiry,
                 from_blocked_pool=False, dns_hijacked=bool(_should_hijack_vlan(vlan_id)),
             )

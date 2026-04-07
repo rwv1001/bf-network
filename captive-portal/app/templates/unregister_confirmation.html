@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Device Unregistered - Blackfriars Network</title>
+    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
+    <link rel="shortcut icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: #2c2c2c;
+            background: linear-gradient(135deg, #1a1a1a 0%, #4a4a4a 100%);
+            min-height: 100vh;
+            padding: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .container {
+            max-width: 520px;
+            width: 100%;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+            overflow: hidden;
+        }
+        .header {
+            background: linear-gradient(135deg, #1a2b1a 0%, #263326 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        .header .logo {
+            max-width: 120px;
+            height: auto;
+            margin-bottom: 12px;
+            filter: drop-shadow(0 2px 4px rgba(0,0,0,0.3));
+        }
+        .header h1 {
+            font-size: 24px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        .content {
+            padding: 40px 30px;
+            text-align: center;
+        }
+        .icon {
+            font-size: 56px;
+            margin-bottom: 20px;
+        }
+        .message {
+            font-size: 20px;
+            font-weight: 600;
+            margin-bottom: 12px;
+        }
+        .sub-message {
+            font-size: 15px;
+            color: #666;
+        }
+        .success .icon  { color: #28a745; }
+        .success .message { color: #155724; }
+        .warning .icon  { color: #e67e00; }
+        .warning .message { color: #5a3e00; }
+        .info .icon    { color: #17a2b8; }
+        .info .message  { color: #0c5460; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <img src="{{ url_for('static', filename='laudare-2827310_960_720.png') }}" alt="Blackfriars Logo" class="logo">
+        <h1>Blackfriars Network</h1>
+    </div>
+    <div class="content {% if success %}success{% elif confirm %}warning{% else %}info{% endif %}">
+        {% if confirm %}
+        <div class="icon">&#x26A0;</div>
+        <div class="message">Unregister this device?</div>
+        <div class="sub-message" style="margin-bottom:24px;">This will remove your device from the network. You will lose internet access.</div>
+        <button id="unreg-btn" type="button" style="
+            display:inline-block;padding:12px 32px;
+            background:linear-gradient(135deg,#8B0000 0%,#b22222 100%);
+            color:white;border:none;border-radius:5px;font-size:16px;
+            font-weight:500;cursor:pointer;">
+            Yes, unregister my device
+        </button>
+        <script>
+        document.getElementById('unreg-btn').addEventListener('click', function() {
+            var btn = this;
+            btn.disabled = true;
+            btn.textContent = 'Processing\u2026';
+            fetch(window.location.href, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: 'js=1'
+            }).then(function(r) { return r.text(); })
+              .then(function(html) { document.open(); document.write(html); document.close(); })
+              .catch(function() {
+                btn.disabled = false;
+                btn.textContent = 'Yes, unregister my device';
+                alert('Something went wrong. Please try again.');
+              });
+        });
+        </script>
+        {% elif success %}
+        <div class="icon">&#10003;</div>
+        <div class="message">Your device has been successfully unregistered.</div>
+        <div class="sub-message">Your access to the network has been removed.</div>
+        {% else %}
+        <div class="icon">&#x2139;</div>
+        <div class="message">This device has already been unregistered.</div>
+        <div class="sub-message">This link has already been used, or it has expired.</div>
+        {% endif %}
+    </div>
+</div>
+</body>
+</html>
