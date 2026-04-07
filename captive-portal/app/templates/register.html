@@ -225,12 +225,6 @@
 <div id="institutionLink" style="display: none; margin-top: 8px; text-align: center;"></div>
 <div id="userHomeLink" style="display: {% if show_status and device and device.internet_accessible == True and user_home_url %}block{% else %}none{% endif %}; margin-top: 8px; text-align: center;">{% if show_status and device and device.internet_accessible == True and user_home_url %}<a href="{{ user_home_url }}" class="btn" style="display:inline-block;">Go to your home page</a>{% if not device.ownership_validated %}<p style="margin-top:8px;font-size:0.9em;color:#555;">(You will be asked to enter your password)</p>{% endif %}{% endif %}</div>
 
-<div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e0e0e0; text-align: center;">
-    <a href="{{ url_for('status') }}" style="color: #667eea; text-decoration: none;">
-        Check registration status →
-    </a>
-</div>
-
 <script>
 document.addEventListener('DOMContentLoaded', function() {
     const form = document.querySelector('form');

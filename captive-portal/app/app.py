@@ -4381,8 +4381,8 @@ def unregister(token):
                 mac_address, ip_address, lease_expiry,
             )
 
-    # Unregister from Kea / RADIUS
-    if connection_type == 'wifi':
+    # Unregister from Kea / RADIUS (only if device actually has an active reservation)
+    if connection_type == 'wifi' and device.internet_accessible:
         kea = get_kea()
         if kea and vlan_id:
             if not kea.unregister_mac(mac=mac_address, vlan=vlan_id):

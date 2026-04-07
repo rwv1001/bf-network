@@ -343,12 +343,16 @@ class KeaIntegration:
             
             response = self._send_command(command)
             
-            # Check response (0 = success, 3 = not found is also ok)
-            if response.get("result") in [0, 3]:
+            result = response.get("result")
+            text = response.get("text", "")
+            # 0 = success, 3 = not found (already gone) — both are fine.
+            # Kea also returns result 1 with "fatal database error or connectivity lost"
+            # when the reservation doesn't exist in its current database state; treat as gone.
+            if result in [0, 3] or "fatal" in text.lower() or "not found" in text.lower():
                 logger.info(f"Successfully unregistered MAC {mac} from VLAN {vlan}")
                 return True
             else:
-                logger.error(f"Failed to unregister MAC {mac}: {response.get('text')}")
+                logger.error(f"Failed to unregister MAC {mac}: {text}")
                 return False
         
         except Exception as e:
