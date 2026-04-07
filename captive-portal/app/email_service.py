@@ -806,6 +806,79 @@ def send_wifi_registration_confirmation(
     return send_email(user_email, subject, html_body, text_body)
 
 
+def send_vlan_mismatch_notification(
+    user_email,
+    first_name,
+    requested_ssid,
+    assigned_ssid,
+    mac_address,
+    unregister_url,
+):
+    """
+    Notify a user that the administrator has assigned them to a different
+    network than the one they requested (spec 4b.ii.2.c).
+    """
+    subject = f"Network Access Decision – Please Connect to {assigned_ssid}"
+
+    admin_contact_html = (
+        f"If you have questions, email <a href=\"mailto:{ADMIN_EMAIL}\">{ADMIN_EMAIL}</a>."
+        if ADMIN_EMAIL else
+        "If you have questions, please contact the administrator."
+    )
+    admin_contact_text = (
+        f"If you have questions, email {ADMIN_EMAIL}."
+        if ADMIN_EMAIL else
+        "If you have questions, please contact the administrator."
+    )
+
+    html_body = f"""
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <div style="background: linear-gradient(135deg, #1a2b1a, #263326); color: white; padding: 30px; text-align: center; border-radius: 8px 8px 0 0;">
+            <h1 style="margin: 0; font-size: 24px;">Blackfriars Network</h1>
+            <p style="margin: 10px 0 0; opacity: 0.9;">Network Access Decision</p>
+        </div>
+        <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 8px 8px;">
+            <p>Hi {first_name},</p>
+            <p>The administrator has reviewed your request to access <strong>{requested_ssid}</strong>.</p>
+            <p>You have been granted access to a different network instead:</p>
+            <div style="background: #e8f5e9; border-left: 4px solid #2e7d32; padding: 15px; margin: 20px 0; border-radius: 4px;">
+                <p style="margin: 0; font-size: 18px; font-weight: bold; color: #1b5e20;">
+                    Please connect to: {assigned_ssid}
+                </p>
+                <p style="margin: 8px 0 0; font-size: 14px; color: #555;">
+                    Device MAC address: {mac_address}
+                </p>
+            </div>
+            <p>To gain internet access, disconnect from <strong>{requested_ssid}</strong> and connect to <strong>{assigned_ssid}</strong>.</p>
+            <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
+            <p style="font-size: 14px; color: #666;">
+                If you did not make this registration request, you can
+                <a href="{unregister_url}" style="color: #8B0000;">unregister this device</a>.
+            </p>
+            <p style="font-size: 14px; color: #666;">{admin_contact_html}</p>
+        </div>
+    </div>
+    """
+
+    text_body = f"""
+Hi {first_name},
+
+The administrator has reviewed your request to access {requested_ssid}.
+
+You have been granted access to a different network instead.
+
+Please connect to: {assigned_ssid}
+Device MAC address: {mac_address}
+
+To gain internet access, disconnect from {requested_ssid} and connect to {assigned_ssid}.
+
+If you did not make this request, unregister this device: {unregister_url}
+{admin_contact_text}
+    """
+
+    return send_email(user_email, subject, html_body, text_body)
+
+
 def send_admin_password_reset_email(admin_email, admin_username, reset_url):
     """
     Send a password reset link to an admin user.

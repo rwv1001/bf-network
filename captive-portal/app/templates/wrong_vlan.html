@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+
+{% block title %}Connect to Different Network - Network Access Portal{% endblock %}
+
+{% block header %}Network Access Approved{% endblock %}
+
+{% block subheader %}
+<p style="margin-top: 10px; opacity: 0.9;">Please connect to a different network.</p>
+{% endblock %}
+
+{% block content %}
+<div class="alert alert-info">
+    <strong>ℹ Access granted on a different network</strong>
+    <div style="margin-top: 6px;">
+        The administrator has not granted you access to
+        <strong>{{ detected_ssid or 'your current network' }}</strong>,
+        but has instead granted you access to
+        <strong>{{ assigned_ssid or ('VLAN ' ~ assigned_vlan) if assigned_vlan else 'another network' }}</strong>.
+    </div>
+</div>
+
+<div class="info-box">
+    <p>To gain internet access, please:</p>
+    <ol style="margin: 10px 0 0 20px; line-height: 2;">
+        <li>Disconnect from <strong>{{ detected_ssid or 'your current network' }}</strong></li>
+        <li>Connect to <strong>{{ assigned_ssid or ('VLAN ' ~ assigned_vlan) if assigned_vlan else 'the assigned network' }}</strong></li>
+    </ol>
+</div>
+{% endblock %}

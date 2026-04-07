@@ -60,6 +60,12 @@
                     window.location.href = pageUrl('/registered');
                     return;
                 }
+                if (data.status === 'wrong_vlan') {
+                    window.location.href = pageUrl('/wrong-vlan'
+                        + '?assigned_vlan=' + encodeURIComponent(data.expected_vlan || '')
+                        + '&assigned_ssid=' + encodeURIComponent(data.expected_ssid || ''));
+                    return;
+                }
                 if (data.status === 'rejected') {
                     const reason = data.reason ? encodeURIComponent(data.reason) : '';
                     const qs = reason ? `?reason=${reason}` : '';

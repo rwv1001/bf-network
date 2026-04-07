@@ -33,6 +33,7 @@ from email_service import (
     send_admin_notification,
     send_admin_password_setup_email,
     send_wifi_registration_confirmation,
+    send_vlan_mismatch_notification,
     send_user_blocked_device_notice,
     send_admin_password_reset_email,
     send_network_password_set_email,
@@ -1768,12 +1769,15 @@ def _sync_registration_status(device):
     Rules:
     - internet_blocked=True  → 'blocked'
     - internet_accessible=True and assigned_vlan set → 'registered'
+    - internet_accessible=False and assigned_vlan set → 'wrong_vlan'
     - anything else → 'pending'
     """
     if device.internet_blocked:
         device.registration_status = 'blocked'
     elif device.internet_accessible and device.assigned_vlan:
         device.registration_status = 'registered'
+    elif device.internet_accessible is False and device.assigned_vlan:
+        device.registration_status = 'wrong_vlan'
     else:
         device.registration_status = 'pending'
 
@@ -4100,6 +4104,23 @@ def request_rejected():
     )
 
 
+@app.route('/wrong-vlan')
+def wrong_vlan_page():
+    """Shown when the admin has assigned the user to a different VLAN (spec 4b.ii.2.c)."""
+    mac_address = get_client_mac()
+    device = Device.query.filter_by(mac_address=mac_address).first() if mac_address else None
+    assigned_vlan = (device.assigned_vlan if device else None) or request.args.get('assigned_vlan')
+    assigned_ssid = get_ssid_for_vlan(int(assigned_vlan)) if assigned_vlan else request.args.get('assigned_ssid')
+    _, detected_vlan, _ = detect_connection_type(get_client_ip())
+    detected_ssid = get_ssid_for_vlan(detected_vlan) if detected_vlan else None
+    return render_template(
+        'wrong_vlan.html',
+        assigned_vlan=assigned_vlan,
+        assigned_ssid=assigned_ssid,
+        detected_ssid=detected_ssid,
+    )
+
+
 @app.route('/registered')
 def registered_success():
     """Registration success page."""
@@ -4256,8 +4277,8 @@ def registration_status():
             'current_ip': current_ip,
             'current_vlan': current_vlan,
             'current_ssid': current_ssid,
-            'expected_vlan': device.current_vlan,
-            'expected_ssid': expected_ssid,
+            'expected_vlan': device.assigned_vlan or device.current_vlan,
+            'expected_ssid': get_ssid_for_vlan(device.assigned_vlan) or expected_ssid,
             'network_mismatch': network_mismatch
         })
         response.headers['Access-Control-Allow-Origin'] = '*'
@@ -8602,33 +8623,46 @@ def admin_process_request(request_id):
         clear_unregistered_lease(device.mac_address)
 
         unregister_url = _build_unregister_url(device.unregister_token)
-        if not device.ownership_validated:
-            confirm_url, confirm_timeout_sec = _set_wifi_confirmation(device)
-        else:
-            confirm_url = None
-            confirm_timeout_sec = None
         if device.connection_type == 'wired':
-            ssid_display = "Wired Network"
+            assigned_ssid_display = "Wired Network"
         else:
-            ssid_display = device.ssid or get_ssid_for_vlan(target_vlan) or "WiFi Network"
-        send_wifi_registration_confirmation(
-            user.email,
-            user.first_name or reg_request.first_name or "there",
-            ssid_display,
-            device.mac_address,
-            unregister_url,
-            confirm_url=confirm_url,
-            confirm_timeout_sec=confirm_timeout_sec,
-            registration_details={
-                "email": user.email,
-                "first_name": user.first_name or reg_request.first_name,
-                "last_name": user.last_name or reg_request.last_name,
-                "phone_number": user.phone_number or reg_request.phone_number,
-                "device_type": device.device_name,
-                "ip_address": device.ip_address,
-                "ssid": ssid_display,
-            },
-        )
+            assigned_ssid_display = get_ssid_for_vlan(target_vlan) or f"VLAN {target_vlan}"
+
+        if network_mismatch:
+            # Spec 4b.ii.2.c: admin granted a different VLAN — send mismatch email
+            current_ssid_display = device.ssid or get_ssid_for_vlan(detected_vlan) or f"VLAN {detected_vlan}"
+            send_vlan_mismatch_notification(
+                user.email,
+                user.first_name or reg_request.first_name or "there",
+                requested_ssid=current_ssid_display,
+                assigned_ssid=assigned_ssid_display,
+                mac_address=device.mac_address,
+                unregister_url=unregister_url,
+            )
+        else:
+            if not device.ownership_validated:
+                confirm_url, confirm_timeout_sec = _set_wifi_confirmation(device)
+            else:
+                confirm_url = None
+                confirm_timeout_sec = None
+            send_wifi_registration_confirmation(
+                user.email,
+                user.first_name or reg_request.first_name or "there",
+                assigned_ssid_display,
+                device.mac_address,
+                unregister_url,
+                confirm_url=confirm_url,
+                confirm_timeout_sec=confirm_timeout_sec,
+                registration_details={
+                    "email": user.email,
+                    "first_name": user.first_name or reg_request.first_name,
+                    "last_name": user.last_name or reg_request.last_name,
+                    "phone_number": user.phone_number or reg_request.phone_number,
+                    "device_type": device.device_name,
+                    "ip_address": device.ip_address,
+                    "ssid": assigned_ssid_display,
+                },
+            )
 
         flash(f'Request approved and user {user.email} registered', 'success')
         logger.info("Admin approved registration request for %s", user.email)

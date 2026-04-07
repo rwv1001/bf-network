@@ -625,6 +625,25 @@ document.addEventListener('DOMContentLoaded', function() {
                         clearInterval(pollInterval);
                         pollingStarted = false;
                         showNetworkPasswordPrompt(data.message || 'Your administrator has set a password. Please enter it to continue.');
+                    } else if (data.status === 'wrong_vlan') {
+                        clearInterval(pollInterval);
+                        pollingStarted = false;
+                        // Fetch device-status for the correct assigned_vlan/ssid (spec 4b.ii.2.c)
+                        fetch(apiUrl('/api/device-status'))
+                            .then(r => r.json())
+                            .then(d => {
+                                const assigned = d.assigned_ssid || (d.assigned_vlan ? `VLAN ${d.assigned_vlan}` : 'the assigned network');
+                                showStatus(
+                                    `The administrator has not granted you access to this network, but has instead granted you access to ${assigned}. Please disconnect and connect to that network.`,
+                                    'error'
+                                );
+                            })
+                            .catch(() => {
+                                showStatus(
+                                    'The administrator has assigned you to a different network. Please check your email for details.',
+                                    'error'
+                                );
+                            });
                     } else if (data.status === 'pending' || data.status === 'pending_password') {
                         // Do nothing, keep polling
                     }
@@ -772,6 +791,23 @@ document.addEventListener('DOMContentLoaded', function() {
                     showStatus(data.message || 'A network password is required. Please check your email for a link to set your password.', 'info');
                     form.style.display = 'none';
                     startPolling();
+                } else if (data.status === 'wrong_vlan') {
+                    // Spec 4b.ii.2.c: admin assigned a different VLAN
+                    fetch(apiUrl('/api/device-status'))
+                        .then(r => r.json())
+                        .then(d => {
+                            const assigned = d.assigned_ssid || (d.assigned_vlan ? `VLAN ${d.assigned_vlan}` : 'the assigned network');
+                            showStatus(
+                                `The administrator has not granted you access to this network, but has instead granted you access to ${assigned}. Please disconnect and connect to that network.`,
+                                'error'
+                            );
+                        })
+                        .catch(() => {
+                            showStatus(
+                                'The administrator has assigned you to a different network. Please check your email for details.',
+                                'error'
+                            );
+                        });
                 } else {
                     // Unknown status — reveal the registration form as a fallback
                     form.style.display = 'block';
