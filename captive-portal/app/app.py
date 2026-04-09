@@ -4201,6 +4201,18 @@ def registration_status():
     # A devices row created solely by the Kea DHCP hook (no ownership) must
     # still be treated as unregistered so the registration form is shown.
     if device and not _get_active_ownership(mac_address):
+        # Check if the most recent registration request for this MAC was rejected —
+        # if so return 'rejected' so pending_approval.html can redirect accordingly.
+        _recent_req = RegistrationRequest.query.filter_by(
+            mac_address=mac_address
+        ).order_by(RegistrationRequest.submitted_at.desc()).first()
+        if _recent_req and _recent_req.status == 'rejected':
+            _payload = {'status': 'rejected', 'message': 'Your registration request was rejected.'}
+            if _recent_req.notes:
+                _payload['reason'] = _recent_req.notes
+            _resp = jsonify(_payload)
+            _resp.headers['Access-Control-Allow-Origin'] = '*'
+            return _resp
         response = jsonify({'status': 'unregistered', 'message': 'Not registered'})
         response.headers['Access-Control-Allow-Origin'] = '*'
         return response
@@ -5156,17 +5168,33 @@ def admin_reset_test():
     acl_ok = reset_acl_baseline()
     mac_auth_cleared = clear_mac_auth_sessions()
     ports_reset = reset_user_ports()
+    nqa_ok = push_pbr_nqa_to_switches()
 
-    if acl_ok and mac_auth_cleared and ports_reset:
-        flash('Test reset complete. Database cleared (users, devices, NAT sessions, DNS resolutions), ACL baseline restored, DNS hijack rules restored, MAC auth sessions cleared, and user ports reset.', 'success')
+    if acl_ok and mac_auth_cleared and ports_reset and nqa_ok:
+        flash('Test reset complete. Database cleared (users, devices, NAT sessions, DNS resolutions), ACL baseline restored, DNS hijack rules restored, MAC auth sessions cleared, user ports reset, and PBR/NQA config pushed to switches.', 'success')
+    elif acl_ok and mac_auth_cleared and ports_reset:
+        flash('Test reset complete, but PBR/NQA push to switches failed.', 'warning')
     elif acl_ok and mac_auth_cleared:
-        flash('Test reset complete (including NAT/DNS logs), but user port reset failed.', 'warning')
+        flash('Test reset complete (including NAT/DNS logs), but user port reset or PBR/NQA push failed.', 'warning')
     elif acl_ok:
-        flash('Test reset complete (including NAT/DNS logs), but MAC auth session clearing or port reset failed.', 'warning')
+        flash('Test reset complete (including NAT/DNS logs), but MAC auth session clearing, port reset, or PBR/NQA push failed.', 'warning')
     else:
-        flash('Test reset complete (including NAT/DNS logs), but ACL baseline, MAC auth clearing, or port reset failed.', 'warning')
+        flash('Test reset complete (including NAT/DNS logs), but ACL baseline, MAC auth clearing, port reset, or PBR/NQA push failed.', 'warning')
 
     return redirect(url_for('admin_dashboard'))
+
+
+@app.route('/admin/push-pbr-nqa', methods=['POST'])
+@login_required
+@permission_required('manage_isp_routers')
+def admin_push_pbr_nqa():
+    """Push PBR + NQA tracking config for all ISP routers to all HP5130 switches."""
+    ok = push_pbr_nqa_to_switches()
+    if ok:
+        flash('PBR/NQA config pushed to all switches successfully.', 'success')
+    else:
+        flash('PBR/NQA push failed for one or more switches — check logs.', 'warning')
+    return redirect(url_for('admin_isp_routers'))
 
 
 # ---------------------------------------------------------------------------
@@ -6293,6 +6321,9 @@ def admin_vlan_config():
                         _run_switch_command(host, _build_vlan_pbr_remove(pbr_vlan_id, old_pbr))
             flash('ISP router PBR assignments pushed to switches.', 'success')
 
+        # Always resync full PBR/NQA config to switches whenever VLAN config is saved
+        push_pbr_nqa_to_switches()
+
         vlan_map = get_vlan_map()
         vlan_prefix_by_id = {}
         changed_vlan_ids = []
@@ -7229,10 +7260,14 @@ def _build_port_config(port_name, role, description=''):
 # ---------------------------------------------------------------------------
 
 def _build_isp_router_switch_config(router, switch_host):
-    """Generate HP5130 config for an ISP router uplink VLAN, interface, and PBR."""
+    """Generate HP5130 config for an ISP router uplink VLAN, interface, PBR, and NQA tracking."""
     last_octet = switch_host.split('.')[-1]
     host_ip = f"{_net_word()}.{router.vlan_id}.{last_octet}"
     pbr_name = router.pbr_name
+    # NQA entry name derived from pbr_name (e.g. 'PBR-TEL' -> 'pbr-tel')
+    nqa_name = pbr_name.lower()
+    # Track ID is the router's database primary key — stable and unique per router
+    track_id = router.id
     name_upper = router.name.upper().replace(' ', '_')
     lines = [
         'system-view',
@@ -7248,13 +7283,34 @@ def _build_isp_router_switch_config(router, switch_host):
         ' description PBR-local-traffic-normal-routing',
         f' rule 10 permit ip any {_net_word()}.0.0 0.0.255.255',
         'quit',
-        # Undo the whole PBR first so stale nodes/next-hops don't accumulate
+        # Undo the whole PBR first (removes track reference so undo track is safe)
         f'undo policy-based-route {pbr_name}',
+        # Rebuild NQA probe and track object (undo first for idempotency)
+        f'undo track {track_id}',
+        f'undo nqa schedule admin {nqa_name}',
+        f'undo nqa entry admin {nqa_name}',
+        f'nqa entry admin {nqa_name}',
+        ' type icmp-echo',
+        f' destination ip {router.gateway_ip}',
+        ' frequency 5',
+        ' probe-count 3',
+        ' timeout 2000',
+        ' interval milliseconds 2000',
+        'quit',
+        f'nqa schedule admin {nqa_name} start-time now lifetime forever',
+        f'track {track_id} nqa admin {nqa_name} probe-pass',
+        # Rebuild PBR with NQA track — next-hop is only active when probe passes.
+        # Node 20 is a catch-all discard: if the track is DOWN (router unreachable),
+        # node 10 is deactivated and traffic falls to node 20 which drops it,
+        # preventing fallback to the switch's static default route (UDM).
         f'policy-based-route {pbr_name} deny node 5',
         ' if-match acl 3001',
         'quit',
         f'policy-based-route {pbr_name} permit node 10',
-        f' apply next-hop {router.gateway_ip}',
+        f' apply next-hop {router.gateway_ip} track {track_id}',
+        'quit',
+        f'policy-based-route {pbr_name} permit node 20',
+        ' apply discard',
         'quit',
         'quit',
         'save force',
@@ -7362,6 +7418,38 @@ def _build_remove_isp_router_vlan(vlan_id):
     ])
 
 
+def _build_isp_router_block_acl(acl_number, router, excluded_subnets):
+    """Build an outbound ACL for this ISP router's uplink SVI to block source
+    traffic from VLANs that are assigned to a different ISP router.
+
+    This prevents silent internet fallback via this router when a VLAN's own
+    ISP router goes down and PBR falls back to normal IP routing.
+
+    acl_number:        ACL number to use (e.g. 3951 for router.id=1)
+    excluded_subnets:  list of (network_address_str, wildcard_str) tuples
+    Returns None when there are no subnets to block.
+    """
+    if not excluded_subnets:
+        return None
+    lines = [
+        'system-view',
+        f'undo acl {acl_number}',
+        f'acl advanced {acl_number}',
+        f' description ISP-{router.pbr_name}-block-foreign-VLANs',
+    ]
+    for i, (network, wildcard) in enumerate(excluded_subnets):
+        rule_num = 10 + i * 10
+        lines.append(f' rule {rule_num} deny ip source {network} {wildcard}')
+    lines.append(' rule 500 permit ip')
+    lines.append('quit')
+    lines.append(f'interface Vlan-interface{router.vlan_id}')
+    lines.append(f' packet-filter {acl_number} outbound')
+    lines.append('quit')
+    lines.append('quit')
+    lines.append('save force')
+    return '\n'.join(lines)
+
+
 def _build_remove_isp_router_full(router):
     """Remove all switch config for an ISP router: PBR, Vlan-interface, VLAN."""
     pbr_name = router.pbr_name
@@ -7390,6 +7478,84 @@ def _remove_isp_router_vlan_from_switches(old_vlan_id):
     switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
     for host in switch_hosts:
         _run_switch_command(host, _build_remove_isp_router_vlan(old_vlan_id))
+
+
+def push_pbr_nqa_to_switches():
+    """Push full ISP router PBR + NQA tracking config for all routers to all switches.
+
+    Also applies egress block ACLs on each ISP uplink SVI to deny source traffic
+    from VLANs assigned to a different ISP router.  This is the reliable backstop
+    that prevents internet fallback via UDM (or any other ISP) when a tracked
+    next-hop goes DOWN — because Comware 7 PBR falls through to normal IP routing
+    when a track-bound node becomes invalid, bypassing any subsequent PBR nodes.
+
+    ACL numbers used: 3950 + router.id  (e.g. 3951 for UDM id=1, 3952 for TEL id=2)
+
+    Idempotent — safe to call on reset or after config changes.  Returns True
+    if every switch/router combination succeeded, False if any failed.
+    """
+    import ipaddress as _ipaddress
+
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
+    if not switch_hosts:
+        logger.warning("push_pbr_nqa_to_switches: no SWITCH_HOSTS configured")
+        return True  # nothing to do — not treated as a failure
+
+    routers = ISPRouter.query.all()
+    if not routers:
+        return True
+
+    # Build router_id → [(network_addr, wildcard), ...] for all assigned VLANs
+    router_subnets = {}  # router.id -> list of (network_addr_str, wildcard_str)
+    for vlan in VlanMapping.query.filter(VlanMapping.isp_router_id.isnot(None)).all():
+        prefix_raw = Setting.get_value(f'vlan_prefix_{vlan.status}', '24')
+        try:
+            prefix = int(prefix_raw)
+        except (TypeError, ValueError):
+            prefix = 24
+        try:
+            net = _ipaddress.IPv4Network(
+                f'{_net_word()}.{vlan.vlan_id}.0/{prefix}', strict=False)
+            network_addr = str(net.network_address)
+            wildcard = str(_ipaddress.IPv4Address(int(net.hostmask)))
+        except ValueError:
+            logger.warning("push_pbr_nqa_to_switches: bad subnet for VLAN %s", vlan.vlan_id)
+            continue
+        router_subnets.setdefault(vlan.isp_router_id, []).append((network_addr, wildcard))
+
+    failed = []
+    for router in routers:
+        # Push PBR + NQA config for this router
+        for host in switch_hosts:
+            cfg = _build_isp_router_switch_config(router, host)
+            if _run_switch_command(host, cfg) is None:
+                failed.append(f'{host}/{router.pbr_name}')
+                logger.warning(
+                    "push_pbr_nqa_to_switches: PBR/NQA failed for %s on %s",
+                    router.pbr_name, host,
+                )
+
+        # Push egress block ACL: deny VLANs assigned to OTHER routers from
+        # exiting through this router's uplink SVI.  When PBR track goes DOWN,
+        # Comware falls to normal routing; this ACL catches that fallback.
+        excluded = []
+        for other_router in routers:
+            if other_router.id != router.id:
+                excluded.extend(router_subnets.get(other_router.id, []))
+
+        acl_number = 3950 + router.id
+        block_cfg = _build_isp_router_block_acl(acl_number, router, excluded)
+        if block_cfg:
+            for host in switch_hosts:
+                if _run_switch_command(host, block_cfg) is None:
+                    failed.append(f'{host}/{router.pbr_name}/block-acl')
+                    logger.warning(
+                        "push_pbr_nqa_to_switches: block ACL failed for %s on %s",
+                        router.pbr_name, host,
+                    )
+
+    return len(failed) == 0
 
 
 def _apply_isp_router_to_switches(router):

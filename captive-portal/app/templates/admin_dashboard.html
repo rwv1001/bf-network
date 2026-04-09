@@ -883,6 +883,7 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
                     <span class="sort-arrow">{% if devices_sort == 'current_vlan' %}{{ '▼' if devices_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
                 </a>
             </th>
+            <th>Notes</th>
             <th>Actions</th>
         </tr>
     </thead>
@@ -955,6 +956,15 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
                 {% endif %}
             </td>
             <td>VLAN {{ device.current_vlan }}</td>
+            <td style="font-size: 12px; max-width: 150px;">
+                {% if user and user.notes %}
+                    <span title="{{ user.notes }}" style="cursor: help;">
+                        {{ user.notes | truncate(40) }}
+                    </span>
+                {% else %}
+                    <em style="color: #999;">-</em>
+                {% endif %}
+            </td>
             <td>
                 {% if device.registration_status == 'registered' %}
                 <form method="POST" action="{{ url_for('admin_block_device', device_id=device.id) }}" style="display: inline;">

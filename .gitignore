@@ -61,8 +61,18 @@ freeradius/raddb/mods-config/files/authorize
 npm/data/
 npm/letsencrypt/
 
-# Pi-Hole runtime directories
-pihole/etc-pihole/
+# Pi-hole runtime/secret files (keep config tracked)
+pihole/etc-pihole/*.db
+pihole/etc-pihole/*.db-shm
+pihole/etc-pihole/*.db-wal
+pihole/etc-pihole/dhcp.leases
+pihole/etc-pihole/cli_pw
+pihole/etc-pihole/config_backups/
+pihole/etc-pihole/gravity_backups/
+pihole/etc-pihole/listsCache/
+pihole/etc-pihole/migration_backup/
+pihole/etc-pihole/logrotate
+pihole/etc-pihole/versions
 pihole/logs/
 npmold/
 **/keys.json
@@ -87,3 +97,4 @@ sessions/
 
 kea-compare/
 shared/
+pihole/etc-pihole/hosts/custom.list

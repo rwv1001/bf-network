@@ -159,6 +159,9 @@
 {% block content %}
 <div class="page-header">
     <h2>ISP Routers</h2>
+    <form method="post" action="{{ url_for('admin_push_pbr_nqa') }}" onsubmit="return confirm('Push PBR/NQA config to all HP5130 switches?')">
+        <button type="submit" class="btn btn-secondary">Push PBR/NQA to Switches</button>
+    </form>
 </div>
 
 <div class="info-box">
