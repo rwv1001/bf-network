@@ -19,6 +19,7 @@ elif [ -f "$BASE_DIR/keys/hp5130_id_rsa" ]; then
 fi
 
 SWITCH_HOST="${SWITCH_HOST:?SWITCH_HOST required}"
+SAFE_HOST="$(echo "${SWITCH_HOST}" | tr '.:' '__')"
 SWITCH_USER="${SWITCH_USER:-robert}"
 SWITCH_SSH_PORT="${SWITCH_SSH_PORT:-22}"
 SWITCH_KEY_PATH="${SWITCH_KEY_PATH:-$DEFAULT_KEY_PATH}"
@@ -46,9 +47,9 @@ if [ -z "$QUEUE_BASE" ]; then
   fi
 fi
 
-LOG_FILE="${ACL_LOG_FILE:-$QUEUE_BASE/hp5130-acl.log}"
-QUEUE_FILE="${ACL_QUEUE_FILE:-$QUEUE_BASE/hp5130-acl.queue}"
-QUEUE_PID_FILE="${ACL_QUEUE_PID:-$QUEUE_BASE/hp5130-acl.pid}"
+LOG_FILE="${ACL_LOG_FILE:-$QUEUE_BASE/hp5130-acl-${SAFE_HOST}.log}"
+QUEUE_FILE="${ACL_QUEUE_FILE:-$QUEUE_BASE/hp5130-acl-${SAFE_HOST}.queue}"
+QUEUE_PID_FILE="${ACL_QUEUE_PID:-$QUEUE_BASE/hp5130-acl-${SAFE_HOST}.pid}"
 QUEUE_INTERVAL="${ACL_QUEUE_INTERVAL:-3}"
 QUEUE_DISABLE="${ACL_QUEUE_DISABLE:-0}"  # Corrected: Use ACL_QUEUE_DISABLE (was QUEUE_DISABLE in your command, but script checks this)
 QUEUE_WORKER="${ACL_QUEUE_WORKER:-$SCRIPT_DIR/hp5130-acl-queue.sh}"
@@ -80,7 +81,7 @@ if ! is_valid_ip "$IP_ADDRESS"; then
 fi
 
 SAFE_IP="$(echo "$IP_ADDRESS" | tr '.' '_')"
-DEDUP_FILE="$QUEUE_BASE/.dedup-${ACTION}-${SAFE_IP}"
+DEDUP_FILE="$QUEUE_BASE/.dedup-${ACTION}-${SAFE_IP}-${SAFE_HOST}"
 now=$(date +%s)
 if [ -f "$DEDUP_FILE" ]; then
   last=$(cat "$DEDUP_FILE" 2>/dev/null || echo 0)
@@ -182,31 +183,25 @@ run_ssh() {
 }
 
 if [ "$ACTION" = "block" ]; then
-  CMDS_APPLY=$(cat <<EOF
+  CMDS=$(cat <<EOF
 system-view
 acl advanced $ACL_NUM
 rule $RULE_NUM deny ip source $IP_ADDRESS 0
 quit
 quit  
 quit
-EOF
-)
-  CMDS_SAVE=$(cat <<EOF
 save force
 quit  
 EOF
 )
 elif [ "$ACTION" = "unblock" ]; then
-  CMDS_APPLY=$(cat <<EOF
+  CMDS=$(cat <<EOF
 system-view
 acl advanced $ACL_NUM
 undo rule $RULE_NUM
 quit
 quit
 quit  
-EOF
-)
-  CMDS_SAVE=$(cat <<EOF
 save force
 quit  
 EOF
@@ -219,22 +214,14 @@ fi
 if [ "$QUEUE_DISABLE" = "1" ]; then
   # Execute commands via SSH (force TTY for Comware)
   apply_start=$(date +%s)
-  log "START action=$ACTION phase=apply ip=$IP_ADDRESS vlan=$VLAN_ID acl=$ACL_NUM rule=$RULE_NUM host=$SWITCH_HOST"
-  run_ssh "apply" "$CMDS_APPLY"
-  apply_status=$?
+  log "START action=$ACTION phase=apply_save ip=$IP_ADDRESS vlan=$VLAN_ID acl=$ACL_NUM rule=$RULE_NUM host=$SWITCH_HOST"
+  run_ssh "apply_save" "$CMDS"
+  ssh_status=$?
   apply_end=$(date +%s)
   apply_duration=$((apply_end - apply_start))
-  log "END action=$ACTION phase=apply ip=$IP_ADDRESS status=$apply_status duration_sec=$apply_duration"
+  log "END action=$ACTION phase=apply_save ip=$IP_ADDRESS status=$ssh_status duration_sec=$apply_duration"
 
-  save_start=$(date +%s)
-  log "START action=$ACTION phase=save ip=$IP_ADDRESS vlan=$VLAN_ID acl=$ACL_NUM rule=$RULE_NUM host=$SWITCH_HOST"
-  run_ssh "save" "$CMDS_SAVE"
-  save_status=$?
-  save_end=$(date +%s)
-  save_duration=$((save_end - save_start))
-  log "END action=$ACTION phase=save ip=$IP_ADDRESS status=$save_status duration_sec=$save_duration"
-
-  exit $save_status
+  exit $ssh_status
 fi
 
 # Queue mode (default)

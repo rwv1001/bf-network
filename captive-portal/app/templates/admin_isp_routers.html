@@ -159,8 +159,11 @@
 {% block content %}
 <div class="page-header">
     <h2>ISP Routers</h2>
-    <form method="post" action="{{ url_for('admin_push_pbr_nqa') }}" onsubmit="return confirm('Push PBR/NQA config to all HP5130 switches?')">
+    <form method="post" action="{{ url_for('admin_push_pbr_nqa') }}" onsubmit="return confirm('Push PBR/NQA config to all HP5130 switches?')" style="display:inline;">
         <button type="submit" class="btn btn-secondary">Push PBR/NQA to Switches</button>
+    </form>
+    <form method="post" action="{{ url_for('admin_reapply_acl_blocks') }}" onsubmit="return confirm('Re-push ACL baseline (walled garden) AND all current per-device IP blocks to all HP5130 switches?\n\nUse this after adding a new switch or changing a router\'s HP5130 Switch setting.')" style="display:inline; margin-left:8px;">
+        <button type="submit" class="btn btn-secondary">Reapply ACL Baseline + Blocks</button>
     </form>
 </div>
 
@@ -181,6 +184,7 @@
                     <th>Name</th>
                     <th>Subnet</th>
                     <th>VLAN ID</th>
+                    <th>HP5130 Switch</th>
                     <th>HP5130 Port</th>
                     <th>DHCP Snoop Trust</th>
                     <th>Gateway IP</th>
@@ -193,6 +197,7 @@
                 <td><strong>{{ router.name }}</strong></td>
                 <td class="mono">{{ router.subnet }}</td>
                 <td class="mono">{{ router.vlan_id }}</td>
+                <td class="mono">{{ router.switch_host or '<span style="color:#999">not set</span>'|safe }}</td>
                 <td class="mono">{{ router.switch_port or '—' }}</td>
                 <td>
                     {% if router.dhcp_snooping_trust %}
@@ -216,7 +221,7 @@
                 </td>
             </tr>
             <tr class="edit-row" id="edit-row-{{ router.id }}">
-                <td colspan="7">
+                <td colspan="8">
                     <form method="POST" class="edit-form">
                         <input type="hidden" name="action" value="update">
                         <input type="hidden" name="router_id" value="{{ router.id }}">
@@ -242,12 +247,26 @@
                             {% endif %}
                         </div>
                         <div class="form-group">
+                            <label>HP5130 Switch</label>
+                            {% if switch_hosts %}
+                            <select name="switch_host">
+                                <option value="">— Unassigned (uses first SWITCH_HOST) —</option>
+                                {% for h in switch_hosts %}
+                                <option value="{{ h }}" {% if router.switch_host == h %}selected{% endif %}>{{ h }}</option>
+                                {% endfor %}
+                            </select>
+                            {% else %}
+                            <input type="text" name="switch_host" value="{{ router.switch_host or '' }}"
+                                   placeholder="e.g. 192.168.99.2">
+                            {% endif %}
+                        </div>
+                        <div class="form-group">
                             <label>HP5130 Port</label>
-                            {% if switch_ports %}
+                            {% if switch_ports_by_host %}
                             <select name="switch_port">
                                 <option value="">— Unassigned —</option>
-                                {% for p in switch_ports %}
-                                <option value="{{ p }}" {% if router.switch_port == p %}selected{% endif %}>{{ p }}</option>
+                                {% for h, p in switch_ports_by_host %}
+                                <option value="{{ p }}" {% if router.switch_port == p and router.switch_host == h %}selected{% elif router.switch_port == p and not router.switch_host %}selected{% endif %}>{{ h }} — {{ p }}</option>
                                 {% endfor %}
                             </select>
                             {% else %}
@@ -304,12 +323,25 @@
                 </select>
             </div>
             <div class="form-group">
+                <label>HP5130 Switch</label>
+                {% if switch_hosts %}
+                <select name="switch_host">
+                    <option value="">— Unassigned (uses first SWITCH_HOST) —</option>
+                    {% for h in switch_hosts %}
+                    <option value="{{ h }}">{{ h }}</option>
+                    {% endfor %}
+                </select>
+                {% else %}
+                <input type="text" name="switch_host" placeholder="e.g. 192.168.99.2">
+                {% endif %}
+            </div>
+            <div class="form-group">
                 <label>HP5130 Port</label>
-                {% if switch_ports %}
+                {% if switch_ports_by_host %}
                 <select name="switch_port">
                     <option value="">— Unassigned —</option>
-                    {% for p in switch_ports %}
-                    <option value="{{ p }}">{{ p }}</option>
+                    {% for h, p in switch_ports_by_host %}
+                    <option value="{{ p }}">{{ h }} — {{ p }}</option>
                     {% endfor %}
                 </select>
                 {% else %}

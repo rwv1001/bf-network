@@ -16,6 +16,7 @@
 #include <sstream>
 #include <string>
 #include <map>
+#include <vector>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -125,28 +126,130 @@ bool is_blocked_pool_ip(const std::string& ip_address) {
     return (last_octet >= 214 && last_octet <= 254);
 }
 
-// Helper function to call HP5130 ACL script
-void manage_acl(const std::string& action, const std::string& ip_address) {
-    std::cout << "DNS Hijack Hook: [DEBUG] manage_acl ENTRY (action="
-              << action << ", ip=" << ip_address << ")" << std::endl;
-    std::cout.flush();
+// Helper: parse SWITCH_HOSTS (space-separated) env var.
+// Falls back to SWITCH_HOST (single) if SWITCH_HOSTS is unset.
+std::vector<std::string> get_switch_hosts() {
+    const char* env = std::getenv("SWITCH_HOSTS");
+    if (!env || !*env) {
+        env = std::getenv("SWITCH_HOST");
+    }
+    std::vector<std::string> hosts;
+    if (!env || !*env) return hosts;
+    std::istringstream iss(env);
+    std::string h;
+    while (iss >> h) {
+        if (!h.empty()) hosts.push_back(h);
+    }
+    return hosts;
+}
+
+// Helper: query isp_routers + vlan_mappings to find which HP5130 switch hosts
+// the ISP router for the given device VLAN.  That switch is the internet choke
+// point: blocking there prevents internet access regardless of which physical
+// switch the device is currently connected to.
+// vlan_id is an integer from the lease (no SQL injection risk).
+std::string get_isp_router_switch_for_vlan(uint32_t vlan_id) {
+    if (vlan_id == 0) return "";
+
+    const char* db_host = std::getenv("DB_HOST");
+    const char* db_port = std::getenv("DB_PORT");
+    const char* db_name = std::getenv("DB_NAME");
+    const char* db_user = std::getenv("DB_USER");
+    const char* db_pass = std::getenv("DB_PASSWORD");
+    if (!db_host || !db_name || !db_user || !db_pass) return "";
+
+    setenv("PGPASSWORD", db_pass, 1);
 
     std::stringstream cmd;
-    cmd << "/scripts/hp5130-acl.sh " << action << " " << ip_address << " >/dev/null 2>&1 &";
+    cmd << "psql -h " << db_host
+        << " -p " << (db_port ? db_port : "5432")
+        << " -U " << db_user
+        << " -d " << db_name
+        << " -t -A -q"
+        << " -c \"SELECT ir.switch_host FROM isp_routers ir"
+        << " JOIN vlan_mappings vm ON vm.isp_router_id = ir.id"
+        << " WHERE vm.vlan_id = " << vlan_id
+        << " AND ir.switch_host IS NOT NULL LIMIT 1\""
+        << " 2>/dev/null";
 
-    std::cout << "DNS Hijack Hook: [DEBUG] ACL Command: " << cmd.str() << std::endl;
+    FILE* pipe = popen(cmd.str().c_str(), "r");
+    if (!pipe) return "";
+    char buf[64] = {};
+    bool got = (fgets(buf, sizeof(buf) - 1, pipe) != nullptr);
+    pclose(pipe);
+    if (!got) return "";
+
+    std::string result(buf);
+    while (!result.empty() &&
+           (result.back() == '\n' || result.back() == '\r' || result.back() == ' ')) {
+        result.pop_back();
+    }
+    return result;
+}
+
+// Helper function to call HP5130 ACL script on the appropriate switch(es).
+// For "block": targets only the ISP router's switch for the VLAN (the internet
+//              choke point). Falls back to all switches if not configured.
+// For "unblock": targets all switches to remove any stale deny rules.
+void manage_acl(const std::string& action, const std::string& ip_address,
+                uint32_t vlan_id = 0) {
+    std::cout << "DNS Hijack Hook: [DEBUG] manage_acl ENTRY (action="
+              << action << ", ip=" << ip_address
+              << ", vlan=" << vlan_id << ")" << std::endl;
     std::cout.flush();
 
-    int status = system(cmd.str().c_str());
-    std::cout << "DNS Hijack Hook: [DEBUG] ACL system() returned: " << status << std::endl;
-    std::cout.flush();
-    if (status == -1) {
-        std::cerr << "DNS Hijack Hook WARNING: ACL script launch failed errno="
-                  << errno << " (" << std::strerror(errno) << ")" << std::endl;
+    std::vector<std::string> all_hosts = get_switch_hosts();
+    if (all_hosts.empty()) {
+        std::cerr << "DNS Hijack Hook WARNING: no SWITCH_HOSTS/SWITCH_HOST configured"
+                  << std::endl;
         std::cerr.flush();
-    } else if (status != 0) {
-        std::cerr << "DNS Hijack Hook WARNING: ACL script exit status " << status << std::endl;
-        std::cerr.flush();
+        return;
+    }
+
+    std::vector<std::string> targets;
+
+    if (action == "block") {
+        // Target only the ISP router's switch for this VLAN.
+        std::string isp_sw = get_isp_router_switch_for_vlan(vlan_id);
+        if (!isp_sw.empty()) {
+            // Validate against the configured hosts list.
+            for (const auto& h : all_hosts) {
+                if (h == isp_sw) { targets.push_back(h); break; }
+            }
+        }
+        if (targets.empty()) {
+            std::cout << "DNS Hijack Hook: ACL block for " << ip_address
+                      << " vlan=" << vlan_id
+                      << " — ISP router switch not found, targeting all switches"
+                      << std::endl;
+            targets = all_hosts;
+        } else {
+            std::cout << "DNS Hijack Hook: ACL block for " << ip_address
+                      << " targeting ISP router switch " << targets[0]
+                      << " (vlan=" << vlan_id << ")" << std::endl;
+        }
+    } else {
+        // Unblock: hit all switches to remove any stale deny rules.
+        targets = all_hosts;
+    }
+
+    for (const auto& target : targets) {
+        std::stringstream cmd;
+        cmd << "SWITCH_HOST='" << target << "' QUEUE_DISABLE=1 /scripts/hp5130-acl.sh "
+            << action << " " << ip_address << " >/dev/null 2>&1 &";
+
+        std::cout << "DNS Hijack Hook: [DEBUG] ACL Command: " << cmd.str() << std::endl;
+        std::cout.flush();
+
+        int status = system(cmd.str().c_str());
+        std::cout << "DNS Hijack Hook: [DEBUG] ACL system() returned: " << status << std::endl;
+        std::cout.flush();
+        if (status == -1) {
+            std::cerr << "DNS Hijack Hook WARNING: ACL script launch failed for "
+                      << target << " errno=" << errno
+                      << " (" << std::strerror(errno) << ")" << std::endl;
+            std::cerr.flush();
+        }
     }
 }
 
@@ -521,13 +624,13 @@ int lease4_select(CalloutHandle& handle) {
                               << " registered but on wrong VLAN (subnet "
                               << lease->subnet_id_ << ") - restricting access" << std::endl;
                     manage_dns_hijack("hijack", ip_address);
-                    manage_acl("block", ip_address);
+                    manage_acl("block", ip_address, lease->subnet_id_);
                     do_hijack = true;
                 } else {
                     std::cout << "DNS Hijack Hook: Device " << mac_address
                               << " is REGISTERED - removing DNS hijack" << std::endl;
                     manage_dns_hijack("unhijack", ip_address);
-                    manage_acl("unblock", ip_address);
+                    manage_acl("unblock", ip_address, lease->subnet_id_);
                     do_hijack = false;
                 }
             }
@@ -537,7 +640,7 @@ int lease4_select(CalloutHandle& handle) {
             if (!blocked_ip.empty() && blocked_ip != ip_address) {
                 std::cout << "DNS Hijack Hook: [DEBUG] Removing ACL for blocked IP: "
                           << blocked_ip << std::endl;
-                manage_acl("unblock", blocked_ip);
+                manage_acl("unblock", blocked_ip, lease->subnet_id_);
 
                 std::cout << "DNS Hijack Hook: [DEBUG] Removing per-IP DNS hijack for: "
                           << blocked_ip << std::endl;
@@ -547,7 +650,7 @@ int lease4_select(CalloutHandle& handle) {
             std::cout << "DNS Hijack Hook: Device " << mac_address
                       << " is UNREGISTERED - enabling DNS hijack" << std::endl;
             manage_dns_hijack("hijack", ip_address);
-            manage_acl("block", ip_address);
+            manage_acl("block", ip_address, lease->subnet_id_);
             manage_unregistered_lease("upsert", mac_address, ip_address, lease_seconds);
             do_hijack = true;
         }
@@ -656,7 +759,7 @@ int lease4_renew(CalloutHandle& handle) {
                 // Apply hijack while the client waits for re-DHCP.
                 manage_dns_hijack_pools("hijack-blocked-pools");
                 manage_dns_hijack("hijack", ip_address);
-                manage_acl("block", ip_address);
+                manage_acl("block", ip_address, lease->subnet_id_);
                 manage_lease_event("expire", mac_address, ip_address,
                                    lease->subnet_id_, 0, false, true);
                 handle.setStatus(CalloutHandle::NEXT_STEP_DROP);
@@ -673,7 +776,7 @@ int lease4_renew(CalloutHandle& handle) {
                 std::cout.flush();
                 // Remove the hijack so the fresh DHCPDISCOVER can succeed.
                 manage_dns_hijack("unhijack", ip_address);
-                manage_acl("unblock", ip_address);
+                manage_acl("unblock", ip_address, lease->subnet_id_);
                 manage_lease_event("expire", mac_address, ip_address,
                                    lease->subnet_id_, 0, true, false);
                 handle.setStatus(CalloutHandle::NEXT_STEP_DROP);
@@ -701,14 +804,14 @@ int lease4_renew(CalloutHandle& handle) {
                               << lease->subnet_id_ << ") - restricting access" << std::endl;
                     std::cout.flush();
                     manage_dns_hijack("hijack", ip_address);
-                    manage_acl("block", ip_address);
+                    manage_acl("block", ip_address, lease->subnet_id_);
                     do_hijack = true;
                 } else {
                     std::cout << "DNS Hijack Hook: Device " << mac_address
                               << " is REGISTERED - removing DNS hijack" << std::endl;
                     std::cout.flush();
                     manage_dns_hijack("unhijack", ip_address);
-                    manage_acl("unblock", ip_address);
+                    manage_acl("unblock", ip_address, lease->subnet_id_);
                     do_hijack = false;
                 }
             }
@@ -719,7 +822,7 @@ int lease4_renew(CalloutHandle& handle) {
                 std::cout << "DNS Hijack Hook: [DEBUG] Removing ACL for blocked IP: "
                           << blocked_ip << std::endl;
                 std::cout.flush();
-                manage_acl("unblock", blocked_ip);
+                manage_acl("unblock", blocked_ip, lease->subnet_id_);
 
                 std::cout << "DNS Hijack Hook: [DEBUG] Removing per-IP DNS hijack for: "
                           << blocked_ip << std::endl;
@@ -731,7 +834,7 @@ int lease4_renew(CalloutHandle& handle) {
                       << " is UNREGISTERED - enabling DNS hijack" << std::endl;
             std::cout.flush();
             manage_dns_hijack("hijack", ip_address);
-            manage_acl("block", ip_address);
+            manage_acl("block", ip_address, lease->subnet_id_);
             manage_unregistered_lease("upsert", mac_address, ip_address, lease_seconds);
             do_hijack = true;
         }
@@ -774,7 +877,7 @@ int lease4_expire(CalloutHandle& handle) {
         std::cout << "DNS Hijack Hook: Lease expired - removing ACL for IP: " << ip_address << std::endl;
         std::cout.flush();
 
-        manage_acl("unblock", ip_address);
+        manage_acl("unblock", ip_address, lease->subnet_id_);
         manage_dns_hijack("unhijack", ip_address);
         if (!mac_address.empty()) {
             manage_unregistered_lease("expire", mac_address, ip_address, 0);

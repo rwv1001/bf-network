@@ -217,6 +217,7 @@ class ISPRouter(db.Model):
     subnet = db.Column(db.String(50), nullable=False)               # e.g. "192.168.1.0/24"
     vlan_id = db.Column(db.Integer, nullable=False)                 # uplink VLAN
     switch_port = db.Column(db.String(100), nullable=True)          # e.g. "GigabitEthernet1/0/24"
+    switch_host = db.Column(db.String(50), nullable=True)           # e.g. "192.168.99.2" — which HP5130 this router is on
     dhcp_snooping_trust = db.Column(db.Boolean, default=True, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 

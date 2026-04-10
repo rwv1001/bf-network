@@ -13,14 +13,11 @@ if [ -z "$QUEUE_BASE" ]; then
   fi
 fi
 
-QUEUE_FILE="${ACL_QUEUE_FILE:-$QUEUE_BASE/hp5130-acl.queue}"
-QUEUE_LOCK="${ACL_QUEUE_LOCK:-$QUEUE_BASE/hp5130-acl.lock}"
-LOCK_META="${QUEUE_LOCK}/meta"
+# QUEUE_FILE, QUEUE_LOCK, QUEUE_PID_FILE, LOG_FILE are set below after
+# SWITCH_HOST is established, so they can include a per-host suffix.
 LOCK_STALE_SEC="${ACL_QUEUE_LOCK_STALE_SEC:-120}"
-QUEUE_PID_FILE="${ACL_QUEUE_PID:-$QUEUE_BASE/hp5130-acl.pid}"
 INTERVAL="${ACL_QUEUE_INTERVAL:-3}"
 IDLE_MAX="${ACL_QUEUE_IDLE_MAX:-12}"
-LOG_FILE="${ACL_LOG_FILE:-$QUEUE_BASE/hp5130-acl.log}"
 QUEUE_UMASK="${ACL_QUEUE_UMASK:-0002}"
 QUEUE_GID="${ACL_QUEUE_GID:-}"
 RULE_BASE="${ACL_RULE_BASE:-10000}"
@@ -38,9 +35,20 @@ elif [ -f "$BASE_DIR/keys/hp5130_id_rsa" ]; then
 fi
 
 SWITCH_HOST="${SWITCH_HOST:?SWITCH_HOST required}"
+SAFE_HOST="$(echo "${SWITCH_HOST}" | tr '.:' '__')"
 SWITCH_USER="${SWITCH_USER:-robert}"
 SWITCH_SSH_PORT="${SWITCH_SSH_PORT:-22}"
 SWITCH_KEY_PATH="${SWITCH_KEY_PATH:-$DEFAULT_KEY_PATH}"
+
+# Per-host file paths — must agree with hp5130-acl.sh naming convention.
+# If ACL_QUEUE_FILE/LOCK/PID/LOG are explicitly set in env, honour them;
+# otherwise derive per-host defaults so that multiple workers for different
+# switches can run concurrently without interfering with each other.
+QUEUE_FILE="${ACL_QUEUE_FILE:-$QUEUE_BASE/hp5130-acl-${SAFE_HOST}.queue}"
+QUEUE_LOCK="${ACL_QUEUE_LOCK:-$QUEUE_BASE/hp5130-acl-${SAFE_HOST}.lock}"
+LOCK_META="${QUEUE_LOCK}/meta"
+QUEUE_PID_FILE="${ACL_QUEUE_PID:-$QUEUE_BASE/hp5130-acl-${SAFE_HOST}.pid}"
+LOG_FILE="${ACL_LOG_FILE:-$QUEUE_BASE/hp5130-acl-${SAFE_HOST}.log}"
 KEA_CONFIG_PATH="${KEA_CONFIG_PATH:-}"
 PYTHON_BIN="${PYTHON_BIN:-}"
 
@@ -213,7 +221,7 @@ PY
     acl=$((3000 + vlan * 10))
 
     apply_start=$(date +%s)
-    log "BATCH_START phase=apply vlan=$vlan acl=$acl host=$SWITCH_HOST"
+    log "BATCH_START phase=apply_save vlan=$vlan acl=$acl host=$SWITCH_HOST"
     cmd_file="/tmp/hp5130-acl.cmd.${vlan}.$$"
     {
       echo "system-view"
@@ -228,27 +236,17 @@ PY
       done < "$vlan_file"
       echo "quit"
       echo "quit"
-      echo "quit"  # Added: Extra quit to log out from user-view and close session
+      echo "quit"
+      echo "save force"
+      echo "quit"
     } > "$cmd_file"
-    run_ssh_cmdfile "apply" "$cmd_file"
+    run_ssh_cmdfile "apply_save" "$cmd_file"
     apply_status=$?
     apply_end=$(date +%s)
     apply_duration=$((apply_end - apply_start))
-    log "BATCH_END phase=apply vlan=$vlan status=$apply_status duration_sec=$apply_duration"
+    log "BATCH_END phase=apply_save vlan=$vlan status=$apply_status duration_sec=$apply_duration"
 
-    save_start=$(date +%s)
-    log "BATCH_START phase=save vlan=$vlan host=$SWITCH_HOST"
-    {
-      echo "save force"
-      echo "quit"  # Added: Quit to close session after save
-    } > "$cmd_file"
-    run_ssh_cmdfile "save" "$cmd_file"
-    save_status=$?
-    save_end=$(date +%s)
-    save_duration=$((save_end - save_start))
-    log "BATCH_END phase=save vlan=$vlan status=$save_status duration_sec=$save_duration"
-
-    if [ "$apply_status" -ne 0 ] || [ "$save_status" -ne 0 ]; then
+    if [ "$apply_status" -ne 0 ]; then
       fail=1
     fi
   done

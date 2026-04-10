@@ -1,0 +1,18 @@
+{
+  "description": "Add switch_host column to isp_routers table. This records which HP5130 switch (by management IP) each ISP router is physically connected to. Used to correctly target ACL blocks (both per-device IP blocks and egress ISP uplink block ACLs) to the specific switch hosting the ISP router, as required by spec table 11. Without this column the code fell back to SWITCH_HOST for all operations, which was correct by coincidence but not spec-compliant. After migration, admins must set switch_host on each ISP router via the admin ISP Routers page.",
+  "env": {
+    "add": [],
+    "remove": []
+  },
+  "db": {
+    "up":   "commit-migrations/c9a1f3d-up.sh",
+    "down": "commit-migrations/c9a1f3d-down.sh",
+    "verify_up": [
+      {"type": "column", "table": "isp_routers", "column": "switch_host"}
+    ],
+    "verify_down": [
+      {"type": "column_absent", "table": "isp_routers", "column": "switch_host"}
+    ]
+  },
+  "notes": "After deploying, visit Admin → ISP Routers and set the HP5130 Switch field for each router. Until set, ACL blocks fall back to the first SWITCH_HOST (existing behaviour). The per-device IP block ACLs (ACL 30xx) and the egress ISP uplink block ACLs (ACL 395x) will then be applied to the correct switch based on where each ISP router is physically plugged in."
+}

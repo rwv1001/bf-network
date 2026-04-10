@@ -1433,28 +1433,45 @@ def reset_dns_hijack_rules():
 
 
 def reset_acl_baseline():
-    """Re-apply baseline ACLs on the switch."""
+    """Re-apply baseline walled-garden ACLs on ALL configured switches.
+
+    The walled-garden ACL (ACL 30xx per VLAN) is applied inbound on each
+    switch's VLAN SVI, so it must exist on every switch in SWITCH_HOSTS.
+    Runs the baseline script once per switch host.
+    """
     script_path = os.getenv('ACL_BASELINE_SCRIPT', '/scripts/hp5130-acl-baseline.sh')
     if not os.path.isfile(script_path):
         logger.error("ACL baseline script not found: %s", script_path)
         return False
 
-    env = os.environ.copy()
-    if not env.get("SWITCH_KEY_PATH"):
-        env["SWITCH_KEY_PATH"] = "/keys/id_rsa"
-
-    result = subprocess.run([script_path], capture_output=True, text=True, timeout=120, env=env)
-    if result.returncode != 0:
-        stderr = (result.stderr or '').strip()
-        stdout = (result.stdout or '').strip()
-        logger.error(
-            "ACL baseline failed (exit=%s). stderr=%s stdout=%s",
-            result.returncode,
-            stderr or '<empty>',
-            stdout or '<empty>',
-        )
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
+    if not switch_hosts:
+        logger.error("reset_acl_baseline: no SWITCH_HOSTS configured")
         return False
-    return True
+
+    all_ok = True
+    for host in switch_hosts:
+        env = os.environ.copy()
+        env['SWITCH_HOST'] = host
+        if not env.get("SWITCH_KEY_PATH"):
+            env["SWITCH_KEY_PATH"] = "/keys/id_rsa"
+
+        result = subprocess.run([script_path], capture_output=True, text=True,
+                                timeout=120, env=env)
+        if result.returncode != 0:
+            stderr = (result.stderr or '').strip()
+            stdout = (result.stdout or '').strip()
+            logger.error(
+                "ACL baseline failed for %s (exit=%s). stderr=%s stdout=%s",
+                host, result.returncode,
+                stderr or '<empty>',
+                stdout or '<empty>',
+            )
+            all_ok = False
+        else:
+            logger.info("ACL baseline pushed to %s", host)
+    return all_ok
 
 
 def clear_mac_auth_sessions():
@@ -1572,14 +1589,23 @@ def reset_acl_queue_files():
     try:
         if os.path.isdir(queue_base):
             for name in os.listdir(queue_base):
-                if name.startswith(".dedup-") or name in {"hp5130-acl.queue", "hp5130-acl.pid", "hp5130-acl.lock"}:
-                    path = os.path.join(queue_base, name)
+                path = os.path.join(queue_base, name)
+                # Clear dedup markers, queue files, PID files, and lock dirs
+                # for both the legacy single-host names and the current
+                # per-host names (hp5130-acl-<host>.queue etc.).
+                is_dedup = name.startswith('.dedup-')
+                is_acl_file = (
+                    name.startswith('hp5130-acl') and
+                    (name.endswith('.queue') or name.endswith('.pid') or name.endswith('.lock'))
+                )
+                is_acl_lock_dir = name.startswith('hp5130-acl') and name.endswith('.lock') and os.path.isdir(path)
+                if is_dedup or is_acl_file or is_acl_lock_dir:
                     if os.path.isdir(path):
                         shutil.rmtree(path, ignore_errors=True)
                     else:
                         try:
                             os.remove(path)
-                            logger.info("ACL queue file cleared successfully: %s", path)
+                            logger.info("ACL queue file cleared: %s", path)
                         except FileNotFoundError:
                             pass
     except Exception as exc:
@@ -1587,7 +1613,12 @@ def reset_acl_queue_files():
 
 
 def reset_test_data():
-    """Remove all users/devices/requests, Kea host/lease data, and NAT/DNS logs."""
+    """Remove all users/devices/requests, Kea host/lease data, and NAT/DNS logs.
+
+    This function only performs fast synchronous work (DB deletes + file truncation).
+    The Kea container restart is intentionally excluded here; callers that want it
+    should call _restart_kea_container() separately (e.g. in a background thread).
+    """
     kea = None
     if os.path.exists(KEA_SOCKET):
         kea = get_kea()
@@ -1635,15 +1666,6 @@ def reset_test_data():
         logger.info("Kea CSV lease file truncated: %s", lease_file)
     except Exception as exc:
         logger.warning("Failed to truncate Kea lease file %s: %s", lease_file, exc)
-
-    # Restart Kea so it re-reads the now-empty CSV and clears its in-memory
-    # lease cache.  Without this restart Kea continues to skip previously
-    # issued IPs even though the CSV and DB are empty.
-    try:
-        _restart_kea_container()
-        logger.info("Kea container restarted after test reset")
-    except Exception as exc:
-        logger.warning("Failed to restart Kea after test reset: %s", exc)
 
 
 def upsert_unregistered_lease(mac_address, ip_address, expires_at, commit=True):
@@ -1923,43 +1945,59 @@ def cleanup_orphan_hijack_rules():
     return removed
 
 
+def _get_switch_host_for_isp_router(router):
+    """Return the switch host (management IP) for the HP5130 that physically hosts
+    this ISP router's uplink port.  Uses ISPRouter.switch_host when set; falls back
+    to the first entry in SWITCH_HOSTS (preserving pre-migration behaviour).
+    """
+    if router and router.switch_host:
+        return router.switch_host
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
+    return hosts[0] if hosts else ''
+
+
+def _get_switch_host_for_vlan(vlan_id):
+    """Return the HP5130 switch_host that hosts the ISP router for the given
+    device VLAN.  The ISP router's switch is the choke point for internet
+    traffic: blocking there is sufficient regardless of which physical switch
+    the device is connected to.
+
+    Resolves via VlanMapping.isp_router_id -> ISPRouter.switch_host.
+    Falls back to first SWITCH_HOSTS entry if the mapping is not configured.
+    """
+    if vlan_id:
+        try:
+            mapping = VlanMapping.query.filter_by(vlan_id=int(vlan_id)).first()
+            if mapping and mapping.isp_router and mapping.isp_router.switch_host:
+                return mapping.isp_router.switch_host
+        except Exception:
+            pass
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
+    return hosts[0] if hosts else ''
+
+
 def manage_switch_acl(action, ip_address, vlan_id):
     """
     Manage HP5130 ACL rules for blocking/unblocking specific IPs using SSH.
-    
+
+    For 'block': targets only the ISP router's switch for the VLAN.  That
+    switch is the internet choke point — all traffic destined for the internet
+    must pass through it regardless of which physical switch the device is on.
+
+    For 'unblock': targets ALL switches in SWITCH_HOSTS to defensively remove
+    any stale deny rules left from previous behaviour or device moves.
+
     Args:
         action: 'block' to deny traffic, 'unblock' to remove deny rule
         ip_address: Device IP address to block/unblock
         vlan_id: VLAN ID (e.g., 10)
-        
+
     Returns:
-        bool: True if successful, False otherwise
+        bool: True if all targeted switches succeeded
     """
-    acl_script = os.getenv('ACL_QUEUE_SCRIPT', '/scripts/hp5130-acl.sh')
-    use_acl_script = os.getenv('USE_ACL_QUEUE', '1') != '0'
-
-    if use_acl_script and os.path.isfile(acl_script):
-        try:
-            result = subprocess.run(
-                [acl_script, action, ip_address],
-                capture_output=True,
-                text=True,
-                timeout=15
-            )
-            if result.returncode == 0:
-                logger.info("ACL %s queued for %s via %s", action, ip_address, acl_script)
-                return True
-            logger.warning(
-                "ACL queue script failed for %s: %s",
-                ip_address,
-                (result.stderr or result.stdout).strip()
-            )
-        except Exception as exc:
-            logger.warning("ACL queue script error for %s: %s", ip_address, exc)
-
-    # Fallback: apply ACL directly via SSH
-    switch_host = os.environ['SWITCH_HOST']
-
+    # Derive VLAN ID from IP third octet if not provided (scheme: 192.168.<vlan>.x)
     if not vlan_id and ip_address:
         try:
             vlan_id = int(ip_address.split('.')[2])
@@ -1970,6 +2008,27 @@ def manage_switch_acl(action, ip_address, vlan_id):
         logger.error("Unable to determine VLAN ID for ACL update")
         return False
 
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    all_switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
+    if not all_switch_hosts:
+        logger.error("manage_switch_acl: no SWITCH_HOSTS configured")
+        return False
+
+    if action == 'block':
+        # Target only the ISP router's switch for this VLAN.
+        isp_switch = _get_switch_host_for_vlan(vlan_id)
+        if isp_switch:
+            switch_hosts = [isp_switch]
+            logger.info("manage_switch_acl block: targeting ISP router switch %s for VLAN %s",
+                        isp_switch, vlan_id)
+        else:
+            switch_hosts = all_switch_hosts
+            logger.warning("manage_switch_acl block: ISP router switch not found for VLAN %s,"
+                           " falling back to all switches", vlan_id)
+    else:
+        # Unblock: hit all switches to remove any stale rules.
+        switch_hosts = all_switch_hosts
+
     acl_num = 3000 + (vlan_id * 10)
     try:
         host_octet = int(ip_address.split('.')[3])
@@ -1979,40 +2038,73 @@ def manage_switch_acl(action, ip_address, vlan_id):
 
     rule_num = 1000 + host_octet
 
-    if action == 'block':
-        logger.info(f"Adding ACL deny rule for {ip_address} on VLAN {vlan_id} via SSH")
-        commands = [
-            "system-view",
-            f"acl advanced {acl_num}",
-            f"rule {rule_num} deny ip source {ip_address} 0",
-            "quit", "quit", "save force"
-        ]
-    elif action == 'unblock':
-        logger.info(f"Removing ACL deny rule for {ip_address} on VLAN {vlan_id} via SSH")
-        commands = [
-            "system-view",
-            f"acl advanced {acl_num}",
-            f"undo rule {rule_num}",
-            "quit", "quit", "save force"
-        ]
-    else:
-        logger.error(f"Invalid action: {action}")
-        return False
+    acl_script = os.getenv('ACL_QUEUE_SCRIPT', '/scripts/hp5130-acl.sh')
+    use_acl_script = os.getenv('USE_ACL_QUEUE', '1') != '0'
 
-    try:
-        output = _run_switch_command(switch_host, '\n'.join(commands))
-        if output is not None:
-            if output:
-                logger.debug(f"SSH ACL output: {output}")
-            logger.info(f"ACL {action} successful for {ip_address} on VLAN {vlan_id} via SSH")
-            return True
-        logger.error(f"Switch ACL {action} failed for {ip_address}: no response")
-        return False
-    except Exception as e:
-        logger.error(f"Switch ACL {action} failed for {ip_address}: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return False
+    all_ok = True
+    for switch_host in switch_hosts:
+        if use_acl_script and os.path.isfile(acl_script):
+            try:
+                env = os.environ.copy()
+                env['SWITCH_HOST'] = switch_host
+                result = subprocess.run(
+                    [acl_script, action, ip_address],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    env=env,
+                )
+                if result.returncode == 0:
+                    logger.info("ACL %s queued for %s on %s via %s",
+                                action, ip_address, switch_host, acl_script)
+                    continue
+                logger.warning(
+                    "ACL queue script failed for %s on %s: %s",
+                    ip_address, switch_host,
+                    (result.stderr or result.stdout).strip()
+                )
+            except Exception as exc:
+                logger.warning("ACL queue script error for %s on %s: %s",
+                               ip_address, switch_host, exc)
+
+        # Fallback: apply directly via SSH
+        if action == 'block':
+            logger.info("Adding ACL deny rule for %s on VLAN %s via SSH to %s",
+                        ip_address, vlan_id, switch_host)
+            commands = [
+                "system-view",
+                f"acl advanced {acl_num}",
+                f"rule {rule_num} deny ip source {ip_address} 0",
+                "quit", "quit", "save force"
+            ]
+        elif action == 'unblock':
+            logger.info("Removing ACL deny rule for %s on VLAN %s via SSH to %s",
+                        ip_address, vlan_id, switch_host)
+            commands = [
+                "system-view",
+                f"acl advanced {acl_num}",
+                f"undo rule {rule_num}",
+                "quit", "quit", "save force"
+            ]
+        else:
+            logger.error("Invalid action: %s", action)
+            return False
+
+        try:
+            output = _run_switch_command(switch_host, '\n'.join(commands))
+            if output is not None:
+                if output:
+                    logger.debug("SSH ACL output (%s): %s", switch_host, output)
+            else:
+                logger.error("Switch ACL %s failed for %s on %s: no response",
+                             action, ip_address, switch_host)
+                all_ok = False
+        except Exception as e:
+            logger.error("Switch ACL %s failed for %s on %s: %s",
+                         action, ip_address, switch_host, e)
+            all_ok = False
+
+    return all_ok
 
 
 def _normalize_switch_mac(mac_address):
@@ -5152,7 +5244,13 @@ def admin_update_admin_email(admin_id):
 @login_required
 @permission_required('manage_users')
 def admin_reset_test():
-    """Reset test environment data and network rules."""
+    """Reset test environment data and network rules.
+
+    The DB cleanup happens synchronously so it is complete before we redirect.
+    The slow switch/Kea operations (ACL baseline, MAC auth clear, port reset,
+    PBR/NQA push) run in a background thread so the browser gets a response
+    immediately rather than hitting a 504 gateway timeout.
+    """
     if not is_test_env():
         abort(404)
 
@@ -5165,22 +5263,48 @@ def admin_reset_test():
 
     reset_acl_queue_files()
     reset_dns_hijack_rules()
-    acl_ok = reset_acl_baseline()
-    mac_auth_cleared = clear_mac_auth_sessions()
-    ports_reset = reset_user_ports()
-    nqa_ok = push_pbr_nqa_to_switches()
 
-    if acl_ok and mac_auth_cleared and ports_reset and nqa_ok:
-        flash('Test reset complete. Database cleared (users, devices, NAT sessions, DNS resolutions), ACL baseline restored, DNS hijack rules restored, MAC auth sessions cleared, user ports reset, and PBR/NQA config pushed to switches.', 'success')
-    elif acl_ok and mac_auth_cleared and ports_reset:
-        flash('Test reset complete, but PBR/NQA push to switches failed.', 'warning')
-    elif acl_ok and mac_auth_cleared:
-        flash('Test reset complete (including NAT/DNS logs), but user port reset or PBR/NQA push failed.', 'warning')
-    elif acl_ok:
-        flash('Test reset complete (including NAT/DNS logs), but MAC auth session clearing, port reset, or PBR/NQA push failed.', 'warning')
-    else:
-        flash('Test reset complete (including NAT/DNS logs), but ACL baseline, MAC auth clearing, port reset, or PBR/NQA push failed.', 'warning')
+    def _background_reset():
+        with app.app_context():
+            try:
+                # Run ACL baseline first, while dhcp4.json is stable.
+                # Kea restart regenerates dhcp4.json asynchronously; if we ran
+                # the baseline after the restart docker command returned but
+                # before the entrypoint finished writing the file, the Python
+                # subnet parser would fail and every switch would fall back to
+                # a hardcoded /24 mask.
+                acl_ok = reset_acl_baseline()
 
+                # Now restart Kea to clear its in-memory lease cache.
+                try:
+                    _restart_kea_container()
+                    logger.info("Test reset: Kea container restarted")
+                except Exception as exc:
+                    logger.warning("Test reset: Kea restart failed: %s", exc)
+
+                mac_auth_cleared = clear_mac_auth_sessions()
+                ports_reset = reset_user_ports()
+                nqa_ok = push_pbr_nqa_to_switches()
+                if acl_ok and mac_auth_cleared and ports_reset and nqa_ok:
+                    logger.info("Test reset: background switch tasks complete (all OK)")
+                else:
+                    logger.warning(
+                        "Test reset: background switch tasks finished with errors "
+                        "(acl=%s mac_auth=%s ports=%s nqa=%s)",
+                        acl_ok, mac_auth_cleared, ports_reset, nqa_ok,
+                    )
+            except Exception as exc:
+                logger.error("Test reset: background switch tasks raised: %s", exc)
+
+    t = threading.Thread(target=_background_reset, daemon=True)
+    t.start()
+
+    flash(
+        'Test reset started. Database cleared (users, devices, NAT sessions, '
+        'DNS resolutions). Switch ACL baseline, MAC auth, port reset, and '
+        'PBR/NQA push are running in the background — check server logs for results.',
+        'success',
+    )
     return redirect(url_for('admin_dashboard'))
 
 
@@ -5194,6 +5318,82 @@ def admin_push_pbr_nqa():
         flash('PBR/NQA config pushed to all switches successfully.', 'success')
     else:
         flash('PBR/NQA push failed for one or more switches — check logs.', 'warning')
+    return redirect(url_for('admin_isp_routers'))
+
+
+def reapply_all_ip_blocks():
+    """Re-push every current per-device IP block to all switches.
+
+    Iterates through active IPLeases (non-expired, not from blocked pool) for
+    devices that are not fully accessible, and re-adds the ACL deny rule to
+    all switches.  Also re-sends the block for IPs that should be hijacked.
+
+    This is idempotent and safe to call after changing switch configuration
+    or adding a new switch — it brings all switches' ACL 30xx rules up to date.
+
+    Returns (pushed_count, failed_count).
+    """
+    from datetime import datetime as _dt
+    now = _dt.utcnow()
+
+    pushed = 0
+    failed = 0
+
+    # Get all active non-blocked-pool leases for devices that are not internet_accessible=True
+    leases = IPLease.query.filter(
+        IPLease.lease_expiry > now,
+        IPLease.from_blocked_pool == False,  # noqa: E712
+    ).all()
+
+    for lease in leases:
+        device = Device.query.filter_by(mac_address=lease.mac_address).first()
+        if not device:
+            continue
+        # Only re-push if the device should currently be blocked at the switch
+        if device.internet_accessible is True:
+            continue
+        vlan_id = lease.vlan_id or device.current_vlan
+        if not vlan_id or not lease.ip_address:
+            continue
+        ok = manage_switch_acl('block', lease.ip_address, vlan_id)
+        if ok:
+            pushed += 1
+        else:
+            failed += 1
+            logger.warning("reapply_all_ip_blocks: failed to block %s on VLAN %s",
+                           lease.ip_address, vlan_id)
+
+    logger.info("reapply_all_ip_blocks: pushed=%d failed=%d", pushed, failed)
+    return pushed, failed
+
+
+@app.route('/admin/reapply-acl-blocks', methods=['POST'])
+@login_required
+@permission_required('manage_isp_routers')
+def admin_reapply_acl_blocks():
+    """Re-push ACL baseline + all current per-device blocks to all switches.
+
+    Use this after adding a new switch or changing a router's switch_host,
+    to bring the new switch's ACLs up to date without a full test reset.
+    """
+    baseline_ok = reset_acl_baseline()
+    pushed, failed = reapply_all_ip_blocks()
+    if baseline_ok and failed == 0:
+        flash(
+            f'ACL baseline pushed and {pushed} IP block(s) re-applied to all switches.',
+            'success',
+        )
+    elif not baseline_ok:
+        flash(
+            f'ACL baseline push failed on one or more switches. '
+            f'{pushed} IP block(s) re-applied ({failed} failed). Check logs.',
+            'warning',
+        )
+    else:
+        flash(
+            f'ACL baseline pushed. {pushed} IP block(s) re-applied but {failed} failed. Check logs.',
+            'warning',
+        )
     return redirect(url_for('admin_isp_routers'))
 
 
@@ -5213,6 +5413,7 @@ def admin_isp_routers():
             name = request.form.get('name', '').strip()
             vlan_id_raw = request.form.get('vlan_id', '').strip()
             switch_port = request.form.get('switch_port', '').strip() or None
+            switch_host_form = request.form.get('switch_host', '').strip() or None
             if not name or not vlan_id_raw:
                 flash('Name and VLAN ID are required.', 'error')
                 return redirect(url_for('admin_isp_routers'))
@@ -5228,6 +5429,7 @@ def admin_isp_routers():
                 return redirect(url_for('admin_isp_routers'))
             router = ISPRouter(name=name, subnet=subnet, vlan_id=vlan_id,
                                switch_port=switch_port,
+                               switch_host=switch_host_form,
                                dhcp_snooping_trust=dhcp_trust)
             db.session.add(router)
             db.session.commit()
@@ -5235,6 +5437,8 @@ def admin_isp_routers():
             _update_isl_trunk_vlan(router.vlan_id, add=True)
             if switch_port:
                 _set_isp_router_port(switch_port, router)
+            reset_acl_baseline()
+            reapply_all_ip_blocks()
             flash(
                 f'ISP router "{name}" added. '
                 f'⚠ Set the router LAN IP to {router.gateway_ip} and add a '
@@ -5247,6 +5451,7 @@ def admin_isp_routers():
         elif action == 'update':
             router = ISPRouter.query.get_or_404(request.form.get('router_id'))
             old_port = router.switch_port
+            old_switch_host = router.switch_host
             old_vlan_id = router.vlan_id
             old_pbr_name = router.pbr_name
             router.name = request.form.get('name', router.name).strip()
@@ -5262,6 +5467,7 @@ def admin_isp_routers():
             router.subnet = f'{_net_word()}.{router.vlan_id}.0/24'
             new_port = request.form.get('switch_port', '').strip() or None
             router.switch_port = new_port
+            router.switch_host = request.form.get('switch_host', '').strip() or None
             router.dhcp_snooping_trust = (router.vlan_id == 1)
             db.session.commit()
             # If name changed, remove the old PBR entries from all switches
@@ -5277,9 +5483,10 @@ def admin_isp_routers():
                 for host in switch_hosts:
                     _run_switch_command(host, _build_pbr_undo_next_hop(router.pbr_name, old_gateway_ip))
                 _remove_isp_router_vlan_from_switches(old_vlan_id)
-            # Clear the old port if it changed
+            # Clear the old port if it changed (use old_switch_host since the old port
+            # is on the switch the router was previously assigned to)
             if old_port and old_port != new_port:
-                _clear_isp_router_port(old_port)
+                _clear_isp_router_port(old_port, old_switch_host)
             # Create the new VLAN/interface/PBR BEFORE configuring the port,
             # so that 'port access vlan N' succeeds on an existing VLAN
             _apply_isp_router_to_switches(router)
@@ -5299,14 +5506,24 @@ def admin_isp_routers():
             if vlan_changed:
                 _update_isl_trunk_vlan(old_vlan_id, add=False)
             _update_isl_trunk_vlan(router.vlan_id, add=True)
-            flash(f'ISP router "{router.name}" updated.', 'success')
+            # Reapply ACL baseline and current IP blocks to all switches so that
+            # any new switch (or changed switch_host) is immediately up to date.
+            baseline_ok = reset_acl_baseline()
+            pushed, blk_failed = reapply_all_ip_blocks()
+            msg = f'ISP router "{router.name}" updated.'
+            if baseline_ok and blk_failed == 0:
+                msg += f' ACL baseline pushed and {pushed} block(s) re-applied to all switches.'
+                flash(msg, 'success')
+            else:
+                msg += f' ACL baseline or block reapply had errors (pushed={pushed} failed={blk_failed}) — check logs.'
+                flash(msg, 'warning')
             return redirect(url_for('admin_isp_routers'))
 
         elif action == 'delete':
             router = ISPRouter.query.get_or_404(request.form.get('router_id'))
             vlan_to_remove = router.vlan_id
             if router.switch_port:
-                _clear_isp_router_port(router.switch_port)
+                _clear_isp_router_port(router.switch_port, router.switch_host)
             _remove_isp_router_from_switches(router)
             _update_isl_trunk_vlan(vlan_to_remove, add=False)
             db.session.delete(router)
@@ -5316,15 +5533,15 @@ def admin_isp_routers():
 
     routers = ISPRouter.query.order_by(ISPRouter.id).all()
     used_vlan_ids = {r.vlan_id for r in routers}
-    # Populate port dropdown from the primary switch (first of SWITCH_HOSTS)
+    # Collect ports per switch for the port dropdowns
     switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
     switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
-    primary_host = switch_hosts[0] if switch_hosts else ''
-    switch_ports_list = []
-    if primary_host:
+    # switch_ports_by_host: list of (host, port_name) tuples across all switches
+    switch_ports_by_host = []
+    for host in switch_hosts:
         rows = db.session.execute(
             text("""
-                SELECT port_name FROM switch_ports
+                SELECT switch_host, port_name FROM switch_ports
                 WHERE switch_host = :host
                 ORDER BY
                     (CASE WHEN port_name LIKE 'XGE%' THEN 1 ELSE 0 END),
@@ -5332,11 +5549,17 @@ def admin_isp_routers():
                     CAST(NULLIF(split_part(port_name, '/', 2), '') AS INTEGER),
                     CAST(NULLIF(split_part(port_name, '/', 3), '') AS INTEGER)
             """),
-            {'host': primary_host}
+            {'host': host}
         ).fetchall()
-        switch_ports_list = [r[0] for r in rows]
+        for r in rows:
+            switch_ports_by_host.append((r[0], r[1]))
+    # For backwards compat keep switch_ports as a flat list from primary switch
+    primary_host = switch_hosts[0] if switch_hosts else ''
+    switch_ports_list = [p for h, p in switch_ports_by_host if h == primary_host]
     return render_template('admin_isp_routers.html', routers=routers,
                            switch_ports=switch_ports_list,
+                           switch_ports_by_host=switch_ports_by_host,
+                           switch_hosts=switch_hosts,
                            used_vlan_ids=used_vlan_ids,
                            network_word=_net_word())
 
@@ -7539,6 +7762,8 @@ def push_pbr_nqa_to_switches():
         # Push egress block ACL: deny VLANs assigned to OTHER routers from
         # exiting through this router's uplink SVI.  When PBR track goes DOWN,
         # Comware falls to normal routing; this ACL catches that fallback.
+        # The ACL lives on the ISP uplink SVI which is only physically active
+        # on the switch where the ISP router is plugged in.
         excluded = []
         for other_router in routers:
             if other_router.id != router.id:
@@ -7547,13 +7772,19 @@ def push_pbr_nqa_to_switches():
         acl_number = 3950 + router.id
         block_cfg = _build_isp_router_block_acl(acl_number, router, excluded)
         if block_cfg:
-            for host in switch_hosts:
-                if _run_switch_command(host, block_cfg) is None:
-                    failed.append(f'{host}/{router.pbr_name}/block-acl')
+            block_host = _get_switch_host_for_isp_router(router)
+            if block_host:
+                if _run_switch_command(block_host, block_cfg) is None:
+                    failed.append(f'{block_host}/{router.pbr_name}/block-acl')
                     logger.warning(
                         "push_pbr_nqa_to_switches: block ACL failed for %s on %s",
-                        router.pbr_name, host,
+                        router.pbr_name, block_host,
                     )
+            else:
+                logger.warning(
+                    "push_pbr_nqa_to_switches: no switch host for router %s, skipping block ACL",
+                    router.pbr_name,
+                )
 
     return len(failed) == 0
 
@@ -7572,17 +7803,17 @@ def _apply_isp_router_to_switches(router):
 
 
 def _set_isp_router_port(port_name, router):
-    """Mark switch port(s) as uplink_udm and push port config on all switches."""
-    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
-    switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
-    for host in switch_hosts:
-        db.session.execute(text("""
-            UPDATE switch_ports
-            SET port_role = 'uplink_udm', last_updated = NOW()
-            WHERE switch_host = :host AND port_name = :port
-        """), {'host': host, 'port': port_name})
-        cfg = _build_isp_router_port_config(port_name, router)
-        _run_switch_command(host, cfg)
+    """Mark switch port as uplink_udm and push port config to the router's switch only."""
+    host = _get_switch_host_for_isp_router(router)
+    if not host:
+        return
+    db.session.execute(text("""
+        UPDATE switch_ports
+        SET port_role = 'uplink_udm', last_updated = NOW()
+        WHERE switch_host = :host AND port_name = :port
+    """), {'host': host, 'port': port_name})
+    cfg = _build_isp_router_port_config(port_name, router)
+    _run_switch_command(host, cfg)
     db.session.commit()
 
 
@@ -7642,18 +7873,25 @@ def _update_isl_trunk_vlan(vlan_id, add=True):
         _run_switch_command(switch_host, cfg)
 
 
-def _clear_isp_router_port(port_name):
-    """Revert a switch port that was an ISP router uplink back to unknown and reset it on the switch."""
-    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
-    switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
-    for host in switch_hosts:
-        db.session.execute(text("""
-            UPDATE switch_ports
-            SET port_role = 'unknown', last_updated = NOW()
-            WHERE switch_host = :host AND port_name = :port
-              AND port_role = 'uplink_udm'
-        """), {'host': host, 'port': port_name})
-        _run_switch_command(host, _build_reset_port_config(port_name))
+def _clear_isp_router_port(port_name, switch_host=None):
+    """Revert a switch port that was an ISP router uplink back to unknown and reset it.
+
+    switch_host should be the management IP of the HP5130 that hosts the port.  When
+    omitted the first SWITCH_HOST is used (pre-migration fallback).
+    """
+    if not switch_host:
+        switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+        hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
+        switch_host = hosts[0] if hosts else ''
+    if not switch_host:
+        return
+    db.session.execute(text("""
+        UPDATE switch_ports
+        SET port_role = 'unknown', last_updated = NOW()
+        WHERE switch_host = :host AND port_name = :port
+          AND port_role = 'uplink_udm'
+    """), {'host': switch_host, 'port': port_name})
+    _run_switch_command(switch_host, _build_reset_port_config(port_name))
     db.session.commit()
 
 

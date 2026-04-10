@@ -1,5 +1,6 @@
 {
     "files.associations": {
         "*.html": "jinja-html"
-    }
+    },
+    "cmake.sourceDirectory": "/home/admin/bf-network/kea-hooks/dynamic_subnet"
 }
