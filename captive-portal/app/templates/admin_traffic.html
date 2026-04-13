@@ -695,5 +695,51 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
 });
+
+// Auto-refresh every 15 seconds, preserving current URL params (filters, sort, page)
+(function() {
+    const REFRESH_INTERVAL = 15000;
+    let countdown = REFRESH_INTERVAL / 1000;
+    let paused = false;
+    let timer = null;
+
+    // Inject status bar above the table
+    const tableWrapper = document.querySelector('.table-responsive') || document.querySelector('table');
+    if (!tableWrapper) return;
+
+    const bar = document.createElement('div');
+    bar.style.cssText = 'display:flex;align-items:center;gap:12px;margin-bottom:8px;font-size:0.85em;color:#666;';
+    bar.innerHTML = `
+        <span id="tv-countdown">Refreshing in <b id="tv-secs">${countdown}</b>s</span>
+        <button id="tv-pause" style="font-size:0.85em;padding:2px 8px;cursor:pointer;">Pause</button>
+        <button id="tv-now" style="font-size:0.85em;padding:2px 8px;cursor:pointer;">Refresh now</button>
+    `;
+    tableWrapper.parentNode.insertBefore(bar, tableWrapper);
+
+    const secsEl = document.getElementById('tv-secs');
+    const pauseBtn = document.getElementById('tv-pause');
+    const nowBtn = document.getElementById('tv-now');
+
+    function doRefresh() {
+        window.location.href = window.location.href;
+    }
+
+    function tick() {
+        if (paused) return;
+        countdown--;
+        secsEl.textContent = countdown;
+        if (countdown <= 0) doRefresh();
+    }
+
+    timer = setInterval(tick, 1000);
+
+    pauseBtn.addEventListener('click', function() {
+        paused = !paused;
+        pauseBtn.textContent = paused ? 'Resume' : 'Pause';
+        document.getElementById('tv-countdown').style.opacity = paused ? '0.4' : '1';
+    });
+
+    nowBtn.addEventListener('click', doRefresh);
+})();
 </script>
 {% endblock %}

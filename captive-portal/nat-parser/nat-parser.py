@@ -23,9 +23,14 @@ DB_URL = os.getenv("DATABASE_URL", "postgresql://portal_user:change_this_passwor
 KEA_LEASES_FILE = os.getenv("KEA_LEASES_FILE", "/kea/leases/kea-leases4.csv")
 POSITION_FILE = os.getenv("POSITION_FILE", "/state/nat-parser.pos")
 
-UDM_HOST = os.environ['UDM_HOST']
 UDM_SSH_KEY = os.getenv("UDM_SSH_KEY", "/config/udm_key")
 UDM_INSTALL_SCRIPT = os.getenv("UDM_INSTALL_SCRIPT", "/scripts/udm-nat-logger-persist.sh")
+ROUTER_SSH_KEY = os.getenv("ROUTER_SSH_KEY", os.getenv("TEL_SSH_KEY", "/config/tel_key"))  # Shared key for all non-UDM routers
+ROUTER_INSTALL_SCRIPT = os.getenv("ROUTER_INSTALL_SCRIPT", "/scripts/tel-nat-logger-install.sh")
+PORTAL_IP = os.getenv("PORTAL_IP", "")
+USER_VLAN_MIN = os.getenv("USER_VLAN_MIN", "")
+USER_VLAN_MAX = os.getenv("USER_VLAN_MAX", "")
+ROUTER_CHECK_INTERVAL_SECONDS = int(os.getenv("ROUTER_CHECK_INTERVAL_SECONDS", os.getenv("TEL_CHECK_INTERVAL_SECONDS", "300")))  # 5 min
 
 SESSION_GAP_SECONDS = int(os.getenv("SESSION_GAP_SECONDS", "60"))
 STALE_LOG_THRESHOLD_SECONDS = int(os.getenv("STALE_LOG_THRESHOLD_SECONDS", "3600"))
@@ -53,6 +58,10 @@ class NATParser:
         self.last_flush = None
         self.active_sessions = {}  # (src_ip, src_port, dst_ip, dst_port) -> session_data
         self.seen_ips = set()  # Track IPs we've seen to trigger updates
+        self.cached_routers: list = []       # rows from isp_routers with nat_logger_type != 'none'
+        self.last_router_sync: Optional[datetime] = None
+        self.router_last_check: Dict[int, datetime] = {}      # router_id -> last check time
+        self.router_last_reinstall: Dict[int, datetime] = {}  # router_id -> last reinstall time
         
     def connect_db(self):
         """Connect to PostgreSQL database"""
@@ -464,6 +473,191 @@ class NATParser:
         except Exception as e:
             logger.error(f"Error processing log file: {e}")
     
+    def load_routers(self):
+        """Load ISP routers with nat_logger_type != 'none' from the database."""
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, name, nat_logger_type, subnet
+                    FROM isp_routers
+                    WHERE nat_logger_type != 'none'
+                    ORDER BY id
+                """)
+                rows = cur.fetchall()
+            routers = []
+            for row in rows:
+                router_id, name, logger_type, subnet = row
+                # Derive gateway_ip from subnet (always X.X.X.0/24 -> X.X.X.1)
+                gateway_ip = subnet.split('/')[0].rsplit('.', 1)[0] + '.1'
+                routers.append({
+                    'id': router_id,
+                    'name': name,
+                    'nat_logger_type': logger_type,
+                    'gateway_ip': gateway_ip,
+                })
+            self.cached_routers = routers
+            self.last_router_sync = datetime.now()
+            logger.info(f"Loaded {len(routers)} NAT logger router(s): "
+                        f"{[r['name'] for r in routers]}")
+        except Exception as e:
+            logger.error(f"Failed to load routers from DB: {e}")
+
+    def check_all_routers(self):
+        """Check all configured ISP routers and reinstall loggers as needed."""
+        # Reload router list from DB every 10 minutes so new routers are picked up
+        if (self.last_router_sync is None or
+                (datetime.now() - self.last_router_sync).total_seconds() > 600):
+            self.load_routers()
+
+        for router in self.cached_routers:
+            rid = router['id']
+            last_check = self.router_last_check.get(rid)
+            if last_check and (datetime.now() - last_check).total_seconds() < ROUTER_CHECK_INTERVAL_SECONDS:
+                continue
+            if router['nat_logger_type'] == 'udm':
+                self._check_udm_router(router)
+            elif router['nat_logger_type'] == 'openwrt':
+                self._check_openwrt_router(router)
+            self.router_last_check[rid] = datetime.now()
+
+    def _check_udm_router(self, router: dict):
+        """Check if NAT logger is running on a UDM router, reinstall if not."""
+        host = router['gateway_ip']
+        name = router['name']
+        if not os.path.exists(UDM_SSH_KEY):
+            logger.warning(f"UDM SSH key not found: {UDM_SSH_KEY} - skipping {name} check")
+            return
+        try:
+            logger.info(f"Checking NAT logger on {name} ({host})...")
+            result = subprocess.run([
+                "ssh", "-i", UDM_SSH_KEY,
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "ConnectTimeout=10",
+                f"root@{host}", "pgrep -f nat_logger.sh"
+            ], capture_output=True, timeout=10)
+            if result.returncode == 0:
+                pids = result.stdout.decode().strip().split('\n')
+                logger.info(f"NAT logger running on {name} (PIDs: {', '.join(pids)})")
+            else:
+                logger.warning(f"NAT logger NOT running on {name} - attempting reinstall...")
+                self._reinstall_udm_router(router)
+        except subprocess.TimeoutExpired:
+            logger.error(f"{name} connection timed out")
+        except Exception as e:
+            logger.error(f"Failed to check {name} logger status: {e}")
+
+    def _reinstall_udm_router(self, router: dict):
+        """Reinstall NAT logger on a UDM router."""
+        rid = router['id']
+        host = router['gateway_ip']
+        name = router['name']
+        last = self.router_last_reinstall.get(rid)
+        if last and (datetime.now() - last).total_seconds() < REINSTALL_COOLDOWN_SECONDS:
+            remaining = REINSTALL_COOLDOWN_SECONDS - (datetime.now() - last).total_seconds()
+            logger.info(f"{name} reinstall cooldown active ({remaining:.0f}s remaining)")
+            return
+        self.router_last_reinstall[rid] = datetime.now()
+        if not os.path.exists(UDM_SSH_KEY) or not os.path.exists(UDM_INSTALL_SCRIPT):
+            logger.warning(f"Missing SSH key or install script for {name}")
+            return
+        try:
+            logger.info(f"Copying install script to {name} ({host})...")
+            result = subprocess.run([
+                "scp", "-i", UDM_SSH_KEY,
+                "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+                UDM_INSTALL_SCRIPT, f"root@{host}:/tmp/udm-nat-logger-persist.sh"
+            ], capture_output=True, timeout=30)
+            if result.returncode != 0:
+                logger.error(f"SCP to {name} failed: {result.stderr.decode()}")
+                return
+            env_prefix = (f"PORTAL_IP='{PORTAL_IP}' "
+                          f"USER_VLAN_MIN='{USER_VLAN_MIN}' "
+                          f"USER_VLAN_MAX='{USER_VLAN_MAX}'")
+            result = subprocess.run([
+                "ssh", "-i", UDM_SSH_KEY,
+                "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+                f"root@{host}",
+                f"{env_prefix} bash /tmp/udm-nat-logger-persist.sh"
+            ], capture_output=True, timeout=60)
+            if result.returncode == 0:
+                logger.info(f"Successfully reinstalled NAT logger on {name}")
+                logger.debug(result.stdout.decode())
+            else:
+                logger.error(f"{name} install script failed: {result.stderr.decode()}")
+        except subprocess.TimeoutExpired:
+            logger.error(f"{name} connection timed out during reinstall")
+        except Exception as e:
+            logger.error(f"{name} reinstall failed: {e}")
+
+    def _check_openwrt_router(self, router: dict):
+        """Check if NAT logger is running on an OpenWRT router, reinstall if not."""
+        host = router['gateway_ip']
+        name = router['name']
+        if not os.path.exists(ROUTER_SSH_KEY):
+            logger.warning(f"Router SSH key not found: {ROUTER_SSH_KEY} - skipping {name} check")
+            return
+        try:
+            logger.info(f"Checking NAT logger on {name} ({host})...")
+            result = subprocess.run([
+                "ssh", "-i", ROUTER_SSH_KEY,
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "ConnectTimeout=10",
+                f"root@{host}", "pgrep -f nat_logger.sh"
+            ], capture_output=True, timeout=10)
+            if result.returncode == 0:
+                pids = result.stdout.decode().strip().split('\n')
+                logger.info(f"NAT logger running on {name} (PIDs: {', '.join(pids)})")
+            else:
+                logger.warning(f"NAT logger NOT running on {name} - attempting reinstall...")
+                self._reinstall_openwrt_router(router)
+        except subprocess.TimeoutExpired:
+            logger.error(f"{name} connection timed out")
+        except Exception as e:
+            logger.error(f"Failed to check {name} logger status: {e}")
+
+    def _reinstall_openwrt_router(self, router: dict):
+        """Reinstall NAT logger on an OpenWRT router."""
+        rid = router['id']
+        host = router['gateway_ip']
+        name = router['name']
+        last = self.router_last_reinstall.get(rid)
+        if last and (datetime.now() - last).total_seconds() < REINSTALL_COOLDOWN_SECONDS:
+            remaining = REINSTALL_COOLDOWN_SECONDS - (datetime.now() - last).total_seconds()
+            logger.info(f"{name} reinstall cooldown active ({remaining:.0f}s remaining)")
+            return
+        self.router_last_reinstall[rid] = datetime.now()
+        if not os.path.exists(ROUTER_SSH_KEY) or not os.path.exists(ROUTER_INSTALL_SCRIPT):
+            logger.warning(f"Missing SSH key or install script for {name}")
+            return
+        try:
+            logger.info(f"Copying install script to {name} ({host})...")
+            result = subprocess.run([
+                "scp", "-i", ROUTER_SSH_KEY,
+                "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+                ROUTER_INSTALL_SCRIPT, f"root@{host}:/tmp/tel-nat-logger-install.sh"
+            ], capture_output=True, timeout=30)
+            if result.returncode != 0:
+                logger.error(f"SCP to {name} failed: {result.stderr.decode()}")
+                return
+            env_prefix = (f"PORTAL_IP='{PORTAL_IP}' "
+                          f"USER_VLAN_MIN='{USER_VLAN_MIN}' "
+                          f"USER_VLAN_MAX='{USER_VLAN_MAX}'")
+            result = subprocess.run([
+                "ssh", "-i", ROUTER_SSH_KEY,
+                "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+                f"root@{host}",
+                f"{env_prefix} sh /tmp/tel-nat-logger-install.sh"
+            ], capture_output=True, timeout=60)
+            if result.returncode == 0:
+                logger.info(f"Successfully reinstalled NAT logger on {name}")
+                logger.debug(result.stdout.decode())
+            else:
+                logger.error(f"{name} install script failed: {result.stderr.decode()}")
+        except subprocess.TimeoutExpired:
+            logger.error(f"{name} connection timed out during reinstall")
+        except Exception as e:
+            logger.error(f"{name} reinstall failed: {e}")
+
     def check_log_freshness(self):
         """Check if logs are stale and attempt reinstall if needed"""
         if self.last_log_timestamp is None:
@@ -484,59 +678,15 @@ class NATParser:
             self.attempt_udm_reinstall()
     
     def attempt_udm_reinstall(self):
-        """Attempt to reinstall NAT logger on UDM"""
-        logger.info("Attempting to reinstall NAT logger on UDM...")
+        """Stale-log triggered reinstall: find the UDM router from cache and reinstall."""
+        logger.info("Attempting to reinstall NAT logger on UDM (stale log trigger)...")
         self.last_reinstall_attempt = datetime.now()
-        
-        try:
-            # Check if SSH key exists
-            if not os.path.exists(UDM_SSH_KEY):
-                logger.warning(f"SSH key not found: {UDM_SSH_KEY} - skipping reinstall")
-                return
-            
-            # Check if install script exists
-            if not os.path.exists(UDM_INSTALL_SCRIPT):
-                logger.warning(f"Install script not found: {UDM_INSTALL_SCRIPT} - skipping reinstall")
-                return
-            
-            # Copy script to UDM
-            logger.info(f"Copying script to UDM {UDM_HOST}...")
-            scp_cmd = [
-                "scp",
-                "-i", UDM_SSH_KEY,
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "ConnectTimeout=10",
-                UDM_INSTALL_SCRIPT,
-                f"root@{UDM_HOST}:/tmp/udm-nat-logger-persist.sh"
-            ]
-            
-            result = subprocess.run(scp_cmd, capture_output=True, timeout=30)
-            if result.returncode != 0:
-                logger.error(f"SCP failed: {result.stderr.decode()}")
-                return
-            
-            # Execute script on UDM
-            logger.info("Executing install script on UDM...")
-            ssh_cmd = [
-                "ssh",
-                "-i", UDM_SSH_KEY,
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "ConnectTimeout=10",
-                f"root@{UDM_HOST}",
-                "bash /tmp/udm-nat-logger-persist.sh"
-            ]
-            
-            result = subprocess.run(ssh_cmd, capture_output=True, timeout=60)
-            if result.returncode == 0:
-                logger.info("Successfully reinstalled NAT logger on UDM")
-                logger.debug(result.stdout.decode())
-            else:
-                logger.error(f"Install script failed: {result.stderr.decode()}")
-        
-        except subprocess.TimeoutExpired:
-            logger.error("UDM connection timed out - device may be unreachable")
-        except Exception as e:
-            logger.error(f"Reinstall attempt failed: {e}")
+        udm_routers = [r for r in self.cached_routers if r['nat_logger_type'] == 'udm']
+        if not udm_routers:
+            logger.warning("No UDM router found in DB - cannot reinstall")
+            return
+        for router in udm_routers:
+            self._reinstall_udm_router(router)
     
     def cleanup_old_sessions(self):
         """Delete NAT sessions older than RETENTION_DAYS"""
@@ -574,42 +724,11 @@ class NATParser:
                 pass
     
     def check_udm_logger_running(self):
-        """Check if NAT logger is running on UDM, start if not"""
-        try:
-            # Check if SSH key exists
-            if not os.path.exists(UDM_SSH_KEY):
-                logger.warning(f"SSH key not found: {UDM_SSH_KEY} - skipping UDM check")
-                return
-            
-            logger.info(f"Checking if NAT logger is running on UDM {UDM_HOST}...")
-            
-            # Check for running nat_logger processes
-            ssh_cmd = [
-                "ssh",
-                "-i", UDM_SSH_KEY,
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "ConnectTimeout=10",
-                f"root@{UDM_HOST}",
-                "pgrep -f nat_logger.sh"
-            ]
-            
-            result = subprocess.run(ssh_cmd, capture_output=True, timeout=10)
-            
-            if result.returncode == 0:
-                pids = result.stdout.decode().strip().split('\n')
-                logger.info(f"NAT logger is running on UDM (PIDs: {', '.join(pids)})")
-                return True
-            else:
-                logger.warning("NAT logger is NOT running on UDM - attempting to start...")
-                self.attempt_udm_reinstall()
-                return False
-        
-        except subprocess.TimeoutExpired:
-            logger.error("UDM connection timed out - device may be unreachable")
-            return False
-        except Exception as e:
-            logger.error(f"Failed to check UDM logger status: {e}")
-            return False
+        """Backwards-compatible: delegate to check_all_routers for UDM routers."""
+        udm_routers = [r for r in self.cached_routers if r['nat_logger_type'] == 'udm']
+        for router in udm_routers:
+            self._check_udm_router(router)
+            self.router_last_check[router['id']] = datetime.now()
     
     def run(self):
         """Main loop"""
@@ -633,9 +752,10 @@ class NATParser:
         logger.info(f"Session gap threshold: {SESSION_GAP_SECONDS}s")
         logger.info(f"Stale log threshold: {STALE_LOG_THRESHOLD_SECONDS}s")
         logger.info(f"NAT retention: {RETENTION_DAYS} days")
-        
-        # Check if NAT logger is running on UDM and start if needed
-        self.check_udm_logger_running()
+
+        # Load router list from DB and check all loggers at startup
+        self.load_routers()
+        self.check_all_routers()
         
         try:
             while True:
@@ -651,8 +771,11 @@ class NATParser:
                 # Close stale sessions
                 self.close_stale_sessions()
                 
-                # Check log freshness
+                # Check log freshness (triggers UDM reinstall if stale)
                 self.check_log_freshness()
+
+                # Periodically check all routers are still running
+                self.check_all_routers()
                 
                 # Cleanup old sessions (runs once per day)
                 self.cleanup_old_sessions()

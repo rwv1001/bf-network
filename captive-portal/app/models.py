@@ -219,6 +219,7 @@ class ISPRouter(db.Model):
     switch_port = db.Column(db.String(100), nullable=True)          # e.g. "GigabitEthernet1/0/24"
     switch_host = db.Column(db.String(50), nullable=True)           # e.g. "192.168.99.2" — which HP5130 this router is on
     dhcp_snooping_trust = db.Column(db.Boolean, default=True, nullable=False)
+    nat_logger_type = db.Column(db.String(20), nullable=False, default='none')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     # VLANs routed via this ISP

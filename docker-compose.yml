@@ -146,9 +146,14 @@ services:
       DATABASE_URL: postgresql://${DB_USER:-portal_user}:${DB_PASSWORD:-change_this_password}@127.0.0.1:5432/${DB_NAME:-captive_portal}
       LOG_FILE: /logs/remote-syslog.log
       KEA_LEASES_FILE: /kea/leases/kea-leases4.csv
-      UDM_HOST: ${UDM_HOST:?UDM_HOST is required}
+      UDM_HOST: ${UDM_HOST:-}  # Optional: overrides UDM gateway_ip from DB if set
+      PORTAL_IP: ${PORTAL_IP:?PORTAL_IP is required}
+      USER_VLAN_MIN: ${USER_VLAN_MIN:-192.168.2.0}
+      USER_VLAN_MAX: ${USER_VLAN_MAX:-192.168.95.255}
       UDM_SSH_KEY: /config/udm_key
       UDM_INSTALL_SCRIPT: /scripts/udm-nat-logger-persist.sh
+      ROUTER_SSH_KEY: /config/tel_key  # Shared SSH key for all non-UDM (OpenWRT) routers
+      ROUTER_INSTALL_SCRIPT: /scripts/tel-nat-logger-install.sh
       SESSION_GAP_SECONDS: ${NAT_SESSION_GAP_SECONDS:-60}
       STALE_LOG_THRESHOLD_SECONDS: ${NAT_STALE_LOG_THRESHOLD_SECONDS:-3600}
       CHECK_INTERVAL_SECONDS: ${NAT_CHECK_INTERVAL_SECONDS:-5}

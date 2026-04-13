@@ -184,10 +184,10 @@
                     <th>Name</th>
                     <th>Subnet</th>
                     <th>VLAN ID</th>
-                    <th>HP5130 Switch</th>
                     <th>HP5130 Port</th>
                     <th>DHCP Snoop Trust</th>
                     <th>Gateway IP</th>
+                    <th>NAT Logger</th>
                     <th>Actions</th>
                 </tr>
             </thead>
@@ -197,7 +197,6 @@
                 <td><strong>{{ router.name }}</strong></td>
                 <td class="mono">{{ router.subnet }}</td>
                 <td class="mono">{{ router.vlan_id }}</td>
-                <td class="mono">{{ router.switch_host or '<span style="color:#999">not set</span>'|safe }}</td>
                 <td class="mono">{{ router.switch_port or '—' }}</td>
                 <td>
                     {% if router.dhcp_snooping_trust %}
@@ -207,6 +206,15 @@
                     {% endif %}
                 </td>
                 <td class="mono">{{ router.gateway_ip }}</td>
+                <td>
+                    {% if router.nat_logger_type == 'udm' %}
+                        <span class="badge-trust">UDM</span>
+                    {% elif router.nat_logger_type == 'openwrt' %}
+                        <span class="badge-trust">OpenWRT</span>
+                    {% else %}
+                        <span style="color:#999">—</span>
+                    {% endif %}
+                </td>
                 <td>
                     <button type="button" class="btn btn-secondary btn-sm"
                             onclick="toggleEdit({{ router.id }})">Edit</button>
@@ -247,26 +255,12 @@
                             {% endif %}
                         </div>
                         <div class="form-group">
-                            <label>HP5130 Switch</label>
-                            {% if switch_hosts %}
-                            <select name="switch_host">
-                                <option value="">— Unassigned (uses first SWITCH_HOST) —</option>
-                                {% for h in switch_hosts %}
-                                <option value="{{ h }}" {% if router.switch_host == h %}selected{% endif %}>{{ h }}</option>
-                                {% endfor %}
-                            </select>
-                            {% else %}
-                            <input type="text" name="switch_host" value="{{ router.switch_host or '' }}"
-                                   placeholder="e.g. 192.168.99.2">
-                            {% endif %}
-                        </div>
-                        <div class="form-group">
                             <label>HP5130 Port</label>
                             {% if switch_ports_by_host %}
                             <select name="switch_port">
                                 <option value="">— Unassigned —</option>
                                 {% for h, p in switch_ports_by_host %}
-                                <option value="{{ p }}" {% if router.switch_port == p and router.switch_host == h %}selected{% elif router.switch_port == p and not router.switch_host %}selected{% endif %}>{{ h }} — {{ p }}</option>
+                                <option value="{{ p }}" {% if router.switch_port == p %}selected{% endif %}>{{ h }} — {{ p }}</option>
                                 {% endfor %}
                             </select>
                             {% else %}
@@ -277,6 +271,19 @@
                         {% if router.vlan_id == 1 %}
                         <input type="hidden" name="dhcp_snooping_trust" value="on">
                         {% endif %}
+                        <div class="form-group">
+                            <label>NAT Logger Type</label>
+                            <select name="nat_logger_type" id="edit-nat-type-{{ router.id }}"
+                                    onchange="updateNatHint('edit-{{ router.id }}')">
+                                <option value="none" {% if router.nat_logger_type == 'none' %}selected{% endif %}>None (no traffic monitoring)</option>
+                                <option value="udm"  {% if router.nat_logger_type == 'udm'  %}selected{% endif %}>UDM (UniFi Dream Machine)</option>
+                                <option value="openwrt" {% if router.nat_logger_type == 'openwrt' %}selected{% endif %}>OpenWRT / Teltonika</option>
+                            </select>
+                        </div>
+                        <div class="router-hint" id="nat-hint-edit-{{ router.id }}" style="display:{% if router.nat_logger_type == 'openwrt' %}block{% else %}none{% endif %}">
+                            🔑 <strong>Copy the shared SSH key to this router (run on the Pi):</strong><br>
+                            <code>ssh-copy-id -i /home/admin/.ssh/tel_key.pub root@{{ router.gateway_ip }}</code>
+                        </div>
                         <div class="router-hint" id="hint-edit-{{ router.id }}">
                             ⚠️ <strong>Router configuration required:</strong>
                             <ul>
@@ -323,19 +330,6 @@
                 </select>
             </div>
             <div class="form-group">
-                <label>HP5130 Switch</label>
-                {% if switch_hosts %}
-                <select name="switch_host">
-                    <option value="">— Unassigned (uses first SWITCH_HOST) —</option>
-                    {% for h in switch_hosts %}
-                    <option value="{{ h }}">{{ h }}</option>
-                    {% endfor %}
-                </select>
-                {% else %}
-                <input type="text" name="switch_host" placeholder="e.g. 192.168.99.2">
-                {% endif %}
-            </div>
-            <div class="form-group">
                 <label>HP5130 Port</label>
                 {% if switch_ports_by_host %}
                 <select name="switch_port">
@@ -347,6 +341,18 @@
                 {% else %}
                 <input type="text" name="switch_port" placeholder="No ports discovered yet — refresh Switch Ports first">
                 {% endif %}
+            </div>
+            <div class="form-group">
+                <label>NAT Logger Type</label>
+                <select name="nat_logger_type" id="add-nat-type" onchange="updateNatHint('add')">
+                    <option value="none" selected>None (no traffic monitoring)</option>
+                    <option value="udm">UDM (UniFi Dream Machine)</option>
+                    <option value="openwrt">OpenWRT / Teltonika</option>
+                </select>
+            </div>
+            <div class="router-hint" id="nat-hint-add" style="display:none">
+                🔑 <strong>Copy the shared SSH key to this router (run on the Pi):</strong><br>
+                <code>ssh-copy-id -i /home/admin/.ssh/tel_key.pub root@<span id="nat-hint-add-gw"></span></code>
             </div>
 
             <div class="router-hint" id="hint-add">
@@ -387,6 +393,23 @@ function updateHint(key) {
     if (gwEl) gwEl.textContent = gw;
     if (swEl) swEl.textContent = sw;
     hintBox.style.display = 'block';
+    // Keep nat hint gateway in sync when VLAN changes on add form
+    const natGwEl = document.getElementById('nat-hint-add-gw');
+    if (natGwEl && key === 'add') natGwEl.textContent = gw;
+}
+
+function updateNatHint(key) {
+    let selType, hintBox;
+    if (key === 'add') {
+        selType = document.getElementById('add-nat-type');
+        hintBox = document.getElementById('nat-hint-add');
+    } else {
+        const id = key.replace('edit-', '');
+        selType = document.getElementById('edit-nat-type-' + id);
+        hintBox = document.getElementById('nat-hint-' + key);
+    }
+    if (!selType || !hintBox) return;
+    hintBox.style.display = (selType.value === 'openwrt') ? 'block' : 'none';
 }
 
 function toggleEdit(id) {

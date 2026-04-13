@@ -1,0 +1,18 @@
+{
+  "description": "Add nat_logger_type column to isp_routers. Stores which NAT logger install script to use for each router ('none', 'udm', 'openwrt'). Enables nat-parser to auto-install and health-check loggers on any ISP router added through the admin UI, not just the hardcoded UDM and Teltonika. All non-UDM routers share a single SSH key (/home/admin/.ssh/tel_key). Migration auto-sets nat_logger_type='udm' for vlan_id=1 (the UDM); all other existing routers default to 'none' and can be updated via Admin → ISP Routers.",
+  "env": {
+    "add": [],
+    "remove": ["TEL_HOST", "TEL_SSH_USER", "TEL_INSTALL_SCRIPT"]
+  },
+  "db": {
+    "up":   "commit-migrations/58060ae-up.sh",
+    "down": "commit-migrations/58060ae-down.sh",
+    "verify_up": [
+      {"type": "column", "table": "isp_routers", "column": "nat_logger_type"}
+    ],
+    "verify_down": [
+      {"type": "column_absent", "table": "isp_routers", "column": "nat_logger_type"}
+    ]
+  },
+  "notes": "After deploying, visit Admin → ISP Routers and set nat_logger_type='openwrt' for the Teltonika (and any other OpenWRT-based routers). The shared SSH key (~/.ssh/tel_key) must be copied to each new openwrt router — the admin UI shows the exact ssh-copy-id command when you select OpenWRT type."
+}

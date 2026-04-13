@@ -1969,6 +1969,22 @@ def cleanup_orphan_hijack_rules():
     return removed
 
 
+def _switch_host_for_port(port_name):
+    """Return the switch_host for the given port by looking it up in switch_ports.
+    Falls back to the first SWITCH_HOSTS entry if the port is not found.
+    """
+    if port_name:
+        row = db.session.execute(
+            text("SELECT switch_host FROM switch_ports WHERE port_name = :p LIMIT 1"),
+            {'p': port_name}
+        ).fetchone()
+        if row:
+            return row[0]
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
+    return hosts[0] if hosts else None
+
+
 def _get_switch_host_for_isp_router(router):
     """Return the switch host (management IP) for the HP5130 that physically hosts
     this ISP router's uplink port.  Uses ISPRouter.switch_host when set; falls back
@@ -5465,7 +5481,7 @@ def admin_isp_routers():
             name = request.form.get('name', '').strip()
             vlan_id_raw = request.form.get('vlan_id', '').strip()
             switch_port = request.form.get('switch_port', '').strip() or None
-            switch_host_form = request.form.get('switch_host', '').strip() or None
+            switch_host_form = _switch_host_for_port(switch_port)
             if not name or not vlan_id_raw:
                 flash('Name and VLAN ID are required.', 'error')
                 return redirect(url_for('admin_isp_routers'))
@@ -5478,10 +5494,14 @@ def admin_isp_routers():
             if ISPRouter.query.filter_by(name=name).first():
                 flash(f'A router named "{name}" already exists.', 'error')
                 return redirect(url_for('admin_isp_routers'))
+            nat_logger_type = request.form.get('nat_logger_type', 'none').strip()
+            if nat_logger_type not in ('none', 'udm', 'openwrt'):
+                nat_logger_type = 'none'
             router = ISPRouter(name=name, subnet=subnet, vlan_id=vlan_id,
                                switch_port=switch_port,
                                switch_host=switch_host_form,
-                               dhcp_snooping_trust=True)
+                               dhcp_snooping_trust=True,
+                               nat_logger_type=nat_logger_type)
             db.session.add(router)
             db.session.commit()
             _apply_isp_router_to_switches(router)
@@ -5518,8 +5538,11 @@ def admin_isp_routers():
             router.subnet = f'{_net_word()}.{router.vlan_id}.0/24'
             new_port = request.form.get('switch_port', '').strip() or None
             router.switch_port = new_port
-            router.switch_host = request.form.get('switch_host', '').strip() or None
+            router.switch_host = _switch_host_for_port(new_port)
             router.dhcp_snooping_trust = True
+            new_nat_logger_type = request.form.get('nat_logger_type', router.nat_logger_type).strip()
+            if new_nat_logger_type in ('none', 'udm', 'openwrt'):
+                router.nat_logger_type = new_nat_logger_type
             db.session.commit()
             # If name changed, remove the old PBR entries from all switches
             if old_pbr_name != router.pbr_name:
