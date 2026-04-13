@@ -223,6 +223,16 @@ def _sweep_expired_ip_leases():
                 ).all()
                 for lease in expired:
                     try:
+                        # Do not remove hijack/block for devices that are still
+                        # internet_blocked — admin blocks persist beyond lease
+                        # expiry and are cleared only by an explicit unblock.
+                        device = Device.query.filter_by(mac_address=lease.mac_address).first()
+                        if device and device.internet_blocked:
+                            logger.debug(
+                                "Lease sweep: skipping unhijack for %s — device still blocked",
+                                lease.ip_address,
+                            )
+                            continue
                         manage_dns_hijack('unhijack', lease.ip_address)
                         if lease.vlan_id:
                             manage_switch_acl('unblock', lease.ip_address, lease.vlan_id)
@@ -1004,6 +1014,17 @@ def get_client_mac():
                                     logger.info(f"Found MAC {mac} for IP {ip_address} via Kea control socket")
                     except Exception as e:
                         logger.error(f"Error querying Kea control socket: {e}")
+
+                # Final fallback: look up our own ip_leases table (covers the
+                # window after lease4-del but before the device renews DHCP).
+                if not mac:
+                    try:
+                        lease_row = IPLease.query.filter_by(ip_address=ip_address).order_by(IPLease.lease_expiry.desc()).first()
+                        if lease_row and lease_row.mac_address:
+                            mac = lease_row.mac_address
+                            logger.info(f"Found MAC {mac} for IP {ip_address} via ip_leases DB fallback")
+                    except Exception as e:
+                        logger.error(f"Error querying ip_leases for MAC lookup: {e}")
                         
             except Exception as e:
                 logger.error(f"Error looking up MAC address: {e}")
@@ -1525,7 +1546,7 @@ def reset_user_ports():
 
 
 def reset_vlan_interface_masks(vlan_ids):
-    """Update HP5130 VLAN interface masks for specific VLAN IDs."""
+    """Update HP5130 VLAN interface masks for specific VLAN IDs on all switches."""
     vlan_ids = [str(vlan_id) for vlan_id in vlan_ids if vlan_id]
     if not vlan_ids:
         return True
@@ -1539,6 +1560,9 @@ def reset_vlan_interface_masks(vlan_ids):
     if not env.get("SWITCH_KEY_PATH"):
         env["SWITCH_KEY_PATH"] = "/keys/id_rsa"
     env["VLAN_LIST"] = " ".join(vlan_ids)
+    # Pass all switch hosts — the script loops over them.
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    env["SWITCH_HOSTS"] = switch_hosts_raw
 
     result = subprocess.run([script_path], capture_output=True, text=True, timeout=120, env=env)
     if result.returncode != 0:
@@ -2634,6 +2658,34 @@ def api_request_unblock():
 
     response = jsonify({'status': 'ok', 'message': 'Your request has been sent to the administrator.'})
     response.headers['Access-Control-Allow-Origin'] = '*'
+    return response
+
+
+@app.route('/.well-known/captive-portal')
+def rfc8908_captive_portal():
+    """RFC 8908 Captive Portal API endpoint.
+
+    Probed natively by iOS 14+ and Android 11+ before legacy detection methods.
+    Returns JSON indicating whether the device is captive and the portal URL.
+    """
+    mac_address = get_client_mac()
+    portal_url = _build_portal_url(url_for('register'))
+    captive = True  # default: assume captive if we can't identify the device
+
+    if mac_address:
+        device = Device.query.filter_by(mac_address=mac_address).first()
+        if device:
+            if device.internet_blocked:
+                portal_url = _build_portal_url(url_for('blocked_page'))
+            elif device.internet_accessible:
+                captive = False
+
+    response = jsonify({
+        'captive': captive,
+        'user-portal-url': portal_url,
+    })
+    response.headers['Content-Type'] = 'application/captive+json'
+    response.headers['Cache-Control'] = 'no-store'
     return response
 
 
@@ -5423,14 +5475,13 @@ def admin_isp_routers():
                 flash('VLAN ID must be an integer.', 'error')
                 return redirect(url_for('admin_isp_routers'))
             subnet = f'{_net_word()}.{vlan_id}.0/24'
-            dhcp_trust = (vlan_id == 1)
             if ISPRouter.query.filter_by(name=name).first():
                 flash(f'A router named "{name}" already exists.', 'error')
                 return redirect(url_for('admin_isp_routers'))
             router = ISPRouter(name=name, subnet=subnet, vlan_id=vlan_id,
                                switch_port=switch_port,
                                switch_host=switch_host_form,
-                               dhcp_snooping_trust=dhcp_trust)
+                               dhcp_snooping_trust=True)
             db.session.add(router)
             db.session.commit()
             _apply_isp_router_to_switches(router)
@@ -5468,7 +5519,7 @@ def admin_isp_routers():
             new_port = request.form.get('switch_port', '').strip() or None
             router.switch_port = new_port
             router.switch_host = request.form.get('switch_host', '').strip() or None
-            router.dhcp_snooping_trust = (router.vlan_id == 1)
+            router.dhcp_snooping_trust = True
             db.session.commit()
             # If name changed, remove the old PBR entries from all switches
             if old_pbr_name != router.pbr_name:
@@ -6529,70 +6580,111 @@ def admin_vlan_config():
 
         db.session.commit()
 
-        # Push PBR changes to all switches
-        if pbr_changes:
-            switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
-            switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
-            for (pbr_vlan_id, old_pbr, new_pbr) in pbr_changes:
-                for host in switch_hosts:
-                    if new_pbr:
-                        # _build_vlan_pbr_assign already issues 'undo ip policy-based-route'
-                        # before the assign, so a separate remove call is not needed.
-                        _run_switch_command(host, _build_vlan_pbr_assign(pbr_vlan_id, new_pbr))
-                    elif old_pbr:
-                        # Router removed entirely — just undo with the known name.
-                        _run_switch_command(host, _build_vlan_pbr_remove(pbr_vlan_id, old_pbr))
-            flash('ISP router PBR assignments pushed to switches.', 'success')
+        # Capture all data needed by the background worker before the request
+        # context is torn down.
+        _pbr_changes      = list(pbr_changes)
+        _prefix_changed   = prefix_changed
+        _changed_statuses = list(changed_statuses)
+        _vlan_map         = get_vlan_map()
+        _vlan_prefix_by_id = {}
+        _changed_vlan_ids  = []
+        for _status, _prefix in prefix_by_status.items():
+            _vid = _vlan_map.get(_status)
+            if _vid:
+                _vlan_prefix_by_id[_vid] = _prefix
+                if _status in _changed_statuses:
+                    _changed_vlan_ids.append(_vid)
 
-        # Always resync full PBR/NQA config to switches whenever VLAN config is saved
-        push_pbr_nqa_to_switches()
+        _push_job_id = secrets.token_hex(16)
+        session['vlan_push_job_id'] = _push_job_id
 
-        vlan_map = get_vlan_map()
-        vlan_prefix_by_id = {}
-        changed_vlan_ids = []
-        for status, prefix in prefix_by_status.items():
-            vlan_id = vlan_map.get(status)
-            if vlan_id:
-                vlan_prefix_by_id[vlan_id] = prefix
-                if status in changed_statuses:
-                    changed_vlan_ids.append(vlan_id)
+        def _background_vlan_push():
+            """Run all slow switch/Kea work outside the HTTP request."""
+            _errors = []
+            try:
+                _r = _pihole_redis()
+                _r.set(f'vlan_push_job:{_push_job_id}', json.dumps({'state': 'running'}), ex=300)
+            except Exception:
+                pass  # Redis unavailable — polling will just show nothing
 
-        warnings = warnings or []
-        try:
-            _update_kea_config(vlan_prefix_by_id)
-            restarted, message = _restart_kea_container()
-            if restarted:
-                flash('VLAN configuration updated and Kea restarted.', 'success')
-            else:
-                flash('VLAN configuration updated, but Kea restart failed.', 'warning')
-                warnings.append(message)
-        except Exception as exc:
-            flash('VLAN configuration updated, but Kea config update failed.', 'warning')
-            warnings.append(str(exc))
+            # SQLAlchemy and app-context-dependent helpers require an app context.
+            with app.app_context():
+                try:
+                    # 1. Ensure all PBR/NQA definitions are current on the switches
+                    #    (creates PBR-TEL etc.) BEFORE assigning them to VLAN interfaces.
+                    push_pbr_nqa_to_switches()
 
-        if prefix_changed:
-            acl_ok = reset_acl_baseline()
-            if acl_ok:
-                flash('Switch ACL baseline updated for new subnet sizes.', 'success')
-            else:
-                flash('Switch ACL baseline update failed.', 'warning')
+                    # 2. Assign changed PBR policies to VLAN interfaces
+                    if _pbr_changes:
+                        from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
+                        switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+                        switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
+                        pbr_tasks = []
+                        for (pbr_vlan_id, old_pbr, new_pbr) in _pbr_changes:
+                            for host in switch_hosts:
+                                if new_pbr:
+                                    pbr_tasks.append((host, _build_vlan_pbr_assign(pbr_vlan_id, new_pbr)))
+                                elif old_pbr:
+                                    pbr_tasks.append((host, _build_vlan_pbr_remove(pbr_vlan_id, old_pbr)))
+                        if pbr_tasks:
+                            with _TPE(max_workers=len(pbr_tasks)) as _ex:
+                                for _f in _ac([_ex.submit(_run_switch_command, h, c) for h, c in pbr_tasks]):
+                                    try:
+                                        _f.result()
+                                    except Exception as _e:
+                                        logger.warning('BG PBR assign SSH error: %s', _e)
+                                        _errors.append(str(_e))
 
-            iface_ok = reset_vlan_interface_masks(changed_vlan_ids)
-            if iface_ok:
-                flash('Switch VLAN interface masks updated.', 'success')
-            else:
-                flash('Switch VLAN interface mask update failed.', 'warning')
+                    # 3. Write new Kea config (dhcp4.json + vlan-prefix-map.txt).
+                    # ACL baseline runs BEFORE restarting Kea so it reads the
+                    # freshly-written dhcp4.json rather than a file that Kea's
+                    # entrypoint may not have finished regenerating yet.
+                    try:
+                        _update_kea_config(_vlan_prefix_by_id)
+                    except Exception as exc:
+                        logger.warning('BG Kea config write failed: %s', exc)
+                        _errors.append(f'Kea config: {exc}')
 
-            pi_ok = reset_pi_network_masks(changed_vlan_ids)
-            if pi_ok:
-                flash('Pi VLAN interface masks updated.', 'success')
-            else:
-                flash('Pi VLAN interface mask update failed.', 'warning')
+                    # 4. ACL baseline + interface masks if prefix changed.
+                    # Runs here so it reads the just-written dhcp4.json, not
+                    # the post-restart regenerated one (which may lag behind).
+                    if _prefix_changed:
+                        ok = reset_acl_baseline()
+                        if not ok:
+                            _errors.append('ACL baseline push failed')
+                        reset_vlan_interface_masks(_changed_vlan_ids)
+                        reset_pi_network_masks(_changed_vlan_ids)
 
+                    # 5. Restart Kea to pick up the new pool/subnet config.
+                    try:
+                        _restart_kea_container()
+                    except Exception as exc:
+                        logger.warning('BG Kea restart failed: %s', exc)
+                        _errors.append(f'Kea restart: {exc}')
+
+                except Exception as exc:
+                    logger.error('BG VLAN push raised: %s', exc)
+                    _errors.append(str(exc))
+
+                try:
+                    _r = _pihole_redis()
+                    _r.set(
+                        f'vlan_push_job:{_push_job_id}',
+                        json.dumps({'state': 'done', 'ok': not _errors, 'errors': _errors}),
+                        ex=120,
+                    )
+                except Exception:
+                    pass
+
+        import threading as _threading
+        _t = _threading.Thread(target=_background_vlan_push, daemon=True)
+        _t.start()
+
+        flash('VLAN configuration saved. Switch and Kea updates are being applied in the background.', 'success')
         for message in warnings:
             flash(message, 'warning')
 
-        logger.info("Admin updated VLAN configuration")
+        logger.info("Admin updated VLAN configuration (background push started)")
 
         return redirect(url_for('admin_vlan_config'))
     
@@ -6622,7 +6714,24 @@ def admin_vlan_config():
         prefix_statuses=POOL_PREFIX_STATUSES,
         isp_routers=isp_routers,
         kea_config_json=kea_config_json,
+        vlan_push_job_id=session.get('vlan_push_job_id'),
     )
+
+
+@app.route('/api/admin/vlan-push-status')
+@login_required
+def admin_vlan_push_status():
+    """Return the status of the most recent background VLAN push job."""
+    job_id = session.get('vlan_push_job_id')
+    if not job_id:
+        return jsonify({'state': 'none'})
+    try:
+        raw = _pihole_redis().get(f'vlan_push_job:{job_id}')
+        if not raw:
+            return jsonify({'state': 'expired'})
+        return jsonify(json.loads(raw))
+    except Exception:
+        return jsonify({'state': 'error'})
 
 
 @app.route('/admin', strict_slashes=False)
@@ -7488,7 +7597,8 @@ def _build_isp_router_switch_config(router, switch_host):
     host_ip = f"{_net_word()}.{router.vlan_id}.{last_octet}"
     pbr_name = router.pbr_name
     # NQA entry name derived from pbr_name (e.g. 'PBR-TEL' -> 'pbr-tel')
-    nqa_name = pbr_name.lower()
+    # NQA operation tags must be alphanumeric — hyphens cause "Invalid operation tag"
+    nqa_name = pbr_name.lower().replace('-', '').replace(' ', '_')
     # Track ID is the router's database primary key — stable and unique per router
     track_id = router.id
     name_upper = router.name.upper().replace(' ', '_')
@@ -7498,6 +7608,9 @@ def _build_isp_router_switch_config(router, switch_host):
         f' description UPLINK-TO-{name_upper}',
         'quit',
         f'dhcp snooping enable vlan {router.vlan_id}',
+        f'vlan {router.vlan_id}',
+        ' dhcp snooping binding record',
+        'quit',
         f'interface Vlan-interface{router.vlan_id}',
         f' description UPLINK-TO-{name_upper}',
         f' ip address {host_ip} 255.255.255.0',
@@ -7583,6 +7696,7 @@ def _build_isp_router_port_config(port_name, router):
         ' port link-type access',
         ' undo port access vlan',
         f' port access vlan {router.vlan_id}',
+        ' dhcp snooping trust',
         ' dhcp snooping check mac-address',
         ' port-security max-mac-count 1',
         ' port-security port-mode autolearn',
@@ -7650,13 +7764,24 @@ def _build_isp_router_block_acl(acl_number, router, excluded_subnets):
 
     acl_number:        ACL number to use (e.g. 3951 for router.id=1)
     excluded_subnets:  list of (network_address_str, wildcard_str) tuples
-    Returns None when there are no subnets to block.
+    Always returns a non-None command string — when excluded_subnets is empty,
+    generates cleanup commands to remove any stale ACL and packet-filter so that
+    stale deny rules do not persist after a VLAN switches to this router.
     """
     if not excluded_subnets:
-        return None
+        # No foreign VLANs to block — remove stale ACL and packet-filter if present.
+        return '\n'.join([
+            'system-view',
+            f'interface Vlan-interface{router.vlan_id}',
+            f' undo packet-filter {acl_number} outbound',
+            'quit',
+            f'undo acl advanced {acl_number}',
+            'quit',
+            'save force',
+        ])
     lines = [
         'system-view',
-        f'undo acl {acl_number}',
+        f'undo acl advanced {acl_number}',
         f'acl advanced {acl_number}',
         f' description ISP-{router.pbr_name}-block-foreign-VLANs',
     ]
@@ -7747,44 +7872,45 @@ def push_pbr_nqa_to_switches():
             continue
         router_subnets.setdefault(vlan.isp_router_id, []).append((network_addr, wildcard))
 
-    failed = []
+    # Build all (label, host, config) tasks up front — all DB access happens here
+    # in the main thread before any parallelism, keeping SQLAlchemy sessions safe.
+    tasks = []  # list of (label, host, config_str)
     for router in routers:
-        # Push PBR + NQA config for this router
         for host in switch_hosts:
             cfg = _build_isp_router_switch_config(router, host)
-            if _run_switch_command(host, cfg) is None:
-                failed.append(f'{host}/{router.pbr_name}')
-                logger.warning(
-                    "push_pbr_nqa_to_switches: PBR/NQA failed for %s on %s",
-                    router.pbr_name, host,
-                )
+            tasks.append((f'{host}/{router.pbr_name}', host, cfg))
 
-        # Push egress block ACL: deny VLANs assigned to OTHER routers from
-        # exiting through this router's uplink SVI.  When PBR track goes DOWN,
-        # Comware falls to normal routing; this ACL catches that fallback.
-        # The ACL lives on the ISP uplink SVI which is only physically active
-        # on the switch where the ISP router is plugged in.
+        # Egress block ACL: deny VLANs on OTHER routers from leaking through this
+        # router's uplink SVI when PBR falls back to normal routing.
+        # Push to ALL switches — the uplink Vlan-interface exists on every switch.
         excluded = []
         for other_router in routers:
             if other_router.id != router.id:
                 excluded.extend(router_subnets.get(other_router.id, []))
-
         acl_number = 3950 + router.id
         block_cfg = _build_isp_router_block_acl(acl_number, router, excluded)
-        if block_cfg:
-            block_host = _get_switch_host_for_isp_router(router)
-            if block_host:
-                if _run_switch_command(block_host, block_cfg) is None:
-                    failed.append(f'{block_host}/{router.pbr_name}/block-acl')
-                    logger.warning(
-                        "push_pbr_nqa_to_switches: block ACL failed for %s on %s",
-                        router.pbr_name, block_host,
-                    )
-            else:
-                logger.warning(
-                    "push_pbr_nqa_to_switches: no switch host for router %s, skipping block ACL",
-                    router.pbr_name,
-                )
+        for host in switch_hosts:
+            tasks.append((f'{host}/{router.pbr_name}/block-acl', host, block_cfg))
+
+    # Run all SSH pushes in parallel — safe because _run_switch_command is pure
+    # subprocess with no SQLAlchemy access.
+    from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+    failed = []
+    with ThreadPoolExecutor(max_workers=len(tasks) or 1) as executor:
+        future_to_label = {
+            executor.submit(_run_switch_command, host, cfg): label
+            for label, host, cfg in tasks
+        }
+        for future in _as_completed(future_to_label):
+            label = future_to_label[future]
+            try:
+                result = future.result()
+            except Exception as exc:
+                result = None
+                logger.warning("push_pbr_nqa_to_switches: exception for %s: %s", label, exc)
+            if result is None:
+                failed.append(label)
+                logger.warning("push_pbr_nqa_to_switches: failed %s", label)
 
     return len(failed) == 0
 

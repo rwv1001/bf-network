@@ -366,6 +366,74 @@
         });
     }
 
+    {% if vlan_push_job_id %}
+    (function() {
+        var banner = document.createElement('div');
+        banner.id = 'push-status-banner';
+        banner.style.cssText = 'position:fixed;bottom:24px;right:24px;z-index:1000;' +
+            'background:#fff3cd;color:#856404;border:1px solid #ffc107;' +
+            'border-radius:8px;padding:14px 20px;font-size:14px;font-weight:500;' +
+            'box-shadow:0 4px 12px rgba(0,0,0,0.12);display:flex;align-items:center;gap:10px;' +
+            'max-width:360px;transition:background 0.4s,color 0.4s,border-color 0.4s;';
+        var dot = document.createElement('span');
+        dot.style.cssText = 'width:10px;height:10px;border-radius:50%;background:#ffc107;' +
+            'flex-shrink:0;animation:push-pulse 1.2s ease-in-out infinite;';
+        var text = document.createElement('span');
+        text.id = 'push-status-text';
+        text.textContent = 'Applying switch updates\u2026';
+        banner.appendChild(dot);
+        banner.appendChild(text);
+        document.body.appendChild(banner);
+
+        var style = document.createElement('style');
+        style.textContent = '@keyframes push-pulse{0%,100%{opacity:1}50%{opacity:0.4}}';
+        document.head.appendChild(style);
+
+        function applyStyle(state) {
+            if (state === 'done-ok') {
+                banner.style.background = '#d4edda';
+                banner.style.color = '#155724';
+                banner.style.borderColor = '#28a745';
+                dot.style.background = '#28a745';
+                dot.style.animation = 'none';
+            } else if (state === 'done-error') {
+                banner.style.background = '#f8d7da';
+                banner.style.color = '#721c24';
+                banner.style.borderColor = '#dc3545';
+                dot.style.background = '#dc3545';
+                dot.style.animation = 'none';
+            }
+        }
+
+        var interval = setInterval(poll, 2500);
+        poll();
+
+        function poll() {
+            fetch('/api/admin/vlan-push-status', {credentials: 'same-origin'})
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data.state === 'done') {
+                        clearInterval(interval);
+                        if (data.ok) {
+                            text.textContent = 'Switch updates applied successfully.';
+                            applyStyle('done-ok');
+                        } else {
+                            text.textContent = 'Switch updates finished with errors \u2014 check server logs.';
+                            applyStyle('done-error');
+                        }
+                        setTimeout(function() {
+                            if (banner.parentNode) { banner.parentNode.removeChild(banner); }
+                        }, 10000);
+                    } else if (data.state === 'expired' || data.state === 'none') {
+                        clearInterval(interval);
+                        if (banner.parentNode) { banner.parentNode.removeChild(banner); }
+                    }
+                })
+                .catch(function() {});
+        }
+    })();
+    {% endif %}
+
     const addButton = document.getElementById('add-vlan-row');
     if (addButton) {
         addButton.addEventListener('click', () => {

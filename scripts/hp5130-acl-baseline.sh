@@ -89,9 +89,8 @@ PY
   if [ -z "$VLAN_NET" ] || [ -z "$VLAN_WILDCARD" ] || [ -z "$BLOCK_RULES" ]; then
     VLAN_NET="192.168.${VLAN_ID}.0"
     VLAN_WILDCARD="0.0.0.255"
-    BLOCK_RULES="rule ${BLOCK_RULE_BASE} deny ip source 192.168.${VLAN_ID}.214 0.0.0.1
-  rule $((BLOCK_RULE_BASE + 10)) deny ip source 192.168.${VLAN_ID}.216 0.0.0.7
-  rule $((BLOCK_RULE_BASE + 20)) deny ip source 192.168.${VLAN_ID}.224 0.0.0.31
+    BLOCK_RULES="rule ${BLOCK_RULE_BASE} deny ip source 192.168.${VLAN_ID}.216 0.0.0.7
+  rule $((BLOCK_RULE_BASE + 10)) deny ip source 192.168.${VLAN_ID}.224 0.0.0.31
 "
   fi
 

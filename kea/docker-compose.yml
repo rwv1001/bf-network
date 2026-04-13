@@ -17,6 +17,7 @@ services:
       - /home/admin/.ssh:/keys:ro
     environment:
       PORTAL_IP: ${PORTAL_IP:?PORTAL_IP is required – set it in kea/.env}
+      PORTAL_URL: ${PORTAL_URL:-}
       HIJACK_DNS_IP: ${HIJACK_DNS_IP:?HIJACK_DNS_IP is required – set it in kea/.env}
       SWITCH_HOST: ${SWITCH_HOST:?SWITCH_HOST is required – set it in kea/.env}
       UNREGISTERED_GW: ${UNREGISTERED_GW:?UNREGISTERED_GW is required – set it in kea/.env}

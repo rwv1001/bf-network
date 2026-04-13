@@ -150,6 +150,7 @@ def main():
     db_password = require_env("DB_PASSWORD")
 
     portal_ip        = require_env("PORTAL_IP")
+    portal_url       = os.environ.get("PORTAL_URL", "").strip()
     hijack_dns_ip    = require_env("HIJACK_DNS_IP")
     switch_host      = require_env("SWITCH_HOST")
     unregistered_gw  = require_env("UNREGISTERED_GW")

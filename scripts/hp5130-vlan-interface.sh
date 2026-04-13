@@ -1,7 +1,13 @@
 #!/bin/sh
 set -eu
 
-SWITCH_HOST="${SWITCH_HOST:?SWITCH_HOST required}"
+# Accept either SWITCH_HOST (single) or SWITCH_HOSTS (space-separated list).
+# If both are set, SWITCH_HOSTS takes precedence.
+SWITCH_HOSTS="${SWITCH_HOSTS:-${SWITCH_HOST:-}}"
+if [ -z "$SWITCH_HOSTS" ]; then
+  echo "SWITCH_HOST or SWITCH_HOSTS required" >&2
+  exit 1
+fi
 SWITCH_USER="${SWITCH_USER:-robert}"
 SWITCH_SSH_PORT="${SWITCH_SSH_PORT:-22}"
 SWITCH_KEY_PATH="${SWITCH_KEY_PATH:-/home/admin/.ssh/id_rsa}"
@@ -87,10 +93,23 @@ PY
     exit 1
   fi
 
+  # ACL number follows the pattern 3100 for VLAN 10, 3200 for VLAN 20, etc.
+  ACL_NUM=$((3000 + VLAN_ID * 10))
+  if [ "$VLAN_ID" = "10" ]; then
+    FILTER_DIR="inbound"
+  else
+    FILTER_DIR="outbound"
+  fi
+
   cat <<EOF
 interface Vlan-interface${VLAN_ID}
 undo ip address
 ip address ${ROUTER_IP} ${NETMASK}
+undo packet-filter ${ACL_NUM} inbound
+undo packet-filter ${ACL_NUM} outbound
+undo packet-filter $((3000 + VLAN_ID)) inbound
+undo packet-filter $((3000 + VLAN_ID)) outbound
+packet-filter ${ACL_NUM} ${FILTER_DIR}
 quit
 EOF
 }
@@ -106,4 +125,8 @@ quit
 quit
 "
 
-printf "%s" "$CMDS" | ssh -tt $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}"
+FAILED=0
+for HOST in $SWITCH_HOSTS; do
+  printf "%s" "$CMDS" | ssh -tt $SSH_OPTS "${SWITCH_USER}@${HOST}" || FAILED=1
+done
+exit $FAILED
