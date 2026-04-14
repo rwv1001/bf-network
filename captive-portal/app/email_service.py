@@ -598,6 +598,7 @@ def send_wifi_registration_confirmation(
     unregister_url,
     registration_details=None,
     confirm_url=None,
+    reject_url=None,
     confirm_timeout_sec=None,
 ):
     """
@@ -675,24 +676,35 @@ def send_wifi_registration_confirmation(
                 f"Please confirm within {confirm_timeout_minutes} minutes to keep this device active. "
                 f"If you do not confirm, the device will be automatically blocked."
             )
+        reject_btn_html = ""
+        reject_btn_text = ""
+        if reject_url:
+            reject_btn_html = (
+                f"<a href=\"{reject_url}\" "
+                f"style=\"background-color: #c62828; color: white; padding: 12px 30px; "
+                f"text-decoration: none; border-radius: 5px; display: inline-block; "
+                f"font-weight: bold; margin-left: 12px;\">Block This Device</a>"
+            )
+            reject_btn_text = f"\n    Block this device (did not register / reject access):\n    {reject_url}"
         confirm_html = f"""
                 <div style=\"background-color: white; border-left: 4px solid #1b5e20; padding: 15px; margin: 20px 0;\">
                     <p style=\"margin: 0;\"><strong>Confirm this device</strong></p>
-                    <p style=\"margin: 10px 0 0; font-size: 14px;\">Click accept if you recognize this device.</p>
+                    <p style=\"margin: 10px 0 0; font-size: 14px;\">Click <em>Accept</em> if you registered this device, or <em>Block</em> if you did not.</p>
                     {timeout_note_html}
                     <p style=\"text-align: center; margin: 15px 0 0;\">
                         <a href=\"{confirm_url}\"
                            style=\"background-color: #2e7d32; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: bold;\">
                             Accept and Keep Access
                         </a>
+                        {reject_btn_html}
                     </p>
                 </div>
         """
         confirm_text = f"""
     CONFIRM THIS DEVICE
-    Click the link below if you recognize this device:
+    Click the link below to accept this device:
     {confirm_url}
-    {timeout_note_text}
+    {timeout_note_text}{reject_btn_text}
     """
 
     html_body = f"""

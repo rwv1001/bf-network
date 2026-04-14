@@ -214,7 +214,7 @@
         <ul style="margin: 10px 0 0 20px;">
             <li>If you're pre-registered, you'll get immediate or verified access</li>
             <li>If not, an administrator will review your request and contact you if necessary</li>
-            <li>Once the registration of your device has been approved (either automatically or by the administrator), you will be emailed to say your registration has been successful. You must click on 'Accept and Keep Access' &mdash; otherwise internet access will be blocked after 5 minutes.</li>
+            <li>Once the registration of your device has been approved (either automatically or by the administrator), you will be emailed to say your registration has been successful.</li>
         </ul>
     </div>
     
@@ -222,8 +222,9 @@
 </form>
 
 <div id="statusMessage" style="display: none; margin-top: 20px; padding: 15px; border-radius: 8px; text-align: center;"></div>
+<div id="confirmWarning" style="display: {% if show_status and device and device.internet_accessible == True and not device.ownership_validated %}block{% else %}none{% endif %}; margin-top: 10px; padding: 12px 15px; border-radius: 8px; background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba; text-align: center;">{% if show_status and device and device.internet_accessible == True and not device.ownership_validated %}&#9888; Please click the <strong>Accept and Keep Access</strong> link in the confirmation email you have just received within the next <strong>{{ confirm_timeout_minutes|default(2) }} minute{{ 's' if (confirm_timeout_minutes|default(2)) != 1 else '' }}</strong> or your internet access will be blocked.{% endif %}</div>
 <div id="institutionLink" style="display: none; margin-top: 8px; text-align: center;"></div>
-<div id="userHomeLink" style="display: {% if show_status and device and device.internet_accessible == True and user_home_url %}block{% else %}none{% endif %}; margin-top: 8px; text-align: center;">{% if show_status and device and device.internet_accessible == True and user_home_url %}<a href="{{ user_home_url }}" class="btn" style="display:inline-block;">Go to your home page</a>{% if not device.ownership_validated %}<p style="margin-top:8px;font-size:0.9em;color:#555;">(You will be asked to enter your password)</p>{% endif %}{% endif %}</div>
+<div id="userHomeLink" style="display: {% if show_status and device and device.internet_accessible == True and user_home_url %}block{% else %}none{% endif %}; margin-top: 8px; text-align: center;">{% if show_status and device and device.internet_accessible == True and user_home_url %}<a href="{{ user_home_url }}" class="btn" style="display:inline-block;">Go to your home page</a>{% endif %}</div>
 
 <script>
 document.addEventListener('DOMContentLoaded', function() {
@@ -387,6 +388,9 @@ document.addEventListener('DOMContentLoaded', function() {
                     startMismatchPolling();
                 } else {
                     showStatus(message + ' Checking access...', 'success');
+                    if (data.needs_ownership_confirmation) {
+                        showConfirmWarning(data.confirm_timeout_minutes);
+                    }
                     startAccessCheck();
                 }
                 form.style.display = 'none';  // Hide form on success
@@ -571,6 +575,9 @@ document.addEventListener('DOMContentLoaded', function() {
                         startMismatchPolling();
                     } else {
                         showStatus((data.message || 'Device registered successfully') + ' Checking access...', 'success');
+                        if (data.needs_ownership_confirmation) {
+                            showConfirmWarning(data.confirm_timeout_minutes);
+                        }
                         startAccessCheck();
                     }
                 } else if (data.status === 'pending') {
@@ -620,6 +627,9 @@ document.addEventListener('DOMContentLoaded', function() {
                             startMismatchPolling();
                         } else {
                             showStatus('Request approved! Checking internet access...', 'success');
+                            if (data.needs_ownership_confirmation) {
+                                showConfirmWarning(data.confirm_timeout_minutes);
+                            }
                             startAccessCheck();
                         }
                         // Optional: Hide pending details/form
@@ -769,6 +779,38 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
+    function showConfirmWarning(timeoutMinutes) {
+        const confirmWarning = document.getElementById('confirmWarning');
+        if (!confirmWarning) return;
+        const mins = timeoutMinutes || {{ confirm_timeout_minutes|default(2) }};
+        confirmWarning.innerHTML = `&#9888; Please click the <strong>Accept and Keep Access</strong> link in the confirmation email you have just received within the next <strong>${mins} minute${mins !== 1 ? 's' : ''}</strong> or your internet access will be blocked.`;
+        confirmWarning.style.display = 'block';
+        startOwnershipPoll();
+    }
+
+    let ownershipPollInterval = null;
+    function startOwnershipPoll() {
+        if (ownershipPollInterval) return; // already running
+        ownershipPollInterval = setInterval(function() {
+            fetch(apiUrl('/api/device-status'))
+                .then(r => r.json())
+                .then(data => {
+                    if (data.ownership_validated === true) {
+                        clearInterval(ownershipPollInterval);
+                        ownershipPollInterval = null;
+                        const confirmWarning = document.getElementById('confirmWarning');
+                        if (confirmWarning) {
+                            confirmWarning.style.backgroundColor = '#d4edda';
+                            confirmWarning.style.color = '#155724';
+                            confirmWarning.style.borderColor = '#c3e6cb';
+                            confirmWarning.innerHTML = '&#10003; Access confirmed — thank you!';
+                        }
+                    }
+                })
+                .catch(() => {});
+        }, 3000);
+    }
+
     // Your checkInitialStatus - modify to avoid redirects if needed
     const checkInitialStatus = () => {
         if (accessConfirmed) {
@@ -840,6 +882,15 @@ document.addEventListener('DOMContentLoaded', function() {
     } else {
         checkInitialStatus();
     }
+
+    // If the page loaded with the confirm warning already visible (server-side render),
+    // start the ownership poll immediately so acceptance is reflected without a full reload.
+    (function() {
+        const cw = document.getElementById('confirmWarning');
+        if (cw && cw.style.display !== 'none' && cw.offsetParent !== null) {
+            startOwnershipPoll();
+        }
+    })();
 
     // ── Spec 4b.ii.2 status-page polling (used when device already has ownership) ──
     function startDeviceStatusPolling() {
@@ -922,13 +973,13 @@ document.addEventListener('DOMContentLoaded', function() {
 
                 case 'accessible': {
                     showStatus('Your device now has full internet access.', 'success');
+                    if (data.ownership_validated === false) {
+                        showConfirmWarning(data.confirm_timeout_minutes);
+                    }
                     // showStatus sets institutionLink to the institution URL button;
                     // use the separate userHomeLink div so it isn't overwritten.
                     if (data.user_home_url) {
-                        const note = data.ownership_validated === false
-                            ? '<p style="margin-top:8px;font-size:0.9em;color:#555;">(You will be asked to enter your password)</p>'
-                            : '';
-                        userHomeLink.innerHTML = `<a href="${data.user_home_url}" class="btn" style="display:inline-block;">Go to your home page</a>${note}`;
+                        userHomeLink.innerHTML = `<a href="${data.user_home_url}" class="btn" style="display:inline-block;">Go to your home page</a>`;
                         userHomeLink.style.display = 'block';
                     }
                     stopDevicePoll();

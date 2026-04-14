@@ -113,6 +113,14 @@ def _build_confirm_url(token):
     return url_for('confirm_device', token=token, _external=True)
 
 
+def _build_reject_url(token):
+    portal_url = _get_portal_base_url()
+    if portal_url:
+        parsed = urlparse(portal_url)
+        return f"{parsed.scheme}://{parsed.netloc}{url_for('reject_device', token=token)}"
+    return url_for('reject_device', token=token, _external=True)
+
+
 def _build_set_password_url(token):
     portal_url = _get_portal_base_url()
     if portal_url:
@@ -149,6 +157,11 @@ def _wifi_confirm_timeout_sec():
     return value if value > 0 else 120
 
 
+def _wifi_confirm_timeout_minutes():
+    """Return the WiFi confirmation timeout rounded up to whole minutes."""
+    return max(1, int((_wifi_confirm_timeout_sec() + 59) / 60))
+
+
 def _wifi_confirm_sweep_interval_sec():
     raw = os.getenv('WIFI_CONFIRM_SWEEP_INTERVAL_SEC', '30').strip()
     try:
@@ -164,7 +177,9 @@ def _set_wifi_confirmation(device):
     device.confirmation_confirmed_at = None
     device.confirmation_deadline = datetime.utcnow() + timedelta(seconds=timeout_sec)
     db.session.commit()
-    return _build_confirm_url(device.confirmation_token), timeout_sec
+    confirm_url = _build_confirm_url(device.confirmation_token)
+    reject_url = _build_reject_url(device.confirmation_token)
+    return confirm_url, reject_url, timeout_sec
 
 
 def _enforce_wifi_confirmation(device):
@@ -2601,7 +2616,7 @@ def api_device_status():
             if not device.ownership_validated and device.user:
                 _u = device.user
                 _unreg = _build_unregister_url(device.unregister_token)
-                _curl, _ctimeout = _set_wifi_confirmation(device)
+                _curl, _rurl, _ctimeout = _set_wifi_confirmation(device)
                 send_wifi_registration_confirmation(
                     _u.email,
                     _u.first_name or 'there',
@@ -2609,14 +2624,18 @@ def api_device_status():
                     device.mac_address,
                     _unreg,
                     confirm_url=_curl,
+                    reject_url=_rurl,
                     confirm_timeout_sec=_ctimeout,
                     registration_details={},
                 )
-            return jsonify({
+            _accessible_resp = {
                 'status':              'accessible',
                 'user_home_url':       _build_portal_url(url_for('user_home')),
                 'ownership_validated': bool(device.ownership_validated),
-            })
+            }
+            if not device.ownership_validated:
+                _accessible_resp['confirm_timeout_minutes'] = _wifi_confirm_timeout_minutes()
+            return jsonify(_accessible_resp)
 
     return jsonify({'status': 'pending'})
 
@@ -2896,6 +2915,7 @@ def register():
                 wired_vlan_required=False,
                 wired_vlan_options=wired_vlan_options,
                 user_home_url=user_home_url,
+                confirm_timeout_minutes=_wifi_confirm_timeout_minutes(),
             )
 
     # Fall through to registration form for GET (unregistered) or POST.
@@ -3226,9 +3246,10 @@ def register():
         # user entered the correct VLAN password above, ownership_validated is already
         # True — no confirmation timer or confirm link should be started.
         if not device.ownership_validated:
-            confirm_url, confirm_timeout_sec = _set_wifi_confirmation(device)
+            confirm_url, reject_url, confirm_timeout_sec = _set_wifi_confirmation(device)
         else:
             confirm_url = None
+            reject_url = None
             confirm_timeout_sec = None
         ssid_display = ssid or 'Wired Network'
         send_wifi_registration_confirmation(
@@ -3238,6 +3259,7 @@ def register():
             mac_address,
             unregister_url,
             confirm_url=confirm_url,
+            reject_url=reject_url,
             confirm_timeout_sec=confirm_timeout_sec,
             registration_details={
                 'email':        user.email,
@@ -3251,7 +3273,8 @@ def register():
         )
 
         if is_ajax:
-            return jsonify({
+            _needs_confirm = not bool(device.ownership_validated)
+            _resp = {
                 'status': 'registered',
                 'message': 'Device registered successfully.',
                 'current_vlan':   detected_vlan,
@@ -3259,7 +3282,11 @@ def register():
                 'expected_vlan':  selected_vlan,
                 'expected_ssid':  get_ssid_for_vlan(selected_vlan),
                 'network_mismatch': network_mismatch,
-            })
+                'needs_ownership_confirmation': _needs_confirm,
+            }
+            if _needs_confirm:
+                _resp['confirm_timeout_minutes'] = _wifi_confirm_timeout_minutes()
+            return jsonify(_resp)
         return redirect(url_for('registered'))
 
     # ── GET: show registration form ───────────────────────────────────────────
@@ -3744,9 +3771,10 @@ def adopt_device():
 
     unregister_url = _build_unregister_url(adopted_device.unregister_token)
     confirm_url = None
+    reject_url = None
     confirm_timeout_sec = None
     if not adopted_device.ownership_validated:
-        confirm_url, confirm_timeout_sec = _set_wifi_confirmation(adopted_device)
+        confirm_url, reject_url, confirm_timeout_sec = _set_wifi_confirmation(adopted_device)
     if vlan_id == wired_unregistered_vlan:
         ssid_display = "Wired Network"
     else:
@@ -3758,6 +3786,7 @@ def adopt_device():
         mac_address,
         unregister_url,
         confirm_url=confirm_url,
+        reject_url=reject_url,
         confirm_timeout_sec=confirm_timeout_sec,
         registration_details={
             "email": user.email,
@@ -4684,12 +4713,38 @@ def confirm_device(token):
 
     device.confirmation_confirmed_at = datetime.utcnow()
     device.confirmation_deadline = None
+    device.ownership_validated = True
     db.session.commit()
 
     if device.registration_status == 'blocked':
         apply_device_unblock(device, flash_messages=False)
 
     flash('Device confirmed. Access restored.', 'success')
+    return render_template('status.html', device=device)
+
+
+@app.route('/reject/<token>')
+def reject_device(token):
+    if not token:
+        flash('Invalid rejection link', 'error')
+        return redirect(url_for('index'))
+
+    device = Device.query.filter_by(confirmation_token=token).first()
+    if not device:
+        flash('Invalid or expired link', 'error')
+        return redirect(url_for('index'))
+
+    if device.registration_status == 'unregistered':
+        flash('This device is already unregistered.', 'info')
+        return render_template('status.html', device=device, unregistered=True)
+
+    device.confirmation_confirmed_at = None
+    device.confirmation_deadline = None
+    db.session.commit()
+    apply_device_block(device, flash_messages=False)
+    logger.info("Device %s blocked via reject link in email", device.mac_address)
+
+    flash('Device access has been blocked.', 'success')
     return render_template('status.html', device=device)
 
 
@@ -9263,9 +9318,10 @@ def admin_process_request(request_id):
             )
         else:
             if not device.ownership_validated:
-                confirm_url, confirm_timeout_sec = _set_wifi_confirmation(device)
+                confirm_url, reject_url, confirm_timeout_sec = _set_wifi_confirmation(device)
             else:
                 confirm_url = None
+                reject_url = None
                 confirm_timeout_sec = None
             send_wifi_registration_confirmation(
                 user.email,
@@ -9274,6 +9330,7 @@ def admin_process_request(request_id):
                 device.mac_address,
                 unregister_url,
                 confirm_url=confirm_url,
+                reject_url=reject_url,
                 confirm_timeout_sec=confirm_timeout_sec,
                 registration_details={
                     "email": user.email,
