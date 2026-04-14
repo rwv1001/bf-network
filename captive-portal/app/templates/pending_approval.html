@@ -5,16 +5,16 @@
 {% block header %}Request Submitted{% endblock %}
 
 {% block subheader %}
-<p style="margin-top: 10px; opacity: 0.9;">Please wait for an administrator to approve your request.</p>
+<p id="pageSubheader" style="margin-top: 10px; opacity: 0.9;">Please wait for an administrator to approve your request.</p>
 {% endblock %}
 
 {% block content %}
-<div class="alert alert-info">
+<div id="statusAlert" class="alert alert-info">
     <strong>⏳ Awaiting approval</strong>
     <div style="margin-top: 6px;">Your request has been sent to the administrator.</div>
 </div>
 
-<div class="info-box">
+<div id="submittedDetails" class="info-box">
     <strong>Submitted details</strong>
     <ul style="margin: 10px 0 0 20px;">
         <li><strong>Email:</strong> {{ prefill.email or 'Unknown' }}</li>
@@ -26,7 +26,7 @@
     </ul>
 </div>
 
-<div style="margin-top: 20px; text-align: center;">
+<div id="resubmitDiv" style="margin-top: 20px; text-align: center;">
     {% if portal_url %}
         <a class="btn" href="{{ portal_url.rstrip('/') }}{{ url_for('register', **prefill) }}">Resubmit Request</a>
     {% else %}
@@ -52,24 +52,43 @@
     const apiUrl = (path) => `${pollBase}${path}`;
     const pageUrl = (path) => `${portalBase}${path}`;
 
+    const showRejected = (reason) => {
+        clearInterval(timer);
+        timer = null;
+        const alert = document.getElementById('statusAlert');
+        if (alert) {
+            alert.className = 'alert alert-error';
+            let html = '<strong>✗ Request declined</strong>'
+                + '<div style="margin-top:6px;">The administrator has refused to grant this device internet access.</div>';
+            if (reason) {
+                html += '<div style="margin-top:8px;font-weight:600;">' + reason.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div>';
+            }
+            alert.innerHTML = html;
+        }
+        const details = document.getElementById('submittedDetails');
+        if (details) details.style.display = 'none';
+        const resubmit = document.getElementById('resubmitDiv');
+        if (resubmit) resubmit.style.display = 'none';
+    };
+
     const checkStatus = () => {
         fetch(apiUrl('/api/registration-status'))
             .then(res => res.json())
             .then(data => {
                 if (data.status === 'registered') {
+                    clearInterval(timer);
                     window.location.href = pageUrl('/registered');
                     return;
                 }
                 if (data.status === 'wrong_vlan') {
+                    clearInterval(timer);
                     window.location.href = pageUrl('/wrong-vlan'
                         + '?assigned_vlan=' + encodeURIComponent(data.expected_vlan || '')
                         + '&assigned_ssid=' + encodeURIComponent(data.expected_ssid || ''));
                     return;
                 }
-                if (data.status === 'rejected') {
-                    const reason = data.reason ? encodeURIComponent(data.reason) : '';
-                    const qs = reason ? `?reason=${reason}` : '';
-                    window.location.href = pageUrl(`/request-rejected${qs}`);
+                if (data.status === 'rejected' || data.status === 'blocked') {
+                    showRejected(data.reason || '');
                 }
             })
             .catch(() => {

@@ -615,9 +615,11 @@ document.addEventListener('DOMContentLoaded', function() {
                         const details = document.getElementById('submittedDetails');
                         if (details) details.remove();
                         form.style.display = 'none';
-                    } else if (data.status === 'rejected') {
+                    } else if (data.status === 'rejected' || data.status === 'blocked') {
                         clearInterval(pollInterval);
-                        showStatus(`Request rejected: ${data.reason || 'Please contact admin.'}`, 'error');
+                        const rejMsg = 'The administrator has refused to grant this device internet access.'
+                            + (data.reason ? ' Reason: ' + data.reason : '');
+                        showStatus(rejMsg, 'error');
                         // Show resubmit button again if needed
                         const resubmitBtn = document.getElementById('resubmitBtn');
                         if (resubmitBtn) resubmitBtn.style.display = 'block';
@@ -780,8 +782,10 @@ document.addEventListener('DOMContentLoaded', function() {
                         showStatus('Device already registered. Checking access...', 'success');
                         startAccessCheck();
                     }
-                } else if (data.status === 'rejected') {
-                    showStatus(`Request rejected: ${data.reason || ''}`, 'error');
+                } else if (data.status === 'rejected' || data.status === 'blocked') {
+                    const rejMsg = 'The administrator has refused to grant this device internet access.'
+                        + (data.reason ? ' Reason: ' + data.reason : '');
+                    showStatus(rejMsg, 'error');
                 } else if (data.status === 'pending') {
                     showStatus('Awaiting approval...', 'info');
                     startPolling();

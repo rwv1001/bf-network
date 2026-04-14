@@ -4361,8 +4361,21 @@ def registration_status():
     # A devices row created solely by the Kea DHCP hook (no ownership) must
     # still be treated as unregistered so the registration form is shown.
     if device and not _get_active_ownership(mac_address):
+        # Check if the device was explicitly blocked by an admin — if so, report
+        # immediately so the waiting-for-approval page can update in-place.
+        if device.internet_blocked:
+            _blocked_payload = {'status': 'blocked', 'message': 'Your device has been blocked from accessing the internet.'}
+            # Include the rejection reason from the most recent rejected request if available.
+            _rej_req = RegistrationRequest.query.filter_by(
+                mac_address=mac_address, status='rejected'
+            ).order_by(RegistrationRequest.submitted_at.desc()).first()
+            if _rej_req and _rej_req.notes:
+                _blocked_payload['reason'] = _rej_req.notes
+            _resp = jsonify(_blocked_payload)
+            _resp.headers['Access-Control-Allow-Origin'] = '*'
+            return _resp
         # Check if the most recent registration request for this MAC was rejected —
-        # if so return 'rejected' so pending_approval.html can redirect accordingly.
+        # if so return 'rejected' so pending_approval.html can update accordingly.
         _recent_req = RegistrationRequest.query.filter_by(
             mac_address=mac_address
         ).order_by(RegistrationRequest.submitted_at.desc()).first()
@@ -4443,7 +4456,7 @@ def registration_status():
                                 logger.warning("Kea reservation check failed for %s: %s", device.mac_address, exc)
 
                 clear_unregistered_lease(device.mac_address)
-        response = jsonify({
+        _reg_status_payload = {
             'status': device.registration_status,
             'message': f'Device is {device.registration_status}',
             'current_ip': current_ip,
@@ -4452,7 +4465,14 @@ def registration_status():
             'expected_vlan': device.assigned_vlan or device.current_vlan,
             'expected_ssid': get_ssid_for_vlan(device.assigned_vlan) or expected_ssid,
             'network_mismatch': network_mismatch
-        })
+        }
+        if device.registration_status == 'blocked':
+            _block_req = RegistrationRequest.query.filter_by(
+                mac_address=mac_address, status='rejected'
+            ).order_by(RegistrationRequest.submitted_at.desc()).first()
+            if _block_req and _block_req.notes:
+                _reg_status_payload['reason'] = _block_req.notes
+        response = jsonify(_reg_status_payload)
         response.headers['Access-Control-Allow-Origin'] = '*'
         return response
     
@@ -9230,7 +9250,14 @@ def admin_process_request(request_id):
         reg_request.processed_at = datetime.now()
         reg_request.processed_by = current_user.username
         reg_request.notes = notes
-        
+
+        # Flag the device so the captive-portal polling page detects the rejection
+        # immediately via the internet_blocked field rather than relying on
+        # RegistrationRequest status queries.
+        _rej_device = Device.query.filter_by(mac_address=reg_request.mac_address).first()
+        if _rej_device:
+            _set_internet_blocked(_rej_device, True, commit=False)
+
         db.session.commit()
         
         flash('Request rejected', 'info')
