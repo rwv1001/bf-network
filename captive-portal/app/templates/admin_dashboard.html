@@ -727,7 +727,7 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
                 {% if user.blocked %}
                 <form method="POST" action="{{ url_for('admin_unblock_user', user_id=user.id) }}" style="display: inline; margin-left: 5px;">
                     <button type="submit" class="btn btn-success btn-small"
-                            onclick="return confirm('Unblock all devices for this user?')">
+                            onclick="return confirm('Allow devices for this user?')">
                         ✅ Unblock
                     </button>
                 </form>
@@ -974,11 +974,15 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
                     </button>
                 </form>
                 {% elif device.registration_status == 'blocked' %}
+                {% if user and user.blocked %}
+                <span class="btn btn-small" style="background:#ccc;cursor:not-allowed;" title="Cannot unblock device while user is blocked">🔒 User blocked</span>
+                {% else %}
                 <form method="POST" action="{{ url_for('admin_unblock_device', device_id=device.id) }}" style="display: inline;">
                     <button type="submit" class="btn btn-success btn-small">
                         ✅ Unblock
                     </button>
                 </form>
+                {% endif %}
                 {% endif %}
                 <form method="POST" action="{{ url_for('admin_delete_device', device_id=device.id) }}" style="display: inline; margin-left: 5px;">
                     <button type="submit" class="btn btn-small" 

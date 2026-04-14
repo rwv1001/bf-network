@@ -363,6 +363,14 @@ document.addEventListener('DOMContentLoaded', function() {
         })
         .then(async response => {
             const data = await response.json().catch(() => ({}));
+            // Handle user-blocked response (HTTP 403) before the generic error check.
+            if (response.status === 403 && (data.status === 'blocked')) {
+                const rejMsg = 'The administrator has blocked you from connecting any devices to the internet.'
+                    + (data.reason && data.reason !== rejMsg ? ' ' + data.reason : '');
+                showStatus(rejMsg, 'error');
+                form.style.display = 'none';
+                return;
+            }
             if (!response.ok) {
                 throw new Error(data.message || 'Registration failed');
             }
@@ -480,8 +488,11 @@ document.addEventListener('DOMContentLoaded', function() {
             <p style="margin:0 0 10px 0;">${msg || 'A network password is required. Please enter it below.'}</p>
             <div class="form-group">
                 <label for="network_password"><strong>Network Password</strong></label>
-                <input type="password" id="network_password" placeholder="Enter your network password"
-                       style="width:100%;padding:10px;margin-top:6px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box;">
+                <div style="position:relative;display:flex;align-items:center;">
+                    <input type="password" id="network_password" placeholder="Enter your network password"
+                           style="width:100%;padding:10px;padding-right:40px;margin-top:6px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box;">
+                    <button type="button" onclick="(function(){var i=document.getElementById('network_password');var b=document.getElementById('toggleNetworkPwd');i.type=i.type==='password'?'text':'password';b.textContent=i.type==='password'?'👁️':'🙈';})()" id="toggleNetworkPwd" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;padding:0;font-size:16px;line-height:1;color:#666;" title="Show/hide password">👁️</button>
+                </div>
             </div>
             <button type="button" id="submitPasswordBtn" class="btn" style="margin-top:10px;">Submit Password</button>
             <p style="margin:10px 0 0 0;font-size:0.9em;">

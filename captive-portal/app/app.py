@@ -2382,6 +2382,12 @@ def apply_device_unblock(device, flash_messages=False):
       remove DNS hijack and ACL block, then set internet_accessible=True.
     - Otherwise set internet_accessible=False (wrong VLAN or unvalidated password VLAN).
     """
+    # If the device has active ownership but no assigned_vlan (e.g. was blocked from
+    # a pending-registration state), restore assigned_vlan from current_vlan so that
+    # _should_have_internet() can succeed and the status becomes 'registered'.
+    if not device.assigned_vlan and device.current_vlan and _get_active_ownership(device.mac_address):
+        device.assigned_vlan = device.current_vlan
+
     _set_internet_blocked(device, None, commit=False)
     db.session.commit()
     clear_unregistered_lease(device.mac_address)
@@ -2448,6 +2454,16 @@ def apply_device_unblock(device, flash_messages=False):
                 )
         logger.info("Unblocked device %s: conditions not yet met for internet access", device.mac_address)
 
+    # Supersede any rejected registration request so the user can re-register if needed.
+    RegistrationRequest.query.filter_by(
+        mac_address=device.mac_address, status='rejected'
+    ).update(
+        {'status': 'superseded', 'processed_at': datetime.utcnow(),
+         'processed_by': 'superseded-by-admin-unblock'},
+        synchronize_session=False,
+    )
+    db.session.commit()
+
     cleanup_orphan_hijack_rules()
 
 
@@ -2510,6 +2526,11 @@ def api_device_status():
     # Get latest active lease for blocked-pool and dns_hijacked info.
     lease = _get_active_iplease(mac_address)
 
+    # Spec B: internet_blocked takes priority over everything else — check first
+    # so a blocked user never sees a password prompt or approval wait.
+    if device.internet_blocked:
+        return jsonify({'status': 'blocked'})
+
     # Determine selected/detected VLAN and password requirements.
     ip_address  = get_client_ip()
     _, detected_vlan, _ = detect_connection_type(ip_address)
@@ -2526,9 +2547,6 @@ def api_device_status():
 
     # Spec 4b.ii.2
     assigned_vlan = device.assigned_vlan
-
-    if device.internet_blocked:
-        return jsonify({'status': 'blocked'})
 
     if assigned_vlan is None:
         return jsonify({
@@ -2851,6 +2869,12 @@ def register():
         # Device IS registered (has an active ownership record)
         if device and ownership:
             device = normalize_device_status(device)
+            # If the device is blocked because the user is blocked, skip straight
+            # to the rejection page so the message renders immediately without
+            # waiting for the poll cycle.
+            if device.internet_blocked and device.user and device.user.blocked:
+                _blocked_reason = 'The administrator has blocked you from connecting any devices to the internet.'
+                return redirect(url_for('request_rejected', reason=_blocked_reason))
             # Build prefill from the device's user so the hidden form fields
             # carry valid data when the JS password-entry prompt submits.
             _user_pf = device.user
@@ -3010,6 +3034,17 @@ def register():
             active_ownership = None
         if not active_ownership:
             _open_ownership(mac_address, user.id, commit=True)
+
+        # ── Blocked-user check ────────────────────────────────────────────────
+        # If the user account is blocked, register the device under their name but
+        # immediately set internet_blocked=True so they cannot gain internet access.
+        if user.blocked:
+            device.assigned_vlan = selected_vlan or detected_vlan
+            _set_internet_blocked(device, True, commit=True)
+            _msg = 'The administrator has blocked you from connecting any devices to the internet.'
+            if is_ajax:
+                return jsonify({'status': 'blocked', 'message': _msg}), 403
+            return redirect(url_for('request_rejected', reason=_msg))
 
         # ── Password-required VLAN handling (spec 4b.ii.1) ───────────────────
         if selected_vlan and _vlan_requires_password(selected_vlan) and not device.ownership_validated:
@@ -4365,12 +4400,16 @@ def registration_status():
         # immediately so the waiting-for-approval page can update in-place.
         if device.internet_blocked:
             _blocked_payload = {'status': 'blocked', 'message': 'Your device has been blocked from accessing the internet.'}
-            # Include the rejection reason from the most recent rejected request if available.
-            _rej_req = RegistrationRequest.query.filter_by(
-                mac_address=mac_address, status='rejected'
-            ).order_by(RegistrationRequest.submitted_at.desc()).first()
-            if _rej_req and _rej_req.notes:
-                _blocked_payload['reason'] = _rej_req.notes
+            # Check if blocked due to user account block first.
+            if device.user and device.user.blocked:
+                _blocked_payload['reason'] = 'The administrator has blocked you from connecting any devices to the internet.'
+            else:
+                # Fall back to rejection reason from most recent rejected request.
+                _rej_req = RegistrationRequest.query.filter_by(
+                    mac_address=mac_address, status='rejected'
+                ).order_by(RegistrationRequest.submitted_at.desc()).first()
+                if _rej_req and _rej_req.notes:
+                    _blocked_payload['reason'] = _rej_req.notes
             _resp = jsonify(_blocked_payload)
             _resp.headers['Access-Control-Allow-Origin'] = '*'
             return _resp
@@ -4467,11 +4506,14 @@ def registration_status():
             'network_mismatch': network_mismatch
         }
         if device.registration_status == 'blocked':
-            _block_req = RegistrationRequest.query.filter_by(
-                mac_address=mac_address, status='rejected'
-            ).order_by(RegistrationRequest.submitted_at.desc()).first()
-            if _block_req and _block_req.notes:
-                _reg_status_payload['reason'] = _block_req.notes
+            if device.user and device.user.blocked:
+                _reg_status_payload['reason'] = 'The administrator has blocked you from connecting any devices to the internet.'
+            else:
+                _block_req = RegistrationRequest.query.filter_by(
+                    mac_address=mac_address, status='rejected'
+                ).order_by(RegistrationRequest.submitted_at.desc()).first()
+                if _block_req and _block_req.notes:
+                    _reg_status_payload['reason'] = _block_req.notes
         response = jsonify(_reg_status_payload)
         response.headers['Access-Control-Allow-Origin'] = '*'
         return response
@@ -8874,7 +8916,7 @@ def admin_block_user(user_id):
 @login_required
 @permission_required('manage_users')
 def admin_unblock_user(user_id):
-    """Spec B.b: unblock all currently-owned devices for a user."""
+    """Unblock a user. Devices remain blocked and must be unblocked individually."""
     user = User.query.get_or_404(user_id)
     user.blocked = False
     db.session.commit()
@@ -8883,12 +8925,19 @@ def admin_unblock_user(user_id):
         o.mac_address for o in
         DeviceOwnership.query.filter_by(user_id=user.id, end_datetime=None).all()
     ]
-    devices = Device.query.filter(Device.mac_address.in_(active_macs)).all() if active_macs else []
-    for device in devices:
-        apply_device_unblock(device, flash_messages=False)
+    blocked_count = Device.query.filter(
+        Device.mac_address.in_(active_macs),
+        Device.registration_status == 'blocked',
+    ).count() if active_macs else 0
 
-    flash(f'User {user.email} unblocked. {len(devices)} device(s) unblocked.', 'success')
-    logger.info("Admin unblocked user %s (%d devices)", user.email, len(devices))
+    if blocked_count:
+        flash(
+            f'User {user.email} unblocked. {blocked_count} device(s) still blocked — unblock each device manually.',
+            'info',
+        )
+    else:
+        flash(f'User {user.email} unblocked.', 'success')
+    logger.info("Admin unblocked user %s (devices remain blocked individually)", user.email)
     return redirect(url_for('admin_dashboard'))
 
 
@@ -9301,6 +9350,11 @@ def admin_block_device(device_id):
 def admin_unblock_device(device_id):
     """Unblock a device by removing switch ACL rule"""
     device = Device.query.get_or_404(device_id)
+
+    # Cannot unblock a device whose user is still blocked.
+    if device.user and device.user.blocked:
+        flash(f'Cannot unblock device: user {device.user.email} is still blocked.', 'error')
+        return redirect(url_for('admin_dashboard'))
 
     apply_device_unblock(device, flash_messages=True)
     
