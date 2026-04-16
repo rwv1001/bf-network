@@ -283,6 +283,37 @@ void manage_unregistered_lease(const std::string& action,
     }
 }
 
+// Helper: query central for an unknown MAC via central_import.py.
+// Returns one of: "registered", "blocked", "not_found", "disabled", "error".
+// The call is synchronous but central_import.py uses a 3-second HTTP timeout,
+// so the total wall time is bounded.  We validate the MAC before exec to
+// prevent shell injection.
+std::string query_central_for_mac(const std::string& mac_colon) {
+    // Only allow hex digits and colons (aa:bb:cc:dd:ee:ff)
+    if (mac_colon.size() > 17) return "error";
+    for (unsigned char c : mac_colon) {
+        if (!isxdigit(c) && c != ':') return "error";
+    }
+
+    // Build command — mac_colon already validated; single-quote the arg anyway
+    std::string cmd = "python3 /scripts/central_import.py '" + mac_colon + "' 2>/dev/null";
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) return "error";
+
+    char buf[32] = {};
+    bool got = (fgets(buf, sizeof(buf) - 1, pipe) != nullptr);
+    pclose(pipe);
+    if (!got) return "error";
+
+    std::string result(buf);
+    // Strip trailing whitespace / newline
+    while (!result.empty() &&
+           (result.back() == '\n' || result.back() == '\r' || result.back() == ' ')) {
+        result.pop_back();
+    }
+    return result;
+}
+
 // Helper: extract "blocked-ip" from reservation user-context if present
 std::string get_blocked_ip_from_reservation(const ConstHostPtr& host) {
     if (!host) {
@@ -647,8 +678,30 @@ int lease4_select(CalloutHandle& handle) {
                 manage_dns_hijack("unhijack", blocked_ip);
             }
         } else {
+            // No local reservation — query central before treating as unregistered.
+            std::string central_status = query_central_for_mac(mac_clean);
+            std::cout << "DNS Hijack Hook: Device " << mac_clean
+                      << " not in local DB - central query returned: "
+                      << central_status << std::endl;
+            std::cout.flush();
+
+            if (central_status == "registered" || central_status == "blocked") {
+                // Device was imported from central and a Kea reservation was added.
+                // Drop this offer so the client re-DISCOVERs and picks up the new
+                // reservation (correct pool assignment).
+                std::cout << "DNS Hijack Hook: Device " << mac_clean
+                          << " imported from central (status=" << central_status
+                          << ") - dropping offer for re-DISCOVER" << std::endl;
+                std::cout.flush();
+                manage_unregistered_lease("remove", mac_address, ip_address, 0);
+                handle.setStatus(CalloutHandle::NEXT_STEP_DROP);
+                return 0;
+            }
+
+            // not_found / disabled / error → fail-open: treat as unregistered
             std::cout << "DNS Hijack Hook: Device " << mac_address
                       << " is UNREGISTERED - enabling DNS hijack" << std::endl;
+            std::cout.flush();
             manage_dns_hijack("hijack", ip_address);
             manage_acl("block", ip_address, lease->subnet_id_);
             manage_unregistered_lease("upsert", mac_address, ip_address, lease_seconds);

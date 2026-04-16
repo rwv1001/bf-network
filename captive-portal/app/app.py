@@ -26,7 +26,7 @@ import secrets
 def _net_word() -> str:
     return os.getenv('NETWORK_WORD', '192.168')
 
-from models import db, Admin, User, Device, RegistrationRequest, VlanMapping, ISPRouter, Setting, UnregisteredLease, DomainPolicy, DeviceOwnership, IPLease
+from models import db, Admin, User, Device, RegistrationRequest, VlanMapping, ISPRouter, Setting, UnregisteredLease, DomainPolicy, DeviceOwnership, IPLease, CentralOutboundEvent
 from radius_coa import send_coa_disconnect, send_coa_change
 from email_service import (
     send_verification_email,
@@ -726,6 +726,11 @@ def _restart_kea_container():
 
 # Initialize database
 db.init_app(app)
+
+# Initialize central sync client (no-op if env vars not set)
+import central_client
+with app.app_context():
+    central_client.init_central_client(app, db, CentralOutboundEvent)
 
 
 @app.after_request
@@ -2388,6 +2393,7 @@ def apply_device_block(device, flash_messages=False):
         logger.warning("Block: no IP/VLAN for device %s", device.mac_address)
 
     cleanup_orphan_hijack_rules()
+    central_client.queue_device_blocked(device)
 
 
 def apply_device_unblock(device, flash_messages=False):
@@ -2885,6 +2891,17 @@ def register():
         device    = Device.query.filter_by(mac_address=mac_address).first()
         ownership = _get_active_ownership(mac_address) if device else None
 
+        # Unknown device: check central before showing the registration form.
+        # If central knows this device (registered at another premises), import
+        # it locally so the user gets seamless access (or sees a block message)
+        # without having to re-register.
+        if not ownership and central_client._central_enabled():
+            central_data = central_client.lookup_device_at_central(mac_address)
+            if central_data:
+                device = central_client.import_device_from_central(mac_address, central_data)
+                if device:
+                    ownership = _get_active_ownership(mac_address)
+
         # Device IS registered (has an active ownership record)
         if device and ownership:
             device = normalize_device_status(device)
@@ -3271,6 +3288,9 @@ def register():
                 'ssid':         ssid_display,
             },
         )
+
+        # Notify central server of the new registration (queued, non-blocking)
+        central_client.queue_device_registered(device, user)
 
         if is_ajax:
             _needs_confirm = not bool(device.ownership_validated)
@@ -8962,6 +8982,7 @@ def admin_block_user(user_id):
     for device in devices:
         apply_device_block(device, flash_messages=False)
 
+    central_client.queue_user_blocked(user)
     flash(f'User {user.email} blocked. {len(devices)} device(s) blocked.', 'success')
     logger.info("Admin blocked user %s (%d devices)", user.email, len(devices))
     return redirect(url_for('admin_dashboard'))
@@ -8992,6 +9013,7 @@ def admin_unblock_user(user_id):
         )
     else:
         flash(f'User {user.email} unblocked.', 'success')
+    central_client.queue_user_unblocked(user)
     logger.info("Admin unblocked user %s (devices remain blocked individually)", user.email)
     return redirect(url_for('admin_dashboard'))
 
@@ -9343,6 +9365,9 @@ def admin_process_request(request_id):
                 },
             )
 
+        # Notify central server of the new registration (queued, non-blocking)
+        central_client.queue_device_registered(device, user)
+
         flash(f'Request approved and user {user.email} registered', 'success')
         logger.info("Admin approved registration request for %s", user.email)
         
@@ -9414,6 +9439,7 @@ def admin_unblock_device(device_id):
         return redirect(url_for('admin_dashboard'))
 
     apply_device_unblock(device, flash_messages=True)
+    central_client.queue_device_unblocked(device)
     
     return redirect(url_for('admin_dashboard'))
 

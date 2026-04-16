@@ -1,0 +1,453 @@
+"""
+central_client.py — bf-network integration with the bf-central sync server.
+
+Responsibilities:
+  1. Queue outbound events to central (device/user registered/blocked/unblocked)
+  2. Drain the outbound queue in a background thread (with retry on failure)
+  3. Poll central's outbound queue for instructions addressed to this site and
+     apply them locally (block/unblock device or user)
+  4. Look up an unknown MAC address at central when the local DB has no record
+
+Central integration is opt-in: if CENTRAL_API_URL or CENTRAL_API_KEY are absent
+from the environment the module silently does nothing, so existing
+single-site deployments are unaffected.
+"""
+
+import logging
+import os
+import threading
+import time
+from datetime import datetime, timezone
+from typing import Optional
+
+import requests
+
+logger = logging.getLogger(__name__)
+
+# ── Configuration read from environment ──────────────────────────────────────
+
+def _central_enabled() -> bool:
+    return bool(
+        os.getenv("CENTRAL_API_URL", "").strip()
+        and os.getenv("CENTRAL_API_KEY", "").strip()
+        and os.getenv("CENTRAL_SITE_ID", "").strip()
+    )
+
+def _api_url() -> str:
+    return os.getenv("CENTRAL_API_URL", "").rstrip("/")
+
+def _headers() -> dict:
+    return {
+        "X-API-Key": os.getenv("CENTRAL_API_KEY", ""),
+        "Content-Type": "application/json",
+    }
+
+_TIMEOUT = int(os.getenv("CENTRAL_REQUEST_TIMEOUT_SEC", "8"))
+_POLL_INTERVAL = int(os.getenv("CENTRAL_POLL_INTERVAL_SEC", "10"))
+
+# ── Module-level app reference (set by init_central_client) ──────────────────
+
+_app = None         # Flask app — needed for background threads that need app context
+_db = None          # SQLAlchemy db instance
+_model = None       # CentralOutboundEvent model class
+
+
+def init_central_client(app, db, central_event_model):
+    """
+    Call once at startup (after db.create_all) to wire up the background workers.
+    Pass the Flask app, db instance, and the CentralOutboundEvent model class.
+    """
+    global _app, _db, _model
+    _app = app
+    _db = db
+    _model = central_event_model
+
+    if not _central_enabled():
+        logger.info("Central sync disabled (CENTRAL_API_URL/KEY/SITE_ID not set)")
+        return
+
+    logger.info(
+        "Central sync enabled: site=%s url=%s",
+        os.getenv("CENTRAL_SITE_ID"),
+        _api_url(),
+    )
+
+    threading.Thread(
+        target=_outbound_worker, daemon=True, name="central-outbound"
+    ).start()
+    threading.Thread(
+        target=_inbound_worker, daemon=True, name="central-inbound"
+    ).start()
+
+
+# ── Public API — called from app.py ──────────────────────────────────────────
+
+def queue_device_registered(device, user) -> None:
+    """Queue a device_registered event to central after successful local registration."""
+    if not _central_enabled():
+        return
+    _enqueue("device_registered", {
+        "mac_address": device.mac_address,
+        "email": user.email,
+        "first_name": user.first_name,
+        "last_name": user.last_name,
+        "phone_number": user.phone_number,
+        "assigned_vlan": device.assigned_vlan,
+        "device_name": device.device_name,
+    })
+
+
+def queue_device_blocked(device, reason: Optional[str] = None) -> None:
+    if not _central_enabled():
+        return
+    _enqueue("device_blocked", {
+        "mac_address": device.mac_address,
+        "reason": reason or "",
+    })
+
+
+def queue_device_unblocked(device) -> None:
+    if not _central_enabled():
+        return
+    _enqueue("device_unblocked", {"mac_address": device.mac_address})
+
+
+def queue_user_blocked(user, reason: Optional[str] = None) -> None:
+    if not _central_enabled():
+        return
+    _enqueue("user_blocked", {
+        "email": user.email,
+        "reason": reason or "",
+    })
+
+
+def queue_user_unblocked(user) -> None:
+    if not _central_enabled():
+        return
+    _enqueue("user_unblocked", {"email": user.email})
+
+
+def import_device_from_central(mac_address: str, central_data: dict) -> Optional[object]:
+    """Import a device+user from a central lookup response into the local DB.
+
+    Creates or updates the local User, Device, and DeviceOwnership records, then
+    queues a device_registered event so central knows this site now holds the
+    device.
+
+    Returns the local Device object (which may have internet_blocked=True if
+    central reported it blocked), or None on failure.
+
+    The caller must be inside a Flask app context.
+    """
+    if not central_data:
+        return None
+
+    from models import Device, User, DeviceOwnership
+    from app import db as app_db
+    import datetime as _dt
+
+    mac = mac_address.lower().strip()
+    email = (central_data.get("email") or "").lower().strip()
+    if not email:
+        logger.warning("import_device_from_central: no email in central data for %s", mac)
+        return None
+
+    now = _dt.datetime.now(_dt.timezone.utc)
+
+    # ── Upsert user ──────────────────────────────────────────────────────────
+    user = User.query.filter_by(email=email).first()
+    if not user:
+        user = User(
+            email=email,
+            first_name=central_data.get("first_name") or "",
+            last_name=central_data.get("last_name") or "",
+            phone_number=central_data.get("phone_number") or "",
+            begin_date=now.date(),
+        )
+        app_db.session.add(user)
+        app_db.session.flush()
+        logger.info("import_device_from_central: created user %s from central", email)
+    else:
+        # Fill gaps only — don't overwrite locally-set values
+        if not user.first_name and central_data.get("first_name"):
+            user.first_name = central_data["first_name"]
+        if not user.last_name and central_data.get("last_name"):
+            user.last_name = central_data["last_name"]
+
+    # Apply user-level block from central
+    if central_data.get("user_blocked") and not getattr(user, "blocked", False):
+        user.blocked = True
+        logger.info("import_device_from_central: user %s marked blocked (from central)", email)
+
+    # ── Upsert device ────────────────────────────────────────────────────────
+    device = Device.query.filter_by(mac_address=mac).first()
+    device_blocked = bool(central_data.get("device_blocked") or central_data.get("user_blocked"))
+    if not device:
+        device = Device(
+            mac_address=mac,
+            assigned_vlan=central_data.get("assigned_vlan"),
+            device_name=central_data.get("device_name"),
+            internet_blocked=device_blocked,
+            first_seen=now,
+        )
+        app_db.session.add(device)
+        app_db.session.flush()
+        logger.info("import_device_from_central: created device %s (blocked=%s)", mac, device_blocked)
+    else:
+        if device_blocked and not device.internet_blocked:
+            device.internet_blocked = True
+            logger.info("import_device_from_central: device %s marked blocked (from central)", mac)
+        if not device.assigned_vlan and central_data.get("assigned_vlan"):
+            device.assigned_vlan = central_data["assigned_vlan"]
+
+    # ── Upsert ownership ─────────────────────────────────────────────────────
+    existing_ownership = DeviceOwnership.query.filter_by(
+        mac_address=mac, end_datetime=None
+    ).first()
+    if not existing_ownership:
+        ownership = DeviceOwnership(
+            mac_address=mac,
+            user_id=user.id,
+            start_datetime=now,
+            end_datetime=None,
+        )
+        app_db.session.add(ownership)
+
+    device.ownership_validated = True
+    app_db.session.commit()
+
+    # ── Notify central this site now holds the device ────────────────────────
+    queue_device_registered(device, user)
+
+    return device
+
+
+def lookup_device_at_central(mac_address: str) -> Optional[dict]:
+    """
+    Query central for an unknown MAC address.
+    Returns a dict with device/user info + block status, or None if not found
+    or central is unreachable (fail-open).
+
+    The caller is responsible for creating local DB records from the response.
+    """
+    if not _central_enabled():
+        return None
+    try:
+        resp = requests.get(
+            f"{_api_url()}/api/v1/device/{mac_address}",
+            headers=_headers(),
+            timeout=_TIMEOUT,
+        )
+        if resp.status_code == 200:
+            return resp.json()
+        if resp.status_code == 404:
+            return None
+        logger.warning("central lookup %s → HTTP %d", mac_address, resp.status_code)
+    except Exception as exc:
+        logger.warning("central lookup %s failed (fail-open): %s", mac_address, exc)
+    return None
+
+
+# ── Internal helpers ──────────────────────────────────────────────────────────
+
+def _enqueue(event_type: str, payload: dict) -> None:
+    """Insert and commit an outbound event into the local DB queue.
+    Uses a separate commit so the event is persisted regardless of whether
+    the caller's transaction has already been committed."""
+    if _model is None or _db is None:
+        return
+    try:
+        event = _model(event_type=event_type, payload=payload)
+        _db.session.add(event)
+        _db.session.commit()
+    except Exception as exc:
+        _db.session.rollback()
+        logger.error("Failed to enqueue central event %s: %s", event_type, exc)
+
+
+def _send_event(event_type: str, payload: dict):
+    """Send a single event to central.
+    Returns the parsed JSON response dict on success, False on failure."""
+    try:
+        resp = requests.post(
+            f"{_api_url()}/api/v1/event",
+            json={"event_type": event_type, "data": payload},
+            headers=_headers(),
+            timeout=_TIMEOUT,
+        )
+        if resp.status_code in (200, 201):
+            try:
+                return resp.json()
+            except Exception:
+                return {"status": "ok"}
+        logger.warning("central event %s → HTTP %d: %s", event_type, resp.status_code, resp.text[:200])
+    except Exception as exc:
+        logger.warning("central event %s failed: %s", event_type, exc)
+    return False
+
+
+def _outbound_worker() -> None:
+    """Daemon thread: drain the outbound queue, retrying failed items.
+
+    For device_registered events, central's response includes the current
+    block state.  If the device is blocked (e.g. it was blocked at another
+    site before arriving here), apply the block locally so the correct Kea
+    reservation and ACLs are set without waiting for a separate inbound
+    instruction.
+    """
+    while True:
+        time.sleep(_POLL_INTERVAL)
+        if not _app or not _model or not _db:
+            continue
+        try:
+            with _app.app_context():
+                pending = (
+                    _model.query
+                    .filter_by(status="pending")
+                    .order_by(_model.created_at)
+                    .limit(50)
+                    .all()
+                )
+                for item in pending:
+                    result = _send_event(item.event_type, item.payload)
+                    success = bool(result)
+                    item.attempts += 1
+                    item.last_attempt_at = datetime.now(timezone.utc)
+                    item.status = "sent" if success else "pending"
+                    # For device_registered, central tells us whether the
+                    # device/user is blocked at another site.
+                    if success and item.event_type == "device_registered" and isinstance(result, dict):
+                        _handle_registration_response(item.payload, result)
+                if pending:
+                    _db.session.commit()
+        except Exception as exc:
+            logger.error("outbound worker error: %s", exc)
+
+
+def _handle_registration_response(payload: dict, central_response: dict) -> None:
+    """After central ACKs a device_registered event, apply any block the central
+    server indicates is already in effect for that device or its user."""
+    from models import Device, User, DeviceOwnership
+    from app import apply_device_block, db as app_db
+
+    mac = payload.get("mac_address", "").lower()
+    if not mac:
+        return
+
+    device = Device.query.filter_by(mac_address=mac).first()
+    if not device:
+        return
+
+    if central_response.get("device_blocked") and not device.internet_blocked:
+        logger.info("central: device %s is blocked at another site — applying block locally", mac)
+        apply_device_block(device, flash_messages=False)
+        return
+
+    if central_response.get("user_blocked"):
+        email = payload.get("email", "").lower()
+        user = User.query.filter_by(email=email).first() if email else None
+        if user and not getattr(user, "blocked", False):
+            logger.info("central: user %s is blocked at another site — applying block locally", email)
+            user.blocked = True
+            app_db.session.commit()
+            active_macs = [
+                o.mac_address for o in
+                DeviceOwnership.query.filter_by(user_id=user.id, end_datetime=None).all()
+            ]
+            for d in Device.query.filter(Device.mac_address.in_(active_macs)).all():
+                apply_device_block(d, flash_messages=False)
+
+
+def _inbound_worker() -> None:
+    """Daemon thread: poll central for instructions addressed to this site."""
+    while True:
+        time.sleep(_POLL_INTERVAL)
+        if not _app:
+            continue
+        try:
+            resp = requests.get(
+                f"{_api_url()}/api/v1/queue/pending",
+                headers=_headers(),
+                timeout=_TIMEOUT,
+            )
+            if resp.status_code != 200:
+                continue
+            items = resp.json().get("items", [])
+            if not items:
+                continue
+            with _app.app_context():
+                for item in items:
+                    try:
+                        _apply_inbound(item["event_type"], item["data"])
+                        _ack(item["queue_id"])
+                    except Exception as exc:
+                        logger.error(
+                            "Failed to apply inbound %s (queue_id=%s): %s",
+                            item["event_type"], item["queue_id"], exc,
+                        )
+        except Exception as exc:
+            logger.warning("inbound worker error: %s", exc)
+
+
+def _ack(queue_id: int) -> None:
+    try:
+        requests.post(
+            f"{_api_url()}/api/v1/ack",
+            json={"queue_id": queue_id},
+            headers=_headers(),
+            timeout=_TIMEOUT,
+        )
+    except Exception as exc:
+        logger.warning("ack failed for queue_id=%s: %s", queue_id, exc)
+
+
+def _apply_inbound(event_type: str, data: dict) -> None:
+    """Apply an instruction received from central to the local DB and network."""
+    # Import here to avoid circular imports at module load time
+    from models import Device, User, DeviceOwnership
+    from app import apply_device_block, apply_device_unblock, db as app_db
+
+    logger.info("central inbound: %s %s", event_type, data)
+
+    if event_type == "block_device":
+        mac = data.get("mac_address", "").lower()
+        device = Device.query.filter_by(mac_address=mac).first()
+        if device:
+            apply_device_block(device, flash_messages=False)
+            logger.info("central: blocked device %s", mac)
+        else:
+            logger.warning("central block_device: MAC %s not found locally", mac)
+
+    elif event_type == "unblock_device":
+        mac = data.get("mac_address", "").lower()
+        device = Device.query.filter_by(mac_address=mac).first()
+        if device:
+            apply_device_unblock(device, flash_messages=False)
+            logger.info("central: unblocked device %s", mac)
+
+    elif event_type == "block_user":
+        email = data.get("email", "").lower()
+        user = User.query.filter_by(email=email).first()
+        if user:
+            user.blocked = True
+            app_db.session.commit()
+            active_macs = [
+                o.mac_address for o in
+                DeviceOwnership.query.filter_by(user_id=user.id, end_datetime=None).all()
+            ]
+            for device in Device.query.filter(Device.mac_address.in_(active_macs)).all():
+                apply_device_block(device, flash_messages=False)
+            logger.info("central: blocked user %s", email)
+        else:
+            logger.warning("central block_user: email %s not found locally", email)
+
+    elif event_type == "unblock_user":
+        email = data.get("email", "").lower()
+        user = User.query.filter_by(email=email).first()
+        if user:
+            user.blocked = False
+            app_db.session.commit()
+            logger.info("central: unblocked user %s (devices remain individually blocked)", email)
+
+    else:
+        logger.warning("central: unknown inbound event_type %r", event_type)

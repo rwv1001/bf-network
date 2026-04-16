@@ -363,3 +363,24 @@ class IPLease(db.Model):
 
     def __repr__(self):
         return f'<IPLease {self.ip_address} mac={self.mac_address} blocked={self.from_blocked_pool}>'
+
+
+class CentralOutboundEvent(db.Model):
+    """Events queued for delivery to the central sync server.
+
+    Items with status='pending' are picked up by central_client's outbound
+    worker thread and sent to central's POST /api/v1/event endpoint.
+    Retried on failure; status becomes 'sent' once central acknowledges.
+    """
+    __tablename__ = 'central_outbound_events'
+
+    id = db.Column(db.Integer, primary_key=True)
+    event_type = db.Column(db.String(64), nullable=False)
+    payload = db.Column(db.JSON, nullable=False)
+    status = db.Column(db.String(32), default='pending', nullable=False, index=True)
+    attempts = db.Column(db.Integer, default=0, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    last_attempt_at = db.Column(db.DateTime, nullable=True)
+
+    def __repr__(self):
+        return f'<CentralOutboundEvent {self.event_type} status={self.status}>'

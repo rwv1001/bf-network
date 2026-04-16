@@ -42,6 +42,10 @@ services:
       DB_NAME: ${DB_NAME:-captive_portal}
       DB_USER: ${DB_USER:-portal_user}
       DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required – set it in kea/.env}
+      CENTRAL_API_URL: ${CENTRAL_API_URL:-}
+      CENTRAL_API_KEY: ${CENTRAL_API_KEY:-}
+      CENTRAL_SITE_ID: ${CENTRAL_SITE_ID:-}
+      KEA_CONTROL_SOCKET: /kea/sockets/kea4-ctrl-socket
     entrypoint: |
       sh -c '
       # Abort early if any required variable is missing
