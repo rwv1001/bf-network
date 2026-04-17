@@ -23,6 +23,7 @@
 #include <fcntl.h>
 #include <cstdio>
 #include <cctype>
+#include <mutex>
 
 using namespace isc::hooks;
 using namespace isc::dhcp;
@@ -111,19 +112,66 @@ void manage_dns_hijack_pools(const std::string& action) {
 }
 
 bool is_blocked_pool_ip(const std::string& ip_address) {
-    std::size_t last_dot = ip_address.rfind('.');
-    if (last_dot == std::string::npos || last_dot + 1 >= ip_address.size()) {
-        return false;
+    // Convert a dotted-quad string to a uint32_t for range comparisons.
+    auto ip_to_u32 = [](const std::string& s) -> uint32_t {
+        unsigned a = 0, b = 0, c = 0, d = 0;
+        if (sscanf(s.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4) return 0;
+        return (a << 24) | (b << 16) | (c << 8) | d;
+    };
+
+    // Cache blocked pool ranges on first call by reading the Kea config via Python.
+    static std::mutex              s_mutex;
+    static bool                    s_loaded = false;
+    static std::vector<std::pair<uint32_t, uint32_t>> s_ranges;
+
+    {
+        std::lock_guard<std::mutex> lk(s_mutex);
+        if (!s_loaded) {
+            s_loaded = true;
+            const char* cfg = std::getenv("KEA_CONFIG_PATH");
+            if (!cfg || !*cfg) cfg = "/kea/config/dhcp4.json";
+            std::string cmd =
+                "python3 -c \""
+                "import json\n"
+                "with open('" + std::string(cfg) + "') as f:\n"
+                "    data=json.load(f)\n"
+                "for s in data.get('Dhcp4',{}).get('subnet4',[]):\n"
+                "    for p in s.get('pools',[]):\n"
+                "        if 'BLOCKED' in (p.get('client-classes') or []):\n"
+                "            r=p['pool'].replace(' ','')\n"
+                "            print(r)\n"
+                "\" 2>/dev/null";
+            FILE* pipe = popen(cmd.c_str(), "r");
+            if (pipe) {
+                char line[256];
+                while (fgets(line, sizeof(line), pipe)) {
+                    std::string range(line);
+                    while (!range.empty() &&
+                           (range.back() == '\n' || range.back() == '\r' || range.back() == ' '))
+                        range.pop_back();
+                    auto dash = range.find('-');
+                    if (dash == std::string::npos) continue;
+                    uint32_t start = ip_to_u32(range.substr(0, dash));
+                    uint32_t end   = ip_to_u32(range.substr(dash + 1));
+                    if (start && end && start <= end)
+                        s_ranges.push_back({start, end});
+                }
+                pclose(pipe);
+                std::cout << "DNS Hijack Hook: loaded " << s_ranges.size()
+                          << " blocked-pool range(s) from " << cfg << std::endl;
+            } else {
+                std::cerr << "DNS Hijack Hook: WARNING is_blocked_pool_ip: "
+                             "failed to load ranges from Kea config" << std::endl;
+            }
+        }
     }
 
-    int last_octet = -1;
-    try {
-        last_octet = std::stoi(ip_address.substr(last_dot + 1));
-    } catch (...) {
-        return false;
+    uint32_t ip = ip_to_u32(ip_address);
+    if (ip == 0) return false;
+    for (const auto& r : s_ranges) {
+        if (ip >= r.first && ip <= r.second) return true;
     }
-
-    return (last_octet >= 214 && last_octet <= 254);
+    return false;
 }
 
 // Helper: parse SWITCH_HOSTS (space-separated) env var.
@@ -703,7 +751,11 @@ int lease4_select(CalloutHandle& handle) {
                       << " is UNREGISTERED - enabling DNS hijack" << std::endl;
             std::cout.flush();
             manage_dns_hijack("hijack", ip_address);
-            manage_acl("block", ip_address, lease->subnet_id_);
+            // Blocked-pool IPs are already covered by blanket ACL range rules;
+            // a redundant per-IP rule would survive lease expiry and litter the ACL.
+            if (!ip_is_blocked_pool) {
+                manage_acl("block", ip_address, lease->subnet_id_);
+            }
             manage_unregistered_lease("upsert", mac_address, ip_address, lease_seconds);
             do_hijack = true;
         }
@@ -887,7 +939,9 @@ int lease4_renew(CalloutHandle& handle) {
                       << " is UNREGISTERED - enabling DNS hijack" << std::endl;
             std::cout.flush();
             manage_dns_hijack("hijack", ip_address);
-            manage_acl("block", ip_address, lease->subnet_id_);
+            if (!ip_is_blocked_pool) {
+                manage_acl("block", ip_address, lease->subnet_id_);
+            }
             manage_unregistered_lease("upsert", mac_address, ip_address, lease_seconds);
             do_hijack = true;
         }

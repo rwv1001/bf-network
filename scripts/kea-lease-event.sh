@@ -30,6 +30,38 @@ echo "$LEASE_SECONDS" | grep -qE '^[0-9]+$'                        || LEASE_SECO
 [ "$FROM_BLOCKED_POOL" = "true" ] || FROM_BLOCKED_POOL=false
 [ "$DNS_HIJACKED"      = "true" ] || DNS_HIJACKED=false
 
+# Override from_blocked_pool with an accurate check against the Kea config.
+# The C++ hook's is_blocked_pool_ip() used a naive last-octet check that is
+# wrong for /22 subnets; re-derive it here so the DB value is always correct.
+_kea_cfg="${KEA_CONFIG_PATH:-/kea/config/dhcp4.json}"
+if [ -f "$_kea_cfg" ]; then
+    _recalc=$(python3 - <<'PY' "$_kea_cfg" "$IP_ADDRESS" 2>/dev/null
+import ipaddress, json, sys
+cfg_path, ip_str = sys.argv[1], sys.argv[2]
+ip = ipaddress.ip_address(ip_str)
+try:
+    with open(cfg_path) as fh:
+        data = json.load(fh)
+except Exception:
+    print('false'); sys.exit(0)
+for subnet in data.get('Dhcp4', {}).get('subnet4', []):
+    net = ipaddress.ip_network(subnet.get('subnet', ''), strict=False)
+    if ip not in net:
+        continue
+    for pool in subnet.get('pools', []):
+        if 'BLOCKED' in (pool.get('client-classes') or []):
+            start, end = [p.strip() for p in pool['pool'].split('-')]
+            for cidr in ipaddress.summarize_address_range(
+                    ipaddress.ip_address(start), ipaddress.ip_address(end)):
+                if ip in cidr:
+                    print('true'); sys.exit(0)
+    print('false'); sys.exit(0)
+print('false')
+PY
+    )
+    [ "$_recalc" = "true" ] && FROM_BLOCKED_POOL=true || FROM_BLOCKED_POOL=false
+fi
+
 DB_HOST="${DB_HOST:-127.0.0.1}"
 DB_PORT="${DB_PORT:-5432}"
 DB_NAME="${DB_NAME:-captive_portal}"

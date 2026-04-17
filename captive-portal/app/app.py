@@ -226,40 +226,70 @@ def _start_wifi_confirmation_sweeper():
 
 
 def _sweep_expired_ip_leases():
-    """Background thread: clean up DNS hijacks/ACLs for expired IPLease rows."""
+    """Background thread: clean up DNS hijacks/ACLs for expired IPLease rows.
+
+    Per spec: remove all per-IP hijacks and HP5130 ACL blocks once a lease
+    expires, unconditionally.  The block/hijack is IP-scoped, not MAC-scoped:
+    - the IP is freed and may be reassigned to a different device
+    - a still-blocked device will re-DHCP into the blocked pool, which already
+      has blanket range-level rules, so the old per-IP rule is redundant
+    Also sweeps expired leases that were never dns_hijacked to catch any
+    HP5130 per-IP rules that were added without a corresponding hijack.
+    """
     interval = int(os.getenv('IP_LEASE_SWEEP_INTERVAL', '20'))
     while True:
         try:
             with app.app_context():
                 now = datetime.utcnow()
+                # All expired leases — not just dns_hijacked ones.
+                # We always unblock the IP on the switch; unhijack is a no-op
+                # if no iptables rule exists for that IP.
                 expired = IPLease.query.filter(
                     IPLease.lease_expiry <= now,
-                    IPLease.dns_hijacked == True,  # noqa: E712
                 ).all()
+                changed = False
                 for lease in expired:
                     try:
-                        # Do not remove hijack/block for devices that are still
-                        # internet_blocked — admin blocks persist beyond lease
-                        # expiry and are cleared only by an explicit unblock.
-                        device = Device.query.filter_by(mac_address=lease.mac_address).first()
-                        if device and device.internet_blocked:
-                            logger.debug(
-                                "Lease sweep: skipping unhijack for %s — device still blocked",
-                                lease.ip_address,
-                            )
-                            continue
-                        manage_dns_hijack('unhijack', lease.ip_address)
-                        if lease.vlan_id:
+                        if lease.dns_hijacked:
+                            manage_dns_hijack('unhijack', lease.ip_address)
+                            lease.dns_hijacked = False
+                        # Always attempt ACL removal — harmless if rule absent.
+                        if lease.vlan_id and not lease.from_blocked_pool:
                             manage_switch_acl('unblock', lease.ip_address, lease.vlan_id)
-                        lease.dns_hijacked = False
                         logger.info(
-                            "Lease sweep: unhijacked %s (VLAN %s) — lease expired at %s",
+                            "Lease sweep: cleaned up %s (VLAN %s) — lease expired at %s",
                             lease.ip_address, lease.vlan_id, lease.lease_expiry,
                         )
+                        changed = True
                     except Exception as exc:
                         logger.warning("Lease sweep cleanup failed for %s: %s", lease.ip_address, exc)
-                if expired:
+                if changed:
                     db.session.commit()
+
+                # Spec: set internet_accessible=null for any MAC in devices that
+                # has no active (non-expired) leases.
+                try:
+                    now2 = datetime.utcnow()
+                    active_mac_ids = {
+                        row[0]
+                        for row in db.session.query(IPLease.mac_address).filter(
+                            IPLease.lease_expiry > now2
+                        ).all()
+                    }
+                    stale = Device.query.filter(
+                        Device.internet_accessible.isnot(None),
+                        Device.internet_blocked.isnot(True),
+                    ).all()
+                    changed = 0
+                    for dev in stale:
+                        if dev.mac_address not in active_mac_ids:
+                            dev.internet_accessible = None
+                            changed += 1
+                    if changed:
+                        db.session.commit()
+                        logger.debug("Lease sweep: cleared internet_accessible for %d MAC(s) with no active lease", changed)
+                except Exception as exc:
+                    logger.warning("Lease sweep: internet_accessible cleanup failed: %s", exc)
         except Exception as exc:
             logger.warning("IP lease sweep failed: %s", exc)
         time.sleep(interval)
@@ -2515,9 +2545,12 @@ def index():
     device    = Device.query.filter_by(mac_address=mac_address).first()
     ownership = _get_active_ownership(mac_address) if device else None
 
-    # Blocked device always goes to blocked page.
+    # Blocked device — render inline without redirecting to /blocked
     if device and device.internet_blocked:
-        return redirect(_build_portal_url(url_for('blocked_page')))
+        return render_template('blocked.html',
+                               ip_address=get_client_ip(),
+                               mac_address=mac_address,
+                               admin_email=os.getenv('ADMIN_EMAIL', 'admin@example.com'))
 
     # No active ownership → show registration form (spec 4b.i)
     if not ownership:
@@ -2735,7 +2768,7 @@ def rfc8908_captive_portal():
         device = Device.query.filter_by(mac_address=mac_address).first()
         if device:
             if device.internet_blocked:
-                portal_url = _build_portal_url(url_for('blocked_page'))
+                portal_url = _build_portal_url(url_for('register'))
             elif device.internet_accessible:
                 captive = False
 
@@ -2752,11 +2785,6 @@ def rfc8908_captive_portal():
 @app.route('/gen_204')
 def android_captive_portal_detection():
     """Android captive portal detection - return 302 to show portal"""
-    mac_address = get_client_mac()
-    if mac_address:
-        device = Device.query.filter_by(mac_address=mac_address).first()
-        if device and device.registration_status == 'blocked':
-            return redirect(_build_portal_url(url_for('blocked_page'))), 302
     return redirect(_build_portal_url(url_for('register'))), 302
 
 
@@ -2772,22 +2800,12 @@ def access_check():
 @app.route('/hotspot-detect.html')
 def ios_captive_portal_detection():
     """iOS captive portal detection - return 302 to show portal"""
-    mac_address = get_client_mac()
-    if mac_address:
-        device = Device.query.filter_by(mac_address=mac_address).first()
-        if device and device.internet_blocked:
-            return redirect(_build_portal_url(url_for('blocked_page'))), 302
     return redirect(_build_portal_url(url_for('register'))), 302
 
 
 @app.route('/library/test/success.html')
 def ios_captive_success():
     """iOS captive portal success check"""
-    mac_address = get_client_mac()
-    if mac_address:
-        device = Device.query.filter_by(mac_address=mac_address).first()
-        if device and device.internet_blocked:
-            return redirect(_build_portal_url(url_for('blocked_page'))), 302
     return redirect(_build_portal_url(url_for('register'))), 302
 
 @app.route('/ncsi.txt')
@@ -2820,11 +2838,6 @@ def windows_captive_portal_detection():
         return response, 200
 
     """Windows captive portal detection"""
-    mac_address = get_client_mac()
-    if mac_address:
-        device = Device.query.filter_by(mac_address=mac_address).first()
-        if device and device.registration_status == 'blocked':
-            return redirect(_build_portal_url(url_for('blocked_page'))), 302
     return redirect(_build_portal_url(url_for('register'))), 302
 
 
@@ -2905,12 +2918,12 @@ def register():
         # Device IS registered (has an active ownership record)
         if device and ownership:
             device = normalize_device_status(device)
-            # If the device is blocked because the user is blocked, skip straight
-            # to the rejection page so the message renders immediately without
-            # waiting for the poll cycle.
-            if device.internet_blocked and device.user and device.user.blocked:
-                _blocked_reason = 'The administrator has blocked you from connecting any devices to the internet.'
-                return redirect(url_for('request_rejected', reason=_blocked_reason))
+            # Blocked device (device or user) — render inline without a redirect
+            if device.internet_blocked:
+                return render_template('blocked.html',
+                                       ip_address=ip_address,
+                                       mac_address=mac_address,
+                                       admin_email=os.getenv('ADMIN_EMAIL', 'admin@example.com'))
             # Build prefill from the device's user so the hidden form fields
             # carry valid data when the JS password-entry prompt submits.
             _user_pf = device.user

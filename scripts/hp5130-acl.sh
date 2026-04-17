@@ -139,6 +139,40 @@ fi
 ACL_NUM=$((3000 + VLAN_ID * 10))
 RULE_NUM=$((RULE_BASE + HOST_OFFSET))
 
+# Safety: never add a per-IP rule for an IP already covered by a blanket
+# blocked-pool range rule.  Blanket rules are added by hp5130-acl-baseline.sh
+# (rule BLOCK_RULE_BASE+offset) and are authoritative for blocked-pool IPs;
+# a redundant per-IP rule would outlive the lease and clutter the ACL.
+if [ "$ACTION" = "block" ] && [ -n "$PYTHON_BIN" ] && [ -f "$KEA_CONFIG_PATH" ]; then
+  _in_blocked_pool=$($PYTHON_BIN - <<'PY' "$KEA_CONFIG_PATH" "$IP_ADDRESS" 2>/dev/null
+import ipaddress, json, sys
+cfg, ip_str = sys.argv[1], sys.argv[2]
+ip = ipaddress.ip_address(ip_str)
+try:
+    data = json.load(open(cfg))
+except Exception:
+    print('false'); sys.exit(0)
+for subnet in data.get('Dhcp4', {}).get('subnet4', []):
+    net = ipaddress.ip_network(subnet.get('subnet', ''), strict=False)
+    if ip not in net:
+        continue
+    for pool in subnet.get('pools', []):
+        if 'BLOCKED' in (pool.get('client-classes') or []):
+            start, end = [p.strip() for p in pool['pool'].split('-')]
+            for cidr in ipaddress.summarize_address_range(
+                    ipaddress.ip_address(start), ipaddress.ip_address(end)):
+                if ip in cidr:
+                    print('true'); sys.exit(0)
+    print('false'); sys.exit(0)
+print('false')
+PY
+  )
+  if [ "$_in_blocked_pool" = "true" ]; then
+    log "SKIP_BLOCKED_POOL action=$ACTION ip=$IP_ADDRESS reason=covered_by_blanket_range"
+    exit 0
+  fi
+fi
+
 SSH_TTY_FLAG="${SSH_TTY_FLAG:--tt}"  # Changed: Default to -tt for Comware
 SSH_TTY_FALLBACK="${SSH_TTY_FALLBACK:-0}"  # Changed: Disable fallback
 SSH_HOSTKEY_OPTS="${SSH_HOSTKEY_OPTS:--o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa}"
