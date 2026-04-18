@@ -127,6 +127,26 @@ def queue_user_unblocked(user) -> None:
     _enqueue("user_unblocked", {"email": user.email})
 
 
+def queue_user_updated(user) -> None:
+    """Queue a user_updated event after a profile or VLAN-override change.
+
+    Propagates name, phone, and VLAN-override fields to central, which fans
+    the update out to any other sites that hold this user.
+    """
+    if not _central_enabled():
+        return
+    _enqueue("user_updated", {
+        "email":                    user.email,
+        "first_name":               user.first_name   or "",
+        "last_name":                user.last_name    or "",
+        "phone_number":             user.phone_number or "",
+        "allowed_vlans_override":   user.allowed_vlans_override   or "",
+        "allowed_vlans_deny":       user.allowed_vlans_deny       or "",
+        "adoptable_vlans_override": user.adoptable_vlans_override or "",
+        "adoptable_vlans_deny":     user.adoptable_vlans_deny     or "",
+    })
+
+
 def import_device_from_central(mac_address: str, central_data: dict) -> Optional[object]:
     """Import a device+user from a central lookup response into the local DB.
 
@@ -448,6 +468,29 @@ def _apply_inbound(event_type: str, data: dict) -> None:
             user.blocked = False
             app_db.session.commit()
             logger.info("central: unblocked user %s (devices remain individually blocked)", email)
+
+    elif event_type == "update_user":
+        email = data.get("email", "").lower()
+        user = User.query.filter_by(email=email).first()
+        if user:
+            if data.get("first_name") is not None:
+                user.first_name = data["first_name"]
+            if data.get("last_name") is not None:
+                user.last_name = data["last_name"]
+            if data.get("phone_number") is not None:
+                user.phone_number = data["phone_number"]
+            if data.get("allowed_vlans_override") is not None:
+                user.allowed_vlans_override = data["allowed_vlans_override"] or None
+            if data.get("allowed_vlans_deny") is not None:
+                user.allowed_vlans_deny = data["allowed_vlans_deny"] or None
+            if data.get("adoptable_vlans_override") is not None:
+                user.adoptable_vlans_override = data["adoptable_vlans_override"] or None
+            if data.get("adoptable_vlans_deny") is not None:
+                user.adoptable_vlans_deny = data["adoptable_vlans_deny"] or None
+            app_db.session.commit()
+            logger.info("central: updated profile for user %s", email)
+        else:
+            logger.info("central update_user: %s not found locally — skipping", email)
 
     else:
         logger.warning("central: unknown inbound event_type %r", event_type)

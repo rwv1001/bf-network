@@ -135,74 +135,87 @@
 {% endif %}
 <form method="POST" action="{{ url_for('register') }}"
     {%- if show_status %} style="display:none"{% endif %}>
+    <input type="hidden" name="registration_step" id="registrationStepInput" value="1">
     {% if show_status and device and device.wired_target_vlan %}
     <input type="hidden" name="wired_vlan_id" value="{{ device.wired_target_vlan }}">
     {% endif %}
-    <div class="form-group">
-        <label for="email">Email Address <span class="required">*</span></label>
-        <input type="email" id="email" name="email" required placeholder="your.email@example.com" value="{{ prefill.email if prefill else '' }}">
-        <small style="color: #666; display: block; margin-top: 5px;">
-            Use the email address registered with the network administrator
-        </small>
-    </div>
-    
-    <div class="form-group">
-        <label for="first_name">First Name <span class="required">*</span></label>
-        <input type="text" id="first_name" name="first_name" required placeholder="John" value="{{ prefill.first_name if prefill else '' }}">
-    </div>
-    
-    <div class="form-group">
-        <label for="last_name">Last Name <span class="required">*</span></label>
-        <input type="text" id="last_name" name="last_name" required placeholder="Smith" value="{{ prefill.last_name if prefill else '' }}">
-    </div>
-    
-    <div class="form-group">
-        <label for="phone_number">Phone Number</label>
-        <input type="tel" id="phone_number" name="phone_number" placeholder="+44 1234 567890" value="{{ prefill.phone_number if prefill else '' }}">
-        <small style="color: #666; display: block; margin-top: 5px;">
-            Optional - helps us contact you if needed
-        </small>
-    </div>
-    
-    <div class="form-group">
-        <label for="device_type">Device Type <span class="required">*</span></label>
-        <select id="device_type" name="device_type" required>
-            <option value="">-- Select Device Type --</option>
-            <option value="laptop" {% if prefill and prefill.device_type == 'laptop' %}selected{% endif %}>Laptop</option>
-            <option value="phone" {% if prefill and prefill.device_type == 'phone' %}selected{% endif %}>Phone</option>
-            <option value="tablet" {% if prefill and prefill.device_type == 'tablet' %}selected{% endif %}>Tablet</option>
-            <option value="desktop" {% if prefill and prefill.device_type == 'desktop' %}selected{% endif %}>Desktop Computer</option>
-            <option value="iot" {% if prefill and prefill.device_type == 'iot' %}selected{% endif %}>IoT Device</option>
-            <option value="other" {% if prefill and prefill.device_type == 'other' %}selected{% endif %}>Other</option>
-        </select>
-        <small style="color: #666; display: block; margin-top: 5px;">
-            What type of device are you registering?
-        </small>
-    </div>
 
-    {% if wired_vlan_required %}
-    <div class="form-group">
-        <label for="wired_vlan_id">Wired VLAN <span class="required">*</span></label>
-        <select id="wired_vlan_id" name="wired_vlan_id" required>
-            <option value="">-- Select VLAN --</option>
-            {% for vlan in wired_vlan_options %}
-            <option value="{{ vlan.vlan_id }}">{{ vlan.label }}</option>
-            {% endfor %}
-        </select>
-        <small style="color: #666; display: block; margin-top: 5px;">
-            Choose the network you want this wired device to join.
-        </small>
-    </div>
-    {% endif %}
+    <!-- ── Step 1: email, device type, agreement ── -->
+    <div id="step1-fields">
+      <div class="form-group">
+          <label for="email">Email Address <span class="required">*</span></label>
+          <input type="email" id="email" name="email" required placeholder="your.email@example.com" value="{{ prefill.email if prefill else '' }}">
+          <small style="color: #666; display: block; margin-top: 5px;">
+              Use the email address registered with the network administrator
+          </small>
+      </div>
 
-    {% if usage_policy_text %}
-    <div class="form-group" style="margin-top: 10px;">
-        <label style="display: flex; align-items: flex-start; gap: 10px; cursor: pointer;">
-            <input type="checkbox" id="usage_policy" name="usage_policy" required>
-            <span>{{ usage_policy_text }}</span>
-        </label>
-    </div>
-    {% endif %}
+      <div class="form-group">
+          <label for="device_type">Device Type <span class="required">*</span></label>
+          <select id="device_type" name="device_type" required>
+              <option value="">-- Select Device Type --</option>
+              <option value="laptop" {% if prefill and prefill.device_type == 'laptop' %}selected{% endif %}>Laptop</option>
+              <option value="phone" {% if prefill and prefill.device_type == 'phone' %}selected{% endif %}>Phone</option>
+              <option value="tablet" {% if prefill and prefill.device_type == 'tablet' %}selected{% endif %}>Tablet</option>
+              <option value="desktop" {% if prefill and prefill.device_type == 'desktop' %}selected{% endif %}>Desktop Computer</option>
+              <option value="iot" {% if prefill and prefill.device_type == 'iot' %}selected{% endif %}>IoT Device</option>
+              <option value="other" {% if prefill and prefill.device_type == 'other' %}selected{% endif %}>Other</option>
+          </select>
+          <small style="color: #666; display: block; margin-top: 5px;">
+              What type of device are you registering?
+          </small>
+      </div>
+
+      {% if wired_vlan_required %}
+      <div class="form-group">
+          <label for="wired_vlan_id">Wired VLAN <span class="required">*</span></label>
+          <select id="wired_vlan_id" name="wired_vlan_id" required>
+              <option value="">-- Select VLAN --</option>
+              {% for vlan in wired_vlan_options %}
+              <option value="{{ vlan.vlan_id }}">{{ vlan.label }}</option>
+              {% endfor %}
+          </select>
+          <small style="color: #666; display: block; margin-top: 5px;">
+              Choose the network you want this wired device to join.
+          </small>
+      </div>
+      {% endif %}
+
+      {% if usage_policy_text %}
+      <div class="form-group" style="margin-top: 10px;">
+          <label style="display: flex; align-items: flex-start; gap: 10px; cursor: pointer;">
+              <input type="checkbox" id="usage_policy" name="usage_policy" required>
+              <span>{{ usage_policy_text }}</span>
+          </label>
+      </div>
+      {% endif %}
+    </div><!-- /#step1-fields -->
+
+    <!-- ── Step 2: name and phone (only shown when email not yet in the system) ── -->
+    <div id="step2-fields" style="display:none">
+      <p style="color:#555; font-size:0.95em; margin-bottom:16px;">
+          We don&rsquo;t have a record for that email address yet &mdash; please enter your details
+          so the administrator can review your request.
+      </p>
+      <div class="form-group">
+          <label for="first_name">First Name <span class="required">*</span></label>
+          <input type="text" id="first_name" name="first_name" placeholder="John" value="{{ prefill.first_name if prefill else '' }}">
+      </div>
+      <div class="form-group">
+          <label for="last_name">Last Name <span class="required">*</span></label>
+          <input type="text" id="last_name" name="last_name" placeholder="Smith" value="{{ prefill.last_name if prefill else '' }}">
+      </div>
+      <div class="form-group">
+          <label for="phone_number">Phone Number</label>
+          <input type="tel" id="phone_number" name="phone_number" placeholder="+44 1234 567890" value="{{ prefill.phone_number if prefill else '' }}">
+          <small style="color: #666; display: block; margin-top: 5px;">
+              Optional &ndash; helps us contact you if needed
+          </small>
+      </div>
+      <p style="margin: 4px 0 12px;">
+          <a href="#" id="backToStep1Link" style="font-size:0.9em; color:#555;">&larr; Back</a>
+      </p>
+    </div><!-- /#step2-fields -->
 
     <div id="validationBox" class="validation-box">
         <strong>Please complete the following:</strong>
@@ -212,13 +225,13 @@
     <div class="info-box">
         <strong>What happens next?</strong>
         <ul style="margin: 10px 0 0 20px;">
-            <li>If you're pre-registered, you'll get immediate or verified access</li>
+            <li>If you&rsquo;re pre-registered, you&rsquo;ll get immediate or verified access</li>
             <li>If not, an administrator will review your request and contact you if necessary</li>
             <li>Once the registration of your device has been approved (either automatically or by the administrator), you will be emailed to say your registration has been successful.</li>
         </ul>
     </div>
-    
-    <button type="submit" class="btn" id="registerBtn" disabled>Register Device</button>
+
+    <button type="submit" class="btn" id="registerBtn" disabled>Continue</button>
 </form>
 
 <div id="statusMessage" style="display: none; margin-top: 20px; padding: 15px; border-radius: 8px; text-align: center;"></div>
@@ -265,6 +278,7 @@ document.addEventListener('DOMContentLoaded', function() {
     let mismatchPolling = false;
     let mismatchInterval = null;
     let accessConfirmed = false;
+    let registrationStep = 1;  // 1 = step 1 (email/device), 2 = step 2 (name/phone)
 
     // Remove applyPendingPage and loadPendingPage - not needed anymore
 
@@ -273,16 +287,6 @@ document.addEventListener('DOMContentLoaded', function() {
             id: 'email',
             message: 'Email address is required and must be valid.',
             isValid: () => document.getElementById('email').checkValidity()
-        },
-        {
-            id: 'first_name',
-            message: 'First name is required.',
-            isValid: () => document.getElementById('first_name').checkValidity()
-        },
-        {
-            id: 'last_name',
-            message: 'Last name is required.',
-            isValid: () => document.getElementById('last_name').checkValidity()
         },
         {
             id: 'device_type',
@@ -299,7 +303,18 @@ document.addEventListener('DOMContentLoaded', function() {
                 const checkbox = document.getElementById('usage_policy');
                 return checkbox ? checkbox.checked : false;
             }
-        }
+        },
+        // Step 2 only: name fields are required once step 2 is visible.
+        {
+            id: 'first_name',
+            message: 'First name is required.',
+            isValid: () => registrationStep === 1 || (document.getElementById('first_name').value.trim() !== '')
+        },
+        {
+            id: 'last_name',
+            message: 'Last name is required.',
+            isValid: () => registrationStep === 1 || (document.getElementById('last_name').value.trim() !== '')
+        },
     ];
 
     const wiredVlanSelect = document.getElementById('wired_vlan_id');
@@ -339,12 +354,83 @@ document.addEventListener('DOMContentLoaded', function() {
 
     updateValidationState();
     
+    // ── switchToStep1 / switchToStep2 ─────────────────────────────────────────
+    function switchToStep2() {
+        registrationStep = 2;
+        document.getElementById('registrationStepInput').value = 'final';
+        const step2div = document.getElementById('step2-fields');
+        if (step2div) step2div.style.display = 'block';
+        registerBtn.textContent = 'Register Device';
+        updateValidationState();
+        if (step2div) step2div.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    function switchToStep1() {
+        registrationStep = 1;
+        document.getElementById('registrationStepInput').value = '1';
+        const step2div = document.getElementById('step2-fields');
+        if (step2div) step2div.style.display = 'none';
+        registerBtn.textContent = 'Continue';
+        updateValidationState();
+    }
+
+    const backLink = document.getElementById('backToStep1Link');
+    if (backLink) {
+        backLink.addEventListener('click', function(e) {
+            e.preventDefault();
+            switchToStep1();
+            document.getElementById('email').focus();
+        });
+    }
+
     form.addEventListener('submit', function(event) {
         event.preventDefault();
         if (!form.checkValidity()) {
             return;
         }
 
+        // ── Two-step: step 1 checks whether the email is already known ────────
+        if (registrationStep === 1) {
+            registerBtn.disabled = true;
+            registerBtn.textContent = 'Checking\u2026';
+            const fd1 = new FormData();
+            fd1.set('registration_step', '1');
+            fd1.set('email', (document.getElementById('email').value || '').trim().toLowerCase());
+            fetch(form.action, {
+                method: 'POST',
+                body: fd1,
+                credentials: 'same-origin',
+                headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' }
+            })
+            .then(async r => {
+                const d = await r.json().catch(() => ({}));
+                if (d.status === 'user_found') {
+                    // Known user: silently populate name/phone and continue.
+                    document.getElementById('first_name').value   = d.prefill.first_name   || '';
+                    document.getElementById('last_name').value    = d.prefill.last_name    || '';
+                    document.getElementById('phone_number').value = d.prefill.phone_number || '';
+                    document.getElementById('registrationStepInput').value = 'final';
+                    registrationStep = 2;
+                    // Re-fire submit to run the full registration path.
+                    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+                } else if (d.status === 'need_details') {
+                    switchToStep2();
+                    registerBtn.disabled = false;
+                } else {
+                    showStatus(d.message || 'Could not verify email. Please try again.', 'error');
+                    registerBtn.disabled = false;
+                    registerBtn.textContent = 'Continue';
+                }
+            })
+            .catch(err => {
+                showStatus('Error: ' + (err.message || 'Please try again.'), 'error');
+                registerBtn.disabled = false;
+                registerBtn.textContent = 'Continue';
+            });
+            return;
+        }
+
+        // ── Full registration submit (step 2 / returning user) ────────────────
         setTimeout(() => {
             registerBtn.disabled = true;
             registerBtn.textContent = 'Registering...';
@@ -428,6 +514,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     document.getElementById('last_name').value = currentPrefill.last_name;
                     document.getElementById('phone_number').value = currentPrefill.phone_number;
                     document.getElementById('device_type').value = currentPrefill.device_type;
+                    switchToStep2();
                     form.style.display = 'block';
                     registerBtn.disabled = false;
                     registerBtn.textContent = 'Resubmit Registration';
@@ -474,7 +561,7 @@ document.addEventListener('DOMContentLoaded', function() {
         .catch((error) => {
             showStatus(`Error: ${error.message || 'Registration failed. Please try again.'}`, 'error');
             registerBtn.disabled = false;
-            registerBtn.textContent = 'Register Device';
+            registerBtn.textContent = registrationStep === 1 ? 'Continue' : 'Register Device';
         });
     });
 

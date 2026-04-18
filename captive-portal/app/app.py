@@ -2433,11 +2433,12 @@ def apply_device_unblock(device, flash_messages=False):
       remove DNS hijack and ACL block, then set internet_accessible=True.
     - Otherwise set internet_accessible=False (wrong VLAN or unvalidated password VLAN).
     """
-    # If the device has active ownership but no assigned_vlan (e.g. was blocked from
-    # a pending-registration state), restore assigned_vlan from current_vlan so that
-    # _should_have_internet() can succeed and the status becomes 'registered'.
-    if not device.assigned_vlan and device.current_vlan and _get_active_ownership(device.mac_address):
-        device.assigned_vlan = device.current_vlan
+    # An admin unblock is an explicit grant: accept the device on whatever VLAN it is
+    # currently on.  Update assigned_vlan → current_vlan so that _should_have_internet()
+    # succeeds regardless of any prior VLAN mismatch.
+    if device.current_vlan and _get_active_ownership(device.mac_address):
+        if not device.assigned_vlan or device.assigned_vlan != device.current_vlan:
+            device.assigned_vlan = device.current_vlan
 
     _set_internet_blocked(device, None, commit=False)
     db.session.commit()
@@ -2958,6 +2959,27 @@ def register():
                 return jsonify({'status': 'error', 'message': 'Unable to determine your MAC address.'}), 400
             flash('Unable to determine your device MAC address. Please ensure you are on the local network.', 'error')
             return redirect(url_for('register'))
+
+        # ── Two-step form: step 1 just checks whether the email exists ──────────
+        # The front-end sends registration_step=1 on the first submit.  We check
+        # if the email belongs to a known user and return their name/phone so the
+        # client can skip the details page.  Anything other than "1" falls through
+        # to the normal full-registration logic below.
+        if (request.form.get('registration_step') or '').strip() == '1':
+            email_check = (request.form.get('email') or '').strip().lower()
+            if not email_check or '@' not in email_check:
+                return jsonify({'status': 'error', 'message': 'A valid email address is required.'}), 400
+            existing_user = User.query.filter_by(email=email_check).first()
+            if existing_user:
+                return jsonify({
+                    'status': 'user_found',
+                    'prefill': {
+                        'first_name':   existing_user.first_name   or '',
+                        'last_name':    existing_user.last_name    or '',
+                        'phone_number': existing_user.phone_number or '',
+                    },
+                })
+            return jsonify({'status': 'need_details'})
 
         # ── Field extraction ──────────────────────────────────────────────────
         email        = (request.form.get('email')        or '').strip().lower()
@@ -8957,9 +8979,12 @@ def admin_edit_user(user_id):
 
             db.session.commit()
         
+        # Propagate profile and VLAN-override changes to central (which fans out to other sites)
+        central_client.queue_user_updated(user)
+
         flash(f'User {user.email} updated successfully', 'success')
         logger.info(f"Admin updated user: {user.email}")
-        
+
         return redirect(url_for('admin_dashboard'))
     
     allowed_vlans_allow = _parse_allowed_vlans(user.allowed_vlans_override)
@@ -9159,6 +9184,9 @@ def admin_assign_device():
                 'ssid':         get_ssid_for_vlan(vlan_id) or 'Network',
             },
         )
+
+    # Propagate assignment to central (also updates existing device ownership/vlan)
+    central_client.queue_device_registered(device, user)
 
     flash(f'Device {mac_address} assigned to {user.email} on VLAN {vlan_id}.', 'success')
     logger.info("Admin assigned device %s to user %s (vlan=%s)", mac_address, user.email, vlan_id)
@@ -9654,6 +9682,9 @@ def admin_reassign_device(device_id):
     # Update convenience foreign key; keep assigned_vlan / internet_accessible unchanged
     device.user_id = new_user.id
     db.session.commit()
+
+    # Propagate reassignment to central — updates user_email on the central device record
+    central_client.queue_device_registered(device, new_user)
 
     logger.info(
         "Admin reassigned device %s from %s to %s",
