@@ -128,6 +128,11 @@ def load_config() -> dict:
         # State file
         'state_file':         Path(_cfg(env, 'WATCHDOG_STATE_FILE',
                                         str(Path(__file__).parent / 'state.json'))),
+
+        # Central API connectivity check (optional — skipped if URL not set)
+        'central_url':        _cfg(env, 'CENTRAL_API_URL'),
+        'central_fail_threshold': int(_cfg(env, 'WATCHDOG_CENTRAL_FAIL_THRESHOLD', '3')),
+        'central_timeout':    int(_cfg(env, 'WATCHDOG_CENTRAL_TIMEOUT_SEC', '10')),
     }
     return cfg
 
@@ -760,6 +765,64 @@ def _try_peer_reboot(cfg: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Central API connectivity check
+# ---------------------------------------------------------------------------
+
+def check_central(cfg: dict, state: dict) -> list[str]:
+    """Check that the local Pi can reach bf-central's /health endpoint."""
+    base_url = cfg['central_url'].rstrip('/')
+    if not base_url:
+        return []
+
+    timeout = cfg['central_timeout']
+    threshold = cfg['central_fail_threshold']
+    cs = _check_state(state, 'central')
+    alerts = []
+
+    ok = False
+    detail = ''
+    url = f'{base_url}/health'
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = json.loads(resp.read())
+            ok = (resp.status == 200 and body.get('status') == 'ok')
+            if not ok:
+                detail = f'unexpected response: {body}'
+    except urllib.error.HTTPError as exc:
+        detail = f'HTTP {exc.code} ({exc.reason})'
+    except urllib.error.URLError as exc:
+        detail = f'unreachable ({exc.reason})'
+    except Exception as exc:
+        detail = str(exc)
+
+    if not ok:
+        cs['consecutive_failures'] = cs.get('consecutive_failures', 0) + 1
+        cf = cs['consecutive_failures']
+        log.warning('Central check failed (%d/%d): %s', cf, threshold, detail)
+        if cf >= threshold and not cs.get('alerting'):
+            cs['alerting'] = True
+            alerts.append(
+                f'Cannot reach bf-central (<code>{base_url}</code>) '
+                f'after {cf} consecutive checks: <strong>{detail}</strong>'
+                + _hint(
+                    'Check internet/tunnel: <code>curl -s ' + base_url + '/health</code>',
+                    'Check the SSH tunnel container: <code>docker logs portal-tunnel --tail 50</code>',
+                    'Central sync events are queuing up locally and will replay once restored',
+                )
+            )
+    else:
+        if cs.get('alerting'):
+            cs['alerting'] = False
+            cs['consecutive_failures'] = 0
+            alerts.append(f'RECOVERED: Connection to bf-central (<code>{base_url}</code>) restored')
+        else:
+            cs['consecutive_failures'] = 0
+
+    return alerts
+
+
+# ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 
@@ -776,6 +839,7 @@ def run_once(cfg: dict, state: dict) -> None:
     all_alerts += check_disk(cfg, state)
     all_alerts += check_memory(cfg, state)
     all_alerts += check_peer(cfg, state)
+    all_alerts += check_central(cfg, state)
 
     problems, recoveries = _categorise(all_alerts)
 
@@ -799,6 +863,10 @@ def main() -> None:
         log.info('Peer monitoring: %s', cfg['peer_health_url'] or cfg['peer_host'])
     else:
         log.info('Peer monitoring: disabled')
+    if cfg['central_url']:
+        log.info('Central connectivity check: %s/health', cfg['central_url'].rstrip('/'))
+    else:
+        log.info('Central connectivity check: disabled (CENTRAL_API_URL not set)')
     if not cfg['admin_email']:
         log.warning('ADMIN_EMAIL not set — email alerts disabled')
 

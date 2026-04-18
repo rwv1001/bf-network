@@ -56,5 +56,9 @@
   "memory": {
     "alerting": false,
     "consecutive_failures": 0
+  },
+  "central": {
+    "alerting": false,
+    "consecutive_failures": 0
   }
 }

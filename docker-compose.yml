@@ -347,6 +347,8 @@ services:
       WATCHDOG_DISK_PATH: /hostfs
       # Persist alert state across watchdog restarts
       WATCHDOG_STATE_FILE: /data/state.json
+      # Central API connectivity check (uses CENTRAL_API_URL from .env)
+      CENTRAL_API_URL: ${CENTRAL_API_URL:-}
       # Peer Pi monitoring (optional — leave blank to disable)
       WATCHDOG_PEER_HOST: ${WATCHDOG_PEER_HOST:-}
       WATCHDOG_PEER_HEALTH_URL: ${WATCHDOG_PEER_HEALTH_URL:-}
