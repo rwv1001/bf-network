@@ -759,8 +759,33 @@ db.init_app(app)
 
 # Initialize central sync client (no-op if env vars not set)
 import central_client
+import hmac as _hmac
 with app.app_context():
     central_client.init_central_client(app, db, CentralOutboundEvent)
+
+
+# ── Central push receiver ─────────────────────────────────────────────────────
+
+@app.route("/api/v1/push", methods=["POST"])
+def central_inbound_push():
+    """Receive a pushed update from central and apply it locally."""
+    push_secret = os.getenv("CENTRAL_PUSH_SECRET", "").strip()
+    if not push_secret:
+        return jsonify({"error": "Push not configured on this site"}), 503
+    provided = request.headers.get("X-Push-Secret", "")
+    if not _hmac.compare_digest(push_secret, provided):
+        return jsonify({"error": "Forbidden"}), 403
+    body = request.get_json(silent=True) or {}
+    event_type = body.get("event_type", "").strip()
+    data = body.get("data") or {}
+    if not event_type:
+        return jsonify({"error": "event_type required"}), 400
+    try:
+        central_client._apply_inbound(event_type, data)
+    except Exception as exc:
+        logger.error("central push apply error: %s", exc)
+        return jsonify({"error": "internal error"}), 500
+    return jsonify({"status": "ok"})
 
 
 @app.after_request
@@ -4242,6 +4267,7 @@ def set_network_password(token):
         user.network_password_set_token_expires = None
         user.network_password_approval_mode = None
         db.session.commit()
+        central_client.queue_user_updated(user)
 
         return render_template('set_network_password.html', success=True, user=user)
 
@@ -4744,6 +4770,7 @@ def unregister(token):
     device.unregister_token = None
     device.profile_snapshot = None
     _sync_registration_status(device)
+    central_client.queue_device_unregistered(mac_address)
     db.session.commit()
 
     logger.info("Device %s (user: %s) unregistered via email token", mac_address, user_email)

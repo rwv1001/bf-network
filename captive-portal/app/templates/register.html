@@ -641,6 +641,7 @@ document.addEventListener('DOMContentLoaded', function() {
             }
             const resubmitData = new FormData(form);
             resubmitData.set('network_password', pwd);
+            resubmitData.set('registration_step', 'final');
             const btn = document.getElementById('submitPasswordBtn');
             btn.disabled = true;
             btn.textContent = 'Checking...';

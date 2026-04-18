@@ -428,3 +428,16 @@ CREATE INDEX IF NOT EXISTS idx_il_mac    ON ip_leases(mac_address);
 CREATE INDEX IF NOT EXISTS idx_il_ip     ON ip_leases(ip_address);
 CREATE INDEX IF NOT EXISTS idx_il_expiry ON ip_leases(lease_expiry);
 
+-- ── Central sync: outbound event queue ──────────────────────────────────────
+CREATE TABLE IF NOT EXISTS central_outbound_events (
+    id              SERIAL PRIMARY KEY,
+    event_type      VARCHAR(64)  NOT NULL,
+    payload         JSON         NOT NULL,
+    status          VARCHAR(32)  NOT NULL DEFAULT 'pending',
+    attempts        INTEGER      NOT NULL DEFAULT 0,
+    created_at      TIMESTAMP    NOT NULL DEFAULT NOW(),
+    last_attempt_at TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS ix_central_outbound_events_status ON central_outbound_events(status);
+

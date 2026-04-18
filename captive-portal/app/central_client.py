@@ -4,8 +4,8 @@ central_client.py — bf-network integration with the bf-central sync server.
 Responsibilities:
   1. Queue outbound events to central (device/user registered/blocked/unblocked)
   2. Drain the outbound queue in a background thread (with retry on failure)
-  3. Poll central's outbound queue for instructions addressed to this site and
-     apply them locally (block/unblock device or user)
+  3. Expose _apply_inbound() for the /api/v1/push HTTP endpoint (central pushes
+     updates directly to this site rather than this site polling for them)
   4. Look up an unknown MAC address at central when the local DB has no record
 
 Central integration is opt-in: if CENTRAL_API_URL or CENTRAL_API_KEY are absent
@@ -75,9 +75,6 @@ def init_central_client(app, db, central_event_model):
     threading.Thread(
         target=_outbound_worker, daemon=True, name="central-outbound"
     ).start()
-    threading.Thread(
-        target=_inbound_worker, daemon=True, name="central-inbound"
-    ).start()
 
 
 # ── Public API — called from app.py ──────────────────────────────────────────
@@ -112,6 +109,19 @@ def queue_device_unblocked(device) -> None:
     _enqueue("device_unblocked", {"mac_address": device.mac_address})
 
 
+def queue_device_unregistered(mac_address: str) -> None:
+    """Queue a device_unregistered event to central after a device is unregistered locally.
+
+    Central will remove this site's SiteDeviceRegistration and push an
+    unregister_device instruction to every other site that still holds the device,
+    so no other site grants that device internet access under the former owner's
+    account.
+    """
+    if not _central_enabled():
+        return
+    _enqueue("device_unregistered", {"mac_address": mac_address})
+
+
 def queue_user_blocked(user, reason: Optional[str] = None) -> None:
     if not _central_enabled():
         return
@@ -140,6 +150,7 @@ def queue_user_updated(user) -> None:
         "first_name":               user.first_name   or "",
         "last_name":                user.last_name    or "",
         "phone_number":             user.phone_number or "",
+        "network_password_hash":    user.network_password_hash or "",
         "allowed_vlans_override":   user.allowed_vlans_override   or "",
         "allowed_vlans_deny":       user.allowed_vlans_deny       or "",
         "adoptable_vlans_override": user.adoptable_vlans_override or "",
@@ -378,49 +389,6 @@ def _handle_registration_response(payload: dict, central_response: dict) -> None
                 apply_device_block(d, flash_messages=False)
 
 
-def _inbound_worker() -> None:
-    """Daemon thread: poll central for instructions addressed to this site."""
-    while True:
-        time.sleep(_POLL_INTERVAL)
-        if not _app:
-            continue
-        try:
-            resp = requests.get(
-                f"{_api_url()}/api/v1/queue/pending",
-                headers=_headers(),
-                timeout=_TIMEOUT,
-            )
-            if resp.status_code != 200:
-                continue
-            items = resp.json().get("items", [])
-            if not items:
-                continue
-            with _app.app_context():
-                for item in items:
-                    try:
-                        _apply_inbound(item["event_type"], item["data"])
-                        _ack(item["queue_id"])
-                    except Exception as exc:
-                        logger.error(
-                            "Failed to apply inbound %s (queue_id=%s): %s",
-                            item["event_type"], item["queue_id"], exc,
-                        )
-        except Exception as exc:
-            logger.warning("inbound worker error: %s", exc)
-
-
-def _ack(queue_id: int) -> None:
-    try:
-        requests.post(
-            f"{_api_url()}/api/v1/ack",
-            json={"queue_id": queue_id},
-            headers=_headers(),
-            timeout=_TIMEOUT,
-        )
-    except Exception as exc:
-        logger.warning("ack failed for queue_id=%s: %s", queue_id, exc)
-
-
 def _apply_inbound(event_type: str, data: dict) -> None:
     """Apply an instruction received from central to the local DB and network."""
     # Import here to avoid circular imports at module load time
@@ -479,6 +447,12 @@ def _apply_inbound(event_type: str, data: dict) -> None:
                 user.last_name = data["last_name"]
             if data.get("phone_number") is not None:
                 user.phone_number = data["phone_number"]
+            # Propagate network password hash so cross-site password entry works
+            if data.get("network_password_hash"):
+                user.network_password_hash = data["network_password_hash"]
+                # If they didn't have a password before, set mode to first_use
+                if not user.network_password_approval_mode:
+                    user.network_password_approval_mode = 'first_use'
             if data.get("allowed_vlans_override") is not None:
                 user.allowed_vlans_override = data["allowed_vlans_override"] or None
             if data.get("allowed_vlans_deny") is not None:
@@ -491,6 +465,34 @@ def _apply_inbound(event_type: str, data: dict) -> None:
             logger.info("central: updated profile for user %s", email)
         else:
             logger.info("central update_user: %s not found locally — skipping", email)
+
+    elif event_type == "unregister_device":
+        from app import _close_ownership, _sync_registration_status, get_kea
+        mac = data.get("mac_address", "").lower()
+        device = Device.query.filter_by(mac_address=mac).first()
+        if not device:
+            logger.info("central unregister_device: MAC %s not found locally — skipping", mac)
+            return
+        # Remove Kea reservation so the device loses its VLAN at next renewal
+        vlan_id = device.current_vlan
+        if device.connection_type == 'wifi' and device.internet_accessible and vlan_id:
+            kea = get_kea()
+            if kea:
+                if not kea.unregister_mac(mac=mac, vlan=vlan_id):
+                    logger.warning("central unregister_device: Kea unregister failed for %s", mac)
+        # Close ownership and reset all registration fields
+        _close_ownership(mac, commit=False)
+        device.user_id = None
+        device.device_name = None
+        device.assigned_vlan = None
+        device.internet_accessible = None
+        device.internet_blocked = None
+        device.ownership_validated = None
+        device.unregister_token = None
+        device.profile_snapshot = None
+        _sync_registration_status(device)
+        app_db.session.commit()
+        logger.info("central: unregistered device %s via central push", mac)
 
     else:
         logger.warning("central: unknown inbound event_type %r", event_type)
