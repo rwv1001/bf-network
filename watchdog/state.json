@@ -1,0 +1,60 @@
+{
+  "containers": {
+    "captive-portal-db": {
+      "restart_count": 0,
+      "alerting": false
+    },
+    "captive-portal-redis": {
+      "restart_count": 0,
+      "alerting": false
+    },
+    "captive-portal-web": {
+      "restart_count": 0,
+      "alerting": false
+    },
+    "nat-parser": {
+      "restart_count": 0,
+      "alerting": false
+    },
+    "dns-parser": {
+      "restart_count": 0,
+      "alerting": false
+    },
+    "portal-tunnel": {
+      "restart_count": 0,
+      "alerting": false
+    },
+    "freeradius": {
+      "restart_count": 0,
+      "alerting": false
+    },
+    "pihole": {
+      "restart_count": 0,
+      "alerting": false
+    },
+    "dnsmasq-hijack": {
+      "restart_count": 0,
+      "alerting": false
+    },
+    "syslog-ng": {
+      "restart_count": 0,
+      "alerting": false
+    },
+    "kea": {
+      "restart_count": 0,
+      "alerting": false
+    }
+  },
+  "health": {
+    "alerting": false,
+    "consecutive_failures": 0
+  },
+  "disk": {
+    "alerting": false,
+    "consecutive_failures": 0
+  },
+  "memory": {
+    "alerting": false,
+    "consecutive_failures": 0
+  }
+}

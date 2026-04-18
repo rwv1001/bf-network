@@ -328,3 +328,42 @@ services:
     depends_on:
       npm:
         condition: service_healthy
+
+  # ── Watchdog ──────────────────────────────────────────────────────────────────
+  watchdog:
+    build: ./watchdog
+    image: bf-watchdog:latest
+    container_name: watchdog
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      GRAPH_TENANT_ID: ${GRAPH_TENANT_ID}
+      GRAPH_CLIENT_ID: ${GRAPH_CLIENT_ID}
+      GRAPH_CLIENT_SECRET: ${GRAPH_CLIENT_SECRET}
+      GRAPH_FROM_EMAIL: ${GRAPH_FROM_EMAIL}
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+      PORTAL_URL: ${PORTAL_URL:-}
+      # Where to find the host root for disk-usage checks (mounted below)
+      WATCHDOG_DISK_PATH: /hostfs
+      # Persist alert state across watchdog restarts
+      WATCHDOG_STATE_FILE: /data/state.json
+      # Peer Pi monitoring (optional — leave blank to disable)
+      WATCHDOG_PEER_HOST: ${WATCHDOG_PEER_HOST:-}
+      WATCHDOG_PEER_HEALTH_URL: ${WATCHDOG_PEER_HEALTH_URL:-}
+      WATCHDOG_PEER_SSH_USER: ${WATCHDOG_PEER_SSH_USER:-admin}
+      WATCHDOG_PEER_SSH_KEY: /keys/id_rsa
+      WATCHDOG_PEER_REBOOT_ENABLED: ${WATCHDOG_PEER_REBOOT_ENABLED:-false}
+    volumes:
+      # Docker Engine socket — allows container inspection via Unix API (read-only)
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Host root filesystem — for accurate disk-usage reporting
+      - /:/hostfs:ro
+      # Persistent state (debounce / alert tracking)
+      - ./watchdog:/data
+      # SSH key for optional peer reboot
+      - /home/admin/.ssh:/keys:ro
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

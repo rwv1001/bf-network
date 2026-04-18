@@ -353,6 +353,11 @@ def _outbound_worker() -> None:
                     _db.session.commit()
         except Exception as exc:
             logger.error("outbound worker error: %s", exc)
+        try:
+            from app import _heartbeat
+            _heartbeat('central-outbound')
+        except Exception:
+            pass
 
 
 def _handle_registration_response(payload: dict, central_response: dict) -> None:

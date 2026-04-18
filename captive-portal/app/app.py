@@ -26,6 +26,63 @@ import secrets
 def _net_word() -> str:
     return os.getenv('NETWORK_WORD', '192.168')
 
+
+# ---------------------------------------------------------------------------
+# Background-thread heartbeat (shared across gunicorn workers via a file)
+# ---------------------------------------------------------------------------
+# Each background thread calls _heartbeat(name) after every work cycle.
+# The health endpoint checks _check_heartbeats() which reads the shared file
+# and reports any thread whose heartbeat hasn't been updated recently.
+# Using a file means all workers contribute; we alert only when threads are
+# dying in every worker (the only operationally significant failure).
+
+_HEARTBEAT_FILE = os.getenv('WATCHDOG_HEARTBEAT_FILE', '/tmp/bf-thread-heartbeats.json')
+_HEARTBEAT_LOCK = threading.Lock()
+
+
+def _heartbeat(thread_name: str) -> None:
+    """Write a fresh timestamp for this thread to the shared heartbeat file."""
+    try:
+        with _HEARTBEAT_LOCK:
+            try:
+                beats = json.loads(open(_HEARTBEAT_FILE).read())
+            except Exception:
+                beats = {}
+            beats[thread_name] = time.time()
+            tmp = _HEARTBEAT_FILE + '.tmp'
+            with open(tmp, 'w') as f:
+                f.write(json.dumps(beats))
+            os.replace(tmp, _HEARTBEAT_FILE)
+    except Exception:
+        pass  # never crash the thread over a heartbeat write failure
+
+
+def _check_heartbeats(max_stale_sec: int) -> dict:
+    """
+    Return {thread_name: 'ok'|'dead'|'unknown'} for monitored threads.
+    'unknown' means the heartbeat file hasn't been written yet (fresh start).
+    """
+    monitored = ['wifi-confirm-sweep', 'ip-lease-sweep', 'central-outbound']
+    # central-outbound only matters when central sync is configured
+    if not (os.getenv('CENTRAL_API_URL', '').strip() and os.getenv('CENTRAL_API_KEY', '').strip()):
+        monitored.remove('central-outbound')
+
+    try:
+        beats = json.loads(open(_HEARTBEAT_FILE).read())
+    except Exception:
+        return {name: 'unknown' for name in monitored}
+
+    now = time.time()
+    result = {}
+    for name in monitored:
+        if name not in beats:
+            result[name] = 'unknown'
+        elif now - beats[name] > max_stale_sec:
+            result[name] = 'dead'
+        else:
+            result[name] = 'ok'
+    return result
+
 from models import db, Admin, User, Device, RegistrationRequest, VlanMapping, ISPRouter, Setting, UnregisteredLease, DomainPolicy, DeviceOwnership, IPLease, CentralOutboundEvent
 from radius_coa import send_coa_disconnect, send_coa_change
 from email_service import (
@@ -215,13 +272,14 @@ def _sweep_expired_wifi_confirmations():
                     apply_device_block(device, flash_messages=False)
         except Exception as exc:
             logger.warning("WiFi confirmation sweep failed: %s", exc)
+        _heartbeat('wifi-confirm-sweep')
         time.sleep(interval)
 
 
 def _start_wifi_confirmation_sweeper():
     if not _env_truthy('WIFI_CONFIRM_SWEEP_ENABLED', True):
         return
-    thread = threading.Thread(target=_sweep_expired_wifi_confirmations, daemon=True)
+    thread = threading.Thread(target=_sweep_expired_wifi_confirmations, daemon=True, name='wifi-confirm-sweep')
     thread.start()
 
 
@@ -292,11 +350,12 @@ def _sweep_expired_ip_leases():
                     logger.warning("Lease sweep: internet_accessible cleanup failed: %s", exc)
         except Exception as exc:
             logger.warning("IP lease sweep failed: %s", exc)
+        _heartbeat('ip-lease-sweep')
         time.sleep(interval)
 
 
 def _start_ip_lease_sweeper():
-    thread = threading.Thread(target=_sweep_expired_ip_leases, daemon=True)
+    thread = threading.Thread(target=_sweep_expired_ip_leases, daemon=True, name='ip-lease-sweep')
     thread.start()
 
 
@@ -10211,14 +10270,39 @@ def admin_pihole_blocked_queries():
 @app.route('/health')
 def health():
     """Health check endpoint"""
+    # --- database ---
+    db_ok = True
+    db_error = None
     try:
-        # Check database connection
         from sqlalchemy import text
         db.session.execute(text('SELECT 1'))
-        return jsonify({'status': 'healthy'}), 200
     except Exception as e:
         logger.error(f"Health check failed: {e}")
-        return jsonify({'status': 'unhealthy', 'error': str(e)}), 500
+        db_ok = False
+        db_error = str(e)
+
+    # --- background thread liveness (via shared heartbeat file) ---
+    # Each worker's threads write timestamps to /tmp/bf-thread-heartbeats.json.
+    # Threads that have not pulsed within 3× their sweep interval are 'dead'.
+    # This works correctly with multiple gunicorn workers: a thread dying in
+    # all workers shows as a stale heartbeat; dying in one worker only is not
+    # operationally significant (others continue the work).
+    max_stale = max(
+        int(os.getenv('IP_LEASE_SWEEP_INTERVAL', '20')),
+        int(os.getenv('WIFI_CONFIRM_SWEEP_INTERVAL_SEC', '30')),
+        int(os.getenv('CENTRAL_POLL_INTERVAL_SEC', '10')),
+    ) * 3
+    threads = _check_heartbeats(max_stale)
+
+    threads_ok = all(v in ('ok', 'unknown') for v in threads.values())
+    overall_ok = db_ok and threads_ok
+
+    payload = {
+        'status': 'healthy' if overall_ok else 'unhealthy',
+        'db': 'ok' if db_ok else f'error: {db_error}',
+        'threads': threads,
+    }
+    return jsonify(payload), 200 if overall_ok else 500
 
 
 @app.errorhandler(404)
