@@ -157,7 +157,7 @@
             <td>
                 {% if device.connection_type == 'wifi' %}
                     📶 WiFi
-                {% elif device.connection_type == 'wired' %}
+                {% elif device.connection_type == 'wired' or device.is_wired %}
                     🔌 Wired
                 {% else %}
                     {{ device.connection_type or '-' }}

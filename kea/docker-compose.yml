@@ -26,7 +26,7 @@ services:
       VLAN_PREFIX_MAP: ${VLAN_PREFIX_MAP:?VLAN_PREFIX_MAP is required – set it in kea/.env}
       SWITCH_USER: ${SWITCH_USER:-robert}
       SWITCH_SSH_PORT: ${SWITCH_SSH_PORT:-22}
-      SWITCH_KEY_PATH: ${SWITCH_KEY_PATH:-/keys/id_rsa}
+      SWITCH_KEY_PATH: /keys/id_rsa
       # Set to "1" to enable async switch port lookup on every DHCP lease/renew
       SWITCH_PORT_LOOKUP_ENABLED: "1"
       # How long (seconds) a cached port entry is considered fresh (skip SSH re-query)

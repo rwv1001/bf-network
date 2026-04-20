@@ -7316,10 +7316,12 @@ def admin_dashboard():
         unregistered_devices=unregistered_devices,
         unregistered_total=unregistered_total,
         vlan_map=vlan_map,
+        wired_unregistered_vlan=_get_wired_unregistered_vlan_id(),
         wired_vlan_choices=[
             {
                 'vlan_id': entry.vlan_id,
                 'label': _label_for_vlan(entry.vlan_id, vlan_map),
+                'wired_enabled': bool(entry.wired_enabled),
             }
             for entry in _get_admin_assignable_entries()
         ],
@@ -9172,6 +9174,14 @@ def admin_assign_device():
         flash('User not found.', 'error')
         return redirect(url_for('admin_dashboard'))
 
+    # Validate VLAN is wired-enabled if device is a wired device.
+    vlan_mapping = VlanMapping.query.filter_by(vlan_id=vlan_id).first()
+    existing_device = Device.query.filter_by(mac_address=mac_address).first()
+    if (existing_device and existing_device.connection_type == 'wired'
+            and vlan_mapping and not vlan_mapping.wired_enabled):
+        flash(f'VLAN {vlan_id} does not allow wired connections.', 'error')
+        return redirect(url_for('admin_dashboard'))
+
     # Resolve current IP for the MAC.
     ip_lease = _get_active_iplease(mac_address)
     ip_address = ip_lease.ip_address if ip_lease else None
@@ -9200,13 +9210,22 @@ def admin_assign_device():
     # Detect which VLAN the device is currently on.
     _, detected_vlan, _ = detect_connection_type(ip_address) if ip_address else (None, None, None)
 
+    # If the target VLAN is wired-enabled, treat the device as wired.
+    _assigned_vlan_mapping = VlanMapping.query.filter_by(vlan_id=vlan_id).first()
+    _is_wired_assignment = bool(_assigned_vlan_mapping and _assigned_vlan_mapping.wired_enabled)
+
     device.user_id           = user.id
     device.device_name       = device_name or device.device_name or 'admin-assigned'
     device.ip_address        = ip_address
     device.assigned_vlan     = vlan_id
     device.current_vlan      = detected_vlan or vlan_id
+    device.wired_target_vlan = vlan_id if (detected_vlan and detected_vlan != vlan_id) else None
     device.ownership_validated = True  # Admin-assigned devices are considered validated.
-    device.connection_type   = device.connection_type or 'unknown'
+    if _is_wired_assignment:
+        device.connection_type = 'wired'
+        device.is_wired = True
+    else:
+        device.connection_type = device.connection_type or 'unknown'
     if not device.unregister_token:
         device.unregister_token = secrets.token_urlsafe(32)
     db.session.commit()
@@ -9234,10 +9253,18 @@ def admin_assign_device():
         _sync_registration_status(device)
         db.session.commit()
     else:
-        # Wrong VLAN or blocked-pool IP — device will get access when it reconnects.
-        _set_internet_accessible(device, False if vlan_id else None, commit=True)
-        _sync_registration_status(device)
+        # Wrong VLAN or blocked-pool IP — CoA tells the switch to change the
+        # port VLAN immediately; replug then forces the device to re-DHCP on
+        # the new VLAN.  wired_target_vlan (set above) ensures FreeRADIUS
+        # returns the correct VLAN when the switch re-auths after the replug.
+        # We set registration_status='registered' directly (not via
+        # _sync_registration_status) so FreeRADIUS accepts the device during
+        # re-auth — same pattern as the captive-portal wired registration flow.
+        device.internet_accessible = False
+        device.registration_status = 'registered'
         db.session.commit()
+        send_coa_change(mac_address, vlan_id)
+        replug_switch_port_for_mac(mac_address)
 
     # Register with Kea for WiFi, or update RADIUS for wired.
     kea = get_kea()
@@ -9596,6 +9623,7 @@ def admin_change_device_vlan(device_id):
     device.current_vlan = target_vlan
     device.is_wired = True
     device.wired_target_vlan = target_vlan
+    device.assigned_vlan = target_vlan
     db.session.commit()
 
     send_coa_change(device.mac_address, target_vlan)
@@ -9605,6 +9633,7 @@ def admin_change_device_vlan(device_id):
             kea.register_mac(mac=device.mac_address, vlan=target_vlan, hostname=device.device_name or 'device', ip_address=None)
         except Exception as exc:
             logger.warning("Kea registration failed for %s: %s", device.mac_address, exc)
+    central_client.queue_device_vlan_changed(device)
 
     flash(f'Device {device.mac_address} moved to VLAN {target_vlan}.', 'success')
     return redirect(url_for('admin_dashboard'))
@@ -9642,6 +9671,7 @@ def admin_change_devices_vlan():
         device.current_vlan = target_vlan
         device.is_wired = True
         device.wired_target_vlan = target_vlan
+        device.assigned_vlan = target_vlan
         updated += 1
         send_coa_change(device.mac_address, target_vlan)
         if kea:
@@ -9649,6 +9679,7 @@ def admin_change_devices_vlan():
                 kea.register_mac(mac=device.mac_address, vlan=target_vlan, hostname=device.device_name or 'device', ip_address=None)
             except Exception as exc:
                 logger.warning("Kea registration failed for %s: %s", device.mac_address, exc)
+        central_client.queue_device_vlan_changed(device)
 
     if updated:
         db.session.commit()

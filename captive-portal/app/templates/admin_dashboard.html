@@ -435,7 +435,8 @@ function searchTable(tableType, searchValue) {
             <td>{{ device.last_seen.strftime('%Y-%m-%d %H:%M') if device.last_seen else '-' }}</td>
             {% if current_user.can_manage_users %}
             <td>
-                <button onclick="showAssignForm('{{ device.mac_address }}', '{{ device.ip_address or '' }}')" 
+                {% set _conn_type = 'wired' if (device.is_wired or device.current_vlan == wired_unregistered_vlan) else (device.connection_type or '') %}
+                <button onclick="showAssignForm('{{ device.mac_address }}', '{{ device.ip_address or '' }}', '{{ _conn_type }}')" 
                         class="btn btn-small" style="background: #2c7a7b; font-size: 12px; padding: 4px 8px;">
                     Assign
                 </button>
@@ -486,7 +487,7 @@ function searchTable(tableType, searchValue) {
                         style="width: 100%; padding: 8px; border: 1px solid #ddd;">
                     <option value="">-- Select VLAN --</option>
                     {% for choice in wired_vlan_choices %}
-                    <option value="{{ choice.vlan_id }}">{{ choice.label }}</option>
+                    <option value="{{ choice.vlan_id }}" data-wired-enabled="{{ 'true' if choice.wired_enabled else 'false' }}">{{ choice.label }}</option>
                     {% endfor %}
                 </select>
             </div>
@@ -522,12 +523,27 @@ function validateAssignForm() {
     }
 }
 
-function showAssignForm(mac, ip) {
+function showAssignForm(mac, ip, connectionType) {
     document.getElementById('assignMacAddress').value = mac;
     document.getElementById('assignIpAddress').value = ip;
     document.getElementById('assignUserId').value = '';
     document.getElementById('assignVlanId').value = '';
     document.getElementById('assignDeviceName').value = '';
+
+    // Filter VLAN dropdown: if the device is wired, hide non-wired-enabled VLANs.
+    const vlanSelect = document.getElementById('assignVlanId');
+    const isWired = (connectionType === 'wired');
+    Array.from(vlanSelect.options).forEach(function(opt) {
+        if (!opt.value) return; // keep the placeholder
+        if (isWired && opt.dataset.wiredEnabled === 'false') {
+            opt.hidden = true;
+            opt.disabled = true;
+        } else {
+            opt.hidden = false;
+            opt.disabled = false;
+        }
+    });
+
     document.getElementById('assignDeviceModal').style.display = 'block';
     validateAssignForm(); // Ensure button is disabled when dialog opens
 }

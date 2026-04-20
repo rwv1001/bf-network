@@ -168,6 +168,8 @@ REPLUG_DB_NAME="${REPLUG_DB_NAME:-captive_portal}"
 REPLUG_DB_CACHE_TTL="${REPLUG_DB_CACHE_TTL:-900}"  # seconds, default 15 min
 MAC_COLON="$(echo "$MAC_NORM" | tr 'A-F' 'a-f' | tr '-' ':')"
 IFACE=""
+CACHE_IFACE=""
+CACHE_HOST=""
 if command -v docker >/dev/null 2>&1; then
   CACHE_ROW=$(docker exec "$REPLUG_DB_CONTAINER" psql -U "$REPLUG_DB_USER" -d "$REPLUG_DB_NAME" -tAc \
     "SELECT switch_iface, COALESCE(switch_host, '') FROM mac_port_cache WHERE mac_address = '${MAC_COLON}' AND last_seen > NOW() - INTERVAL '${REPLUG_DB_CACHE_TTL} seconds' LIMIT 1" \

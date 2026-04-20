@@ -63,12 +63,14 @@ if not email:
     print("error")
     sys.exit(0)
 
-device_blocked = bool(data.get("device_blocked") or data.get("user_blocked"))
-assigned_vlan  = data.get("assigned_vlan")
-device_name    = (data.get("device_name") or "")
-first_name     = (data.get("first_name") or "")
-last_name      = (data.get("last_name") or "")
-phone          = (data.get("phone_number") or "")
+device_blocked   = bool(data.get("device_blocked") or data.get("user_blocked"))
+assigned_vlan    = data.get("assigned_vlan")
+is_wired         = bool(data.get("is_wired"))
+connection_type  = "wired" if is_wired else (data.get("connection_type") or "unknown")
+device_name      = (data.get("device_name") or "")
+first_name       = (data.get("first_name") or "")
+last_name        = (data.get("last_name") or "")
+phone            = (data.get("phone_number") or "")
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
@@ -121,23 +123,41 @@ if not user_id:
     print("error")
     sys.exit(0)
 
+# If central didn't return is_wired, infer from local VLAN mapping
+if not is_wired and assigned_vlan:
+    try:
+        wired_check = psql(
+            f"SELECT wired_enabled FROM vlan_mappings WHERE vlan_id = {int(assigned_vlan)} LIMIT 1;"
+        )
+        if wired_check in ('t', 'true', '1'):
+            is_wired = True
+            connection_type = 'wired'
+    except Exception:
+        pass
+
 # Upsert device
 blocked_val = "true" if device_blocked else "false"
 vlan_val    = str(assigned_vlan) if assigned_vlan else "NULL"
+is_wired_val = "true" if is_wired else "false"
+conn_type_escaped = connection_type.replace("'", "''")
 
 psql(f"""
 INSERT INTO devices (
     mac_address, user_id, device_name, internet_blocked,
-    ownership_validated, first_seen, registered_at
+    ownership_validated, first_seen, registered_at,
+    is_wired, connection_type
 )
 VALUES (
     '{MAC}', {user_id}, '{q(device_name)}', {blocked_val},
-    true, '{now}', '{now}'
+    true, '{now}', '{now}',
+    {is_wired_val}, '{conn_type_escaped}'
 )
 ON CONFLICT (mac_address) DO UPDATE SET
     internet_blocked    = EXCLUDED.internet_blocked,
     user_id             = EXCLUDED.user_id,
-    ownership_validated = true;
+    ownership_validated = true,
+    is_wired            = CASE WHEN {is_wired_val} THEN true ELSE devices.is_wired END,
+    connection_type     = CASE WHEN {is_wired_val} THEN '{conn_type_escaped}' ELSE devices.connection_type END;
 """)
 
 # Set assigned_vlan only when it's currently NULL (don't overwrite a known vlan)
@@ -186,6 +206,74 @@ VALUES (
 )
 ON CONFLICT DO NOTHING;
 """)
+
+# ── Wired cross-site: trigger port bounce if device is on the wrong VLAN ─────
+# The device arrived on VLAN 250 (wired_unregistered). Now that we've created
+# local DB records and a Kea reservation, bounce the switch port so the HP5130
+# fires a MAB re-auth. RADIUS will return the correct VLAN. We cannot use the
+# control socket here (risk of Kea deadlock); instead we append directly to the
+# replug queue file which the queue worker daemon picks up within seconds.
+# A short-lease expiry alone is NOT sufficient — DHCP DISCOVER goes out on
+# whichever VLAN the switch port is currently on, not the target VLAN.
+if is_wired and assigned_vlan and not device_blocked:
+    # Find wired_unregistered VLAN ID from Kea config to confirm we're on it
+    wired_unreg_vlan = 250  # default fallback
+    kea_cfg = os.getenv("KEA_CONFIG_PATH", "/kea/config/dhcp4.json")
+    try:
+        import json as _json
+        with open(kea_cfg) as _fh:
+            _kea = _json.load(_fh)
+        for _s in _kea.get("Dhcp4", {}).get("subnet4", []):
+            _ctx = _s.get("user-context", {})
+            if _ctx.get("vlan_status") == "wired_unregistered":
+                wired_unreg_vlan = int(_s["id"])
+                break
+    except Exception:
+        pass
+
+    current_vlan_row = psql(
+        f"SELECT current_vlan FROM devices WHERE mac_address = '{MAC}';"
+    )
+    try:
+        current_vlan = int(current_vlan_row)
+    except (TypeError, ValueError):
+        current_vlan = None
+
+    if current_vlan in (None, wired_unreg_vlan) or current_vlan != assigned_vlan:
+        # Mark device as wrong_vlan so FreeRADIUS returns the target VLAN on
+        # the next auth (the queries.conf already accepts wrong_vlan status).
+        psql(f"""
+UPDATE devices
+   SET registration_status = 'wrong_vlan',
+       wired_target_vlan   = {assigned_vlan}
+ WHERE mac_address = '{MAC}';
+""")
+        # Trigger port bounce directly by running the replug script in background.
+        # Also append to queue as a fallback in case the direct invocation fails.
+        import time as _time
+        mac_norm = MAC.replace(":", "").upper()
+        mac_norm = ":".join(mac_norm[i:i+2] for i in range(0, 12, 2))
+
+        replug_script = "/scripts/hp5130-replug.sh"
+        try:
+            subprocess.Popen(
+                [replug_script, mac_norm, "2"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            # Fall back to queue file if direct invocation fails
+            queue_base = "/acl-queue" if os.path.isdir("/acl-queue") else os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "..", "shared", "acl-queue"
+            )
+            queue_file = os.path.join(queue_base, "hp5130-replug.queue")
+            ts = _time.strftime("%Y-%m-%dT%H:%M:%S", _time.gmtime())
+            try:
+                os.makedirs(queue_base, exist_ok=True)
+                with open(queue_file, "a") as _qf:
+                    _qf.write(f"{ts}|{mac_norm}|2\n")
+            except Exception:
+                pass  # fail-open
 
 # ── done ──────────────────────────────────────────────────────────────────────
 

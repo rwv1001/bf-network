@@ -96,6 +96,14 @@ ON CONFLICT (mac_address) DO UPDATE SET
     last_seen    = NOW(),
     ip_address   = EXCLUDED.ip_address,
     current_vlan = EXCLUDED.current_vlan;
+-- Clear wrong_vlan status once the device lands on its assigned VLAN
+UPDATE devices
+   SET registration_status = 'registered',
+       wired_target_vlan   = NULL
+ WHERE mac_address = '${MAC_ADDRESS}'
+   AND registration_status = 'wrong_vlan'
+   AND assigned_vlan IS NOT NULL
+   AND assigned_vlan = ${VLAN_ID};
 ENDSQL
 
         # ── Table 7: upsert ip_leases row ─────────────────────────────────────

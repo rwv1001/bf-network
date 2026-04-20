@@ -91,6 +91,8 @@ def queue_device_registered(device, user) -> None:
         "phone_number": user.phone_number,
         "assigned_vlan": device.assigned_vlan,
         "device_name": device.device_name,
+        "is_wired": bool(device.is_wired),
+        "connection_type": device.connection_type or "unknown",
     })
 
 
@@ -120,6 +122,23 @@ def queue_device_unregistered(mac_address: str) -> None:
     if not _central_enabled():
         return
     _enqueue("device_unregistered", {"mac_address": mac_address})
+
+
+def queue_device_vlan_changed(device) -> None:
+    """Queue a device_vlan_changed event after an admin changes a wired device's VLAN.
+
+    Central will fan this out to every other site that holds a registration for
+    this device, so their local RADIUS/Kea configs are updated and the device
+    gets the correct VLAN wherever it connects next.
+    """
+    if not _central_enabled():
+        return
+    _enqueue("device_vlan_changed", {
+        "mac_address": device.mac_address,
+        "assigned_vlan": device.assigned_vlan,
+        "is_wired": bool(device.is_wired),
+        "connection_type": device.connection_type or "wired",
+    })
 
 
 def queue_user_blocked(user, reason: Optional[str] = None) -> None:
@@ -213,13 +232,17 @@ def import_device_from_central(mac_address: str, central_data: dict) -> Optional
     # ── Upsert device ────────────────────────────────────────────────────────
     device = Device.query.filter_by(mac_address=mac).first()
     device_blocked = bool(central_data.get("device_blocked") or central_data.get("user_blocked"))
+    is_wired_device = bool(central_data.get("is_wired"))
+    central_vlan = central_data.get("assigned_vlan")
     if not device:
         device = Device(
             mac_address=mac,
-            assigned_vlan=central_data.get("assigned_vlan"),
+            assigned_vlan=central_vlan,
             device_name=central_data.get("device_name"),
             internet_blocked=device_blocked,
             first_seen=now,
+            is_wired=is_wired_device,
+            connection_type="wired" if is_wired_device else (central_data.get("connection_type") or "unknown"),
         )
         app_db.session.add(device)
         app_db.session.flush()
@@ -228,8 +251,11 @@ def import_device_from_central(mac_address: str, central_data: dict) -> Optional
         if device_blocked and not device.internet_blocked:
             device.internet_blocked = True
             logger.info("import_device_from_central: device %s marked blocked (from central)", mac)
-        if not device.assigned_vlan and central_data.get("assigned_vlan"):
-            device.assigned_vlan = central_data["assigned_vlan"]
+        if not device.assigned_vlan and central_vlan:
+            device.assigned_vlan = central_vlan
+        if is_wired_device:
+            device.is_wired = True
+            device.connection_type = "wired"
 
     # ── Upsert ownership ─────────────────────────────────────────────────────
     existing_ownership = DeviceOwnership.query.filter_by(
@@ -245,7 +271,35 @@ def import_device_from_central(mac_address: str, central_data: dict) -> Optional
         app_db.session.add(ownership)
 
     device.ownership_validated = True
+
+    # ── Wired cross-site: trigger port bounce if on wrong VLAN ───────────────
+    # The device arrived on VLAN 250 (wired_unregistered). RADIUS placed it
+    # there because it had no local record. Now that we've imported it, queue a
+    # port bounce so the switch re-auths via RADIUS, which will now return the
+    # correct VLAN. A short-lease expiry alone is NOT sufficient — DHCP DISCOVER
+    # goes out on whatever VLAN the switch port is currently on, not the target.
+    needs_bounce = False
+    if is_wired_device and central_vlan and not device_blocked:
+        from app import _get_wired_unregistered_vlan_id
+        wired_unreg_vlan = _get_wired_unregistered_vlan_id()
+        current_vlan = getattr(device, 'current_vlan', None)
+        if current_vlan in (None, wired_unreg_vlan) or current_vlan != central_vlan:
+            device.registration_status = "wrong_vlan"
+            device.wired_target_vlan = central_vlan
+            needs_bounce = True
+
     app_db.session.commit()
+
+    if needs_bounce:
+        try:
+            from app import replug_switch_port_for_mac
+            replug_switch_port_for_mac(mac)
+            logger.info(
+                "import_device_from_central: wired device %s on wrong VLAN — port bounce queued",
+                mac,
+            )
+        except Exception as exc:
+            logger.warning("import_device_from_central: port bounce failed for %s: %s", mac, exc)
 
     # ── Notify central this site now holds the device ────────────────────────
     queue_device_registered(device, user)
@@ -470,6 +524,34 @@ def _apply_inbound(event_type: str, data: dict) -> None:
             logger.info("central: updated profile for user %s", email)
         else:
             logger.info("central update_user: %s not found locally — skipping", email)
+
+    elif event_type == "update_device_vlan":
+        from app import send_coa_change, get_kea, replug_switch_port_for_mac
+        mac = data.get("mac_address", "").lower()
+        new_vlan = data.get("assigned_vlan")
+        device = Device.query.filter_by(mac_address=mac).first()
+        if not device:
+            logger.info("central update_device_vlan: MAC %s not found locally — skipping", mac)
+            return
+        if not new_vlan:
+            logger.warning("central update_device_vlan: no assigned_vlan in payload for %s", mac)
+            return
+        old_vlan = device.current_vlan
+        device.assigned_vlan = new_vlan
+        device.wired_target_vlan = new_vlan
+        device.is_wired = True
+        device.connection_type = "wired"
+        if old_vlan != new_vlan:
+            device.registration_status = "wrong_vlan"
+        app_db.session.commit()
+        # Trigger RADIUS re-auth via port bounce — this is the only reliable
+        # way to move a wired device to a new VLAN (short lease expiry alone
+        # won't help because DHCP DISCOVER still goes out on the current VLAN).
+        replug_switch_port_for_mac(mac)
+        logger.info(
+            "central: updated wired device %s VLAN %s → %s, port bounce queued",
+            mac, old_vlan, new_vlan,
+        )
 
     elif event_type == "unregister_device":
         from app import _close_ownership, _sync_registration_status, get_kea

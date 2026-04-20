@@ -511,7 +511,7 @@ authorize {
 	# Debug SQL lookup for wired VLAN resolution.
 	if (&Calling-Station-Id) {
 		update control {
-			&Tmp-String-0 := "%{sql:SELECT COALESCE(wired_target_vlan, current_vlan)::text FROM devices WHERE registration_status = 'registered' AND COALESCE(wired_target_vlan, current_vlan) IS NOT NULL AND lower(replace(replace(mac_address,':',''),'-','')) = lower(replace(replace('%{Calling-Station-Id}',':',''),'-','')) LIMIT 1}"
+			&Tmp-String-0 := "%{sql:SELECT COALESCE(wired_target_vlan, current_vlan)::text FROM devices WHERE (registration_status = 'registered' OR (registration_status = 'wrong_vlan' AND wired_target_vlan IS NOT NULL)) AND COALESCE(wired_target_vlan, current_vlan) IS NOT NULL AND lower(replace(replace(mac_address,':',''),'-','')) = lower(replace(replace('%{Calling-Station-Id}',':',''),'-','')) LIMIT 1}"
 		}
 	}
 
