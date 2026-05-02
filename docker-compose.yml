@@ -128,6 +128,7 @@ services:
       - ./shared/acl-queue:/acl-queue
       - /home/admin/.ssh:/keys:ro
       - /etc/systemd/network:/host-systemd-network
+      - ./watchdog:/watchdog-data
       - ${GIT_REPO_DIR}:${GIT_REPO_DIR}
       - /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro
     network_mode: host
@@ -358,6 +359,13 @@ services:
       # Syslog staleness check — alert if remote-syslog.log not updated within 10 minutes
       WATCHDOG_SYSLOG_LOG_PATH: /logs/remote-syslog.log
       WATCHDOG_SYSLOG_STALE_SEC: "600"
+      # HP5130 switch hardware health checks
+      WATCHDOG_SWITCH_HOSTS: ${SWITCH_HOSTS:-}
+      WATCHDOG_SWITCH_USER: ${SWITCH_USER:-robert}
+      WATCHDOG_SWITCH_KEY_PATH: /keys/id_rsa
+      # Space-separated IPs of switches that have an RPS fitted.
+      # Absent/Fault on a secondary PSU is only alerted for listed switches.
+      WATCHDOG_SWITCH_RPS_HOSTS: ${SWITCH_RPS_HOSTS:-}
     volumes:
       # Docker Engine socket — allows container inspection via Unix API (read-only)
       - /var/run/docker.sock:/var/run/docker.sock:ro

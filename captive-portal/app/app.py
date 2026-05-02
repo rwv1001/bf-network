@@ -7381,10 +7381,16 @@ PORT_ROLES = {
 }
 
 
-def _run_switch_command(host, command):
+def _run_switch_command(host, command, extra_input='', disable_paging=False):
     """Run a single command on an HP5130 switch via the system ssh binary.
     Uses the same SSH options as hp5130-port-lookup.sh / hp5130-replug.sh so
     the old RSA host-key algorithms negotiate correctly.
+
+    extra_input: additional text to send after the command (e.g. 'N\n' for
+                 display diagnostic-information's Y/N prompt).
+    disable_paging: if True, sends 'screen-length disable' first to prevent
+                    '---- More ----' truncation on long output.
+
     Returns the command output as a string, or None on failure.
     """
     import subprocess
@@ -7408,13 +7414,16 @@ def _run_switch_command(host, command):
         f'{switch_user}@{host}',
     ]
 
+    preamble = 'screen-length disable\n' if disable_paging else ''
+    stdin_data = f'{preamble}{command}\n{extra_input}quit\n'
+
     try:
         result = subprocess.run(
             ssh_args,
-            input=f'{command}\nquit\n',
+            input=stdin_data,
             capture_output=True,
             text=True,
-            timeout=90,
+            timeout=120,
         )
         if result.returncode != 0:
             logger.warning("SSH to %s exited %d: %s", host, result.returncode,
@@ -7784,6 +7793,126 @@ def admin_switch_ports_refresh():
         else:
             flash(f"{host}: {result}", 'warning')
     return redirect(url_for('admin_switch_ports'))
+
+
+@app.route('/admin/switch-health')
+@login_required
+@permission_required('manage_switch_ports')
+def admin_switch_health():
+    """Switch hardware health monitoring page."""
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
+    return render_template('admin_switch_health.html', switch_hosts=switch_hosts)
+
+
+_SWITCH_RPS_FILE = '/watchdog-data/switch_rps.json'
+
+
+def _load_rps_settings():
+    try:
+        with open(_SWITCH_RPS_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_rps_settings(data):
+    import tempfile
+    tmp = _SWITCH_RPS_FILE + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump(data, f)
+    os.replace(tmp, _SWITCH_RPS_FILE)
+
+
+@app.route('/admin/switch-health/rps', methods=['GET'])
+@login_required
+@permission_required('manage_switch_ports')
+def admin_switch_health_rps_get():
+    """Return the saved RPS settings for all switches."""
+    return jsonify(_load_rps_settings())
+
+
+@app.route('/admin/switch-health/rps', methods=['POST'])
+@login_required
+@permission_required('manage_switch_ports')
+def admin_switch_health_rps_set():
+    """Save the RPS connected flag for a single switch host."""
+    data = request.get_json(silent=True) or {}
+    host = (data.get('host') or '').strip()
+    rps  = bool(data.get('rps'))
+    if not host:
+        return jsonify({'ok': False, 'error': 'missing host'}), 400
+    settings = _load_rps_settings()
+    settings[host] = rps
+    try:
+        _save_rps_settings(settings)
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+    return jsonify({'ok': True})
+
+
+_SWITCH_RPS_FILE = '/watchdog-data/switch_rps.json'
+
+
+def _load_rps_settings():
+    try:
+        with open(_SWITCH_RPS_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_rps_settings(data):
+    import tempfile
+    tmp = _SWITCH_RPS_FILE + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump(data, f)
+    os.replace(tmp, _SWITCH_RPS_FILE)
+
+
+@app.route('/admin/switch-health/data')
+@login_required
+@permission_required('manage_switch_ports')
+def admin_switch_health_data():
+    """AJAX: run hardware health commands on all HP5130 switches and return JSON.
+    All SSH calls are issued in parallel so the response time is bounded by the
+    slowest single command rather than the sum of all commands.
+    """
+    try:
+        from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+        switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+        switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
+        # (command_string, extra_input_after_command)
+        commands = {
+            'power':       ('display power',                  ''),
+            'fan':         ('display fan',                    ''),
+            'environment': ('display environment',            ''),
+            'diagnostic':  ('display diagnostic-information', 'N\n'),
+        }
+
+        def _fetch(host, key, cmd, extra):
+            out = _run_switch_command(host, cmd, extra_input=extra, disable_paging=True)
+            return host, key, out.strip() if out else None
+
+        results = {host: {} for host in switch_hosts}
+        tasks = [
+            (host, key, cmd, extra)
+            for host in switch_hosts
+            for key, (cmd, extra) in commands.items()
+        ]
+        with ThreadPoolExecutor(max_workers=len(tasks) or 1) as pool:
+            futures = {pool.submit(_fetch, h, k, c, e): None for h, k, c, e in tasks}
+            for fut in _as_completed(futures):
+                h, k, val = fut.result()
+                results[h][k] = val
+
+        return jsonify({
+            'switches': results,
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC'),
+        })
+    except Exception as exc:
+        logger.exception("admin_switch_health_data error")
+        return jsonify({'error': str(exc), 'switches': {}, 'timestamp': ''}), 500
 
 
 def _build_port_config(port_name, role, description=''):

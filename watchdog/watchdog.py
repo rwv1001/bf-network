@@ -138,6 +138,22 @@ def load_config() -> dict:
         # Syslog staleness check — alert if remote-syslog.log hasn't grown for this many seconds
         'syslog_log_path':    _cfg(env, 'WATCHDOG_SYSLOG_LOG_PATH', '/logs/remote-syslog.log'),
         'syslog_stale_sec':   int(_cfg(env, 'WATCHDOG_SYSLOG_STALE_SEC', '600')),
+
+        # HP5130 switch hardware health (optional — leave WATCHDOG_SWITCH_HOSTS blank to disable)
+        'switch_hosts':          _cfg(env, 'WATCHDOG_SWITCH_HOSTS',
+                                      _cfg(env, 'SWITCH_HOSTS', '')),
+        'switch_user':           _cfg(env, 'WATCHDOG_SWITCH_USER',
+                                      _cfg(env, 'SWITCH_USER', 'admin')),
+        'switch_ssh_port':       int(_cfg(env, 'WATCHDOG_SWITCH_SSH_PORT',
+                                          _cfg(env, 'SWITCH_SSH_PORT', '22'))),
+        'switch_key_path':       _cfg(env, 'WATCHDOG_SWITCH_KEY_PATH', '/keys/id_rsa'),
+        # Space-separated list of switch IPs that have an RPS fitted.
+        # Only switches in this list will trigger an alert for Absent/Fault PSU.
+        # Switches NOT in this list will still alert if ALL PSUs are unhealthy.
+        'switch_rps_hosts':      _cfg(env, 'WATCHDOG_SWITCH_RPS_HOSTS', ''),
+        # Path to the JSON file written by the portal when the RPS checkbox is toggled.
+        # Takes precedence over WATCHDOG_SWITCH_RPS_HOSTS when the file exists.
+        'switch_rps_file':       _cfg(env, 'WATCHDOG_SWITCH_RPS_FILE', '/data/switch_rps.json'),
     }
     return cfg
 
@@ -888,8 +904,181 @@ def check_syslog_stale(cfg: dict, state: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Main loop
+# HP5130 switch hardware health checks
 # ---------------------------------------------------------------------------
+
+def _ssh_switch(host: str, command: str, cfg: dict, timeout: int = 30) -> str | None:
+    """Run a single show command on an HP5130 via SSH.
+
+    Uses the same RSA legacy negotiation options as the captive-portal helper
+    so that old switch host-keys work.  Returns stdout or None on failure.
+    """
+    user = cfg.get('switch_user', 'admin')
+    port = str(cfg.get('switch_ssh_port', 22))
+    key  = cfg.get('switch_key_path', '')
+    if not key:
+        return None
+    ssh_args = [
+        'ssh', '-tt',
+        '-i', key,
+        '-p', port,
+        '-o', 'HostKeyAlgorithms=+ssh-rsa',
+        '-o', 'PubkeyAcceptedAlgorithms=+ssh-rsa',
+        '-o', 'StrictHostKeyChecking=no',
+        '-o', 'UserKnownHostsFile=/dev/null',
+        '-o', 'ConnectTimeout=10',
+        '-o', 'ServerAliveInterval=5',
+        '-o', 'ServerAliveCountMax=3',
+        f'{user}@{host}',
+    ]
+    try:
+        result = subprocess.run(
+            ssh_args,
+            input=f'{command}\nquit\n',
+            capture_output=True, text=True,
+            timeout=timeout,
+        )
+        return result.stdout if result.stdout.strip() else None
+    except Exception as exc:
+        log.warning('Switch SSH %s failed: %s', host, exc)
+        return None
+
+
+def check_switch_health(cfg: dict, state: dict) -> list[str]:
+    """Alert on HP5130 PSU faults, fan faults, and overtemperature readings.
+
+    Checks each switch in WATCHDOG_SWITCH_HOSTS by running:
+        display power, display fan, display environment
+
+    Alerts once per host; sends a recovery message when the issue clears.
+    Skipped entirely when WATCHDOG_SWITCH_HOSTS is empty or the SSH key is absent.
+    """
+    import re as _re
+
+    hosts_raw = cfg.get('switch_hosts', '')
+    if not hosts_raw:
+        return []
+    hosts = [h.strip() for h in hosts_raw.split() if h.strip()]
+    if not hosts:
+        return []
+
+    key = cfg.get('switch_key_path', '')
+    if not key or not os.path.exists(key):
+        log.debug('Switch key %s not found — skipping switch health check', key)
+        return []
+
+    rps_hosts = set(cfg.get('switch_rps_hosts', '').split())
+    # Prefer the JSON file written by the portal checkbox (overrides env var)
+    rps_file = cfg.get('switch_rps_file', '')
+    if rps_file:
+        try:
+            with open(rps_file) as f:
+                rps_json = json.loads(f.read())
+            rps_hosts = {h for h, v in rps_json.items() if v}
+        except FileNotFoundError:
+            pass  # file not created yet — fall back to env var
+        except Exception as exc:
+            log.warning('Failed to read RPS settings file %s: %s', rps_file, exc)
+    alerts: list[str] = []
+
+    for host in hosts:
+        ss = _check_state(state, f'switch_health_{host}')
+        problems: list[str] = []
+
+        # Power supply
+        power_out = _ssh_switch(host, 'display power', cfg)
+        if power_out:
+            # Determine whether any PSU is reporting Normal.
+            # If so, a Fault/Absent on another slot is the empty RPS bay —
+            # only alert on it when the host is in rps_hosts.
+            # If ALL PSUs are unhealthy, alert regardless (primary power failure).
+            psu_data_lines = [
+                l.strip() for l in power_out.splitlines()
+                if _re.match(r'\d+\s+(Normal|Fault|Absent)', l.strip(), _re.IGNORECASE)
+            ]
+            any_normal = any('normal' in l.lower() for l in psu_data_lines)
+            for line in power_out.splitlines():
+                low = line.lower()
+                if ('fault' in low or 'absent' in low) and any(c.isdigit() for c in line):
+                    if host not in rps_hosts and any_normal:
+                        # Primary PSU is fine — this is just the empty RPS slot
+                        continue
+                    problems.append(f'PSU: {line.strip()}')
+
+        # Fans
+        fan_out = _ssh_switch(host, 'display fan', cfg)
+        if fan_out:
+            for line in fan_out.splitlines():
+                if 'fault' in line.lower() and any(c.isdigit() for c in line):
+                    problems.append(f'Fan: {line.strip()}')
+
+        # Temperature / environment
+        # HP5130 output format (fixed-width columns):
+        #   Slot  Sensor    Temperature  Lower  Warning  Alarm  Shutdown
+        #   1     hotspot 1 85           0      98       108    NA
+        # We find the header to locate column positions, then compare Temperature
+        # against the switch's own Warning threshold.  Fall back to keyword
+        # detection (Abnormal/Critical/Overtemperature) for other firmware variants.
+        env_out = _ssh_switch(host, 'display environment', cfg)
+        if env_out:
+            lines = env_out.splitlines()
+            temp_col = warn_col = -1
+            header_idx = -1
+            for i, line in enumerate(lines):
+                if 'Temperature' in line and 'Warning' in line:
+                    temp_col = line.index('Temperature')
+                    warn_col = line.index('Warning')
+                    header_idx = i
+                    break
+
+            if header_idx >= 0:
+                for line in lines[header_idx + 1:]:
+                    if not line.strip() or line.strip().startswith('-'):
+                        continue
+                    if not _re.match(r'^\s*\d', line):
+                        continue
+                    try:
+                        t_str = line[temp_col:temp_col + 12].split()[0]
+                        w_str = line[warn_col:warn_col + 12].split()[0]
+                        temp_val = int(t_str)
+                        warn_val = int(w_str)
+                        if temp_val >= warn_val:
+                            problems.append(
+                                f'Temperature at/above Warning threshold: '
+                                f'{temp_val}\u00b0C \u2265 Warning {warn_val}\u00b0C \u2014 {line.strip()}'
+                            )
+                    except (ValueError, IndexError):
+                        pass
+            else:
+                # Fallback: keyword-based for non-standard firmware output
+                for line in lines:
+                    low = line.lower()
+                    if 'abnormal' in low or 'critical' in low or 'overtemperature' in low:
+                        problems.append(f'Temperature status: {line.strip()}')
+
+        if problems:
+            if not ss.get('alerting'):
+                ss['alerting'] = True
+                problem_html = '<br>'.join(f'&nbsp;&nbsp;• {p}' for p in problems)
+                alerts.append(
+                    f'Switch <strong>{host}</strong> hardware alert:<br>{problem_html}'
+                    + _hint(
+                        f'View details: Admin portal → Switch Health',
+                        f'Check power:  SSH to switch → <code>display power</code>',
+                        f'Check fans:   SSH to switch → <code>display fan</code>',
+                        f'Check temp:   SSH to switch → <code>display environment</code>',
+                    )
+                )
+                log.warning('Switch health alert for %s: %s', host, problems)
+        else:
+            if ss.get('alerting'):
+                ss['alerting'] = False
+                alerts.append(
+                    f'RECOVERED: Switch <strong>{host}</strong> — hardware health normal'
+                )
+                log.info('Switch health recovered for %s', host)
+
+    return alerts
 
 def _categorise(alerts: list[str]) -> tuple[list[str], list[str]]:
     problems = [a for a in alerts if not a.startswith('RECOVERED:')]
@@ -906,6 +1095,7 @@ def run_once(cfg: dict, state: dict) -> None:
     all_alerts += check_peer(cfg, state)
     all_alerts += check_central(cfg, state)
     all_alerts += check_syslog_stale(cfg, state)
+    all_alerts += check_switch_health(cfg, state)
 
     problems, recoveries = _categorise(all_alerts)
 

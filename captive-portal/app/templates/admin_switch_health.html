@@ -1,0 +1,496 @@
+{% extends "base.html" %}
+
+{% block title %}Switch Health - Network Access Portal{% endblock %}
+{% block header %}HP5130 Switch Health{% endblock %}
+
+{% block extra_head %}
+<style>
+    .page-actions {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 24px;
+        flex-wrap: wrap;
+    }
+    .btn {
+        padding: 8px 18px;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        font-size: 14px;
+        font-weight: 500;
+        transition: all 0.2s;
+        text-decoration: none;
+        display: inline-block;
+    }
+    .btn-primary  { background: #2c3e2c; color: white; }
+    .btn-primary:hover  { background: #3d5a3d; }
+    .btn-secondary { background: #6c757d; color: white; }
+    .btn-secondary:hover { background: #5a6268; }
+    #refresh-ts { font-size: 13px; color: #888; }
+
+    .switch-card {
+        background: white;
+        border-radius: 8px;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+        margin-bottom: 32px;
+        overflow: hidden;
+    }
+    .switch-header {
+        background: #2c3e2c;
+        color: white;
+        padding: 12px 20px;
+        font-size: 16px;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+    }
+    .health-badge {
+        padding: 2px 10px;
+        border-radius: 12px;
+        font-size: 12px;
+        font-weight: 600;
+    }
+    .health-badge.ok      { background: #d5f5e3; color: #1d6a3a; }
+    .health-badge.fault   { background: #f8d7da; color: #721c24; }
+    .health-badge.loading { background: rgba(255,255,255,0.15); color: #eee; }
+    .health-badge.error   { background: #f8d7da; color: #721c24; }
+
+    /* RPS checkbox — white text on dark green header */
+    .rps-label {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 13px;
+        font-weight: 600;
+        color: #ffffff;
+        cursor: pointer;
+        margin-left: auto;
+        background: rgba(255,255,255,0.15);
+        padding: 4px 12px;
+        border-radius: 12px;
+        border: 1.5px solid rgba(255,255,255,0.4);
+        user-select: none;
+        white-space: nowrap;
+    }
+    .rps-label input[type=checkbox] {
+        cursor: pointer;
+        width: 15px;
+        height: 15px;
+        accent-color: #4ec9b0;
+    }
+    .rps-saving { font-size: 11px; color: #aee; margin-left: 6px; }
+
+    .switch-sections { padding: 0 20px 20px; }
+    .section-tabs {
+        display: flex;
+        gap: 6px;
+        margin: 16px 0 12px;
+        flex-wrap: wrap;
+    }
+    .tab-btn {
+        padding: 5px 14px;
+        border: none;
+        border-radius: 20px;
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 500;
+        background: #f0f4f0;
+        color: #495057;
+        border: 1.5px solid #d4e0d4;
+        transition: all 0.2s;
+    }
+    .tab-btn.active    { background: #2c3e2c; color: white; border-color: #2c3e2c; }
+    .tab-btn.has-fault { border-color: #e74c3c; color: #c0392b; }
+    .tab-btn.has-fault.active { background: #e74c3c; color: white; border-color: #e74c3c; }
+
+    .section-panel { display: none; }
+    .section-panel.active { display: block; }
+
+    pre.health-out {
+        background: #1e1e1e;
+        color: #d4d4d4;
+        padding: 14px 16px;
+        border-radius: 6px;
+        font-size: 12.5px;
+        line-height: 1.55;
+        overflow-x: auto;
+        max-height: 520px;
+        overflow-y: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+        margin: 0;
+    }
+    .kw-normal  { color: #4ec9b0; font-weight: 600; }
+    .kw-fault   { color: #f48771; font-weight: 700;
+                  background: rgba(244,135,113,0.15); border-radius: 3px; padding: 0 2px; }
+    .kw-absent  { color: #ce9178; font-weight: 700;
+                  background: rgba(206,145,120,0.15); border-radius: 3px; padding: 0 2px; }
+    .kw-neutral { color: #888; }
+    .kw-temp-hot { color: #f48771; font-weight: 700; }
+    .kw-temp-ok  { color: #9cdcfe; }
+
+    .unavailable {
+        background: #fff5f5;
+        border: 1px solid #fed7d7;
+        border-radius: 6px;
+        padding: 16px 20px;
+        color: #c53030;
+        font-size: 14px;
+        margin-top: 8px;
+    }
+    .loading-spinner {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 24px 0;
+        color: #888;
+        font-size: 14px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner-icon {
+        width: 20px; height: 20px;
+        border: 3px solid #ddd;
+        border-top-color: #2c3e2c;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+        flex-shrink: 0;
+    }
+    .empty-state {
+        padding: 40px;
+        text-align: center;
+        color: #6c757d;
+        background: white;
+        border-radius: 8px;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+    }
+    .rps-hint {
+        font-size: 12px;
+        color: #888;
+        margin: 6px 0 12px;
+        font-style: italic;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="page-actions">
+    <button id="refreshBtn" class="btn btn-primary" onclick="loadHealth()">&#8635; Refresh</button>
+    <a href="{{ url_for('admin_switch_ports') }}" class="btn btn-secondary">&#8592; Switch Ports</a>
+    <span id="refresh-ts"></span>
+</div>
+
+{% if not switch_hosts %}
+<div class="empty-state">
+    <p>No switches configured. Set <code>SWITCH_HOSTS</code> environment variable.</p>
+</div>
+{% else %}
+{% for host in switch_hosts %}
+<div class="switch-card" id="card-{{ loop.index }}">
+    <div class="switch-header">
+        &#128268; {{ host }}
+        <span class="health-badge loading" id="badge-{{ loop.index }}">Loading&hellip;</span>
+        <label class="rps-label"
+               title="Tick if a Redundant Power Supply is physically fitted. When ticked, a Fault on the secondary PSU will generate an email alert.">
+            <input type="checkbox" id="rps-{{ loop.index }}"
+                   onchange="onRpsChange('{{ host }}', {{ loop.index }}, this.checked)">
+            RPS connected
+            <span class="rps-saving" id="rps-saving-{{ loop.index }}" style="display:none">saving&hellip;</span>
+        </label>
+    </div>
+    <div class="switch-sections" id="sections-{{ loop.index }}">
+        <div class="loading-spinner">
+            <div class="spinner-icon"></div>
+            <span>Connecting to switch and running diagnostics&hellip;</span>
+        </div>
+    </div>
+</div>
+{% endfor %}
+{% endif %}
+
+<script>
+const SWITCH_HOSTS = {{ switch_hosts | tojson }};
+let _healthCache  = null;
+let _rpsSettings  = {};   // { host: bool } — loaded from server
+
+const SECTIONS = [
+    { key: 'power',       label: '&#9889; Power (PSU)' },
+    { key: 'fan',         label: '&#127744; Fans' },
+    { key: 'environment', label: '&#127777;&#65039; Temperature' },
+    { key: 'diagnostic',  label: '&#128203; Diagnostics' },
+];
+
+// ── RPS persistence (server-backed) ──────────────────────────────────────────
+
+function getRps(host) { return !!_rpsSettings[host]; }
+
+function initRpsCheckboxes() {
+    fetch('{{ url_for("admin_switch_health_rps_get") }}')
+        .then(r => r.json())
+        .then(data => {
+            _rpsSettings = data || {};
+            SWITCH_HOSTS.forEach((host, i) => {
+                var cb = document.getElementById('rps-' + (i + 1));
+                if (cb) cb.checked = !!_rpsSettings[host];
+            });
+            // Re-render if data already loaded
+            if (_healthCache) {
+                SWITCH_HOSTS.forEach((host, i) => renderSwitch(i + 1, host, _healthCache.switches[host] || null));
+            }
+        })
+        .catch(() => {});  // non-fatal — checkboxes stay unchecked
+}
+
+function onRpsChange(host, idx, checked) {
+    _rpsSettings[host] = checked;
+    var savingEl = document.getElementById('rps-saving-' + idx);
+    if (savingEl) savingEl.style.display = 'inline';
+    fetch('{{ url_for("admin_switch_health_rps_set") }}', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({host: host, rps: checked})
+    })
+    .then(r => r.json())
+    .finally(() => { if (savingEl) savingEl.style.display = 'none'; });
+    // Re-render immediately without waiting for save
+    if (_healthCache) renderSwitch(idx, host, _healthCache.switches[host] || null);
+}
+
+// ── Output rendering ──────────────────────────────────────────────────────────
+
+function escapeHtml(s) {
+    return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+/**
+ * Parse the HP5130 `display environment` fixed-width table.
+ * Returns array of {temp, warning} numbers for each sensor row.
+ * Header format:
+ *   Slot  Sensor    Temperature  Lower  Warning  Alarm  Shutdown
+ */
+function parseEnvTable(raw) {
+    if (!raw) return [];
+    var lines = raw.split('\n');
+    var tempCol = -1, warnCol = -1, headerIdx = -1;
+    for (var i = 0; i < lines.length; i++) {
+        if (lines[i].indexOf('Temperature') >= 0 && lines[i].indexOf('Warning') >= 0) {
+            tempCol = lines[i].indexOf('Temperature');
+            warnCol = lines[i].indexOf('Warning');
+            headerIdx = i;
+            break;
+        }
+    }
+    if (headerIdx < 0) return [];
+    var rows = [];
+    for (var i = headerIdx + 1; i < lines.length; i++) {
+        var line = lines[i];
+        if (!line.trim() || /^[-=\s]*$/.test(line.trim())) continue;
+        if (!/^\s*\d/.test(line)) continue;
+        try {
+            var tParts = line.slice(tempCol).trim().split(/\s+/);
+            var wParts = line.slice(warnCol).trim().split(/\s+/);
+            var t = parseInt(tParts[0], 10);
+            var w = parseInt(wParts[0], 10);
+            if (!isNaN(t) && !isNaN(w)) rows.push({temp: t, warning: w, line: line.trim()});
+        } catch(e) {}
+    }
+    return rows;
+}
+
+/**
+ * Highlight raw HP5130 output.
+ *
+ * Temperature section: colour each temperature number based on whether it
+ * is at/above the Warning threshold (red) or below it (blue).
+ * "Warning" is a COLUMN HEADER and is never flagged as an alert keyword.
+ *
+ * Diagnostic section: no fault keyword highlighting — it is a dump of
+ * configuration values that contains words like "Critical" as threshold
+ * labels, not live error states.
+ */
+function highlightOutput(raw, sectionKey, rpsConnected) {
+    if (sectionKey === 'environment') {
+        return highlightEnv(raw);
+    }
+    var s = escapeHtml(raw);
+    s = s.replace(/\b(Normal)\b/gi, '<span class="kw-normal">$1</span>');
+    if (sectionKey === 'power' && !rpsConnected) {
+        s = s.replace(/\b(Fault|Absent)\b/gi, '<span class="kw-neutral">$1</span>');
+    } else if (sectionKey !== 'diagnostic') {
+        // Don't highlight fault keywords in diagnostic — they're threshold labels
+        s = s.replace(/\b(Fault)\b/gi,  '<span class="kw-fault">$1</span>');
+        s = s.replace(/\b(Absent)\b/gi, '<span class="kw-absent">$1</span>');
+    }
+    return s;
+}
+
+function highlightEnv(raw) {
+    var lines  = raw.split('\n');
+    var tempCol = -1, warnCol = -1, headerIdx = -1;
+    for (var i = 0; i < lines.length; i++) {
+        if (lines[i].indexOf('Temperature') >= 0 && lines[i].indexOf('Warning') >= 0) {
+            tempCol = lines[i].indexOf('Temperature');
+            warnCol = lines[i].indexOf('Warning');
+            headerIdx = i;
+            break;
+        }
+    }
+    return lines.map(function(line, i) {
+        var escaped = escapeHtml(line);
+        if (headerIdx < 0 || i <= headerIdx) return escaped;
+        if (!line.trim() || /^\s*[-=]/.test(line)) return escaped;
+        if (!/^\s*\d/.test(line)) return escaped;
+        try {
+            var tParts = line.slice(tempCol).trim().split(/\s+/);
+            var wParts = line.slice(warnCol).trim().split(/\s+/);
+            var t = parseInt(tParts[0], 10);
+            var w = parseInt(wParts[0], 10);
+            if (!isNaN(t) && !isNaN(w)) {
+                var cls = (t >= w) ? 'kw-temp-hot' : 'kw-temp-ok';
+                // Replace just the temperature number (first number after tempCol)
+                escaped = escaped.replace(/(\s)(\d{1,3})(\s)/, function(m, a, n, b) {
+                    return a + '<span class="' + cls + '">' + n + '</span>' + b;
+                });
+            }
+        } catch(e) {}
+        return escaped;
+    }).join('\n');
+}
+
+function hasNormalPsu(raw) {
+    if (!raw) return false;
+    return raw.split('\n').some(l => /^\s+\d+\s+Normal/i.test(l));
+}
+
+/**
+ * Classify a section for the fault badge.
+ *
+ * Temperature: fault if any sensor temp >= its Warning threshold value.
+ * Power: fault if Fault/Absent present AND (rpsConnected OR no Normal PSU).
+ * Fan: fault if any line contains "Fault".
+ * Diagnostic: never auto-classified — the raw dump contains threshold labels
+ *             that look like errors but are not (Critical, Absent, etc.).
+ */
+function classifySection(key, raw, rpsConnected) {
+    if (!raw) return 'ok';
+    if (key === 'environment') {
+        var rows = parseEnvTable(raw);
+        return rows.some(r => r.temp >= r.warning) ? 'fault' : 'ok';
+    }
+    if (key === 'diagnostic') return 'ok';  // never flag — it's a config dump
+    var lower = raw.toLowerCase();
+    if (key === 'power') {
+        if (/fault|absent/.test(lower)) {
+            if (!rpsConnected && hasNormalPsu(raw)) return 'ok';
+            return 'fault';
+        }
+    }
+    if (key === 'fan' && /fault/.test(lower)) return 'fault';
+    return 'ok';
+}
+
+// ── Render ────────────────────────────────────────────────────────────────────
+
+function renderSwitch(idx, host, switchData) {
+    var container = document.getElementById('sections-' + idx);
+    var badgeEl   = document.getElementById('badge-' + idx);
+    var rpsConnected = getRps(host);
+    var overallStatus = 'ok';
+    var tabsHtml = '<div class="section-tabs">';
+    var panelsHtml = '';
+
+    SECTIONS.forEach(function(sec, si) {
+        var raw    = switchData ? switchData[sec.key] : null;
+        var status = classifySection(sec.key, raw, rpsConnected);
+        if (status === 'fault') overallStatus = 'fault';
+
+        var activeClass = si === 0 ? ' active' : '';
+        var faultClass  = status === 'fault' ? ' has-fault' : '';
+        var tabId   = 'tab-'   + idx + '-' + sec.key;
+        var panelId = 'panel-' + idx + '-' + sec.key;
+
+        tabsHtml += '<button class="tab-btn' + activeClass + faultClass + '" id="' + tabId + '"'
+                  + ' onclick="showPanel(' + idx + ',\'' + sec.key + '\')">' + sec.label + '</button>';
+
+        var content;
+        if (!switchData) {
+            content = '<div class="unavailable">Could not connect to switch.</div>';
+        } else if (raw == null) {
+            content = '<div class="unavailable">No output returned for this command.</div>';
+        } else {
+            content = '<pre class="health-out">' + highlightOutput(raw, sec.key, rpsConnected) + '</pre>';
+        }
+
+        if (sec.key === 'power') {
+            content += rpsConnected
+                ? '<p class="rps-hint">RPS marked as connected &mdash; secondary PSU faults will be reported.</p>'
+                : '<p class="rps-hint">RPS not connected &mdash; a Fault on the secondary PSU slot is suppressed. '
+                + 'Tick &ldquo;RPS connected&rdquo; in the header if an RPS is fitted.</p>';
+        }
+
+        panelsHtml += '<div class="section-panel' + activeClass + '" id="' + panelId + '">' + content + '</div>';
+    });
+
+    tabsHtml += '</div>';
+    container.innerHTML = tabsHtml + panelsHtml;
+    badgeEl.className = 'health-badge ' + overallStatus;
+    badgeEl.textContent = overallStatus === 'fault' ? '\u26a0 Fault detected' : '\u2713 Healthy';
+}
+
+function showPanel(switchIdx, sectionKey) {
+    SECTIONS.forEach(function(sec) {
+        var tab   = document.getElementById('tab-'   + switchIdx + '-' + sec.key);
+        var panel = document.getElementById('panel-' + switchIdx + '-' + sec.key);
+        if (!tab || !panel) return;
+        var active = sec.key === sectionKey;
+        tab.classList.toggle('active', active);
+        panel.classList.toggle('active', active);
+    });
+}
+
+// ── Fetch ─────────────────────────────────────────────────────────────────────
+
+function setLoading(on) {
+    var btn = document.getElementById('refreshBtn');
+    btn.disabled = on;
+    btn.textContent = on ? '\u23f3 Loading\u2026' : '\u21ba Refresh';
+}
+
+function loadHealth() {
+    setLoading(true);
+    document.getElementById('refresh-ts').textContent = '';
+    SWITCH_HOSTS.forEach(function(host, i) {
+        var idx = i + 1;
+        var b = document.getElementById('badge-' + idx);
+        var s = document.getElementById('sections-' + idx);
+        if (b) { b.className = 'health-badge loading'; b.textContent = 'Loading\u2026'; }
+        if (s) s.innerHTML = '<div class="loading-spinner"><div class="spinner-icon"></div>'
+            + '<span>Connecting\u2026 (may take up to 30s)</span></div>';
+    });
+    fetch('{{ url_for("admin_switch_health_data") }}')
+        .then(r => r.json())
+        .then(data => {
+            if (data.error) throw new Error('Server error: ' + data.error);
+            _healthCache = data;
+            SWITCH_HOSTS.forEach((host, i) => renderSwitch(i + 1, host, data.switches[host] || null));
+            document.getElementById('refresh-ts').textContent = 'Last updated: ' + data.timestamp;
+        })
+        .catch(err => {
+            SWITCH_HOSTS.forEach((host, i) => {
+                var b = document.getElementById('badge-' + (i+1));
+                var s = document.getElementById('sections-' + (i+1));
+                if (b) { b.className = 'health-badge error'; b.textContent = 'Error'; }
+                if (s) s.innerHTML = '<div class="unavailable">Failed to load: ' + err + '</div>';
+            });
+        })
+        .finally(() => setLoading(false));
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    initRpsCheckboxes();
+    loadHealth();
+});
+</script>
+{% endblock %}

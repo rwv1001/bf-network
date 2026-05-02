@@ -373,6 +373,7 @@
             {% endif %}
             {% if current_user.can_manage_switch_ports %}
             <a href="{{ url_for('admin_switch_ports') }}" class="{% if request.endpoint == 'admin_switch_ports' %}active{% endif %}">Switch Ports</a>
+            <a href="{{ url_for('admin_switch_health') }}" class="{% if request.endpoint in ('admin_switch_health', 'admin_switch_health_data') %}active{% endif %}">Switch Health</a>
             {% endif %}
             {% if current_user.can_manage_firmware %}
             <a href="{{ url_for('admin_firmware') }}" class="{% if request.endpoint == 'admin_firmware' %}active{% endif %}">Firmware</a>
