@@ -318,6 +318,7 @@ def _sweep_expired_ip_leases():
                             "Lease sweep: cleaned up %s (VLAN %s) — lease expired at %s",
                             lease.ip_address, lease.vlan_id, lease.lease_expiry,
                         )
+                        db.session.delete(lease)
                         changed = True
                     except Exception as exc:
                         logger.warning("Lease sweep cleanup failed for %s: %s", lease.ip_address, exc)
@@ -7836,6 +7837,7 @@ def _build_port_config(port_name, role, description=''):
         ]
     elif role == 'pi':
         body = [
+            'port link-type access',  # reset from hybrid/access before switching to trunk
             'port link-type trunk',
             'undo port trunk permit vlan 1',
             'port trunk permit vlan 10 20 30 40 50 60 70 80 90 99',

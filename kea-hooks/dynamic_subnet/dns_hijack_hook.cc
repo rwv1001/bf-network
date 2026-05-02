@@ -32,7 +32,7 @@ using namespace isc::asiolink;
 extern "C" {
 
 int version() {
-    return 30002;  // Kea 3.0.2 - hardcoded since we compile with 2.6.3 headers
+    return KEA_HOOKS_VERSION;  // Use the version from the Kea headers we compiled against
 }
 
 // Declare multi-threading compatibility
@@ -283,7 +283,7 @@ void manage_acl(const std::string& action, const std::string& ip_address,
 
     for (const auto& target : targets) {
         std::stringstream cmd;
-        cmd << "SWITCH_HOST='" << target << "' QUEUE_DISABLE=1 /scripts/hp5130-acl.sh "
+        cmd << "SWITCH_HOST='" << target << "' ACL_QUEUE_DISABLE=1 /scripts/hp5130-acl.sh "
             << action << " " << ip_address << " >/dev/null 2>&1 &";
 
         std::cout << "DNS Hijack Hook: [DEBUG] ACL Command: " << cmd.str() << std::endl;

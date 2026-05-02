@@ -1,6 +1,8 @@
 services:
   kea:
-    build: .
+    build:
+      context: ..
+      dockerfile: kea/Dockerfile
     image: kea-custom:3.0-alpine
     container_name: kea
     restart: unless-stopped
@@ -13,7 +15,6 @@ services:
       - ./sockets:/kea/sockets
       - ../scripts:/scripts:ro
       - ../shared/acl-queue:/acl-queue
-      - ../kea-hooks/dynamic_subnet/dhcp_dns_hijack.so:/usr/local/lib/kea/hooks/dhcp_dns_hijack.so:ro
       - /home/admin/.ssh:/keys:ro
     environment:
       PORTAL_IP: ${PORTAL_IP:?PORTAL_IP is required – set it in kea/.env}
@@ -75,6 +76,12 @@ services:
       chmod 2775 /acl-queue || true
       chmod 755 /kea/leases || true
       umask 0002
+      # Restore DNS hijack iptables rules from previous session and re-apply
+      # switch ACL blocks for any pending devices already in the DB.
+      # This ensures hijacking survives Kea restarts and host reboots.
+      if [ -x /scripts/kea-startup-restore.sh ]; then
+        /scripts/kea-startup-restore.sh || true
+      fi
       kea-dhcp4 -c /kea/config/dhcp4.json &
       KEA_PID=$!
       (

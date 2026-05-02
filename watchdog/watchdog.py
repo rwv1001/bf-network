@@ -94,6 +94,7 @@ def load_config() -> dict:
 
         # Health endpoint
         'health_url':         _cfg(env, 'WATCHDOG_HEALTH_URL', 'http://127.0.0.1:8080/health'),
+        'health_enabled':     _cfg(env, 'WATCHDOG_HEALTH_ENABLED', 'true').lower() != 'false',
         'health_timeout':     int(_cfg(env, 'WATCHDOG_HEALTH_TIMEOUT_SEC', '10')),
         'health_fail_threshold': int(_cfg(env, 'WATCHDOG_HEALTH_FAIL_THRESHOLD', '3')),
 
@@ -133,6 +134,10 @@ def load_config() -> dict:
         'central_url':        _cfg(env, 'CENTRAL_API_URL'),
         'central_fail_threshold': int(_cfg(env, 'WATCHDOG_CENTRAL_FAIL_THRESHOLD', '3')),
         'central_timeout':    int(_cfg(env, 'WATCHDOG_CENTRAL_TIMEOUT_SEC', '10')),
+
+        # Syslog staleness check — alert if remote-syslog.log hasn't grown for this many seconds
+        'syslog_log_path':    _cfg(env, 'WATCHDOG_SYSLOG_LOG_PATH', '/logs/remote-syslog.log'),
+        'syslog_stale_sec':   int(_cfg(env, 'WATCHDOG_SYSLOG_STALE_SEC', '600')),
     }
     return cfg
 
@@ -488,6 +493,8 @@ def check_containers(cfg: dict, state: dict) -> list[str]:
 
 def check_health(cfg: dict, state: dict) -> list[str]:
     """Poll the captive-portal /health endpoint."""
+    if not cfg.get('health_enabled', True):
+        return []
     url = cfg['health_url']
     timeout = cfg['health_timeout']
     threshold = cfg['health_fail_threshold']
@@ -823,6 +830,64 @@ def check_central(cfg: dict, state: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Syslog staleness check
+# ---------------------------------------------------------------------------
+
+def check_syslog_stale(cfg: dict, state: dict) -> list[str]:
+    """Alert if the remote syslog file hasn't been written to recently.
+
+    This catches the case where the NAT logger on the UDM has stopped
+    sending data (e.g. wrong SYSLOG_SERVER IP, process died, UDM reboot)
+    without requiring the nat-parser container itself to be down.
+    """
+    log_path = cfg['syslog_log_path']
+    stale_sec = cfg['syslog_stale_sec']
+    if not log_path:
+        return []
+
+    ss = _check_state(state, 'syslog_stale')
+    alerts = []
+
+    try:
+        mtime = os.path.getmtime(log_path)
+        age = time.time() - mtime
+        if age > stale_sec:
+            if not ss.get('alerting'):
+                ss['alerting'] = True
+                minutes = int(age // 60)
+                alerts.append(
+                    f'Remote syslog file <code>{log_path}</code> has not been updated '
+                    f'for <strong>{minutes} minutes</strong> — '
+                    f'the NAT logger on the UDM may have stopped.'
+                    + _hint(
+                        'Check NAT logger: <code>ssh root@192.168.1.1 pgrep -af nat_logger</code>',
+                        'Reinstall: <code>docker restart nat-parser</code> (auto-reinstalls if down)',
+                    )
+                )
+                log.warning('Syslog stale: %s not updated for %ds', log_path, int(age))
+        else:
+            if ss.get('alerting'):
+                ss['alerting'] = False
+                alerts.append(
+                    f'RECOVERED: Remote syslog file <code>{log_path}</code> is receiving data again'
+                )
+            ss['consecutive_failures'] = 0
+    except FileNotFoundError:
+        if not ss.get('alerting'):
+            ss['alerting'] = True
+            alerts.append(
+                f'Remote syslog file <code>{log_path}</code> not found — '
+                f'syslog-ng may not be running or the volume is not mounted.'
+                + _hint('Check: <code>docker logs syslog-ng</code>')
+            )
+            log.warning('Syslog file not found: %s', log_path)
+    except Exception as exc:
+        log.warning('Syslog stale check failed: %s', exc)
+
+    return alerts
+
+
+# ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 
@@ -840,6 +905,7 @@ def run_once(cfg: dict, state: dict) -> None:
     all_alerts += check_memory(cfg, state)
     all_alerts += check_peer(cfg, state)
     all_alerts += check_central(cfg, state)
+    all_alerts += check_syslog_stale(cfg, state)
 
     problems, recoveries = _categorise(all_alerts)
 

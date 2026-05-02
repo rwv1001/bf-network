@@ -355,6 +355,9 @@ services:
       WATCHDOG_PEER_SSH_USER: ${WATCHDOG_PEER_SSH_USER:-admin}
       WATCHDOG_PEER_SSH_KEY: /keys/id_rsa
       WATCHDOG_PEER_REBOOT_ENABLED: ${WATCHDOG_PEER_REBOOT_ENABLED:-false}
+      # Syslog staleness check — alert if remote-syslog.log not updated within 10 minutes
+      WATCHDOG_SYSLOG_LOG_PATH: /logs/remote-syslog.log
+      WATCHDOG_SYSLOG_STALE_SEC: "600"
     volumes:
       # Docker Engine socket — allows container inspection via Unix API (read-only)
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -364,6 +367,8 @@ services:
       - ./watchdog:/data
       # SSH key for optional peer reboot
       - /home/admin/.ssh:/keys:ro
+      # Syslog log directory — for staleness check
+      - ./syslog-container/logs:/logs:ro
     logging:
       driver: "json-file"
       options:
