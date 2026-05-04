@@ -259,7 +259,10 @@ class VlanMapping(db.Model):
     description = db.Column(db.Text)
     isp_router_id = db.Column(db.Integer, db.ForeignKey('isp_routers.id',
                               ondelete='SET NULL'), nullable=True)
-    
+    # Comma-separated list of VLAN IDs this VLAN is allowed to reach at IP layer.
+    # NULL / empty string = unrestricted (all inter-VLAN traffic permitted).
+    visible_vlans = db.Column(db.Text, nullable=True)
+
     def __repr__(self):
         return f'<VlanMapping {self.status} -> VLAN {self.vlan_id}>'
 

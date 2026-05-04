@@ -708,6 +708,15 @@ def _get_vlan_prefix_map():
     return prefix_map
 
 
+def _parse_visible_vlans(visible_vlans_list, index):
+    """Extract and normalise the visible_vlans CSV string for a positional form row.
+    Returns a comma-separated string of integer VLAN IDs, or '' if unrestricted.
+    """
+    raw = visible_vlans_list[index] if index < len(visible_vlans_list) else ''
+    parts = [p.strip() for p in raw.split(',') if p.strip().isdigit()]
+    return ','.join(parts)
+
+
 def _ip_from_offset(network, offset):
     return str(ipaddress.IPv4Address(int(network.network_address) + offset))
 
@@ -1627,7 +1636,129 @@ def reset_acl_baseline():
             all_ok = False
         else:
             logger.info("ACL baseline pushed to %s", host)
+            # Add inter-VLAN isolation rules on top of the fresh baseline.
+            if not _push_vlan_isolation_acls(host):
+                logger.warning("Inter-VLAN isolation ACLs failed for %s", host)
+                all_ok = False
     return all_ok
+
+
+def _push_vlan_isolation_acls(switch_host):
+    """Insert per-VLAN inter-VLAN deny rules into each VLAN's walled-garden ACL.
+
+    Must be called AFTER reset_acl_baseline() has run for the same switch.
+    The baseline script recreates each VLAN's ACL from scratch (undo + recreate),
+    so there are no leftover rules in the 25000-25990 range.  We insert deny
+    rules numbered 25000+ for every destination VLAN that the source VLAN is
+    NOT allowed to reach.
+
+    HP5130 evaluates rules in numerical order under 'match-order auto', so
+    rule 25000 is always checked before the baseline's final 'rule 30000
+    permit ip' regardless of insertion order.
+
+    Semantics of visible_vlans:
+      - NULL / empty  → deny ALL other user VLANs (fully isolated, default)
+      - non-empty CSV → deny all user VLANs NOT in the list
+    """
+    try:
+        vlans = VlanMapping.query.filter(
+            VlanMapping.status != WIRED_UNREGISTERED_STATUS
+        ).all()
+    except Exception as exc:
+        logger.warning('_push_vlan_isolation_acls: DB query failed: %s', exc)
+        return True  # non-fatal; skip gracefully
+
+    if not vlans:
+        return True
+
+    # Build vlan_id → prefix mapping
+    prefix_by_status = _get_vlan_prefix_map()
+    prefix_by_id = {}
+    for v in vlans:
+        try:
+            prefix_by_id[v.vlan_id] = int(prefix_by_status.get(v.status, 24))
+        except (TypeError, ValueError):
+            prefix_by_id[v.vlan_id] = 24
+
+    all_vlan_ids = set(prefix_by_id.keys())
+    net_word = os.getenv('NETWORK_WORD', '192.168')
+
+    lines = ['system-view']  # single command block for one SSH session
+    has_rules = False
+
+    for v in sorted(vlans, key=lambda x: x.vlan_id):
+        # Empty/NULL → deny ALL other VLANs.  Non-empty → deny unlisted ones.
+        visible_ids = set()
+        if v.visible_vlans:
+            for part in v.visible_vlans.split(','):
+                part = part.strip()
+                if part.isdigit():
+                    visible_ids.add(int(part))
+
+        denied_vids = sorted(all_vlan_ids - visible_ids - {v.vlan_id})
+        if not denied_vids:
+            continue
+
+        acl_num = 3000 + v.vlan_id * 10
+        outbound_acl_num = acl_num + 1
+
+        # Resolve subnets for all denied VLANs once, reused for both ACLs
+        denied_nets = []
+        for dvid in denied_vids:
+            pfx = prefix_by_id.get(dvid, 24)
+            try:
+                net = ipaddress.ip_network(f'{net_word}.{dvid}.0/{pfx}', strict=False)
+                denied_nets.append((net.network_address, net.hostmask))
+            except ValueError:
+                continue
+
+        if not denied_nets:
+            continue
+
+        # Collect commands for this VLAN into the shared session block.
+        # The baseline script wiped ACL 3100 and deleted ACL 3101 already, so
+        # no cleanup is needed — just add rules directly.
+
+        # Inbound ACL (30x0): add destination-deny rules to the clean ACL.
+        lines.append(f'acl advanced {acl_num}')
+        rule_num = 25000
+        for net_addr, hostmask in denied_nets:
+            lines.append(f'rule {rule_num} deny ip destination {net_addr} {hostmask}')
+            rule_num += 10
+        lines.append('quit')
+
+        # Outbound companion ACL (30x1): create fresh and populate.
+        lines.append(f'acl advanced {outbound_acl_num} match config')
+        lines.append(f'description "VLAN{v.vlan_id} Outbound Isolation"')
+        rule_num = 25000
+        for net_addr, hostmask in denied_nets:
+            lines.append(f'rule {rule_num} deny ip source {net_addr} {hostmask}')
+            rule_num += 10
+        lines.append('rule 30000 permit ip')
+        lines.append('quit')
+
+        # Bind outbound ACL to the interface.
+        lines.append(f'interface Vlan-interface{v.vlan_id}')
+        lines.append(f'packet-filter {outbound_acl_num} outbound')
+        lines.append('quit')
+
+        has_rules = True
+
+    if not has_rules:
+        return True  # all VLANs have no peers to deny — nothing to push
+
+    lines.append('quit')       # exit system-view back to user-view
+    lines.append('save force')  # save from user-view (no prompt)
+    command = '\n'.join(lines)
+
+    # Single SSH session — baseline already wiped the ACLs so no interactive
+    # prompts will appear. Timeout: ~25 cmds per VLAN × 8 VLANs × ~1s each.
+    out = _run_switch_command(switch_host, command, timeout=300)
+    if out is None:
+        logger.warning('_push_vlan_isolation_acls: SSH command failed for %s', switch_host)
+        return False
+    logger.info('_push_vlan_isolation_acls: inter-VLAN deny rules pushed to %s', switch_host)
+    return True
 
 
 def clear_mac_auth_sessions():
@@ -5648,6 +5779,34 @@ def admin_push_pbr_nqa():
     return redirect(url_for('admin_isp_routers'))
 
 
+@app.route('/admin/push-vlan-interfaces', methods=['POST'])
+@login_required
+@permission_required('manage_isp_routers')
+def admin_push_vlan_interfaces():
+    """Re-push VLAN interface IP addresses and packet-filter (ACL) assignments to all switches.
+
+    Applies the correct inbound packet-filter for every user VLAN.  Use this after
+    adding a new HP5130 switch, or to correct packet-filter direction mismatches.
+    """
+    all_vlan_ids = [m.vlan_id for m in VlanMapping.query.all() if m.vlan_id]
+    if not all_vlan_ids:
+        flash('No VLANs configured — nothing to push.', 'warning')
+        return redirect(url_for('admin_isp_routers'))
+    ok = reset_vlan_interface_masks(all_vlan_ids)
+    if ok:
+        flash(
+            f'VLAN interface config (IP + packet-filter inbound) pushed to all switches for '
+            f'{len(all_vlan_ids)} VLAN(s).',
+            'success',
+        )
+    else:
+        flash(
+            'VLAN interface push failed on one or more switches — check logs.',
+            'warning',
+        )
+    return redirect(url_for('admin_isp_routers'))
+
+
 def reapply_all_ip_blocks():
     """Re-push every current per-device IP block to all switches.
 
@@ -6747,12 +6906,14 @@ def admin_vlan_config():
         password_statuses = set(request.form.getlist('vlan_require_password'))
         remove_statuses = set(request.form.getlist('vlan_remove'))
         isp_router_ids = request.form.getlist('vlan_isp_router')  # positional, matches statuses
+        visible_vlans_list = request.form.getlist('vlan_visible_vlans')  # positional CSV strings
 
         warnings = []
         errors = []
         seen_statuses = set()
         seen_vlan_ids = set()
         pbr_changes = []  # list of (vlan_id, old_pbr_name_or_None, new_pbr_name_or_None)
+        visibility_changed = False
 
         for index, status_raw in enumerate(statuses):
             status = (status_raw or '').strip().lower()
@@ -6818,7 +6979,15 @@ def admin_vlan_config():
                 mapping.wired_enabled = wired_enabled
                 mapping.require_password = require_password
                 mapping.isp_router_id = new_isp_router_id
+                # Visible VLANs (inter-VLAN isolation)
+                new_vv = _parse_visible_vlans(visible_vlans_list, index)
+                if (mapping.visible_vlans or '') != new_vv:
+                    visibility_changed = True
+                mapping.visible_vlans = new_vv or None
             else:
+                new_vv = _parse_visible_vlans(visible_vlans_list, index)
+                if new_vv:
+                    visibility_changed = True
                 mapping = VlanMapping(
                     status=status,
                     vlan_id=vlan_id,
@@ -6827,6 +6996,7 @@ def admin_vlan_config():
                     wired_enabled=wired_enabled,
                     require_password=require_password,
                     isp_router_id=new_isp_router_id,
+                    visible_vlans=new_vv or None,
                 )
                 db.session.add(mapping)
 
@@ -6864,9 +7034,10 @@ def admin_vlan_config():
 
         # Capture all data needed by the background worker before the request
         # context is torn down.
-        _pbr_changes      = list(pbr_changes)
-        _prefix_changed   = prefix_changed
-        _changed_statuses = list(changed_statuses)
+        _pbr_changes       = list(pbr_changes)
+        _prefix_changed    = prefix_changed
+        _visibility_changed = visibility_changed
+        _changed_statuses  = list(changed_statuses)
         _vlan_map         = get_vlan_map()
         _vlan_prefix_by_id = {}
         _changed_vlan_ids  = []
@@ -6927,13 +7098,14 @@ def admin_vlan_config():
                         logger.warning('BG Kea config write failed: %s', exc)
                         _errors.append(f'Kea config: {exc}')
 
-                    # 4. ACL baseline + interface masks if prefix changed.
+                    # 4. ACL baseline + interface masks if prefix or visibility changed.
                     # Runs here so it reads the just-written dhcp4.json, not
                     # the post-restart regenerated one (which may lag behind).
-                    if _prefix_changed:
+                    if _prefix_changed or _visibility_changed:
                         ok = reset_acl_baseline()
                         if not ok:
                             _errors.append('ACL baseline push failed')
+                    if _prefix_changed:
                         reset_vlan_interface_masks(_changed_vlan_ids)
                         reset_pi_network_masks(_changed_vlan_ids)
 
@@ -7000,6 +7172,19 @@ def admin_vlan_config():
     )
 
 
+@app.route('/api/admin/kea-config')
+@login_required
+@permission_required('manage_vlans')
+def admin_kea_config_api():
+    """Return the current Kea dhcp4.json content as plain text."""
+    kea_config_path = os.getenv('KEA_CONFIG_PATH', '/kea/config/dhcp4.json')
+    try:
+        with open(kea_config_path, 'r', encoding='utf-8') as _f:
+            return _f.read(), 200, {'Content-Type': 'text/plain; charset=utf-8'}
+    except OSError:
+        return '', 404, {'Content-Type': 'text/plain'}
+
+
 @app.route('/api/admin/vlan-push-status')
 @login_required
 def admin_vlan_push_status():
@@ -7010,10 +7195,53 @@ def admin_vlan_push_status():
     try:
         raw = _pihole_redis().get(f'vlan_push_job:{job_id}')
         if not raw:
+            session.pop('vlan_push_job_id', None)  # clear stale key
             return jsonify({'state': 'expired'})
-        return jsonify(json.loads(raw))
+        data = json.loads(raw)
+        if data.get('state') == 'done':
+            session.pop('vlan_push_job_id', None)  # consumed; won't re-show on reload
+        return jsonify(data)
     except Exception:
         return jsonify({'state': 'error'})
+
+
+@app.route('/api/admin/push-acl-baseline', methods=['POST'])
+@login_required
+@permission_required('manage_vlans')
+def admin_push_acl_baseline():
+    """Trigger a full ACL baseline + inter-VLAN isolation push in the background."""
+    job_id = secrets.token_hex(16)
+    session['vlan_push_job_id'] = job_id
+
+    def _run():
+        try:
+            _r = _pihole_redis()
+            _r.set(f'vlan_push_job:{job_id}', json.dumps({'state': 'running'}), ex=300)
+        except Exception:
+            pass
+        errors = []
+        try:
+            with app.app_context():
+                ok = reset_acl_baseline()
+                if not ok:
+                    errors.append('ACL baseline push failed — check server logs')
+        except Exception as exc:  # noqa: BLE001
+            logger.exception('admin_push_acl_baseline thread crashed: %s', exc)
+            errors.append(f'Unexpected error: {exc}')
+        finally:
+            try:
+                _r = _pihole_redis()
+                _r.set(
+                    f'vlan_push_job:{job_id}',
+                    json.dumps({'state': 'done', 'ok': not errors, 'errors': errors}),
+                    ex=300,
+                )
+            except Exception:
+                pass
+
+    import threading as _threading
+    _threading.Thread(target=_run, daemon=True).start()
+    return jsonify({'ok': True, 'job_id': job_id})
 
 
 @app.route('/admin', strict_slashes=False)
@@ -7381,7 +7609,7 @@ PORT_ROLES = {
 }
 
 
-def _run_switch_command(host, command, extra_input='', disable_paging=False):
+def _run_switch_command(host, command, extra_input='', disable_paging=False, timeout=120):
     """Run a single command on an HP5130 switch via the system ssh binary.
     Uses the same SSH options as hp5130-port-lookup.sh / hp5130-replug.sh so
     the old RSA host-key algorithms negotiate correctly.
@@ -7423,7 +7651,7 @@ def _run_switch_command(host, command, extra_input='', disable_paging=False):
             input=stdin_data,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=timeout,
         )
         if result.returncode != 0:
             logger.warning("SSH to %s exited %d: %s", host, result.returncode,

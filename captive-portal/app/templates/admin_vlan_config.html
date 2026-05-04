@@ -128,6 +128,7 @@
         transition: all 0.3s ease;
     }
     .btn-cancel-vlan:hover { background: #d0d0d0; }
+    .btn-cancel-vlan:disabled { cursor: not-allowed; opacity: 0.5; background: #e0e0e0; }
     .spinner {
         width: 14px;
         height: 14px;
@@ -202,6 +203,33 @@
         font-weight: 600;
     }
     .add-vlan-btn:hover { filter: brightness(0.95); }
+
+    /* Visible VLANs widget */
+    .vv-widget {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        min-width: 160px;
+    }
+    .vv-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 12px;
+        background: #f0f4f0;
+        border: 1px solid #d4e0d4;
+        border-radius: 12px;
+        padding: 2px 8px;
+        cursor: pointer;
+        white-space: nowrap;
+        user-select: none;
+    }
+    .vv-chip input[type=checkbox] { cursor: pointer; margin: 0; }
+    .vv-unrestricted {
+        font-size: 12px;
+        color: #888;
+        font-style: italic;
+    }
 </style>
 {% endblock %}
 
@@ -226,12 +254,13 @@
                         <th>Pwd Reqd</th>
                         <th>Subnet Size</th>
                         <th>ISP Router</th>
+                        <th>Visible VLANs<br><span style="font-weight:400;font-size:11px;color:#888">empty&nbsp;=&nbsp;no&nbsp;inter&#8209;VLAN&nbsp;access</span></th>
                         <th>Remove</th>
                     </tr>
                 </thead>
                 <tbody>
                     {% for entry in vlan_entries %}
-                    <tr>
+                    <tr data-vlan-id="{{ entry.vlan_id }}">
                         <td>
                             <input type="text"
                                    name="vlan_status"
@@ -297,6 +326,29 @@
                                 {% endfor %}
                             </select>
                         </td>
+                        {% set outer_loop = loop %}
+                        <td>
+                            {# Hidden field carries the CSV; JS keeps it in sync with the checkboxes #}
+                            <input type="hidden"
+                                   name="vlan_visible_vlans"
+                                   id="vv_{{ outer_loop.index }}"
+                                   value="{{ entry.visible_vlans or '' }}">
+                            <div class="vv-widget" id="vv_widget_{{ outer_loop.index }}">
+                                {% set current_ids = (entry.visible_vlans or '').split(',') %}
+                                {% for peer in vlan_entries %}
+                                {% if peer.vlan_id != entry.vlan_id %}
+                                <label class="vv-chip">
+                                    <input type="checkbox"
+                                           class="vv-cb"
+                                           data-row="{{ outer_loop.index }}"
+                                           data-vid="{{ peer.vlan_id }}"
+                                           {% if peer.vlan_id|string in current_ids and entry.visible_vlans %}checked{% endif %}>
+                                    {{ peer.display_name or peer.status }} ({{ peer.vlan_id }})
+                                </label>
+                                {% endif %}
+                                {% endfor %}
+                            </div>
+                        </td>
                         <td>
                             <input type="checkbox"
                                    name="vlan_remove"
@@ -312,7 +364,11 @@
 
     <div class="button-group">
         <button type="button" class="btn-cancel-vlan" onclick="window.location.href='{{ url_for('admin_dashboard') }}'">Cancel</button>
-        <button id="save-config-button" type="submit" class="btn-save">
+        <button type="button" class="btn-cancel-vlan" id="push-acl-btn"
+                title="Re-push ACL baseline and inter-VLAN isolation rules to all switches without changing any configuration">
+            &#128279; Push ACLs to Switches
+        </button>
+        <button id="save-config-button" type="submit" class="btn-save" disabled>
             <span class="spinner hidden" aria-hidden="true"></span>
             <span class="btn-text">Save Configuration</span>
         </button>
@@ -342,17 +398,57 @@
 
 <script>
     const form = document.getElementById('vlan-config-form');
-    const saveButton = document.getElementById('save-config-button');
-    const buttonText = saveButton ? saveButton.querySelector('.btn-text') : null;
-    const spinner = saveButton ? saveButton.querySelector('.spinner') : null;
+    // ── Change tracking: Save enabled only when there are unsaved changes; ────
+    // ── Push ACLs enabled only when the form is clean (no unsaved changes). ───
+    var saveButton = document.getElementById('save-config-button');
+    var pushAclBtn = document.getElementById('push-acl-btn');
+    var _isDirty = false;
+    var _pushRunning = false;
+    var _formSnapshot = null;
+
+    function serializeFormState() {
+        if (!form) return '';
+        return Array.from(form.elements).map(function(el) {
+            if (!el.name) return '';
+            if (el.type === 'checkbox' || el.type === 'radio') {
+                return el.name + ':' + el.value + ':' + (el.checked ? '1' : '0');
+            }
+            return el.name + ':' + (el.value || '');
+        }).join('|');
+    }
+
+    function updateDirtyState() {
+        _isDirty = !!_formSnapshot && serializeFormState() !== _formSnapshot;
+        if (saveButton) saveButton.disabled = !_isDirty;
+        if (pushAclBtn && !_pushRunning) {
+            pushAclBtn.disabled = _isDirty;
+            pushAclBtn.title = _isDirty
+                ? 'Save your changes first, then push to switches'
+                : 'Re-apply ACL baseline and inter-VLAN rules to all switches (use after replacing a switch or if ACLs were accidentally cleared — not needed after normal config saves)';
+        }
+    }
+
+    // Snapshot state after page renders; Save starts disabled (nothing to save).
+    if (form) {
+        _formSnapshot = serializeFormState();
+        // vv-cb checkboxes update the hidden field synchronously at the target
+        // phase before this form-level bubble listener fires, so reading the
+        // hidden field value here always reflects the updated state.
+        form.addEventListener('change', updateDirtyState);
+        form.addEventListener('input',  updateDirtyState);
+    }
+
+    // ── Save button submit handler ────────────────────────────────────────────
+    var buttonText = saveButton ? saveButton.querySelector('.btn-text') : null;
+    var spinner    = saveButton ? saveButton.querySelector('.spinner')   : null;
     if (form && saveButton) {
-        form.addEventListener('submit', () => {
+        form.addEventListener('submit', function() {
             // Synchronise checkbox values for dynamically-added rows where
             // the value was initially blank.
-            form.querySelectorAll('#vlan-table tbody tr').forEach(row => {
-                const statusInput = row.querySelector('input[name="vlan_status"]');
-                const wiredCb = row.querySelector('input[name="vlan_wired"]');
-                const pwdCb = row.querySelector('input[name="vlan_require_password"]');
+            form.querySelectorAll('#vlan-table tbody tr').forEach(function(row) {
+                var statusInput = row.querySelector('input[name="vlan_status"]');
+                var wiredCb    = row.querySelector('input[name="vlan_wired"]');
+                var pwdCb      = row.querySelector('input[name="vlan_require_password"]');
                 if (statusInput && wiredCb && !wiredCb.value) {
                     wiredCb.value = statusInput.value;
                 }
@@ -362,12 +458,15 @@
             });
             saveButton.disabled = true;
             if (buttonText) { buttonText.textContent = 'Updating configuration'; }
-            if (spinner) { spinner.classList.remove('hidden'); }
+            if (spinner)     { spinner.classList.remove('hidden'); }
         });
     }
 
-    {% if vlan_push_job_id %}
-    (function() {
+    // ── Push ACLs — shared banner + polling helper ────────────────────────────
+    function startPushBanner() {
+        var existing = document.getElementById('push-status-banner');
+        if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
+
         var banner = document.createElement('div');
         banner.id = 'push-status-banner';
         banner.style.cssText = 'position:fixed;bottom:24px;right:24px;z-index:1000;' +
@@ -379,29 +478,46 @@
         dot.style.cssText = 'width:10px;height:10px;border-radius:50%;background:#ffc107;' +
             'flex-shrink:0;animation:push-pulse 1.2s ease-in-out infinite;';
         var text = document.createElement('span');
-        text.id = 'push-status-text';
         text.textContent = 'Applying switch updates\u2026';
         banner.appendChild(dot);
         banner.appendChild(text);
         document.body.appendChild(banner);
 
-        var style = document.createElement('style');
-        style.textContent = '@keyframes push-pulse{0%,100%{opacity:1}50%{opacity:0.4}}';
-        document.head.appendChild(style);
+        if (!document.getElementById('push-pulse-style')) {
+            var styleEl = document.createElement('style');
+            styleEl.id = 'push-pulse-style';
+            styleEl.textContent = '@keyframes push-pulse{0%,100%{opacity:1}50%{opacity:0.4}}';
+            document.head.appendChild(styleEl);
+        }
 
         function applyStyle(state) {
             if (state === 'done-ok') {
-                banner.style.background = '#d4edda';
-                banner.style.color = '#155724';
-                banner.style.borderColor = '#28a745';
-                dot.style.background = '#28a745';
+                banner.style.background = '#d4edda'; banner.style.color = '#155724';
+                banner.style.borderColor = '#28a745'; dot.style.background = '#28a745';
                 dot.style.animation = 'none';
             } else if (state === 'done-error') {
-                banner.style.background = '#f8d7da';
-                banner.style.color = '#721c24';
-                banner.style.borderColor = '#dc3545';
-                dot.style.background = '#dc3545';
+                banner.style.background = '#f8d7da'; banner.style.color = '#721c24';
+                banner.style.borderColor = '#dc3545'; dot.style.background = '#dc3545';
                 dot.style.animation = 'none';
+            }
+        }
+
+        function refreshKeaDisplay() {
+            fetch('/api/admin/kea-config', {credentials: 'same-origin'})
+                .then(function(r) { return r.ok ? r.text() : null; })
+                .then(function(cfg) {
+                    var pre = document.getElementById('kea-config-pre');
+                    if (pre && cfg) { pre.textContent = cfg; }
+                })
+                .catch(function() {});
+        }
+
+        function finishPush() {
+            _pushRunning = false;
+            refreshKeaDisplay();
+            if (pushAclBtn) {
+                pushAclBtn.textContent = '\ud83d\udd17 Push ACLs to Switches';
+                updateDirtyState();
             }
         }
 
@@ -414,6 +530,7 @@
                 .then(function(data) {
                     if (data.state === 'done') {
                         clearInterval(interval);
+                        finishPush();
                         if (data.ok) {
                             text.textContent = 'Switch updates applied successfully.';
                             applyStyle('done-ok');
@@ -422,24 +539,124 @@
                             applyStyle('done-error');
                         }
                         setTimeout(function() {
-                            if (banner.parentNode) { banner.parentNode.removeChild(banner); }
+                            if (banner.parentNode) banner.parentNode.removeChild(banner);
                         }, 10000);
                     } else if (data.state === 'expired' || data.state === 'none') {
                         clearInterval(interval);
-                        if (banner.parentNode) { banner.parentNode.removeChild(banner); }
+                        finishPush();
+                        if (banner.parentNode) banner.parentNode.removeChild(banner);
                     }
                 })
                 .catch(function() {});
         }
-    })();
+    }
+
+    // ── Push ACLs button click ────────────────────────────────────────────────
+    if (pushAclBtn) {
+        pushAclBtn.addEventListener('click', function() {
+            _pushRunning = true;
+            pushAclBtn.disabled = true;
+            pushAclBtn.textContent = '\u23f3 Pushing\u2026';
+            fetch('{{ url_for("admin_push_acl_baseline") }}', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {'X-CSRFToken': ''},
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.ok) {
+                    startPushBanner();
+                } else {
+                    _pushRunning = false;
+                    pushAclBtn.textContent = '\ud83d\udd17 Push ACLs to Switches';
+                    updateDirtyState();
+                    alert('Failed to start ACL push \u2014 check server logs.');
+                }
+            })
+            .catch(function() {
+                _pushRunning = false;
+                pushAclBtn.textContent = '\u274c Error starting push';
+                updateDirtyState();
+            });
+        });
+    }
+
+    {% if vlan_push_job_id %}
+    // A push was in-progress when this page loaded — resume polling.
+    _pushRunning = true;
+    if (pushAclBtn) { pushAclBtn.disabled = true; pushAclBtn.textContent = '\u23f3 Pushing\u2026'; }
+    startPushBanner();
     {% endif %}
+
+    // ── Visible VLANs checkbox sync (bidirectional) ─────────────────────────
+    // When the user ticks/unticks VLAN B in VLAN A's row, the matching
+    // checkbox (VLAN A in VLAN B's row) is mirrored automatically, because
+    // inter-VLAN reachability is always symmetric at the IP level.
+
+    // Rebuild the hidden CSV from the checked boxes in a given row index.
+    function syncVvHidden(rowIdx) {
+        var checked = document.querySelectorAll('.vv-cb[data-row="' + rowIdx + '"]:checked');
+        var ids = Array.from(checked).map(function(cb) { return cb.dataset.vid; });
+        var hidden = document.getElementById('vv_' + rowIdx);
+        if (hidden) hidden.value = ids.join(',');
+    }
+
+    // Return the data-row index of the <tr> whose data-vlan-id == vid, or null.
+    function rowIdxForVid(vid) {
+        var tr = document.querySelector('#vlan-table tbody tr[data-vlan-id="' + vid + '"]');
+        if (!tr) return null;
+        // data-row is on the checkboxes inside the row
+        var anyCb = tr.querySelector('.vv-cb');
+        return anyCb ? anyCb.dataset.row : null;
+    }
+
+    // The VLAN ID that "owns" a given row index (read from the tr attribute).
+    function vidForRow(rowIdx) {
+        var anyCb = document.querySelector('.vv-cb[data-row="' + rowIdx + '"]');
+        if (!anyCb) return null;
+        var tr = anyCb.closest('tr');
+        return tr ? tr.dataset.vlanId : null;
+    }
+
+    // _mirroring guard prevents infinite recursion.
+    var _mirroring = false;
+
+    function onVvChange(cb) {
+        syncVvHidden(cb.dataset.row);
+        if (_mirroring) return;  // already inside a mirror update
+        _mirroring = true;
+        try {
+            // Mirror: find the peer row (the row whose VLAN ID == this cb's data-vid)
+            // and set the checkbox for the current row's VLAN to the same state.
+            var peerRowIdx = rowIdxForVid(cb.dataset.vid);
+            var thisVid    = vidForRow(cb.dataset.row);
+            if (peerRowIdx !== null && thisVid !== null) {
+                var mirror = document.querySelector(
+                    '.vv-cb[data-row="' + peerRowIdx + '"][data-vid="' + thisVid + '"'
+                );
+                if (mirror && mirror.checked !== cb.checked) {
+                    mirror.checked = cb.checked;
+                    syncVvHidden(peerRowIdx);
+                }
+            }
+        } finally {
+            _mirroring = false;
+        }
+    }
+
+    document.querySelectorAll('.vv-cb').forEach(function(cb) {
+        cb.addEventListener('change', function() { onVvChange(this); });
+    });
 
     const addButton = document.getElementById('add-vlan-row');
     if (addButton) {
+        var _newRowIdx = 10000;  // high enough not to clash with existing row indices
         addButton.addEventListener('click', () => {
+            _newRowIdx++;
             const tableBody = document.querySelector('#vlan-table tbody');
             if (!tableBody) return;
             const row = document.createElement('tr');
+            const rowIdx = _newRowIdx;
             row.innerHTML = `
                 <td><input type="text" name="vlan_status" placeholder="custom-key"></td>
                 <td><input type="text" name="vlan_name" placeholder="Display name"></td>
@@ -461,9 +678,25 @@
                     <input type="checkbox" name="vlan_require_password" value="">
                 </td>
                 <td><span style="color: #777; font-size: 13px;">Not configurable</span></td>
+                <td>
+                    <input type="hidden" name="vlan_visible_vlans" id="vv_${rowIdx}" value="">
+                    <div class="vv-widget">
+                        {% for peer in vlan_entries %}
+                        <label class="vv-chip">
+                            <input type="checkbox" class="vv-cb"
+                                   data-row="${rowIdx}" data-vid="{{ peer.vlan_id }}">
+                            {{ peer.display_name or peer.status }} ({{ peer.vlan_id }})
+                        </label>
+                        {% endfor %}
+                    </div>
+                </td>
                 <td><input type="checkbox" name="vlan_remove" disabled></td>
             `;
             tableBody.appendChild(row);
+            // Wire up the new checkboxes
+            row.querySelectorAll('.vv-cb').forEach(function(cb) {
+                cb.addEventListener('change', function() { onVvChange(this); });
+            });
         });
     }
 </script>

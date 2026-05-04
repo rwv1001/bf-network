@@ -12,6 +12,7 @@ KEA_CONFIG_PATH="${KEA_CONFIG_PATH:-}"
 PYTHON_BIN="${PYTHON_BIN:-}"
 BLOCK_RULE_BASE="${ACL_BLOCK_RULE_BASE:-20000}"
 PERMIT_RULE_NUM="${ACL_PERMIT_RULE_NUM:-30000}"
+NETWORK_WORD="${NETWORK_WORD:-192.168}"
 
 if [ -z "$KEA_CONFIG_PATH" ]; then
   if [ -f "/kea/config/dhcp4.json" ]; then
@@ -25,7 +26,7 @@ if [ -z "$PYTHON_BIN" ]; then
   PYTHON_BIN="$(command -v python3 2>/dev/null || true)"
 fi
 
-SSH_OPTS="-i $SWITCH_KEY_PATH -p $SWITCH_SSH_PORT -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+SSH_OPTS="-i $SWITCH_KEY_PATH -p $SWITCH_SSH_PORT -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3"
 
 build_acl_commands() {
   VLAN_ID="$1"
@@ -114,7 +115,8 @@ PY
 
   cat <<EOF
 undo acl advanced ${ACL_NUM}
-acl advanced ${ACL_NUM} match-order config
+undo acl advanced $((ACL_NUM + 1))
+acl advanced ${ACL_NUM} match config
 description "VLAN${VLAN_ID} Walled Garden and Full Access"
 rule 10 permit udp source ${VLAN_NET} ${VLAN_WILDCARD} destination 255.255.255.255 0 destination-port eq bootps
 rule 11 permit udp source ${VLAN_NET} ${VLAN_WILDCARD} destination 255.255.255.255 0 destination-port eq bootpc
@@ -139,6 +141,13 @@ for VLAN_ID in $VLAN_LIST; do
   CMDS="${CMDS}$(build_acl_commands "$VLAN_ID")
 "
 done
+
+# NOTE: VLAN 250 (unregistered wired) is handled by the pre-existing
+# ACL 3000 (name PREAUTH) which is applied to Vlan-interface250 inbound.
+# That ACL already ends with "rule 100 deny ip", so VLAN 250 traffic to
+# any destination not explicitly permitted is dropped — including all user
+# VLANs. No changes to that ACL are needed here.
+
 CMDS="${CMDS}save force
 quit
 quit

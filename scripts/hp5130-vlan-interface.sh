@@ -95,11 +95,7 @@ PY
 
   # ACL number follows the pattern 3100 for VLAN 10, 3200 for VLAN 20, etc.
   ACL_NUM=$((3000 + VLAN_ID * 10))
-  if [ "$VLAN_ID" = "10" ]; then
-    FILTER_DIR="inbound"
-  else
-    FILTER_DIR="outbound"
-  fi
+  FILTER_DIR="inbound"
 
   cat <<EOF
 interface Vlan-interface${VLAN_ID}
@@ -107,9 +103,12 @@ undo ip address
 ip address ${ROUTER_IP} ${NETMASK}
 undo packet-filter ${ACL_NUM} inbound
 undo packet-filter ${ACL_NUM} outbound
+undo packet-filter $((ACL_NUM + 1)) inbound
+undo packet-filter $((ACL_NUM + 1)) outbound
 undo packet-filter $((3000 + VLAN_ID)) inbound
 undo packet-filter $((3000 + VLAN_ID)) outbound
-packet-filter ${ACL_NUM} ${FILTER_DIR}
+packet-filter ${ACL_NUM} inbound
+packet-filter $((ACL_NUM + 1)) outbound
 quit
 EOF
 }

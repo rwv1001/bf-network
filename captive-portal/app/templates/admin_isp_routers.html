@@ -165,6 +165,9 @@
     <form method="post" action="{{ url_for('admin_reapply_acl_blocks') }}" onsubmit="return confirm('Re-push ACL baseline (walled garden) AND all current per-device IP blocks to all HP5130 switches?\n\nUse this after adding a new switch or changing a router\'s HP5130 Switch setting.')" style="display:inline; margin-left:8px;">
         <button type="submit" class="btn btn-secondary">Reapply ACL Baseline + Blocks</button>
     </form>
+    <form method="post" action="{{ url_for('admin_push_vlan_interfaces') }}" onsubmit="return confirm('Re-push VLAN interface IP addresses and packet-filter (ACL inbound) assignments to all HP5130 switches?\n\nUse this when setting up a new switch or correcting packet-filter direction on existing switches.')" style="display:inline; margin-left:8px;">
+        <button type="submit" class="btn btn-secondary">Push VLAN Interface Filters</button>
+    </form>
 </div>
 
 <div class="info-box">

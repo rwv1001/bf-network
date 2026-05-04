@@ -904,6 +904,65 @@ def check_syslog_stale(cfg: dict, state: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# HP5130 switch reachability check
+# ---------------------------------------------------------------------------
+
+def check_switch_reachability(cfg: dict, state: dict) -> list[str]:
+    """Alert when a switch becomes unreachable (TCP port 22) and recover when it comes back.
+
+    Uses a plain TCP connect so it works even if the SSH key is absent.
+    The fail threshold mirrors WATCHDOG_PEER_FAIL_THRESHOLD so brief blips
+    (e.g. spanning-tree reconvergence) don't generate spurious alerts.
+    """
+    hosts_raw = cfg.get('switch_hosts', '')
+    if not hosts_raw:
+        return []
+    hosts = [h.strip() for h in hosts_raw.split() if h.strip()]
+    if not hosts:
+        return []
+
+    ssh_port = cfg.get('switch_ssh_port', 22)
+    fail_threshold = int(cfg.get('switch_fail_threshold',
+                                  cfg.get('peer_fail_threshold', 3)))
+    alerts: list[str] = []
+
+    for host in hosts:
+        ss = _check_state(state, f'switch_reachable_{host}')
+        reachable = False
+        try:
+            with socket.create_connection((host, ssh_port), timeout=5):
+                reachable = True
+        except OSError:
+            pass
+
+        if not reachable:
+            ss['consecutive_failures'] = ss.get('consecutive_failures', 0) + 1
+            if ss['consecutive_failures'] >= fail_threshold and not ss.get('alerting'):
+                ss['alerting'] = True
+                alerts.append(
+                    f'Switch <strong>{host}</strong> is <strong>unreachable</strong> '
+                    f'(TCP port {ssh_port} not responding) — '
+                    f'check the ethernet cable and power.'
+                    + _hint(
+                        f'Ping: <code>ping -c 4 {host}</code>',
+                        f'SSH:  <code>ssh -i /keys/id_rsa {cfg.get("switch_user", "admin")}@{host}</code>',
+                    )
+                )
+                log.warning('Switch unreachable: %s (consecutive failures: %d)',
+                            host, ss['consecutive_failures'])
+        else:
+            if ss.get('alerting'):
+                ss['alerting'] = False
+                alerts.append(
+                    f'RECOVERED: Switch <strong>{host}</strong> is reachable again'
+                )
+                log.info('Switch reachability recovered: %s', host)
+            ss['consecutive_failures'] = 0
+
+    return alerts
+
+
+# ---------------------------------------------------------------------------
 # HP5130 switch hardware health checks
 # ---------------------------------------------------------------------------
 
@@ -1095,6 +1154,7 @@ def run_once(cfg: dict, state: dict) -> None:
     all_alerts += check_peer(cfg, state)
     all_alerts += check_central(cfg, state)
     all_alerts += check_syslog_stale(cfg, state)
+    all_alerts += check_switch_reachability(cfg, state)
     all_alerts += check_switch_health(cfg, state)
 
     problems, recoveries = _categorise(all_alerts)
