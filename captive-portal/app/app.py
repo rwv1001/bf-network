@@ -2040,7 +2040,6 @@ def _unregister_device(device, commit=True):
     _close_ownership(mac_address, commit=False)
 
     # Clear all ownership/registration fields; device row is kept for audit
-    device.user_id = None
     device.device_name = None
     device.assigned_vlan = None
     device.internet_accessible = None
@@ -3365,7 +3364,6 @@ def register():
         )
 
         device.device_name      = device_type or device.device_name
-        device.user_id          = user.id
         device.ip_address       = ip_address
         device.connection_type  = connection_type
         device.ssid             = ssid
@@ -5026,7 +5024,6 @@ def unregister(token):
     _close_ownership(mac_address, commit=False)
 
     # Reset Table-6 fields
-    device.user_id = None
     device.device_name = None
     device.assigned_vlan = None
     device.internet_accessible = None
@@ -9367,7 +9364,9 @@ def admin_import_users():
                     else:
                         stats['devices_updated'] += 1
 
-                    device.user_id = user.id
+                    # Open ownership via Table 9 (device_ownership) — no user_id column on Device
+                    _close_ownership(mac_address, commit=False)
+                    _open_ownership(mac_address, user.id, commit=False)
                     device_type = get_value(row, 'device type', 'device')
                     if device_type and str(device_type).strip():
                         device.device_name = str(device_type).strip()[:100]
@@ -9501,7 +9500,14 @@ def admin_edit_user(user_id):
         
         if apply_status_to_devices:
             target_vlan = _default_vlan_for_user(allowed_vlans_allow, vlan_map)
-            devices = Device.query.filter_by(user_id=user.id, registration_status='registered').all()
+            owned_macs = [
+                o.mac_address for o in
+                DeviceOwnership.query.filter_by(user_id=user.id, end_datetime=None).all()
+            ]
+            devices = Device.query.filter(
+                Device.mac_address.in_(owned_macs),
+                Device.registration_status == 'registered',
+            ).all()
 
             for device in devices:
                 device.current_vlan = target_vlan
@@ -9656,7 +9662,6 @@ def admin_assign_device():
     _assigned_vlan_mapping = VlanMapping.query.filter_by(vlan_id=vlan_id).first()
     _is_wired_assignment = bool(_assigned_vlan_mapping and _assigned_vlan_mapping.wired_enabled)
 
-    device.user_id           = user.id
     device.device_name       = device_name or device.device_name or 'admin-assigned'
     device.ip_address        = ip_address
     device.assigned_vlan     = vlan_id
@@ -9843,7 +9848,6 @@ def admin_process_request(request_id):
         # Get or create Device row (Table 6)
         device = Device.query.filter_by(mac_address=reg_request.mac_address).first()
         if device:
-            device.user_id = user.id
             device.device_name = reg_request.device_type or device.device_name or 'unknown'
             device.ip_address = reg_request.ip_address
             device.current_vlan = target_vlan
@@ -9855,7 +9859,6 @@ def admin_process_request(request_id):
         else:
             device = Device(
                 mac_address=reg_request.mac_address,
-                user_id=user.id,
                 device_name=reg_request.device_type or 'unknown',
                 ip_address=reg_request.ip_address,
                 current_vlan=target_vlan,
@@ -10186,7 +10189,6 @@ def admin_delete_device(device_id):
     _close_ownership(mac_address, commit=False)
 
     # Step 4: Reset Table-6 fields (keep mac_address / ip_address / current_vlan row)
-    device.user_id = None
     device.device_name = None
     device.assigned_vlan = None
     device.internet_accessible = None
@@ -10215,7 +10217,7 @@ def admin_delete_device(device_id):
 def admin_delete_user(user_id):
     """Delete a user — only allowed if they own no devices."""
     user = User.query.get_or_404(user_id)
-    device_count = Device.query.filter_by(user_id=user_id).count()
+    device_count = DeviceOwnership.query.filter_by(user_id=user_id, end_datetime=None).count()
     if device_count > 0:
         flash(f'Cannot delete {user.email}: they still own {device_count} device(s). Delete or reassign them first.', 'error')
         return redirect(url_for('admin_dashboard'))
@@ -10251,8 +10253,6 @@ def admin_reassign_device(device_id):
     _close_ownership(device.mac_address, commit=False)
     _open_ownership(device.mac_address, new_user.id, commit=False)
 
-    # Update convenience foreign key; keep assigned_vlan / internet_accessible unchanged
-    device.user_id = new_user.id
     db.session.commit()
 
     # Propagate reassignment to central — updates user_email on the central device record

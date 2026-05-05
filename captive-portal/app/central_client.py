@@ -577,7 +577,6 @@ def _apply_inbound(event_type: str, data: dict) -> None:
                     logger.warning("central unregister_device: Kea unregister failed for %s", mac)
         # Close ownership and reset all registration fields
         _close_ownership(mac, commit=False)
-        device.user_id = None
         device.device_name = None
         device.assigned_vlan = None
         device.internet_accessible = None

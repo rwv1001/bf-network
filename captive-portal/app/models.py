@@ -88,11 +88,19 @@ class User(db.Model):
     notes = db.Column(db.Text)
     blocked = db.Column(db.Boolean, default=False, nullable=False, index=True)
     
-    # Relationships
-    devices = db.relationship('Device', backref='user', lazy=True, cascade='all, delete-orphan')
-    
     def __repr__(self):
         return f'<User {self.email}>'
+
+    @property
+    def devices(self):
+        """Spec Table 9: Device records currently owned by this user (active device_ownership)."""
+        owned_macs = [
+            o.mac_address for o in
+            DeviceOwnership.query.filter_by(user_id=self.id, end_datetime=None).all()
+        ]
+        if not owned_macs:
+            return []
+        return Device.query.filter(Device.mac_address.in_(owned_macs)).all()
     
     def set_network_password(self, password):
         """Hash and store the user's network (portal) password."""
@@ -127,7 +135,6 @@ class Device(db.Model):
     
     id = db.Column(db.Integer, primary_key=True)
     mac_address = db.Column(db.String(17), unique=True, nullable=False, index=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     device_name = db.Column(db.String(100))
     current_vlan = db.Column(db.Integer)
     registration_status = db.Column(db.String(50), default='pending', index=True)
@@ -177,6 +184,18 @@ class Device(db.Model):
                 return 'newly_unregistered'
         
         return 'old_unregistered'
+
+    @property
+    def user_id(self):
+        """Spec Table 6: no user_id column — current owner is resolved via Table 9 (device_ownership)."""
+        o = DeviceOwnership.query.filter_by(mac_address=self.mac_address, end_datetime=None).first()
+        return o.user_id if o else None
+
+    @property
+    def user(self):
+        """Current owner (User) resolved via Table 9 (device_ownership)."""
+        uid = self.user_id
+        return User.query.get(uid) if uid else None
 
 
 class RegistrationRequest(db.Model):
