@@ -162,6 +162,7 @@ class Device(db.Model):
     profile_snapshot = db.Column(db.Text)  # JSON: previous/new user profile details
     switch_iface = db.Column(db.String(100), nullable=True)  # Switch port, e.g. GigabitEthernet1/0/5
     switch_iface_seen_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    fixed_ip = db.Column(db.String(45), nullable=True)  # Admin-assigned fixed IP reservation
 
     def __repr__(self):
         return f'<Device {self.mac_address}>'

@@ -7248,6 +7248,131 @@ def admin_kea_config_api():
         return '', 404, {'Content-Type': 'text/plain'}
 
 
+@app.route('/api/admin/set-fixed-ip', methods=['POST'])
+@login_required
+@permission_required('manage_devices')
+def admin_set_fixed_ip():
+    """Set or clear a fixed IP reservation for a device.
+
+    POST body (JSON):
+        device_id  – integer
+        ip         – dotted-quad string to set, or "" / null to clear
+    """
+    import ipaddress as _ipaddress
+
+    data = request.get_json(silent=True) or {}
+    device_id = data.get('device_id')
+    ip_raw = (data.get('ip') or '').strip()
+
+    if not device_id:
+        return jsonify({'ok': False, 'error': 'device_id required'}), 400
+
+    device = Device.query.get(device_id)
+    if not device:
+        return jsonify({'ok': False, 'error': 'Device not found'}), 404
+
+    vlan = device.current_vlan or device.assigned_vlan
+    if not vlan:
+        return jsonify({'ok': False, 'error': 'Device has no VLAN assigned'}), 400
+
+    kea = get_kea()
+
+    # --- Clear mode ---
+    if not ip_raw:
+        if device.fixed_ip:
+            old_ip = device.fixed_ip
+            device.fixed_ip = None
+            try:
+                db.session.commit()
+            except Exception as exc:
+                db.session.rollback()
+                logger.error('set-fixed-ip: DB commit failed clearing %s: %s', device.mac_address, exc)
+                return jsonify({'ok': False, 'error': 'Database error'}), 500
+            # Re-register without fixed IP so Kea keeps the registered pool membership
+            if device.registration_status == 'registered':
+                kea.register_mac(device.mac_address, vlan)
+            logger.info('Admin %s cleared fixed IP %s for device %s',
+                        current_user.username, old_ip, device.mac_address)
+        return jsonify({'ok': True, 'fixed_ip': None})
+
+    # --- Set mode ---
+    try:
+        ip_obj = _ipaddress.IPv4Address(ip_raw)
+    except ValueError:
+        return jsonify({'ok': False, 'error': 'Invalid IP address'}), 400
+
+    # Validate IP is within the device's VLAN subnet
+    kea_config_path = os.getenv('KEA_CONFIG_PATH', '/kea/config/dhcp4.json')
+    subnet_net = None
+    try:
+        with open(kea_config_path, 'r', encoding='utf-8') as _f:
+            _kea_cfg = json.load(_f)
+        for _subnet in _kea_cfg.get('Dhcp4', {}).get('subnet4', []):
+            try:
+                if int(_subnet.get('id')) == int(vlan):
+                    subnet_net = _ipaddress.IPv4Network(_subnet['subnet'], strict=False)
+                    break
+            except Exception:
+                continue
+    except Exception as exc:
+        logger.warning('set-fixed-ip: could not read KEA config: %s', exc)
+
+    if subnet_net is None:
+        # Fall back to network-word convention
+        net_word = os.getenv('NETWORK_WORD', '192.168')
+        subnet_net = _ipaddress.IPv4Network(f'{net_word}.{vlan}.0/24', strict=False)
+
+    if ip_obj not in subnet_net:
+        return jsonify({
+            'ok': False,
+            'error': f'IP {ip_raw} is not within VLAN {vlan} subnet {subnet_net}'
+        }), 400
+
+    # Reject network/broadcast addresses
+    if ip_obj in (subnet_net.network_address, subnet_net.broadcast_address):
+        return jsonify({'ok': False, 'error': 'Cannot use network or broadcast address'}), 400
+
+    # Check no unexpired lease (for a different device) already holds this IP
+    existing_lease = IPLease.query.filter(
+        IPLease.ip_address == ip_raw,
+        IPLease.lease_expiry > datetime.utcnow(),
+    ).first()
+    if existing_lease and existing_lease.mac_address != device.mac_address:
+        return jsonify({
+            'ok': False,
+            'error': f'IP {ip_raw} is currently leased to {existing_lease.mac_address} '
+                     f'(expires {existing_lease.lease_expiry.strftime("%H:%M:%S")})'
+        }), 409
+
+    # Check no other device has this as its fixed IP
+    conflict = Device.query.filter(
+        Device.fixed_ip == ip_raw,
+        Device.id != device_id,
+    ).first()
+    if conflict:
+        return jsonify({
+            'ok': False,
+            'error': f'IP {ip_raw} is already the fixed IP for device {conflict.mac_address}'
+        }), 409
+
+    # Push to Kea (reservation-add with explicit ip-address)
+    ok = kea.register_mac(device.mac_address, vlan, ip_address=ip_raw)
+    if not ok:
+        return jsonify({'ok': False, 'error': 'Kea reservation failed — check Kea logs'}), 500
+
+    device.fixed_ip = ip_raw
+    try:
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        logger.error('set-fixed-ip: DB commit failed for %s: %s', device.mac_address, exc)
+        return jsonify({'ok': False, 'error': 'Database error'}), 500
+
+    logger.info('Admin %s set fixed IP %s for device %s (VLAN %s)',
+                current_user.username, ip_raw, device.mac_address, vlan)
+    return jsonify({'ok': True, 'fixed_ip': ip_raw})
+
+
 @app.route('/api/admin/vlan-push-status')
 @login_required
 def admin_vlan_push_status():

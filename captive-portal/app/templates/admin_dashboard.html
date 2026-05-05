@@ -909,7 +909,7 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
             <td style="font-family: monospace; font-size: 12px;">{{ device.mac_address }}</td>
             <td style="font-family: monospace; font-size: 12px;">
                 {% if device.ip_address %}
-                    {{ device.ip_address }}
+                    {{ device.ip_address }}{% if device.fixed_ip %} <span style="font-size:13px;" title="Fixed IP">📌</span>{% endif %}
                 {% else %}
                     <em style="color: #999;">-</em>
                 {% endif %}
@@ -1009,6 +1009,10 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
                 </form>
                 {% if current_user.can_manage_users %}
                 <button onclick="showReassignDeviceForm({{ device.id }}, '{{ device.mac_address }}')" class="btn btn-small" style="background: #4a7c59; margin-left: 5px;">&#8599; Reassign</button>
+                {% endif %}
+                {% if device.registration_status == 'registered' %}
+                <button onclick="showFixedIpDialog({{ device.id }}, '{{ device.mac_address }}', '{{ device.fixed_ip or '' }}', {{ device.current_vlan or 0 }})"
+                        class="btn btn-small" style="background: #1565c0; color:#fff; margin-left: 5px;" title="Set or clear a fixed IP reservation">&#x1F4CC; Fixed IP</button>
                 {% endif %}
             </td>
         </tr>
@@ -1163,6 +1167,98 @@ function saveDashboardPrefs() {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({hidden_sections: hiddenSections})
+    });
+}
+</script>
+
+<!-- Fixed IP Modal -->
+<div id="fixedIpModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:2000; overflow:auto;">
+  <div style="background:#fff; margin:10% auto; padding:28px 32px; border-radius:8px; max-width:420px; box-shadow:0 4px 24px rgba(0,0,0,0.18);">
+    <h3 style="margin-top:0; color:#1565c0;">&#x1F4CC; Fixed IP Reservation</h3>
+    <p style="font-size:13px; color:#555; margin-bottom:4px;">Device: <strong id="fixedIpMac"></strong></p>
+    <p style="font-size:13px; color:#555; margin-bottom:16px;">VLAN: <strong id="fixedIpVlan"></strong></p>
+    <label style="display:block; font-weight:600; margin-bottom:6px;">IP Address</label>
+    <input id="fixedIpInput" type="text" placeholder="e.g. 192.168.40.10"
+           style="width:100%; padding:9px 12px; border:1px solid #ccc; border-radius:4px; font-size:14px; box-sizing:border-box;">
+    <p id="fixedIpError" style="color:#c00; font-size:13px; margin-top:8px; display:none;"></p>
+    <div style="margin-top:20px; display:flex; gap:10px; flex-wrap:wrap;">
+      <button id="fixedIpSaveBtn" onclick="saveFixedIp()"
+              class="btn" style="background:#1565c0; color:#fff;">Save</button>
+      <button id="fixedIpClearBtn" onclick="clearFixedIp()"
+              class="btn" style="background:#888; color:#fff;">Clear Fixed IP</button>
+      <button onclick="hideFixedIpDialog()"
+              class="btn" style="background:#ccc;">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script>
+var _fixedIpDeviceId = null;
+
+function showFixedIpDialog(deviceId, mac, currentFixed, vlan) {
+    _fixedIpDeviceId = deviceId;
+    document.getElementById('fixedIpMac').textContent = mac;
+    document.getElementById('fixedIpVlan').textContent = vlan;
+    document.getElementById('fixedIpInput').value = currentFixed || '';
+    document.getElementById('fixedIpError').style.display = 'none';
+    document.getElementById('fixedIpError').textContent = '';
+    document.getElementById('fixedIpClearBtn').style.display = currentFixed ? '' : 'none';
+    document.getElementById('fixedIpModal').style.display = 'block';
+    setTimeout(function(){ document.getElementById('fixedIpInput').focus(); }, 50);
+}
+
+function hideFixedIpDialog() {
+    document.getElementById('fixedIpModal').style.display = 'none';
+    _fixedIpDeviceId = null;
+}
+
+document.getElementById('fixedIpModal').addEventListener('click', function(e) {
+    if (e.target === this) hideFixedIpDialog();
+});
+
+function saveFixedIp() {
+    var ip = document.getElementById('fixedIpInput').value.trim();
+    if (!ip) { showFixedIpError('Please enter an IP address, or click Clear Fixed IP to remove the reservation.'); return; }
+    _doFixedIpRequest(ip);
+}
+
+function clearFixedIp() {
+    if (!confirm('Remove the fixed IP reservation for this device? It will receive any available IP on its next renewal.')) return;
+    _doFixedIpRequest('');
+}
+
+function showFixedIpError(msg) {
+    var el = document.getElementById('fixedIpError');
+    el.textContent = msg;
+    el.style.display = 'block';
+}
+
+function _doFixedIpRequest(ip) {
+    var btn = document.getElementById('fixedIpSaveBtn');
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+    document.getElementById('fixedIpError').style.display = 'none';
+
+    fetch('/api/admin/set-fixed-ip', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({device_id: _fixedIpDeviceId, ip: ip})
+    })
+    .then(function(r){ return r.json(); })
+    .then(function(data) {
+        btn.disabled = false;
+        btn.textContent = 'Save';
+        if (data.ok) {
+            hideFixedIpDialog();
+            location.reload();
+        } else {
+            showFixedIpError(data.error || 'Unknown error');
+        }
+    })
+    .catch(function(err) {
+        btn.disabled = false;
+        btn.textContent = 'Save';
+        showFixedIpError('Request failed: ' + err);
     });
 }
 </script>
