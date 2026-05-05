@@ -514,6 +514,7 @@ authorize {
 			&Tmp-String-0 := "%{sql:SELECT COALESCE(wired_target_vlan, assigned_vlan, current_vlan)::text FROM devices WHERE (registration_status = 'registered' OR (registration_status = 'wrong_vlan' AND (wired_target_vlan IS NOT NULL OR assigned_vlan IS NOT NULL))) AND COALESCE(wired_target_vlan, assigned_vlan, current_vlan) IS NOT NULL AND lower(replace(replace(mac_address,':',''),'-','')) = lower(replace(replace('%{Calling-Station-Id}',':',''),'-','')) LIMIT 1}"
 		}
 	}
+	
 
 	#
 	#  If you are using /etc/smbpasswd, and are also doing
