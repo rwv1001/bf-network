@@ -35,7 +35,7 @@ KEA_CONTROL_SOCKET = os.getenv('KEA_CONTROL_SOCKET', '/tmp/kea-dhcp4.sock')
 SYNC_INTERVAL = int(os.getenv('SYNC_INTERVAL', '60'))  # seconds
 
 # Switch configuration for port lookup
-SWITCH_HOST     = os.getenv('SWITCH_HOST', '')
+SWITCH_HOST     = next(iter(os.getenv('SWITCH_HOSTS', '').split()), '')
 SWITCH_USER     = os.getenv('SWITCH_USER', 'admin')
 SWITCH_KEY_PATH = os.getenv('SWITCH_KEY_PATH', '/keys/id_rsa')
 SWITCH_PASS     = os.getenv('SWITCH_PASS', '')
@@ -331,7 +331,7 @@ class KeaSync:
         if SWITCH_PORT_SYNC_ENABLED and SWITCH_HOST:
             self.sync_switch_ports()
         elif SWITCH_PORT_SYNC_ENABLED and not SWITCH_HOST:
-            logger.debug("Switch port sync skipped: SWITCH_HOST not configured")
+            logger.debug("Switch port sync skipped: SWITCH_HOSTS not configured")
 
     # ------------------------------------------------------------------
     # Switch port mapping

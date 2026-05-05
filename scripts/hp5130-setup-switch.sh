@@ -2,7 +2,7 @@
 # hp5130-setup-switch.sh
 #
 # Configure an additional HP5130 switch from scratch.
-# Can be run for any switch in SWITCH_HOSTS (other than the primary SWITCH_HOST).
+# Can be run for any switch in SWITCH_HOSTS.
 #
 # Prerequisites:
 #   - Target switch reachable via SSH at TARGET_HOST (factory/current IP), admin password auth
@@ -423,7 +423,7 @@ echo ""
 # ─── Phase 3: Run ACL baseline on new switch ─────────────────────────────────
 echo "=== Phase 3: Running ACL baseline against ${SW_SYSNAME} (${TARGET_IP}) ==="
 
-SWITCH_HOST=${TARGET_IP} \
+SWITCH_HOSTS=${TARGET_IP} \
 SWITCH_USER=robert \
 SWITCH_KEY_PATH="$KEY" \
     bash "$SCRIPT_DIR/hp5130-acl-baseline.sh" || {

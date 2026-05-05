@@ -152,9 +152,9 @@ def main():
     portal_ip        = require_env("PORTAL_IP")
     portal_url       = os.environ.get("PORTAL_URL", "").strip()
     hijack_dns_ip    = require_env("HIJACK_DNS_IP")
-    switch_host      = require_env("SWITCH_HOST")
+    switch_hosts_raw = require_env("SWITCH_HOSTS")
+    switch_host      = switch_hosts_raw.split()[0]
     unregistered_gw  = require_env("UNREGISTERED_GW")
-    switch_hosts_raw = os.environ.get("SWITCH_HOSTS", switch_host)
 
     # VLANs 250 (unregistered) and 99 (management) are handled by the explicit
     # blocks below with their own pool/DNS/gateway config — skip them here.

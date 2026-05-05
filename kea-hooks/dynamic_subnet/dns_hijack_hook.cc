@@ -190,12 +190,8 @@ bool is_blocked_pool_ip(const std::string& ip_address) {
 }
 
 // Helper: parse SWITCH_HOSTS (space-separated) env var.
-// Falls back to SWITCH_HOST (single) if SWITCH_HOSTS is unset.
 std::vector<std::string> get_switch_hosts() {
     const char* env = std::getenv("SWITCH_HOSTS");
-    if (!env || !*env) {
-        env = std::getenv("SWITCH_HOST");
-    }
     std::vector<std::string> hosts;
     if (!env || !*env) return hosts;
     std::istringstream iss(env);
@@ -263,7 +259,7 @@ void manage_acl(const std::string& action, const std::string& ip_address,
 
     std::vector<std::string> all_hosts = get_switch_hosts();
     if (all_hosts.empty()) {
-        std::cerr << "DNS Hijack Hook WARNING: no SWITCH_HOSTS/SWITCH_HOST configured"
+        std::cerr << "DNS Hijack Hook WARNING: no SWITCH_HOSTS configured"
                   << std::endl;
         std::cerr.flush();
         return;
@@ -298,7 +294,7 @@ void manage_acl(const std::string& action, const std::string& ip_address,
 
     for (const auto& target : targets) {
         std::stringstream cmd;
-        cmd << "SWITCH_HOST='" << target << "' ACL_QUEUE_DISABLE=1 /scripts/hp5130-acl.sh "
+        cmd << "SWITCH_HOSTS='" << target << "' ACL_QUEUE_DISABLE=1 /scripts/hp5130-acl.sh "
             << action << " " << ip_address << " >/dev/null 2>&1 &";
 
         std::cout << "DNS Hijack Hook: [DEBUG] ACL Command: " << cmd.str() << std::endl;

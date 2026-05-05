@@ -86,7 +86,6 @@ services:
       CENTRAL_POLL_INTERVAL_SEC: ${CENTRAL_POLL_INTERVAL_SEC:-10}
       TEST_ENV: ${TEST_ENV:-false}
       KEA_CONTROL_SOCKET: ${KEA_CONTROL_SOCKET:-/kea/sockets/kea4-ctrl-socket}
-      SWITCH_HOST: ${SWITCH_HOST:?SWITCH_HOST is required – set it in .env}
       SWITCH_HOSTS: ${SWITCH_HOSTS:?SWITCH_HOSTS is required – set it in .env}
       PORTAL_IP: ${PORTAL_IP:?PORTAL_IP is required – set it in .env}
       HIJACK_DNS_IP: ${HIJACK_DNS_IP:?HIJACK_DNS_IP is required – set it in .env}

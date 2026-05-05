@@ -54,9 +54,9 @@ fi
 if [ -f /etc/freeradius/proxy.conf.template ]; then
     sed \
         -e "s/\${RADIUS_SECRET}/${RADIUS_SECRET}/g" \
-        -e "s/\${SWITCH_HOST}/${SWITCH_HOST}/g" \
-        /etc/freeradius/proxy.conf.template > /etc/freeradius/proxy.conf
-    echo "proxy.conf generated with RADIUS_SECRET and SWITCH_HOST from environment"
+        -e "s/\${SWITCH_HOST}/$(echo "${SWITCH_HOSTS:-}" | awk '{print $1}')/g" \
+    /etc/freeradius/proxy.conf.template > /etc/freeradius/proxy.conf
+    echo "proxy.conf generated with RADIUS_SECRET and SWITCH_HOSTS from environment"
 fi
 
 # Set proper permissions

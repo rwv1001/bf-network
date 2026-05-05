@@ -271,8 +271,245 @@ def _hint(*lines: str) -> str:
     return f'<br><small style="color:#555">&#8627; {inner}</small>'
 
 
+def _parse_switch_temps(env_output: str) -> list:
+    """Parse 'display environment' output from an HP5130 switch.
+
+    Returns a list of (sensor_label: str, temp_val: int, warn_val: int) tuples.
+
+    Handles two common HP5130 firmware output formats:
+
+    Format A — slot column on every data line:
+        Slot  Sensor          Temperature  Lower-limit  Warning  Alarm  Shutdown
+        1     hotspot 1            56           0          98      108    NA
+        1     Board                35           0          85       95    NA
+
+    Format B — slot on a header line, sensor-name-only data lines:
+        Slot 1:
+         Sensor          Temperature  Lower-limit  Warning  Alarm  Shutdown
+         hotspot 1            56           0          98      108    NA
+
+    Also tolerates firmware variants that use column names like
+    Current-Temp, Upper-Warning, etc., and degree-symbol suffixes (56°C).
+    """
+    import re as _re
+
+    lines = env_output.splitlines()
+
+    # --- Locate the column-header line ---
+    header_idx = temp_col = warn_col = -1
+    for i, line in enumerate(lines):
+        ll = line.lower()
+        # Must contain a temperature-related AND a warning/limit-related keyword
+        has_temp = any(k in ll for k in ('temperature', 'current-temp', '-temp', 'temp'))
+        has_warn = any(k in ll for k in ('warning', 'warn', 'upper-limit', 'alarm'))
+        if has_temp and has_warn:
+            # Find character position of the temperature column
+            for kw in ('temperature', 'current-temp', 'temp'):
+                idx = ll.find(kw)
+                if idx >= 0:
+                    temp_col = idx
+                    break
+            # Find character position of the warning column
+            # Choose the FIRST warning-related keyword that appears AFTER temp_col
+            for kw in ('upper-warning', 'warning', 'warn'):
+                idx = ll.find(kw)
+                if idx > temp_col:
+                    warn_col = idx
+                    break
+            if temp_col >= 0 and warn_col >= 0:
+                header_idx = i
+                break
+
+    results = []
+
+    if header_idx >= 0:
+        current_slot = ''
+        for line in lines[header_idx + 1:]:
+            stripped = line.strip()
+            if not stripped or stripped.startswith('-'):
+                continue
+            # Detect a "Slot N:" line (Format B slot-header)
+            slot_m = _re.match(r'[Ss]lot\s+(\d+)\s*:', stripped)
+            if slot_m:
+                current_slot = slot_m.group(1)
+                continue
+            # Skip lines that look like sub-headers (contain alphabetic column names)
+            # A data line must have a numeric value extractable at temp_col
+            try:
+                t_raw = line[temp_col:temp_col + 15].split()[0]
+                w_raw = line[warn_col:warn_col + 15].split()[0]
+                # Strip non-numeric characters (°C suffix, etc.)
+                temp_val = int(_re.sub(r'[^\d-]', '', t_raw))
+                warn_val = int(_re.sub(r'[^\d-]', '', w_raw))
+            except (ValueError, IndexError):
+                continue
+            # Extract sensor name from everything left of temp_col
+            sensor_part = line[:temp_col].strip()
+            # If it starts with a slot digit (Format A), strip it
+            sensor_part = _re.sub(r'^\d+\s+', '', sensor_part).strip()
+            if not sensor_part:
+                sensor_part = f'slot {current_slot}' if current_slot else 'sensor'
+            elif current_slot:
+                sensor_part = f'slot {current_slot} {sensor_part}'
+            results.append((sensor_part, temp_val, warn_val))
+    else:
+        # Last-resort: keyword detection — signal WARNING for anything that looks alarming
+        for line in lines:
+            ll = line.lower()
+            if any(k in ll for k in ('abnormal', 'critical', 'overtemperature')):
+                # Return a sentinel that will always trigger the warning path
+                results.append((line.strip(), 9999, 0))
+
+    return results
+
+
+def _switch_stats_html(cfg: dict) -> str:
+    """Return an HTML block with current fan, PSU, and temperature status for
+    every switch in SWITCH_HOSTS.  Returns '' if SSH key is absent or no
+    hosts are configured.  Intended to be appended to every alert email so
+    the admin always has the switch health snapshot in context.
+    """
+    import re as _re
+
+    hosts_raw = cfg.get('switch_hosts', '')
+    if not hosts_raw:
+        return ''
+    hosts = [h.strip() for h in hosts_raw.split() if h.strip()]
+    if not hosts:
+        return ''
+
+    key = cfg.get('switch_key_path', '')
+    if not key or not os.path.exists(key):
+        return ''
+
+    rps_hosts = set(cfg.get('switch_rps_hosts', '').split())
+    rps_file = cfg.get('switch_rps_file', '')
+    if rps_file:
+        try:
+            with open(rps_file) as _f:
+                rps_json = json.loads(_f.read())
+            rps_hosts = {h for h, v in rps_json.items() if v}
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+
+    switch_blocks: list[str] = []
+
+    for host in hosts:
+        rows: list[str] = []
+
+        # --- Power ---
+        power_out = _ssh_switch(host, 'display power', cfg, timeout=15)
+        if power_out:
+            psu_data_lines = [
+                l.strip() for l in power_out.splitlines()
+                if _re.match(r'\d+\s+(Normal|Fault|Absent)', l.strip(), _re.IGNORECASE)
+            ]
+            any_normal = any('normal' in l.lower() for l in psu_data_lines)
+            for line in psu_data_lines:
+                low = line.lower()
+                if 'absent' in low and host not in rps_hosts and any_normal:
+                    # empty RPS bay on a switch without RPS — skip silently
+                    continue
+                if 'normal' in low:
+                    colour = '#2a7a2a'
+                    label = 'Normal'
+                elif 'fault' in low:
+                    colour = '#b00'
+                    label = 'FAULT'
+                elif 'absent' in low:
+                    colour = '#b00' if (host in rps_hosts or not any_normal) else '#888'
+                    label = 'Absent'
+                else:
+                    colour = '#555'
+                    label = line
+                # Extract slot number from start of line
+                slot_m = _re.match(r'(\d+)', line)
+                slot = slot_m.group(1) if slot_m else '?'
+                rows.append(
+                    f'<tr><td style="padding:1px 6px;color:#555">PSU {slot}</td>'
+                    f'<td style="padding:1px 6px;color:{colour};font-weight:bold">{label}</td></tr>'
+                )
+
+        # --- Fans ---
+        # HP5130 format spans two lines:
+        #   Fan 1:
+        #   State    : Normal
+        fan_out = _ssh_switch(host, 'display fan', cfg, timeout=15)
+        if fan_out:
+            current_fan_id: str | None = None
+            for line in fan_out.splitlines():
+                low = line.lower()
+                fan_hdr = _re.match(r'\s*fan\s+(\d+)', line, _re.IGNORECASE)
+                if fan_hdr:
+                    current_fan_id = fan_hdr.group(1)
+                    continue
+                state_m = _re.match(r'\s*state\s*:\s*(\S+)', line, _re.IGNORECASE)
+                if state_m and current_fan_id is not None:
+                    state_word = state_m.group(1).lower()
+                    if state_word in ('normal', 'running'):
+                        colour, label = '#2a7a2a', 'Normal'
+                    elif state_word == 'fault':
+                        colour, label = '#b00', 'FAULT'
+                    elif state_word == 'absent':
+                        colour, label = '#888', 'Absent'
+                    else:
+                        colour, label = '#555', state_m.group(1)
+                    rows.append(
+                        f'<tr><td style="padding:1px 6px;color:#555">Fan {current_fan_id}</td>'
+                        f'<td style="padding:1px 6px;color:{colour};font-weight:bold">{label}</td></tr>'
+                    )
+                    current_fan_id = None
+
+        # --- Temperature ---
+        env_out = _ssh_switch(host, 'display environment', cfg, timeout=15)
+        if env_out:
+            for sensor, temp_val, warn_val in _parse_switch_temps(env_out):
+                if temp_val >= warn_val:
+                    colour = '#b00'
+                    status = f'{temp_val}°C — <strong>WARNING</strong> (threshold {warn_val}°C)'
+                else:
+                    colour = '#2a7a2a'
+                    status = f'{temp_val}°C (warn {warn_val}°C) — Normal'
+                rows.append(
+                    f'<tr><td style="padding:1px 6px;color:#555">Temp: {sensor}</td>'
+                    f'<td style="padding:1px 6px;color:{colour}">{status}</td></tr>'
+                )
+
+        if power_out is None and fan_out is None and env_out is None:
+            switch_blocks.append(
+                f'<li><strong>{host}</strong>: unreachable via SSH — no hardware data available</li>'
+            )
+            continue
+
+        if not rows:
+            switch_blocks.append(f'<li><strong>{host}</strong>: no sensor data returned</li>')
+            continue
+
+        table = (
+            f'<strong>{host}</strong>'
+            f'<table style="font-size:0.88em;border-collapse:collapse;margin:2px 0 6px 8px">'
+            + ''.join(rows)
+            + '</table>'
+        )
+        switch_blocks.append(f'<li style="margin-bottom:4px">{table}</li>')
+
+    if not switch_blocks:
+        return ''
+
+    return (
+        '<hr style="margin-top:12px">'
+        '<p style="color:#555;font-size:0.9em;margin-bottom:4px">'
+        '<strong>HP5130 switch hardware at time of alert:</strong></p>'
+        '<ul style="font-size:0.9em;margin-top:0;list-style:none;padding-left:0">'
+        + ''.join(switch_blocks)
+        + '</ul>'
+    )
+
+
 def _system_stats_html(cfg: dict) -> str:
-    """HTML block with current memory and disk usage — included in every alert."""
+    """HTML block with current memory, disk, and switch hardware — included in every alert."""
     lines = []
 
     # Memory (reads /proc/meminfo — works on host-networked containers)
@@ -303,21 +540,24 @@ def _system_stats_html(cfg: dict) -> str:
         pass
 
     if not lines:
-        return ''
+        stats_block = ''
+    else:
+        items = ''.join(f'<li>{l}</li>' for l in lines)
+        stats_block = (
+            '<hr style="margin-top:16px">'
+            '<p style="color:#555;font-size:0.9em;margin-bottom:4px">'
+            '<strong>System stats at time of alert:</strong></p>'
+            f'<ul style="font-size:0.9em;margin-top:0">{items}</ul>'
+            '<p style="color:#888;font-size:0.82em">'
+            'High memory? Run on Pi: <code>free -h &amp;&amp; ps aux --sort=-%mem | head -15</code><br>'
+            'High disk? Run on Pi: <code>df -h /</code> &nbsp;&middot;&nbsp; '
+            '<code>docker system prune -f</code> &nbsp;&middot;&nbsp; '
+            '<code>du -sh /var/lib/docker/* 2&gt;/dev/null | sort -h</code>'
+            '</p>'
+        )
 
-    items = ''.join(f'<li>{l}</li>' for l in lines)
-    return (
-        '<hr style="margin-top:16px">'
-        '<p style="color:#555;font-size:0.9em;margin-bottom:4px">'
-        '<strong>System stats at time of alert:</strong></p>'
-        f'<ul style="font-size:0.9em;margin-top:0">{items}</ul>'
-        '<p style="color:#888;font-size:0.82em">'
-        'High memory? Run on Pi: <code>free -h &amp;&amp; ps aux --sort=-%mem | head -15</code><br>'
-        'High disk? Run on Pi: <code>df -h /</code> &nbsp;&middot;&nbsp; '
-        '<code>docker system prune -f</code> &nbsp;&middot;&nbsp; '
-        '<code>du -sh /var/lib/docker/* 2&gt;/dev/null | sort -h</code>'
-        '</p>'
-    )
+    switch_block = _switch_stats_html(cfg)
+    return stats_block + switch_block
 
 
 def _alert_email(cfg: dict, subject: str, lines: list[str]) -> None:
@@ -1046,6 +1286,15 @@ def check_switch_health(cfg: dict, state: dict) -> list[str]:
 
         # Power supply
         power_out = _ssh_switch(host, 'display power', cfg)
+        fan_out   = _ssh_switch(host, 'display fan', cfg)
+        env_out   = _ssh_switch(host, 'display environment', cfg)
+
+        # If every SSH command returned None the switch is simply unreachable —
+        # don't treat the absence of data as a health recovery.
+        if power_out is None and fan_out is None and env_out is None:
+            log.debug('Switch %s returned no SSH output — skipping health state change', host)
+            continue
+
         if power_out:
             # Determine whether any PSU is reporting Normal.
             # If so, a Fault/Absent on another slot is the empty RPS bay —
@@ -1064,56 +1313,28 @@ def check_switch_health(cfg: dict, state: dict) -> list[str]:
                         continue
                     problems.append(f'PSU: {line.strip()}')
 
-        # Fans
-        fan_out = _ssh_switch(host, 'display fan', cfg)
+        # Fans — multi-line format: "Fan N:" then "State    : <word>"
         if fan_out:
+            _cur_fan: str | None = None
             for line in fan_out.splitlines():
-                if 'fault' in line.lower() and any(c.isdigit() for c in line):
-                    problems.append(f'Fan: {line.strip()}')
+                fan_hdr = _re.match(r'\s*fan\s+(\d+)', line, _re.IGNORECASE)
+                if fan_hdr:
+                    _cur_fan = fan_hdr.group(1)
+                    continue
+                state_m = _re.match(r'\s*state\s*:\s*(\S+)', line, _re.IGNORECASE)
+                if state_m and _cur_fan is not None:
+                    if state_m.group(1).lower() == 'fault':
+                        problems.append(f'Fan {_cur_fan}: FAULT')
+                    _cur_fan = None
 
         # Temperature / environment
-        # HP5130 output format (fixed-width columns):
-        #   Slot  Sensor    Temperature  Lower  Warning  Alarm  Shutdown
-        #   1     hotspot 1 85           0      98       108    NA
-        # We find the header to locate column positions, then compare Temperature
-        # against the switch's own Warning threshold.  Fall back to keyword
-        # detection (Abnormal/Critical/Overtemperature) for other firmware variants.
-        env_out = _ssh_switch(host, 'display environment', cfg)
         if env_out:
-            lines = env_out.splitlines()
-            temp_col = warn_col = -1
-            header_idx = -1
-            for i, line in enumerate(lines):
-                if 'Temperature' in line and 'Warning' in line:
-                    temp_col = line.index('Temperature')
-                    warn_col = line.index('Warning')
-                    header_idx = i
-                    break
-
-            if header_idx >= 0:
-                for line in lines[header_idx + 1:]:
-                    if not line.strip() or line.strip().startswith('-'):
-                        continue
-                    if not _re.match(r'^\s*\d', line):
-                        continue
-                    try:
-                        t_str = line[temp_col:temp_col + 12].split()[0]
-                        w_str = line[warn_col:warn_col + 12].split()[0]
-                        temp_val = int(t_str)
-                        warn_val = int(w_str)
-                        if temp_val >= warn_val:
-                            problems.append(
-                                f'Temperature at/above Warning threshold: '
-                                f'{temp_val}\u00b0C \u2265 Warning {warn_val}\u00b0C \u2014 {line.strip()}'
-                            )
-                    except (ValueError, IndexError):
-                        pass
-            else:
-                # Fallback: keyword-based for non-standard firmware output
-                for line in lines:
-                    low = line.lower()
-                    if 'abnormal' in low or 'critical' in low or 'overtemperature' in low:
-                        problems.append(f'Temperature status: {line.strip()}')
+            for sensor, temp_val, warn_val in _parse_switch_temps(env_out):
+                if temp_val >= warn_val:
+                    problems.append(
+                        f'Temperature at/above Warning threshold: '
+                        f'{temp_val}\u00b0C \u2265 Warning {warn_val}\u00b0C \u2014 {sensor}'
+                    )
 
         if problems:
             if not ss.get('alerting'):

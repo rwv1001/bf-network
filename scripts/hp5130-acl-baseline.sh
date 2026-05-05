@@ -1,7 +1,8 @@
 #!/bin/sh
 set -eu
 
-SWITCH_HOST="${SWITCH_HOST:?SWITCH_HOST required}"
+SWITCH_HOST="$(printf '%s' "${SWITCH_HOSTS:-}" | awk '{print $1}')"
+[ -n "$SWITCH_HOST" ] || { echo "SWITCH_HOSTS required" >&2; exit 1; }
 SWITCH_USER="${SWITCH_USER:-robert}"
 SWITCH_SSH_PORT="${SWITCH_SSH_PORT:-22}"
 SWITCH_KEY_PATH="${SWITCH_KEY_PATH:-/home/admin/.ssh/id_rsa}"

@@ -12,9 +12,8 @@
 #                          contains 'Ten' (i.e. a Ten-GigabitEthernet uplink/trunk)
 #                          the next switch in the list is tried, because the device
 #                          is downstream of that trunk.  The first switch to return
-#                          a non-Ten port wins.  Falls back to SWITCH_HOST if unset.
+#                          a non-Ten port wins.
 #                          Example: SWITCH_HOSTS="192.168.99.2 192.168.99.3"
-#   SWITCH_HOST            Fallback single switch IP (used if SWITCH_HOSTS is unset)
 #   SWITCH_USER, SWITCH_SSH_PORT, SWITCH_KEY_PATH
 #   DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
 #   SWITCH_PORT_LOOKUP_CACHE_TTL  (seconds before re-querying; default 120)
@@ -82,10 +81,8 @@ SWITCH_KEY_PATH="${SWITCH_KEY_PATH:-/keys/id_rsa}"
 # Build ordered switch list from SWITCH_HOSTS, falling back to SWITCH_HOST
 if [ -n "${SWITCH_HOSTS:-}" ]; then
     SWITCH_LIST="$SWITCH_HOSTS"
-elif [ -n "${SWITCH_HOST:-}" ]; then
-    SWITCH_LIST="$SWITCH_HOST"
 else
-    echo "Neither SWITCH_HOSTS nor SWITCH_HOST is set – skipping port lookup for $MAC_COLON" >&2
+    echo "SWITCH_HOSTS is not set – skipping port lookup for $MAC_COLON" >&2
     exit 3
 fi
 

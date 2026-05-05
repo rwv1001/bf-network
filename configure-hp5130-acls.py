@@ -19,10 +19,13 @@ import sys
 import argparse
 from getpass import getpass
 
+_sh_raw = os.getenv('SWITCH_HOSTS', '')
+_sh_hosts = [h.strip() for h in _sh_raw.split() if h.strip()]
+
 # Switch connection details
 SWITCH_CONFIG = {
     'device_type': 'hp_comware',
-    'host': os.environ['SWITCH_HOST'],
+    'host': _sh_hosts[0] if _sh_hosts else '',
     'username': 'admin',      # Change as needed
     'password': '',           # Will prompt if not provided
     'session_log': 'hp5130_session.log',

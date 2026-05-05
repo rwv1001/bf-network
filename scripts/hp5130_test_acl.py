@@ -6,7 +6,7 @@ import paramiko
 
 
 def main() -> int:
-    host = os.environ["SWITCH_HOST"]
+    host = (os.getenv('SWITCH_HOSTS', '').split() + [''])[0]
     user = os.getenv("SWITCH_USER", "admin")
     password = os.getenv("SWITCH_PASS", "")
     port = int(os.getenv("SWITCH_SSH_PORT", "22"))

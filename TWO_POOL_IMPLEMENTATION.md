@@ -119,7 +119,7 @@ def register():
 3. **Set environment variables:**
    Add to `.env` or docker-compose:
    ```bash
-   SWITCH_HOST=192.168.99.1
+   SWITCH_HOSTS=192.168.99.1
    SWITCH_USER=admin
    SWITCH_PASS=your_switch_password
    SWITCH_SSH_PORT=22

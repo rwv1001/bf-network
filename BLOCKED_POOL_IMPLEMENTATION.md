@@ -108,7 +108,7 @@ chmod +x scripts/acl-cleanup-hook.sh
 Add to `.env` file or docker-compose environment:
 
 ```bash
-SWITCH_HOST=192.168.99.1
+SWITCH_HOSTS=192.168.99.1
 SWITCH_USER=admin
 SWITCH_PASS=your_switch_password_here
 SWITCH_SSH_PORT=22

@@ -7,7 +7,7 @@ set -e
 # This clears MAC-VLAN relations by doing shutdown/undo shutdown and applies consistent config.
 #
 # Environment variables required:
-#   SWITCH_HOST - IP address of the HP5130 switch
+#   SWITCH_HOSTS - space-separated IP addresses of HP5130 switches (first one is used)
 #   SWITCH_USER - SSH username
 #   USER_DEVICE_INTERFACES - Comma-separated list of interface numbers (e.g., "12,13,14,15,16")
 #
@@ -23,7 +23,8 @@ elif [ -f "$BASE_DIR/keys/hp5130_id_rsa" ]; then
   DEFAULT_KEY_PATH="$BASE_DIR/keys/hp5130_id_rsa"
 fi
 
-SWITCH_HOST="${SWITCH_HOST:?SWITCH_HOST required}"
+SWITCH_HOST="$(printf '%s' "${SWITCH_HOSTS:-}" | awk '{print $1}')"
+[ -n "$SWITCH_HOST" ] || { echo "SWITCH_HOSTS required" >&2; exit 1; }
 SWITCH_USER="${SWITCH_USER:-robert}"
 SWITCH_SSH_PORT="${SWITCH_SSH_PORT:-22}"
 SWITCH_KEY_PATH="${SWITCH_KEY_PATH:-$DEFAULT_KEY_PATH}"

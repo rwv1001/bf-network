@@ -1,11 +1,9 @@
 #!/bin/sh
 set -eu
 
-# Accept either SWITCH_HOST (single) or SWITCH_HOSTS (space-separated list).
-# If both are set, SWITCH_HOSTS takes precedence.
-SWITCH_HOSTS="${SWITCH_HOSTS:-${SWITCH_HOST:-}}"
-if [ -z "$SWITCH_HOSTS" ]; then
-  echo "SWITCH_HOST or SWITCH_HOSTS required" >&2
+# SWITCH_HOSTS: space-separated list of switch IPs to configure.
+if [ -z "${SWITCH_HOSTS:-}" ]; then
+  echo "SWITCH_HOSTS required" >&2
   exit 1
 fi
 SWITCH_USER="${SWITCH_USER:-robert}"

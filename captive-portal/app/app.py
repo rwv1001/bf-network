@@ -1609,7 +1609,7 @@ def reset_acl_baseline():
         logger.error("ACL baseline script not found: %s", script_path)
         return False
 
-    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', '')
     switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
     if not switch_hosts:
         logger.error("reset_acl_baseline: no SWITCH_HOSTS configured")
@@ -1618,7 +1618,7 @@ def reset_acl_baseline():
     all_ok = True
     for host in switch_hosts:
         env = os.environ.copy()
-        env['SWITCH_HOST'] = host
+        env['SWITCH_HOSTS'] = host
         if not env.get("SWITCH_KEY_PATH"):
             env["SWITCH_KEY_PATH"] = "/keys/id_rsa"
 
@@ -1827,7 +1827,7 @@ def reset_vlan_interface_masks(vlan_ids):
         env["SWITCH_KEY_PATH"] = "/keys/id_rsa"
     env["VLAN_LIST"] = " ".join(vlan_ids)
     # Pass all switch hosts — the script loops over them.
-    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', '')
     env["SWITCH_HOSTS"] = switch_hosts_raw
 
     result = subprocess.run([script_path], capture_output=True, text=True, timeout=120, env=env)
@@ -2310,7 +2310,7 @@ def _switch_host_for_port(port_name):
         ).fetchone()
         if row:
             return row[0]
-    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', '')
     hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
     return hosts[0] if hosts else None
 
@@ -2322,7 +2322,7 @@ def _get_switch_host_for_isp_router(router):
     """
     if router and router.switch_host:
         return router.switch_host
-    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', '')
     hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
     return hosts[0] if hosts else ''
 
@@ -2343,7 +2343,7 @@ def _get_switch_host_for_vlan(vlan_id):
                 return mapping.isp_router.switch_host
         except Exception:
             pass
-    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', '')
     hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
     return hosts[0] if hosts else ''
 
@@ -2378,7 +2378,7 @@ def manage_switch_acl(action, ip_address, vlan_id):
         logger.error("Unable to determine VLAN ID for ACL update")
         return False
 
-    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', '')
     all_switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
     if not all_switch_hosts:
         logger.error("manage_switch_acl: no SWITCH_HOSTS configured")
@@ -2416,7 +2416,7 @@ def manage_switch_acl(action, ip_address, vlan_id):
         if use_acl_script and os.path.isfile(acl_script):
             try:
                 env = os.environ.copy()
-                env['SWITCH_HOST'] = switch_host
+                env['SWITCH_HOSTS'] = switch_host
                 result = subprocess.run(
                     [acl_script, action, ip_address],
                     capture_output=True,
@@ -2506,17 +2506,24 @@ def _switch_port_allowed(iface):
 
 
 def _get_switch_ssh_client():
-    """Retained for backward compat; returns a host string instead of a paramiko client.
+    """Retained for backward compat; returns the first SWITCH_HOSTS entry as a host string.
     All callers have been updated to use _run_switch_command() directly."""
-    return os.environ['SWITCH_HOST']
+    hosts_raw = os.getenv('SWITCH_HOSTS', '')
+    hosts = [h.strip() for h in hosts_raw.split() if h.strip()]
+    return hosts[0] if hosts else ''
 
 
 def _find_switch_port_for_mac(client_or_host, mac_address):
     """Find which physical switch port a MAC is on.
-    client_or_host is either the SWITCH_HOST string or legacy paramiko client (ignored).
-    Uses _run_switch_command via subprocess ssh, matching hp5130-port-lookup.sh behaviour.
+    Scans all switches in SWITCH_HOSTS in order, returning (switch_host, iface) for the
+    first switch that reports the MAC, or None if not found on any switch.
+    client_or_host is retained for backward compat and is ignored.
     """
-    switch_host = os.environ['SWITCH_HOST']
+    hosts_raw = os.getenv('SWITCH_HOSTS', '')
+    switch_hosts = [h.strip() for h in hosts_raw.split() if h.strip()]
+    if not switch_hosts:
+        logger.warning('_find_switch_port_for_mac: no SWITCH_HOSTS configured')
+        return None
 
     normalized = _normalize_switch_mac(mac_address)
     if not normalized:
@@ -2527,30 +2534,36 @@ def _find_switch_port_for_mac(client_or_host, mac_address):
         re.IGNORECASE
     )
 
-    for command in [
-        f"display mac-address | include {normalized}",
-        f"display mac-address dynamic | include {normalized}",
-    ]:
-        output = _run_switch_command(switch_host, command)
-        if not output:
-            continue
-        for line in output.splitlines():
-            if normalized not in line.upper():
+    for switch_host in switch_hosts:
+        for command in [
+            f"display mac-address | include {normalized}",
+            f"display mac-address dynamic | include {normalized}",
+        ]:
+            output = _run_switch_command(switch_host, command)
+            if not output:
                 continue
-            match = iface_pattern.search(line)
-            if match:
-                return _expand_switch_iface_name(match.group('iface'))
+            for line in output.splitlines():
+                if normalized not in line.upper():
+                    continue
+                match = iface_pattern.search(line)
+                if match:
+                    return (switch_host, _expand_switch_iface_name(match.group('iface')))
 
     return None
 
 
-def _persist_switch_port(mac_address, iface):
+def _persist_switch_port(mac_address, iface, switch_host=None):
     """Persist a confirmed switch port->MAC mapping at registration time.
-    Updates both mac_port_cache (all devices) and devices.switch_iface."""
+    Updates both mac_port_cache (all devices) and devices.switch_iface.
+    switch_host should be passed in by the caller (discovered from _find_switch_port_for_mac);
+    falls back to the first SWITCH_HOSTS entry if omitted."""
     if not mac_address or not iface:
         return
     try:
-        switch_host = os.getenv('SWITCH_HOST', '')
+        if switch_host is None:
+            hosts_raw = os.getenv('SWITCH_HOSTS', '')
+            hosts = [h.strip() for h in hosts_raw.split() if h.strip()]
+            switch_host = hosts[0] if hosts else ''
         db.session.execute(
             text("""
                 INSERT INTO mac_port_cache (mac_address, switch_iface, switch_host, last_seen)
@@ -2614,22 +2627,20 @@ def replug_switch_port_for_mac(mac_address):
             logger.warning("Replug script error for %s: %s", mac_address, exc)
 
     client = _get_switch_ssh_client()
-    if not client:
-        return False
 
     try:
-        port = _find_switch_port_for_mac(client, mac_address)
-        if not port:
+        result = _find_switch_port_for_mac(client, mac_address)
+        if not result:
             logger.warning("Unable to locate switch port for %s", mac_address)
             return False
+        switch_host, port = result
         if not _switch_port_allowed(port):
             logger.warning("Switch replug blocked for port %s", port)
             return False
 
-        _persist_switch_port(mac_address, port)
+        _persist_switch_port(mac_address, port, switch_host)
 
-        logger.info("Replugging %s on port %s", mac_address, port)
-        switch_host = os.environ['SWITCH_HOST']
+        logger.info("Replugging %s on port %s via %s", mac_address, port, switch_host)
         delay_raw = os.getenv('SWITCH_REPLUG_DELAY_SEC', '3')
         try:
             delay_sec = max(1, int(delay_raw))
@@ -6022,7 +6033,7 @@ def admin_isp_routers():
             vlan_changed = old_vlan_id != router.vlan_id
             if vlan_changed:
                 old_gateway_ip = f'{_net_word()}.{old_vlan_id}.1'
-                switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+                switch_hosts_raw = os.getenv('SWITCH_HOSTS', '')
                 switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
                 for host in switch_hosts:
                     _run_switch_command(host, _build_pbr_undo_next_hop(router.pbr_name, old_gateway_ip))
@@ -6042,7 +6053,7 @@ def admin_isp_routers():
                     # The old VLAN removal leaves a stale port-security sticky MAC
                     # entry bound to the old VLAN.  Reset the port first to clear
                     # it, then re-apply the config with the new VLAN.
-                    sw_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+                    sw_hosts_raw = os.getenv('SWITCH_HOSTS', '')
                     sw_hosts = [h.strip() for h in sw_hosts_raw.split() if h.strip()]
                     for host in sw_hosts:
                         _run_switch_command(host, _build_reset_port_config(new_port))
@@ -6078,7 +6089,7 @@ def admin_isp_routers():
     routers = ISPRouter.query.order_by(ISPRouter.id).all()
     used_vlan_ids = {r.vlan_id for r in routers}
     # Collect ports per switch for the port dropdowns
-    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', '')
     switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
     # switch_ports_by_host: list of (host, port_name) tuples across all switches
     switch_ports_by_host = []
@@ -7122,7 +7133,7 @@ def admin_vlan_config():
                     # 2. Assign changed PBR policies to VLAN interfaces
                     if _pbr_changes:
                         from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
-                        switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+                        switch_hosts_raw = os.getenv('SWITCH_HOSTS', '')
                         switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
                         pbr_tasks = []
                         for (pbr_vlan_id, old_pbr, new_pbr) in _pbr_changes:
@@ -7919,7 +7930,7 @@ def _refresh_switch_ports():
     Preserves manually-set roles (only auto-assigns when role is 'unknown').
     Returns dict: {switch_host: port_count_or_error_string}
     """
-    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', '')
     switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
     if not switch_hosts:
         return {}
@@ -8019,7 +8030,7 @@ def _startup_switch_discovery():
 @permission_required('manage_switch_ports')
 def admin_switch_ports():
     """Switch port management page."""
-    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', '')
     switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
 
     ports_by_switch = {}
@@ -8076,7 +8087,7 @@ def admin_switch_ports_refresh():
 @permission_required('manage_switch_ports')
 def admin_switch_health():
     """Switch hardware health monitoring page."""
-    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', '')
     switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
     return render_template('admin_switch_health.html', switch_hosts=switch_hosts)
 
@@ -8156,7 +8167,7 @@ def admin_switch_health_data():
     """
     try:
         from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
-        switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+        switch_hosts_raw = os.getenv('SWITCH_HOSTS', '')
         switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
         # (command_string, extra_input_after_command)
         commands = {
@@ -8440,7 +8451,7 @@ def _build_pbr_undo_next_hop(pbr_name, old_gateway_ip):
 
 def _remove_isp_router_pbr_from_switches(pbr_name):
     """Push PBR removal for an old PBR name to all switches (e.g. after rename)."""
-    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', '')
     switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
     for host in switch_hosts:
         _run_switch_command(host, _build_remove_isp_router_pbr(pbr_name))
@@ -8517,7 +8528,7 @@ def _build_remove_isp_router_full(router):
 
 def _remove_isp_router_from_switches(router):
     """Push full ISP router removal config (PBR + VLAN + interface) to all switches."""
-    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', '')
     switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
     for host in switch_hosts:
         _run_switch_command(host, _build_remove_isp_router_full(router))
@@ -8525,7 +8536,7 @@ def _remove_isp_router_from_switches(router):
 
 def _remove_isp_router_vlan_from_switches(old_vlan_id):
     """Remove a stale VLAN and its Vlan-interface from all switches."""
-    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', '')
     switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
     for host in switch_hosts:
         _run_switch_command(host, _build_remove_isp_router_vlan(old_vlan_id))
@@ -8547,7 +8558,7 @@ def push_pbr_nqa_to_switches():
     """
     import ipaddress as _ipaddress
 
-    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', '')
     switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
     if not switch_hosts:
         logger.warning("push_pbr_nqa_to_switches: no SWITCH_HOSTS configured")
@@ -8620,7 +8631,7 @@ def push_pbr_nqa_to_switches():
 
 def _apply_isp_router_to_switches(router):
     """Push ISP router VLAN/interface/PBR config to all configured switches."""
-    switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+    switch_hosts_raw = os.getenv('SWITCH_HOSTS', '')
     switch_hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
     failed = []
     for host in switch_hosts:
@@ -8706,10 +8717,10 @@ def _clear_isp_router_port(port_name, switch_host=None):
     """Revert a switch port that was an ISP router uplink back to unknown and reset it.
 
     switch_host should be the management IP of the HP5130 that hosts the port.  When
-    omitted the first SWITCH_HOST is used (pre-migration fallback).
+    omitted the first host from SWITCH_HOSTS is used.
     """
     if not switch_host:
-        switch_hosts_raw = os.getenv('SWITCH_HOSTS', os.getenv('SWITCH_HOST', ''))
+        switch_hosts_raw = os.getenv('SWITCH_HOSTS', '')
         hosts = [h.strip() for h in switch_hosts_raw.split() if h.strip()]
         switch_host = hosts[0] if hosts else ''
     if not switch_host:

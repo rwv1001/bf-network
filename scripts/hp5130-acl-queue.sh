@@ -34,7 +34,8 @@ elif [ -f "$BASE_DIR/keys/hp5130_id_rsa" ]; then
   DEFAULT_KEY_PATH="$BASE_DIR/keys/hp5130_id_rsa"
 fi
 
-SWITCH_HOST="${SWITCH_HOST:?SWITCH_HOST required}"
+SWITCH_HOST="$(printf '%s' "${SWITCH_HOSTS:-}" | awk '{print $1}')"
+[ -n "$SWITCH_HOST" ] || { echo "SWITCH_HOSTS required" >&2; exit 1; }
 SAFE_HOST="$(echo "${SWITCH_HOST}" | tr '.:' '__')"
 SWITCH_USER="${SWITCH_USER:-robert}"
 SWITCH_SSH_PORT="${SWITCH_SSH_PORT:-22}"

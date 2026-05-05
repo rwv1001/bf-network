@@ -13,9 +13,10 @@
 set -euo pipefail
 
 SWITCH_IP="${SWITCH_IP:?SWITCH_IP is required}"   # SSH target – current switch IP before reip
-SWITCH_NEW_IP="${SWITCH_HOST:?SWITCH_HOST is required}"  # New VLAN99 address after reip
+SWITCH_NEW_IP="$(printf '%s' "${SWITCH_HOSTS:-}" | awk '{print $1}')"  # New VLAN99 address after reip
+[ -n "$SWITCH_NEW_IP" ] || { echo "SWITCH_HOSTS required" >&2; exit 1; }
 NET="${NETWORK_WORD:-192.168}"                          # Two-octet network prefix
-SW_OCTET="$(echo "${SWITCH_HOST}" | awk -F. '{print $NF}')"   # Host octet from SWITCH_HOST
+SW_OCTET="$(echo "${SWITCH_NEW_IP}" | awk -F. '{print $NF}')"   # Host octet from SWITCH_HOSTS first entry
 SWITCH_USER="robert"
 SWITCH_KEY="/home/admin/.ssh/id_rsa"
 SWITCH_SSH_PORT="22"
@@ -88,7 +89,7 @@ acl number 3000 name PREAUTH
 quit
 
 radius scheme rad1
- nas-ip ${SWITCH_HOST}
+ nas-ip ${SWITCH_NEW_IP}
 quit
 
 return
@@ -96,7 +97,7 @@ save force
 
 system-view
 interface Vlan-interface99
- ip address ${SWITCH_HOST} 255.255.255.0
+ ip address ${SWITCH_NEW_IP} 255.255.255.0
 return
 
 SWITCH_EOF
@@ -139,7 +140,7 @@ fi
 echo ""
 echo "=== Done ==="
 echo "Next steps:"
-echo "  1. Update kea/.env: SWITCH_HOST=192.168.1.2"
-echo "  2. Update captive-portal/.env: SWITCH_HOST=192.168.1.2"
+echo "  1. Update kea/.env: SWITCH_HOSTS=192.168.1.2"
+echo "  2. Update captive-portal/.env: SWITCH_HOSTS=192.168.1.2"
 echo "  3. Update kea/config/dhcp4.json: all routers from .n.1 -> .n.2"
 echo "  4. Restart kea and captive-portal containers"

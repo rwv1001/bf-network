@@ -70,7 +70,7 @@ ssh admin@192.168.99.1
 ## Environment Variables Needed
 
 ```bash
-SWITCH_HOST=192.168.99.1
+SWITCH_HOSTS=192.168.99.1
 SWITCH_USER=admin
 SWITCH_PASS=your_password
 SWITCH_SSH_PORT=22
