@@ -536,6 +536,14 @@ def _apply_inbound(event_type: str, data: dict) -> None:
         if not new_vlan:
             logger.warning("central update_device_vlan: no assigned_vlan in payload for %s", mac)
             return
+        # If this device has no active local ownership (admin deleted it), do not
+        # let a stale central push re-assign an assigned_vlan — local admin wins.
+        if device.user_id is None:
+            logger.info(
+                "central update_device_vlan: device %s has no local owner — ignoring central push",
+                mac,
+            )
+            return
         old_vlan = device.current_vlan
         device.assigned_vlan = new_vlan
         device.wired_target_vlan = new_vlan

@@ -248,8 +248,8 @@ def _enforce_wifi_confirmation(device):
         return device
     if datetime.utcnow() < device.confirmation_deadline:
         return device
-    logger.info("WiFi confirmation expired for %s; blocking device", device.mac_address)
-    apply_device_block(device, flash_messages=False)
+    logger.info("WiFi confirmation expired for %s; unregistering device", device.mac_address)
+    _unregister_device(device)
     return device
 
 
@@ -268,8 +268,8 @@ def _sweep_expired_wifi_confirmations():
                     Device.confirmation_deadline <= now,
                 ).all()
                 for device in expired:
-                    logger.info("WiFi confirmation expired for %s; blocking device", device.mac_address)
-                    apply_device_block(device, flash_messages=False)
+                    logger.info("WiFi confirmation expired for %s; unregistering device", device.mac_address)
+                    _unregister_device(device)
         except Exception as exc:
             logger.warning("WiFi confirmation sweep failed: %s", exc)
         _heartbeat('wifi-confirm-sweep')
@@ -1995,6 +1995,71 @@ def _get_active_ownership(mac_address):
     ).first()
 
 
+def _unregister_device(device, commit=True):
+    """Fully unregister a device: cut off current-lease access, remove Kea/RADIUS
+    reservation, close ownership history, clear all ownership fields, and notify central.
+
+    This is the shared implementation for reject_device, confirmation-expiry sweep,
+    and any other path where a device should be unregistered (but NOT admin-blocked).
+    The device row is kept for audit; only ownership/access fields are cleared.
+    """
+    mac_address = device.mac_address
+    ip_address = device.ip_address
+    vlan_id = device.current_vlan
+
+    # Apply ACL block + DNS hijack for the remainder of the current lease so the
+    # device loses internet access immediately, but do NOT set internet_blocked.
+    if ip_address and not _is_blocked_pool_ip(ip_address):
+        lease_expiry = get_lease_expiry_for_mac(mac_address, subnet_id=vlan_id)
+        if lease_expiry and lease_expiry > datetime.utcnow():
+            if vlan_id:
+                manage_switch_acl('block', ip_address, vlan_id)
+            if _should_hijack_vlan(vlan_id):
+                manage_dns_hijack('hijack', ip_address)
+            _upsert_iplease(
+                mac_address=mac_address, ip_address=ip_address, vlan_id=vlan_id,
+                lease_start=datetime.utcnow(), lease_expiry=lease_expiry,
+                from_blocked_pool=False,
+                dns_hijacked=bool(_should_hijack_vlan(vlan_id)),
+            )
+            logger.info(
+                "_unregister_device: blocked %s at %s until %s",
+                mac_address, ip_address, lease_expiry,
+            )
+
+    # Remove Kea reservation / send RADIUS disconnect
+    if device.connection_type == 'wifi' and device.internet_accessible:
+        kea = get_kea()
+        if kea and vlan_id:
+            if not kea.unregister_mac(mac=mac_address, vlan=vlan_id):
+                logger.warning("_unregister_device: Kea unregister failed for %s", mac_address)
+    elif device.connection_type == 'wired':
+        send_coa_disconnect(mac_address)
+
+    # Close ownership history record
+    _close_ownership(mac_address, commit=False)
+
+    # Clear all ownership/registration fields; device row is kept for audit
+    device.user_id = None
+    device.device_name = None
+    device.assigned_vlan = None
+    device.internet_accessible = None
+    device.internet_blocked = None
+    device.ownership_validated = None
+    device.unregister_token = None
+    device.profile_snapshot = None
+    device.confirmation_confirmed_at = None
+    device.confirmation_deadline = None
+    _sync_registration_status(device)
+
+    # Notify central so other sites revoke access too
+    central_client.queue_device_unregistered(mac_address)
+
+    if commit:
+        db.session.commit()
+        cleanup_orphan_hijack_rules()
+
+
 def _close_ownership(mac_address, commit=True):
     """Close the active DeviceOwnership for mac_address (set end_datetime=now)."""
     o = _get_active_ownership(mac_address)
@@ -3463,8 +3528,8 @@ def register():
         db.session.commit()
 
         # Network changes
+        kea = get_kea()
         if connection_type == 'wifi':
-            kea = get_kea()
             if kea:
                 kea.register_mac(
                     mac=mac_address,
@@ -3475,6 +3540,15 @@ def register():
                 if ip_address and not network_mismatch:
                     kea.force_lease_renewal(mac_address, ip_address)
         else:
+            # Wired device: create Kea reservation so the hook recognises the
+            # device as registered, then bounce the port to trigger re-auth.
+            if kea:
+                kea.register_mac(
+                    mac=mac_address,
+                    vlan=selected_vlan,
+                    hostname=f"{(first_name or 'device').lower()}-{(last_name or '').lower()}",
+                    ip_address=None,
+                )
             send_coa_change(mac_address, selected_vlan)
             replug_switch_port_for_mac(mac_address)
 
@@ -5011,13 +5085,9 @@ def reject_device(token):
         flash('This device is already unregistered.', 'info')
         return render_template('status.html', device=device, unregistered=True)
 
-    device.confirmation_confirmed_at = None
-    device.confirmation_deadline = None
-    db.session.commit()
-    apply_device_block(device, flash_messages=False)
-    logger.info("Device %s blocked via reject link in email", device.mac_address)
-
-    flash('Device access has been blocked.', 'success')
+    _unregister_device(device)
+    logger.info("Device %s unregistered via reject link", device.mac_address)
+    flash('Device access has been revoked.', 'success')
     return render_template('status.html', device=device)
 
 
@@ -8235,6 +8305,7 @@ def _build_port_config(port_name, role, description=''):
 
 def _build_isp_router_switch_config(router, switch_host):
     """Generate HP5130 config for an ISP router uplink VLAN, interface, PBR, and NQA tracking."""
+    from models import VlanMapping
     last_octet = switch_host.split('.')[-1]
     host_ip = f"{_net_word()}.{router.vlan_id}.{last_octet}"
     pbr_name = router.pbr_name
@@ -8244,6 +8315,9 @@ def _build_isp_router_switch_config(router, switch_host):
     # Track ID is the router's database primary key — stable and unique per router
     track_id = router.id
     name_upper = router.name.upper().replace(' ', '_')
+    # VLANs assigned to this router — must unbind PBR from their interfaces
+    # before HP5130 will allow `undo policy-based-route`
+    assigned_vlans = [m.vlan_id for m in VlanMapping.query.filter_by(isp_router_id=router.id).all()]
     lines = [
         'system-view',
         f'vlan {router.vlan_id}',
@@ -8259,9 +8333,16 @@ def _build_isp_router_switch_config(router, switch_host):
         'quit',
         'acl advanced 3001',
         ' description PBR-local-traffic-normal-routing',
-        f' rule 10 permit ip any {_net_word()}.0.0 0.0.255.255',
+        f' rule 10 permit ip destination {_net_word()}.0.0 0.0.255.255',
         'quit',
-        # Undo the whole PBR first (removes track reference so undo track is safe)
+        # Unbind PBR from every assigned user VLAN interface before deleting it —
+        # HP5130 refuses `undo policy-based-route` while any interface references it.
+        *[cmd for vlan_id in assigned_vlans for cmd in (
+            f'interface Vlan-interface{vlan_id}',
+            ' undo ip policy-based-route',
+            'quit',
+        )],
+        # Undo the whole PBR (now safe — no interface references remain)
         f'undo policy-based-route {pbr_name}',
         # Rebuild NQA probe and track object (undo first for idempotency)
         f'undo track {track_id}',
@@ -8271,25 +8352,27 @@ def _build_isp_router_switch_config(router, switch_host):
         ' type icmp-echo',
         f' destination ip {router.gateway_ip}',
         ' frequency 5',
-        ' probe-count 3',
-        ' timeout 2000',
-        ' interval milliseconds 2000',
+        ' reaction 1 checked-element probe-fail threshold-type consecutive 3 action-type trigger-only',
         'quit',
         f'nqa schedule admin {nqa_name} start-time now lifetime forever',
-        f'track {track_id} nqa admin {nqa_name} probe-pass',
-        # Rebuild PBR with NQA track — next-hop is only active when probe passes.
-        # Node 20 is a catch-all discard: if the track is DOWN (router unreachable),
-        # node 10 is deactivated and traffic falls to node 20 which drops it,
-        # preventing fallback to the switch's static default route (UDM).
+        f'track {track_id} nqa entry admin {nqa_name} reaction 1',
+        # Rebuild PBR with NQA track — next-hop is only active when track is up.
+        # Note: Comware 7 PBR bypasses subsequent nodes when a track-bound node
+        # becomes invalid (falls through to normal IP routing), so a discard node
+        # is ineffective. The egress block ACLs (ACL 395x on uplink SVIs) are the
+        # actual backstop preventing internet fallback via the wrong ISP router.
         f'policy-based-route {pbr_name} deny node 5',
         ' if-match acl 3001',
         'quit',
         f'policy-based-route {pbr_name} permit node 10',
         f' apply next-hop {router.gateway_ip} track {track_id}',
         'quit',
-        f'policy-based-route {pbr_name} permit node 20',
-        ' apply discard',
-        'quit',
+        # Re-bind PBR to each user VLAN interface
+        *[cmd for vlan_id in assigned_vlans for cmd in (
+            f'interface Vlan-interface{vlan_id}',
+            f' ip policy-based-route {pbr_name}',
+            'quit',
+        )],
         'quit',
         'save force',
     ]
@@ -9819,6 +9902,14 @@ def admin_process_request(request_id):
                     except Exception as exc:
                         logger.warning("Could not force lease renewal: %s", exc)
         else:
+            kea = get_kea()
+            if kea:
+                kea.register_mac(
+                    mac=device.mac_address,
+                    vlan=target_vlan,
+                    hostname=f"{(user.first_name or 'device').lower()}-device",
+                    ip_address=None,
+                )
             send_coa_change(device.mac_address, target_vlan)
             replug_switch_port_for_mac(device.mac_address)
 
@@ -10103,6 +10194,11 @@ def admin_delete_device(device_id):
     device.ownership_validated = None
     device.first_seen = device.first_seen  # unchanged
     _sync_registration_status(device)
+
+    # Step 5: Notify central so it removes the site registration and fans out
+    # an unregister_device instruction to every other site holding this device.
+    central_client.queue_device_unregistered(mac_address)
+
     db.session.commit()
 
     cleanup_orphan_hijack_rules()

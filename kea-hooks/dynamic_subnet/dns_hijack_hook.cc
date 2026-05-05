@@ -50,6 +50,21 @@ int unload() {
     return 0;
 }
 
+// Wrapper around system() that temporarily restores SIGCHLD to SIG_DFL.
+// Kea sets SIGCHLD to SIG_IGN to auto-reap children; this causes system()'s
+// internal waitpid() to fail with ECHILD even when the child ran successfully.
+// Saving and restoring the handler makes the exit status reliable.
+int run_script(const std::string& cmd) {
+    struct sigaction sa_old, sa_new;
+    sa_new.sa_handler = SIG_DFL;
+    sigemptyset(&sa_new.sa_mask);
+    sa_new.sa_flags = 0;
+    sigaction(SIGCHLD, &sa_new, &sa_old);
+    int status = system(cmd.c_str());
+    sigaction(SIGCHLD, &sa_old, nullptr);
+    return status;
+}
+
 // Helper function to call DNS hijacking script
 void manage_dns_hijack(const std::string& action, const std::string& ip_address) {
     std::cout << "DNS Hijack Hook: [DEBUG] manage_dns_hijack ENTRY (action=" 
@@ -67,12 +82,12 @@ void manage_dns_hijack(const std::string& action, const std::string& ip_address)
     std::cout << "DNS Hijack Hook: [DEBUG] Command: " << cmd.str() << std::endl;
     std::cout.flush();
     
-    std::cout << "DNS Hijack Hook: [DEBUG] Calling system()" << std::endl;
+    std::cout << "DNS Hijack Hook: [DEBUG] Calling run_script()" << std::endl;
     std::cout.flush();
     
-    int status = system(cmd.str().c_str());
+    int status = run_script(cmd.str());
     
-    std::cout << "DNS Hijack Hook: [DEBUG] system() returned: " << status << std::endl;
+    std::cout << "DNS Hijack Hook: [DEBUG] run_script() returned: " << status << std::endl;
     std::cout.flush();
     
     if (status == -1) {
@@ -100,7 +115,7 @@ void manage_dns_hijack_pools(const std::string& action) {
     std::cout << "DNS Hijack Hook: [DEBUG] Pools Command: " << cmd.str() << std::endl;
     std::cout.flush();
 
-    int status = system(cmd.str().c_str());
+    int status = run_script(cmd.str());
     if (status == -1) {
         std::cerr << "DNS Hijack Hook WARNING: Pools script launch failed errno="
                   << errno << " (" << std::strerror(errno) << ")" << std::endl;
@@ -289,8 +304,8 @@ void manage_acl(const std::string& action, const std::string& ip_address,
         std::cout << "DNS Hijack Hook: [DEBUG] ACL Command: " << cmd.str() << std::endl;
         std::cout.flush();
 
-        int status = system(cmd.str().c_str());
-        std::cout << "DNS Hijack Hook: [DEBUG] ACL system() returned: " << status << std::endl;
+        int status = run_script(cmd.str());
+        std::cout << "DNS Hijack Hook: [DEBUG] ACL run_script() returned: " << status << std::endl;
         std::cout.flush();
         if (status == -1) {
             std::cerr << "DNS Hijack Hook WARNING: ACL script launch failed for "
@@ -319,7 +334,7 @@ void manage_unregistered_lease(const std::string& action,
         return;
     }
 
-    int status = system(cmd.str().c_str());
+    int status = run_script(cmd.str());
     if (status == -1) {
         std::cerr << "DNS Hijack Hook WARNING: unregistered-lease script launch failed errno="
                   << errno << " (" << std::strerror(errno) << ")" << std::endl;
