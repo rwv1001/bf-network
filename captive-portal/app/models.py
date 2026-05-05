@@ -143,7 +143,6 @@ class Device(db.Model):
     registered_at = db.Column(db.DateTime, default=datetime.utcnow)
     first_seen = db.Column(db.DateTime, default=datetime.utcnow, index=True)  # For pool assignment
     last_seen = db.Column(db.DateTime)
-    ip_address = db.Column(db.String(45))
 
     # Spec Table 6 fields: orthogonal internet access state
     internet_accessible = db.Column(db.Boolean, nullable=True)   # True/False/None
@@ -196,6 +195,15 @@ class Device(db.Model):
         """Current owner (User) resolved via Table 9 (device_ownership)."""
         uid = self.user_id
         return User.query.get(uid) if uid else None
+
+    @property
+    def ip_address(self):
+        """Spec Table 7: IP is tracked in ip_leases. Returns current active lease IP."""
+        lease = IPLease.query.filter(
+            IPLease.mac_address == self.mac_address,
+            IPLease.lease_expiry > datetime.utcnow(),
+        ).order_by(IPLease.lease_start.desc()).first()
+        return lease.ip_address if lease else None
 
 
 class RegistrationRequest(db.Model):

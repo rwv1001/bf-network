@@ -87,14 +87,12 @@ case "$ACTION" in
     new_lease|renew)
         # ── Table 6: upsert devices row ───────────────────────────────────────
         # INSERT on first-seen (new MAC); UPDATE only tracking fields on conflict.
-        # The portal exclusively owns: registration_status, internet_accessible,
-        # internet_blocked, assigned_vlan, ownership_validated, user_id.
+        # ip_address is NOT stored on devices (Table 6) per spec — it lives in Table 7 (ip_leases).
         $PSQL <<ENDSQL
-INSERT INTO devices (mac_address, current_vlan, ip_address)
-VALUES ('${MAC_ADDRESS}', ${VLAN_ID}, '${IP_ADDRESS}')
+INSERT INTO devices (mac_address, current_vlan)
+VALUES ('${MAC_ADDRESS}', ${VLAN_ID})
 ON CONFLICT (mac_address) DO UPDATE SET
     last_seen    = NOW(),
-    ip_address   = EXCLUDED.ip_address,
     current_vlan = EXCLUDED.current_vlan;
 -- Clear wrong_vlan status once the device lands on its assigned VLAN
 UPDATE devices

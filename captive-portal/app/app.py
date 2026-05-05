@@ -2668,15 +2668,7 @@ def apply_device_block(device, flash_messages=False):
                              blocked_ip=device.ip_address)
         if device.ip_address:
             kea.force_lease_renewal(device.mac_address, device.ip_address)
-        new_ip = kea.get_lease_ip_for_mac(device.mac_address, subnet_id=device.current_vlan)
-        if new_ip and new_ip != device.ip_address:
-            device.ip_address = new_ip
-            db.session.commit()
-
-    latest_ip = get_ip_for_mac(device.mac_address, subnet_id=device.current_vlan)
-    if latest_ip and latest_ip != device.ip_address:
-        device.ip_address = latest_ip
-        db.session.commit()
+        kea.get_lease_ip_for_mac(device.mac_address, subnet_id=device.current_vlan)  # refresh Kea cache
 
     if device.ip_address and device.current_vlan:
         # Only apply per-IP rules if the IP is NOT already in the blocked pool
@@ -2730,15 +2722,7 @@ def apply_device_unblock(device, flash_messages=False):
     if kea and device.current_vlan:
         blocked_ip = kea.get_blocked_ip_from_reservation(device.mac_address, device.current_vlan)
         kea.set_block_status(device.mac_address, device.current_vlan, False)
-        new_ip = kea.get_lease_ip_for_mac(device.mac_address, subnet_id=device.current_vlan)
-        if new_ip and new_ip != device.ip_address:
-            device.ip_address = new_ip
-            db.session.commit()
-
-    latest_ip = get_ip_for_mac(device.mac_address, subnet_id=device.current_vlan)
-    if latest_ip and latest_ip != device.ip_address:
-        device.ip_address = latest_ip
-        db.session.commit()
+        kea.get_lease_ip_for_mac(device.mac_address, subnet_id=device.current_vlan)  # refresh Kea cache
 
     lease = _get_active_iplease(device.mac_address)
     ip_in_blocked_pool = (
@@ -3364,7 +3348,6 @@ def register():
         )
 
         device.device_name      = device_type or device.device_name
-        device.ip_address       = ip_address
         device.connection_type  = connection_type
         device.ssid             = ssid
         device.is_wired         = connection_type == 'wired'
@@ -3847,9 +3830,13 @@ def adopt_devices():
 
     candidates = _load_adoptable_leases(set(allowed_vlans))
 
-    registered_devices = Device.query.filter_by(
-        user_id=user.id,
-        registration_status='registered',
+    owned_macs_for_registered = [
+        o.mac_address for o in
+        DeviceOwnership.query.filter_by(user_id=user.id, end_datetime=None).all()
+    ]
+    registered_devices = Device.query.filter(
+        Device.mac_address.in_(owned_macs_for_registered),
+        Device.registration_status == 'registered',
     ).order_by(Device.device_name.asc(), Device.mac_address.asc()).all()
 
     registered_device_rows = []
@@ -4042,7 +4029,6 @@ def adopt_device():
         ip_address = reserved_ip
 
     if existing:
-        existing.user_id = user.id
         existing.current_vlan = target_vlan
         existing.connection_type = 'wired' if vlan_id == wired_unregistered_vlan else 'wifi'
         existing.ssid = get_ssid_for_vlan(target_vlan)
@@ -4052,17 +4038,13 @@ def adopt_device():
         existing.ownership_validated = True
         if device_label:
             existing.device_name = device_label
-        if ip_address:
-            existing.ip_address = ip_address
         existing.unregister_token = existing.unregister_token or secrets.token_urlsafe(32)
         db.session.flush()
         adopted_device = existing
     else:
         adopted_device = Device(
             mac_address=mac_address,
-            user_id=user.id,
             device_name=device_label or 'adopted-device',
-            ip_address=ip_address,
             current_vlan=target_vlan,
             connection_type='wired' if vlan_id == wired_unregistered_vlan else 'wifi',
             ssid=get_ssid_for_vlan(target_vlan),
@@ -4171,7 +4153,10 @@ def adopt_change_vlan():
         flash('Device and target VLAN are required.', 'error')
         return redirect(url_for('adopt_devices'))
 
-    device = Device.query.filter_by(id=device_id, user_id=user.id).first()
+    device = Device.query.get(device_id)
+    if device and not DeviceOwnership.query.filter_by(
+            mac_address=device.mac_address, user_id=user.id, end_datetime=None).first():
+        device = None
     if not device:
         flash('Device not found.', 'error')
         return redirect(url_for('adopt_devices'))
@@ -7549,12 +7534,8 @@ def admin_dashboard():
                     device.mac_address,
                     latest_ip,
                 )
-            if latest_ip and latest_ip != device.ip_address:
-                device.ip_address = latest_ip
-                ip_updated = True
-    if ip_updated:
-        db.session.commit()
-        cleanup_orphan_hijack_rules()
+            if latest_ip:
+                pass  # ip_leases is the source of truth; kea-lease-event.sh keeps it current
     devices_pages = (devices_total + devices_per_page - 1) // devices_per_page if devices_per_page > 0 else 0
 
     # Spec Section A: Unregistered devices — Device rows with no active device_ownership entry
@@ -9663,7 +9644,6 @@ def admin_assign_device():
     _is_wired_assignment = bool(_assigned_vlan_mapping and _assigned_vlan_mapping.wired_enabled)
 
     device.device_name       = device_name or device.device_name or 'admin-assigned'
-    device.ip_address        = ip_address
     device.assigned_vlan     = vlan_id
     device.current_vlan      = detected_vlan or vlan_id
     device.wired_target_vlan = vlan_id if (detected_vlan and detected_vlan != vlan_id) else None
@@ -9849,7 +9829,6 @@ def admin_process_request(request_id):
         device = Device.query.filter_by(mac_address=reg_request.mac_address).first()
         if device:
             device.device_name = reg_request.device_type or device.device_name or 'unknown'
-            device.ip_address = reg_request.ip_address
             device.current_vlan = target_vlan
             device.connection_type = connection_type
             device.ssid = ssid
@@ -9860,7 +9839,6 @@ def admin_process_request(request_id):
             device = Device(
                 mac_address=reg_request.mac_address,
                 device_name=reg_request.device_type or 'unknown',
-                ip_address=reg_request.ip_address,
                 current_vlan=target_vlan,
                 connection_type=connection_type,
                 ssid=ssid,
