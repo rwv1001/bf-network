@@ -111,6 +111,9 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'postgresql://portal_user:password@db:5432/captive_portal')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+# In-memory store for background push-all-switch-config jobs {job_id: {...}}
+_push_jobs = {}
 # Detect and recycle stale connections after a container/DB restart.
 # pool_pre_ping issues a lightweight "SELECT 1" before handing out each
 # connection; if it fails the connection is discarded and a fresh one opened.
@@ -867,13 +870,15 @@ def add_cors_headers(response):
         
         
         # Whitelist: Add expected origins (e.g., connectivity checks)
+        portal_url = os.getenv('PORTAL_URL', '').rstrip('/')
         allowed_origins = [
             'http://www.msftconnecttest.com',
             'http://connectivitycheck.gstatic.com',
             'http://captive.apple.com',
             'http://detectportal.firefox.com',
-            # Add PORTAL_URL from captive-portal/.env to allowed_origins if self-calls occur
         ]
+        if portal_url:
+            allowed_origins.append(portal_url)
         
         if origin in allowed_origins:
             response.headers['Access-Control-Allow-Origin'] = origin
@@ -1716,10 +1721,9 @@ def _push_vlan_isolation_acls(switch_host):
             continue
 
         # Collect commands for this VLAN into the shared session block.
-        # The baseline script wiped ACL 3100 and deleted ACL 3101 already, so
-        # no cleanup is needed — just add rules directly.
 
         # Inbound ACL (30x0): add destination-deny rules to the clean ACL.
+        # The baseline script just rebuilt 30x0 from scratch, so no cleanup needed.
         lines.append(f'acl advanced {acl_num}')
         rule_num = 25000
         for net_addr, hostmask in denied_nets:
@@ -1727,8 +1731,9 @@ def _push_vlan_isolation_acls(switch_host):
             rule_num += 10
         lines.append('quit')
 
-        # Outbound companion ACL (30x1): create fresh and populate.
-        lines.append(f'acl advanced {outbound_acl_num} match config')
+        # Outbound companion ACL (30x1): undo first so rules don't accumulate.
+        lines.append(f'undo acl advanced {outbound_acl_num}')
+        lines.append(f'acl advanced {outbound_acl_num}')
         lines.append(f'description "VLAN{v.vlan_id} Outbound Isolation"')
         rule_num = 25000
         for net_addr, hostmask in denied_nets:
@@ -2399,14 +2404,15 @@ def manage_switch_acl(action, ip_address, vlan_id):
         # Unblock: hit all switches to remove any stale rules.
         switch_hosts = all_switch_hosts
 
-    acl_num = 3000 + (vlan_id * 10)
+    # Rule number is unique across VLANs: vlan_id * 150 + host_octet
+    # This matches the formula in hp5130-acl.sh and stays below 20000 (static pool rules)
     try:
         host_octet = int(ip_address.split('.')[3])
     except (IndexError, ValueError):
         logger.error("Unable to determine host octet for ACL rule")
         return False
 
-    rule_num = 1000 + host_octet
+    rule_num = vlan_id * 150 + host_octet
 
     acl_script = os.getenv('ACL_QUEUE_SCRIPT', '/scripts/hp5130-acl.sh')
     use_acl_script = os.getenv('USE_ACL_QUEUE', '1') != '0'
@@ -2443,7 +2449,10 @@ def manage_switch_acl(action, ip_address, vlan_id):
                         ip_address, vlan_id, switch_host)
             commands = [
                 "system-view",
-                f"acl advanced {acl_num}",
+                "acl advanced 3951",
+                f"rule {rule_num} deny ip source {ip_address} 0",
+                "quit",
+                "acl advanced 3953",
                 f"rule {rule_num} deny ip source {ip_address} 0",
                 "quit", "quit", "save force"
             ]
@@ -2452,7 +2461,10 @@ def manage_switch_acl(action, ip_address, vlan_id):
                         ip_address, vlan_id, switch_host)
             commands = [
                 "system-view",
-                f"acl advanced {acl_num}",
+                "acl advanced 3951",
+                f"undo rule {rule_num}",
+                "quit",
+                "acl advanced 3953",
                 f"undo rule {rule_num}",
                 "quit", "quit", "save force"
             ]
@@ -5827,6 +5839,120 @@ def admin_reset_test():
         'success',
     )
     return redirect(url_for('admin_dashboard'))
+
+
+def _push_job_path(job_id):
+    """Return the temp-file path for a push-all job. Shared across all Gunicorn workers."""
+    import re as _re
+    if not _re.fullmatch(r'[0-9a-f]{32}', job_id):
+        return None
+    return f'/tmp/push-all-{job_id}.json'
+
+
+def _push_job_write(job_id, data):
+    import json as _json
+    path = _push_job_path(job_id)
+    if path:
+        try:
+            with open(path, 'w') as fh:
+                _json.dump(data, fh)
+        except Exception:
+            pass
+
+
+def _push_job_read(job_id):
+    import json as _json
+    path = _push_job_path(job_id)
+    if not path:
+        return None
+    try:
+        with open(path) as fh:
+            return _json.load(fh)
+    except Exception:
+        return None
+
+
+@app.route('/admin/push-all-switch-config', methods=['POST'])
+@login_required
+@permission_required('manage_isp_routers')
+def admin_push_all_switch_config():
+    """Start a background push of all HP5130 switch configuration and return a job ID."""
+    import threading as _threading
+    import uuid as _uuid
+
+    job_id = _uuid.uuid4().hex
+
+    # Capture all DB data needed by the background thread before leaving request context
+    all_vlan_ids = [m.vlan_id for m in VlanMapping.query.all() if m.vlan_id]
+
+    _push_job_write(job_id, {'status': 'running', 'message': 'Starting…'})
+
+    def _run():
+        with app.app_context():
+            steps = []
+            try:
+                _push_job_write(job_id, {'status': 'running', 'message': 'Pushing PBR/NQA…'})
+                pbr_ok = push_pbr_nqa_to_switches()
+                steps.append(('PBR/NQA', pbr_ok))
+
+                _push_job_write(job_id, {'status': 'running', 'message': 'Pushing ACL baseline…'})
+                baseline_ok = reset_acl_baseline()
+                steps.append(('ACL baseline', baseline_ok))
+
+                if all_vlan_ids:
+                    _push_job_write(job_id, {'status': 'running', 'message': 'Pushing VLAN interfaces…'})
+                    vlan_ok = reset_vlan_interface_masks(all_vlan_ids)
+                    steps.append(('VLAN interfaces', vlan_ok))
+
+                _push_job_write(job_id, {'status': 'running', 'message': 'Re-applying IP blocks…'})
+                pushed, failed = reapply_all_ip_blocks()
+                steps.append(('IP blocks', failed == 0))
+
+                all_ok = all(ok for _, ok in steps)
+                if all_ok:
+                    _push_job_write(job_id, {
+                        'status': 'done', 'ok': True,
+                        'message': (
+                            f'All switch config pushed successfully. '
+                            f'PBR/NQA ✓  ACL baseline ✓  VLAN interfaces ✓  '
+                            f'IP blocks: {pushed} re-applied.'
+                        ),
+                    })
+                else:
+                    bad = [name for name, ok in steps if not ok]
+                    _push_job_write(job_id, {
+                        'status': 'done', 'ok': False,
+                        'message': (
+                            f'Push completed with errors in: {", ".join(bad)}. '
+                            f'IP blocks: {pushed} pushed, {failed} failed. Check logs.'
+                        ),
+                    })
+            except Exception as exc:
+                logger.exception("admin_push_all_switch_config background job failed")
+                _push_job_write(job_id, {
+                    'status': 'done', 'ok': False,
+                    'message': f'Push failed with exception: {exc}',
+                })
+
+    t = _threading.Thread(target=_run, daemon=True)
+    t.start()
+    return jsonify({'job_id': job_id})
+
+
+@app.route('/admin/push-all-switch-config/status/<job_id>', methods=['GET'])
+@login_required
+@permission_required('manage_isp_routers')
+def admin_push_all_switch_config_status(job_id):
+    """Poll status of a background push-all job (reads shared temp file)."""
+    job = _push_job_read(job_id)
+    if not job:
+        # File not yet written (race at startup) — report still running
+        return jsonify({'status': 'running', 'message': 'Starting…'})
+    return jsonify({
+        'status': job['status'],
+        'ok': job.get('ok'),
+        'message': job.get('message', ''),
+    })
 
 
 @app.route('/admin/push-pbr-nqa', methods=['POST'])

@@ -115,6 +115,7 @@ services:
       RESTART_QUEUE_DIR: /restart-queue
       PIHOLE_WEBPASSWORD: ${PIHOLE_WEBPASSWORD:-}
       NETWORK_WORD: ${NETWORK_WORD:-192.168}
+      ORACLE_VPS_HOST: ${ORACLE_VPS_HOST:?ORACLE_VPS_HOST is required – set it in .env}
     volumes:
       - ./captive-portal/app:/app
       - ./shared/restart-queue:/restart-queue

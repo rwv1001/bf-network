@@ -91,22 +91,30 @@ PY
     exit 1
   fi
 
-  # ACL number follows the pattern 3100 for VLAN 10, 3200 for VLAN 20, etc.
+  # Remove any old per-VLAN inbound ACLs (3100-3900) that are no longer used.
+  # Blocking is now done via outbound ACLs 3951/3953 on the uplink interfaces.
+  # Outbound isolation ACLs (xx01) ARE applied for VLANs 10-70.
   ACL_NUM=$((3000 + VLAN_ID * 10))
-  FILTER_DIR="inbound"
+  ISOLATION_ACL=$((ACL_NUM + 1))
 
   cat <<EOF
 interface Vlan-interface${VLAN_ID}
 undo ip address
 ip address ${ROUTER_IP} ${NETMASK}
 undo packet-filter ${ACL_NUM} inbound
-undo packet-filter ${ACL_NUM} outbound
-undo packet-filter $((ACL_NUM + 1)) inbound
-undo packet-filter $((ACL_NUM + 1)) outbound
 undo packet-filter $((3000 + VLAN_ID)) inbound
 undo packet-filter $((3000 + VLAN_ID)) outbound
-packet-filter ${ACL_NUM} inbound
-packet-filter $((ACL_NUM + 1)) outbound
+EOF
+
+  # Apply outbound isolation ACL for VLANs 10-70 only.
+  # VLANs 80+ use different filtering and have no xx01 isolation ACL.
+  if [ "$VLAN_ID" -le 70 ]; then
+    cat <<EOF
+packet-filter ${ISOLATION_ACL} outbound
+EOF
+  fi
+
+  cat <<EOF
 quit
 EOF
 }

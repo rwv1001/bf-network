@@ -159,16 +159,100 @@
 {% block content %}
 <div class="page-header">
     <h2>ISP Routers</h2>
-    <form method="post" action="{{ url_for('admin_push_pbr_nqa') }}" onsubmit="return confirm('Push PBR/NQA config to all HP5130 switches?')" style="display:inline;">
-        <button type="submit" class="btn btn-secondary">Push PBR/NQA to Switches</button>
-    </form>
-    <form method="post" action="{{ url_for('admin_reapply_acl_blocks') }}" onsubmit="return confirm('Re-push ACL baseline (walled garden) AND all current per-device IP blocks to all HP5130 switches?\n\nUse this after adding a new switch or changing a router\'s HP5130 Switch setting.')" style="display:inline; margin-left:8px;">
-        <button type="submit" class="btn btn-secondary">Reapply ACL Baseline + Blocks</button>
-    </form>
-    <form method="post" action="{{ url_for('admin_push_vlan_interfaces') }}" onsubmit="return confirm('Re-push VLAN interface IP addresses and packet-filter (ACL inbound) assignments to all HP5130 switches?\n\nUse this when setting up a new switch or correcting packet-filter direction on existing switches.')" style="display:inline; margin-left:8px;">
-        <button type="submit" class="btn btn-secondary">Push VLAN Interface Filters</button>
-    </form>
+    <button id="pushAllBtn" class="btn btn-primary" onclick="pushAllSwitchConfig()">
+        &#128225; Push All Config to Switches
+    </button>
+    <span id="pushAllStatus" style="margin-left:12px;font-size:13px;display:none;"></span>
 </div>
+
+<script>
+function pushAllSwitchConfig() {
+    if (!confirm(
+        'Push ALL HP5130 switch configuration?\n\n' +
+        'This will apply:\n' +
+        '• PBR / NQA tracking (ISP failover)\n' +
+        '• ACL 3951 + 3953 (uplink outbound: PiHole enforcement, DoH/DoT blocking, blocked-pool denies)\n' +
+        '• VLAN interface IPs (removes old per-VLAN inbound ACLs)\n' +
+        '• All current per-device IP block rules\n\n' +
+        'Safe to run at any time — fully idempotent.'
+    )) return;
+
+    var btn = document.getElementById('pushAllBtn');
+    var status = document.getElementById('pushAllStatus');
+    btn.disabled = true;
+    btn.style.opacity = '0.55';
+    btn.style.cursor = 'not-allowed';
+    btn.innerHTML = '<span class="spin-icon">&#9696;</span> Pushing…';
+    status.style.display = 'inline';
+    status.style.color = '#555';
+    status.textContent = 'Starting…';
+
+    fetch('{{ url_for("admin_push_all_switch_config") }}', {
+        method: 'POST',
+        headers: {'X-CSRFToken': document.querySelector('meta[name=csrf-token]') ? document.querySelector('meta[name=csrf-token]').content : ''},
+        credentials: 'same-origin',
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (!data.job_id) throw new Error('No job ID returned');
+        pollPushStatus(data.job_id);
+    })
+    .catch(function(err) {
+        resetPushBtn();
+        status.style.color = '#c00';
+        status.textContent = 'Failed to start: ' + err;
+    });
+}
+
+function pollPushStatus(jobId) {
+    var status = document.getElementById('pushAllStatus');
+    var pollUrl = '{{ url_for("admin_push_all_switch_config_status", job_id="__JOB__") }}'.replace('__JOB__', jobId);
+
+    var interval = setInterval(function() {
+        fetch(pollUrl, {credentials: 'same-origin'})
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            status.textContent = data.message || data.status;
+            if (data.status === 'done') {
+                clearInterval(interval);
+                resetPushBtn();
+                status.style.color = data.ok ? '#1a7a1a' : '#c00';
+                // Also show as a page-level banner
+                showPushBanner(data.message, data.ok ? 'success' : 'warning');
+            }
+        })
+        .catch(function() { /* network blip — keep polling */ });
+    }, 2500);
+}
+
+function resetPushBtn() {
+    var btn = document.getElementById('pushAllBtn');
+    btn.disabled = false;
+    btn.style.opacity = '';
+    btn.style.cursor = '';
+    btn.innerHTML = '&#128225; Push All Config to Switches';
+}
+
+function showPushBanner(msg, type) {
+    var existing = document.getElementById('pushBanner');
+    if (existing) existing.remove();
+    var div = document.createElement('div');
+    div.id = 'pushBanner';
+    div.style.cssText = 'margin:10px 0;padding:10px 14px;border-radius:5px;font-size:13px;font-weight:600;' +
+        (type === 'success'
+            ? 'background:#e8f5e9;border:1px solid #a5d6a7;color:#1b5e20;'
+            : 'background:#fff8e1;border:1px solid #ffe082;color:#7a5c00;');
+    div.textContent = msg;
+    var header = document.querySelector('.page-header');
+    header.parentNode.insertBefore(div, header.nextSibling);
+    div.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+}
+</script>
+
+<style>
+@keyframes spin { to { transform: rotate(360deg); } }
+.spin-icon { display: inline-block; animation: spin 0.9s linear infinite; }
+</style>
 
 <div class="info-box">
     Each ISP router represents an upstream gateway. Assigning a router to a VLAN (on the VLAN Config page) creates

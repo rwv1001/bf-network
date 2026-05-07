@@ -137,8 +137,9 @@ if [ -z "$VLAN_ID" ] || [ -z "$HOST_OFFSET" ]; then
   exit 0
 fi
 
-ACL_NUM=$((3000 + VLAN_ID * 10))
-RULE_NUM=$((RULE_BASE + HOST_OFFSET))
+# Apply to both uplink ACLs (3951=UDM/Vlan1, 3953=TEL/Vlan2)
+# Rule number: vlan_id * 150 + host_offset (unique across all VLANs, stays below 20000)
+RULE_NUM=$((VLAN_ID * 150 + HOST_OFFSET))
 
 # Safety: never add a per-IP rule for an IP already covered by a blanket
 # blocked-pool range rule.  Blanket rules are added by hp5130-acl-baseline.sh
@@ -220,25 +221,29 @@ run_ssh() {
 if [ "$ACTION" = "block" ]; then
   CMDS=$(cat <<EOF
 system-view
-acl advanced $ACL_NUM
+acl advanced 3951
 rule $RULE_NUM deny ip source $IP_ADDRESS 0
 quit
-quit  
+acl advanced 3953
+rule $RULE_NUM deny ip source $IP_ADDRESS 0
+quit
 quit
 save force
-quit  
+quit
 EOF
 )
 elif [ "$ACTION" = "unblock" ]; then
   CMDS=$(cat <<EOF
 system-view
-acl advanced $ACL_NUM
+acl advanced 3951
+undo rule $RULE_NUM
+quit
+acl advanced 3953
 undo rule $RULE_NUM
 quit
 quit
-quit  
 save force
-quit  
+quit
 EOF
 )
 else
@@ -249,7 +254,7 @@ fi
 if [ "$QUEUE_DISABLE" = "1" ]; then
   # Execute commands via SSH (force TTY for Comware)
   apply_start=$(date +%s)
-  log "START action=$ACTION phase=apply_save ip=$IP_ADDRESS vlan=$VLAN_ID acl=$ACL_NUM rule=$RULE_NUM host=$SWITCH_HOST"
+  log "START action=$ACTION phase=apply_save ip=$IP_ADDRESS vlan=$VLAN_ID acl=3951+3953 rule=$RULE_NUM host=$SWITCH_HOST"
   run_ssh "apply_save" "$CMDS"
   ssh_status=$?
   apply_end=$(date +%s)
@@ -260,7 +265,7 @@ if [ "$QUEUE_DISABLE" = "1" ]; then
 fi
 
 # Queue mode (default)
-log "QUEUE action=$ACTION ip=$IP_ADDRESS vlan=$VLAN_ID acl=$ACL_NUM rule=$RULE_NUM"
+log "QUEUE action=$ACTION ip=$IP_ADDRESS vlan=$VLAN_ID acl=3951+3953 rule=$RULE_NUM"
 mkdir -p "$(dirname "$QUEUE_FILE")" 2>/dev/null || true
 printf '%s|%s|%s\n' "$(timestamp)" "$ACTION" "$IP_ADDRESS" >> "$QUEUE_FILE"
 

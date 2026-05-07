@@ -365,6 +365,12 @@ def _send_event(event_type: str, payload: dict):
                 return resp.json()
             except Exception:
                 return {"status": "ok"}
+        # 4xx errors (except 429) are permanent failures — the central server
+        # will never accept this event, so don't retry it.
+        if resp.status_code != 429 and 400 <= resp.status_code < 500:
+            logger.debug("central event %s → HTTP %d (permanent, dropping): %s",
+                         event_type, resp.status_code, resp.text[:200])
+            return {"_dropped": True}
         logger.warning("central event %s → HTTP %d: %s", event_type, resp.status_code, resp.text[:200])
     except Exception as exc:
         logger.warning("central event %s failed: %s", event_type, exc)
@@ -401,8 +407,9 @@ def _outbound_worker() -> None:
                     item.status = "sent" if success else "pending"
                     # For device_registered, central tells us whether the
                     # device/user is blocked at another site.
-                    if success and item.event_type == "device_registered" and isinstance(result, dict):
-                        _handle_registration_response(item.payload, result)
+                    if success and not isinstance(result, dict) or (isinstance(result, dict) and not result.get("_dropped")):
+                        if item.event_type == "device_registered" and isinstance(result, dict):
+                            _handle_registration_response(item.payload, result)
                 if pending:
                     _db.session.commit()
         except Exception as exc:
