@@ -744,18 +744,43 @@ int lease4_select(CalloutHandle& handle) {
                       << central_status << std::endl;
             std::cout.flush();
 
-            if (central_status == "registered" || central_status == "blocked") {
-                // Device was imported from central and a Kea reservation was added.
-                // Drop this offer so the client re-DISCOVERs and picks up the new
-                // reservation (correct pool assignment).
+            if (central_status == "registered") {
+                // Device was imported from central with REGISTERED class reservation.
+                // There is no separate registered-only pool, so the device will get
+                // the same IP on re-DISCOVER — drop-and-rediscover is pointless and
+                // races with the portal.  Grant access immediately, exactly as we
+                // do for a device that already has a local REGISTERED reservation.
+                manage_unregistered_lease("remove", mac_address, ip_address, 0);
+                if (is_assigned_vlan_mismatch(mac_clean, lease->subnet_id_)) {
+                    std::cout << "DNS Hijack Hook: Device " << mac_clean
+                              << " imported from central (registered) but on wrong VLAN (subnet "
+                              << lease->subnet_id_ << ") - restricting access" << std::endl;
+                    std::cout.flush();
+                    manage_dns_hijack("hijack", ip_address);
+                    manage_acl("block", ip_address, lease->subnet_id_);
+                    do_hijack = true;
+                } else {
+                    std::cout << "DNS Hijack Hook: Device " << mac_clean
+                              << " imported from central (registered) - granting immediate access"
+                              << std::endl;
+                    std::cout.flush();
+                    manage_dns_hijack("unhijack", ip_address);
+                    manage_acl("unblock", ip_address, lease->subnet_id_);
+                    do_hijack = false;
+                }
+            } else if (central_status == "blocked") {
+                // Device imported from central with BLOCKED class reservation.
+                // Drop this offer so the client re-DISCOVERs and Kea allocates a
+                // blocked-pool IP (the BLOCKED pool requires the BLOCKED class which
+                // central_import.py just added to the reservation).
                 std::cout << "DNS Hijack Hook: Device " << mac_clean
-                          << " imported from central (status=" << central_status
-                          << ") - dropping offer for re-DISCOVER" << std::endl;
+                          << " imported from central (blocked) - dropping offer for re-DISCOVER"
+                          << std::endl;
                 std::cout.flush();
                 manage_unregistered_lease("remove", mac_address, ip_address, 0);
                 handle.setStatus(CalloutHandle::NEXT_STEP_DROP);
                 return 0;
-            }
+            } else {
 
             // not_found / disabled / error → fail-open: treat as unregistered
             std::cout << "DNS Hijack Hook: Device " << mac_address
@@ -769,6 +794,7 @@ int lease4_select(CalloutHandle& handle) {
             }
             manage_unregistered_lease("upsert", mac_address, ip_address, lease_seconds);
             do_hijack = true;
+            }
         }
 
         // Table 6 + Table 7: record this new lease in the portal DB (async).

@@ -119,7 +119,7 @@ services:
     volumes:
       - ./captive-portal/app:/app
       - ./shared/restart-queue:/restart-queue
-      - ./kea/leases:/kea/leases:ro
+      - ./kea/leases:/kea/leases
       - ./kea/sockets:/kea/sockets
       - ./kea/config:/kea/config
       - ./kea/docker-compose.yml:/kea/docker-compose.yml:ro

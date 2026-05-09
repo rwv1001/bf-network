@@ -16,6 +16,7 @@ services:
       - ../scripts:/scripts:ro
       - ../shared/acl-queue:/acl-queue
       - /home/admin/.ssh:/keys:ro
+      - /home/admin/bf-network/kea/logs:/kea/logs
     environment:
       PORTAL_IP: ${PORTAL_IP:?PORTAL_IP is required – set it in kea/.env}
       PORTAL_URL: ${PORTAL_URL:-}

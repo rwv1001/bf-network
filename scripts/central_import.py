@@ -22,11 +22,29 @@ import subprocess
 import urllib.request
 import urllib.error
 
+# ── debug log ─────────────────────────────────────────────────────────────────
+# Stdout is read by the Kea hook (result word only); stderr is suppressed
+# (2>/dev/null in the hook command).  Write debug to a file instead.
+
+_LOG_PATH = os.getenv("CENTRAL_IMPORT_LOG", "/kea/logs/central_import.log")
+
+def _dbg(*parts):
+    """Append a timestamped debug line to the log file."""
+    try:
+        ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        msg = " ".join(str(p) for p in parts)
+        with open(_LOG_PATH, "a") as _lf:
+            _lf.write(f"{ts} {msg}\n")
+    except Exception:
+        pass  # never break the main flow
+
 
 # ── args ──────────────────────────────────────────────────────────────────────
 
 MAC = sys.argv[1].lower().strip() if len(sys.argv) > 1 else ""
+_dbg("=== central_import.py called MAC=%r" % MAC)
 if not MAC:
+    _dbg("ERROR: no MAC argument")
     print("error")
     sys.exit(0)
 
@@ -35,44 +53,14 @@ if not MAC:
 API_URL = os.getenv("CENTRAL_API_URL", "").rstrip("/")
 API_KEY = os.getenv("CENTRAL_API_KEY", "")
 SITE_ID = os.getenv("CENTRAL_SITE_ID", "")
+_dbg(f"central config: API_URL={API_URL!r} SITE_ID={SITE_ID!r} API_KEY={'SET' if API_KEY else 'MISSING'}")
 if not API_URL or not API_KEY or not SITE_ID:
+    _dbg("RESULT: disabled (missing central env vars)")
     print("disabled")
     sys.exit(0)
 
-# ── query central ─────────────────────────────────────────────────────────────
-
-try:
-    req = urllib.request.Request(
-        f"{API_URL}/api/v1/device/{MAC}",
-        headers={"X-API-Key": API_KEY},
-    )
-    with urllib.request.urlopen(req, timeout=3) as r:
-        data = json.loads(r.read().decode())
-except urllib.error.HTTPError as e:
-    if e.code == 404:
-        print("not_found")
-        sys.exit(0)
-    print("error")
-    sys.exit(0)
-except Exception:
-    print("error")
-    sys.exit(0)
-
-email = (data.get("email") or "").lower().strip()
-if not email:
-    print("error")
-    sys.exit(0)
-
-device_blocked   = bool(data.get("device_blocked") or data.get("user_blocked"))
-assigned_vlan    = data.get("assigned_vlan")
-is_wired         = bool(data.get("is_wired"))
-connection_type  = "wired" if is_wired else (data.get("connection_type") or "unknown")
-device_name      = (data.get("device_name") or "")
-first_name       = (data.get("first_name") or "")
-last_name        = (data.get("last_name") or "")
-phone            = (data.get("phone_number") or "")
-
 # ── DB helpers ────────────────────────────────────────────────────────────────
+# Defined early so the 404 fallback (local-queue check) can use them.
 
 DB_HOST = os.getenv("DB_HOST", "127.0.0.1")
 DB_PORT = os.getenv("DB_PORT", "5432")
@@ -100,12 +88,81 @@ def q(s: str) -> str:
     return s.replace("'", "''")
 
 
+# ── query central ─────────────────────────────────────────────────────────────
+
+data = None
+try:
+    req = urllib.request.Request(
+        f"{API_URL}/api/v1/device/{MAC}",
+        headers={"X-API-Key": API_KEY},
+    )
+    _dbg(f"querying central: GET {API_URL}/api/v1/device/{MAC}")
+    with urllib.request.urlopen(req, timeout=3) as r:
+        data = json.loads(r.read().decode())
+    _dbg(f"central response (200): {json.dumps(data)}")
+except urllib.error.HTTPError as e:
+    if e.code == 404:
+        _dbg(f"central returned 404 for {MAC} — checking local outbound queue")
+        # Central doesn't know this device yet.  This can happen when a device
+        # registered locally but the outbound event hasn't been processed by
+        # the background worker (up to CENTRAL_POLL_INTERVAL_SEC delay).
+        # Check the local outbound queue for a recent device_registered payload
+        # so we can honour the registration without waiting for central to catch up.
+        row = psql(
+            f"SELECT payload FROM central_outbound_events"
+            f" WHERE event_type = 'device_registered'"
+            f"   AND payload->>'mac_address' = '{q(MAC)}'"
+            f"   AND created_at > NOW() - INTERVAL '24 hours'"
+            f" ORDER BY created_at DESC LIMIT 1;"
+        )
+        _dbg(f"local outbound queue result: {row!r}")
+        if row:
+            try:
+                data = json.loads(row)
+                _dbg(f"using local queue payload: {json.dumps(data)}")
+            except Exception as ex:
+                _dbg(f"failed to parse local queue payload: {ex}")
+        if data is None:
+            _dbg("RESULT: not_found (central 404, no local queue entry)")
+            print("not_found")
+            sys.exit(0)
+    else:
+        _dbg(f"central HTTP error {e.code} — RESULT: error")
+        print("error")
+        sys.exit(0)
+except Exception as ex:
+    _dbg(f"central request exception: {ex} — RESULT: error")
+    print("error")
+    sys.exit(0)
+
+email = (data.get("email") or "").lower().strip()
+if not email:
+    _dbg("ERROR: no email in data — RESULT: error")
+    print("error")
+    sys.exit(0)
+
+device_blocked   = bool(data.get("device_blocked") or data.get("user_blocked"))
+assigned_vlan    = data.get("assigned_vlan")
+# Keep is_wired as None when the field is absent so we can distinguish
+# "explicitly wireless" (False) from "not provided" (None).
+is_wired         = data.get("is_wired")  # None | True | False
+if is_wired is not None:
+    is_wired = bool(is_wired)
+connection_type  = "wired" if is_wired else (data.get("connection_type") or "unknown")
+device_name      = (data.get("device_name") or "")
+first_name       = (data.get("first_name") or "")
+last_name        = (data.get("last_name") or "")
+phone            = (data.get("phone_number") or "")
+_dbg(f"parsed: email={email!r} device_blocked={device_blocked} assigned_vlan={assigned_vlan} "
+     f"is_wired={is_wired} connection_type={connection_type!r} device_name={device_name!r}")
+
 # ── write to portal DB ────────────────────────────────────────────────────────
 
 now   = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 today = datetime.date.today().isoformat()
 
 # Upsert user (begin_date is NOT NULL)
+_dbg(f"INSERT/UPDATE users: email={email!r} first_name={first_name!r} last_name={last_name!r}")
 psql(f"""
 INSERT INTO users (email, first_name, last_name, phone_number, begin_date, created_at, updated_at)
 VALUES (
@@ -119,57 +176,69 @@ ON CONFLICT (email) DO UPDATE SET
 """)
 
 user_id = psql(f"SELECT id FROM users WHERE email = '{q(email)}' LIMIT 1;")
+_dbg(f"user_id lookup result: {user_id!r}")
 if not user_id:
+    _dbg("ERROR: user_id is empty after upsert — RESULT: error")
     print("error")
     sys.exit(0)
 
-# If central didn't return is_wired, infer from local VLAN mapping
-if not is_wired and assigned_vlan:
+# If central didn't return is_wired (None = unknown), infer from local VLAN mapping.
+# Do NOT infer when is_wired is explicitly False (WiFi device — already known).
+if is_wired is None and assigned_vlan:
     try:
         wired_check = psql(
             f"SELECT wired_enabled FROM vlan_mappings WHERE vlan_id = {int(assigned_vlan)} LIMIT 1;"
         )
+        _dbg(f"wired_enabled for vlan {assigned_vlan}: {wired_check!r}")
         if wired_check in ('t', 'true', '1'):
             is_wired = True
             connection_type = 'wired'
-    except Exception:
-        pass
+            _dbg("inferred is_wired=True from vlan_mappings")
+        else:
+            is_wired = False
+            _dbg("inferred is_wired=False from vlan_mappings")
+    except Exception as ex:
+        _dbg(f"wired inference failed: {ex}")
+
+# Resolve any remaining None to False before writing to SQL
+if is_wired is None:
+    is_wired = False
 
 # Upsert device
-blocked_val = "true" if device_blocked else "false"
-vlan_val    = str(assigned_vlan) if assigned_vlan else "NULL"
-is_wired_val = "true" if is_wired else "false"
+vlan_val          = str(assigned_vlan) if assigned_vlan else "NULL"
+is_wired_val      = "true" if is_wired else "false"
 conn_type_escaped = connection_type.replace("'", "''")
+# internet_blocked: NULL means "not blocked" in this schema; True means blocked.
+internet_blocked_val = "true" if device_blocked else "NULL"
+# registration_status reflects the central block state.
+reg_status = "blocked" if device_blocked else "registered"
+_dbg(f"device upsert values: vlan_val={vlan_val} is_wired_val={is_wired_val} "
+     f"internet_blocked_val={internet_blocked_val} reg_status={reg_status!r} "
+     f"conn_type={conn_type_escaped!r}")
 
 psql(f"""
 INSERT INTO devices (
-    mac_address, user_id, device_name, internet_blocked,
-    ownership_validated, first_seen, registered_at,
-    is_wired, connection_type
+    mac_address, device_name, internet_blocked,
+    assigned_vlan, ownership_validated, first_seen, registered_at,
+    registration_status, is_wired, connection_type
 )
 VALUES (
-    '{MAC}', {user_id}, '{q(device_name)}', {blocked_val},
-    true, '{now}', '{now}',
-    {is_wired_val}, '{conn_type_escaped}'
+    '{MAC}', '{q(device_name)}', {internet_blocked_val},
+    {vlan_val}, true, '{now}', '{now}',
+    '{reg_status}', {is_wired_val}, '{conn_type_escaped}'
 )
 ON CONFLICT (mac_address) DO UPDATE SET
-    internet_blocked    = EXCLUDED.internet_blocked,
-    user_id             = EXCLUDED.user_id,
+    internet_blocked    = {internet_blocked_val},
+    registration_status = '{reg_status}',
+    assigned_vlan       = {vlan_val},
     ownership_validated = true,
     is_wired            = CASE WHEN {is_wired_val} THEN true ELSE devices.is_wired END,
     connection_type     = CASE WHEN {is_wired_val} THEN '{conn_type_escaped}' ELSE devices.connection_type END;
 """)
-
-# Set assigned_vlan only when it's currently NULL (don't overwrite a known vlan)
-if assigned_vlan:
-    psql(f"""
-UPDATE devices
-   SET assigned_vlan = {vlan_val}
- WHERE mac_address = '{MAC}'
-   AND assigned_vlan IS NULL;
-""")
+_dbg("devices upsert done")
 
 # Insert ownership only when there is no currently-active entry
+_dbg("checking/inserting device_ownership")
 psql(f"""
 INSERT INTO device_ownership (mac_address, user_id, start_datetime, end_datetime)
 SELECT '{MAC}', {user_id}, '{now}', NULL
@@ -179,6 +248,7 @@ WHERE NOT EXISTS (
        AND end_datetime IS NULL
 );
 """)
+_dbg("device_ownership upsert done")
 
 # ── add Kea reservation directly to PostgreSQL ───────────────────────────────
 # We cannot use the Kea control socket here because central_import.py is called
@@ -190,6 +260,7 @@ client_class = "BLOCKED" if device_blocked else "REGISTERED"
 
 # MAC as raw hex bytes (binary) — Kea stores it as bytea
 mac_hex = MAC.replace(":", "")
+_dbg(f"INSERT hosts: mac_hex={mac_hex!r} client_class={client_class!r} dhcp4_subnet_id=0")
 
 psql(f"""
 INSERT INTO hosts (
@@ -204,8 +275,11 @@ VALUES (
     0,
     '{client_class}'
 )
-ON CONFLICT DO NOTHING;
+ON CONFLICT (dhcp_identifier, dhcp_identifier_type, dhcp4_subnet_id)
+    WHERE dhcp4_subnet_id IS NOT NULL
+DO UPDATE SET dhcp4_client_classes = EXCLUDED.dhcp4_client_classes;
 """)
+_dbg("hosts upsert done")
 
 # ── Wired cross-site: trigger port bounce if device is on the wrong VLAN ─────
 # The device arrived on VLAN 250 (wired_unregistered). Now that we've created
@@ -216,6 +290,7 @@ ON CONFLICT DO NOTHING;
 # A short-lease expiry alone is NOT sufficient — DHCP DISCOVER goes out on
 # whichever VLAN the switch port is currently on, not the target VLAN.
 if is_wired and assigned_vlan and not device_blocked:
+    _dbg(f"wired device on wrong VLAN check: is_wired={is_wired} assigned_vlan={assigned_vlan} device_blocked={device_blocked}")
     # Find wired_unregistered VLAN ID from Kea config to confirm we're on it
     wired_unreg_vlan = 250  # default fallback
     kea_cfg = os.getenv("KEA_CONFIG_PATH", "/kea/config/dhcp4.json")
@@ -238,8 +313,10 @@ if is_wired and assigned_vlan and not device_blocked:
         current_vlan = int(current_vlan_row)
     except (TypeError, ValueError):
         current_vlan = None
+    _dbg(f"wired VLAN check: current_vlan={current_vlan} wired_unreg_vlan={wired_unreg_vlan} assigned_vlan={assigned_vlan}")
 
     if current_vlan in (None, wired_unreg_vlan) or current_vlan != assigned_vlan:
+        _dbg(f"wired VLAN mismatch — setting wrong_vlan and queuing port bounce")
         # Mark device as wrong_vlan so FreeRADIUS returns the target VLAN on
         # the next auth (the queries.conf already accepts wrong_vlan status).
         psql(f"""
@@ -277,4 +354,6 @@ UPDATE devices
 
 # ── done ──────────────────────────────────────────────────────────────────────
 
-print("blocked" if device_blocked else "registered")
+result_word = "blocked" if device_blocked else "registered"
+_dbg(f"RESULT: {result_word}")
+print(result_word)

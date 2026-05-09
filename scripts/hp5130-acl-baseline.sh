@@ -183,6 +183,7 @@ acl number 3099 name VLAN99_EGRESS
  rule 76 permit tcp source ${ORACLE_VPS_HOST} 0
  rule 77 permit udp source ${ORACLE_VPS_HOST} 0
  rule 78 permit tcp destination ${PORTAL_IP} 0 source-port eq 443 established
+ rule 80 permit tcp destination ${PORTAL_IP} 0 source-port eq 22 established
  rule 83 permit udp source ${PORTAL_IP} 0 destination-port eq ntp
  rule 84 permit udp source ${MGMT_IP_SECONDARY} 0 destination-port eq dns
  rule 85 permit tcp source ${MGMT_IP_SECONDARY} 0 destination-port eq dns

@@ -24,7 +24,7 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-# ── Configuration read from environment ──────────────────────────────────────
+# ?? Configuration read from environment ??????????????????????????????????????
 
 def _central_enabled() -> bool:
     return bool(
@@ -45,7 +45,7 @@ def _headers() -> dict:
 _TIMEOUT = int(os.getenv("CENTRAL_REQUEST_TIMEOUT_SEC", "8"))
 _POLL_INTERVAL = int(os.getenv("CENTRAL_POLL_INTERVAL_SEC", "10"))
 
-# ── Module-level app reference (set by init_central_client) ──────────────────
+# ?? Module-level app reference (set by init_central_client) ??????????????????
 
 _app = None         # Flask app — needed for background threads that need app context
 _db = None          # SQLAlchemy db instance
@@ -77,13 +77,19 @@ def init_central_client(app, db, central_event_model):
     ).start()
 
 
-# ── Public API — called from app.py ──────────────────────────────────────────
+# ?? Public API — called from app.py ??????????????????????????????????????????
 
 def queue_device_registered(device, user) -> None:
-    """Queue a device_registered event to central after successful local registration."""
+    """Queue a device_registered event to central after successful local registration.
+
+    Also kicks off an immediate eager send in a background thread so central has
+    the record before the next scheduled poll cycle (avoids up to
+    CENTRAL_POLL_INTERVAL_SEC of delay that causes central_import.py to return
+    not_found when the device reconnects shortly after registration).
+    """
     if not _central_enabled():
         return
-    _enqueue("device_registered", {
+    payload = {
         "mac_address": device.mac_address,
         "email": user.email,
         "first_name": user.first_name,
@@ -93,7 +99,17 @@ def queue_device_registered(device, user) -> None:
         "device_name": device.device_name,
         "is_wired": bool(device.is_wired),
         "connection_type": device.connection_type or "unknown",
-    })
+    }
+    _enqueue("device_registered", payload)
+    # Attempt an immediate send without waiting for the poll cycle.
+    # The async worker still provides the retry path if this fails.
+    if _app and _model and _db:
+        threading.Thread(
+            target=_eager_send_registration,
+            args=(payload,),
+            daemon=True,
+            name="central-eager-reg",
+        ).start()
 
 
 def queue_device_blocked(device, reason: Optional[str] = None) -> None:
@@ -204,7 +220,7 @@ def import_device_from_central(mac_address: str, central_data: dict) -> Optional
 
     now = _dt.datetime.now(_dt.timezone.utc)
 
-    # ── Upsert user ──────────────────────────────────────────────────────────
+    # ?? Upsert user ??????????????????????????????????????????????????????????
     user = User.query.filter_by(email=email).first()
     if not user:
         user = User(
@@ -229,7 +245,7 @@ def import_device_from_central(mac_address: str, central_data: dict) -> Optional
         user.blocked = True
         logger.info("import_device_from_central: user %s marked blocked (from central)", email)
 
-    # ── Upsert device ────────────────────────────────────────────────────────
+    # ?? Upsert device ????????????????????????????????????????????????????????
     device = Device.query.filter_by(mac_address=mac).first()
     device_blocked = bool(central_data.get("device_blocked") or central_data.get("user_blocked"))
     is_wired_device = bool(central_data.get("is_wired"))
@@ -257,7 +273,7 @@ def import_device_from_central(mac_address: str, central_data: dict) -> Optional
             device.is_wired = True
             device.connection_type = "wired"
 
-    # ── Upsert ownership ─────────────────────────────────────────────────────
+    # ?? Upsert ownership ?????????????????????????????????????????????????????
     existing_ownership = DeviceOwnership.query.filter_by(
         mac_address=mac, end_datetime=None
     ).first()
@@ -272,7 +288,7 @@ def import_device_from_central(mac_address: str, central_data: dict) -> Optional
 
     device.ownership_validated = True
 
-    # ── Wired cross-site: trigger port bounce if on wrong VLAN ───────────────
+    # ?? Wired cross-site: trigger port bounce if on wrong VLAN ???????????????
     # The device arrived on VLAN 250 (wired_unregistered). RADIUS placed it
     # there because it had no local record. Now that we've imported it, queue a
     # port bounce so the switch re-auths via RADIUS, which will now return the
@@ -301,7 +317,7 @@ def import_device_from_central(mac_address: str, central_data: dict) -> Optional
         except Exception as exc:
             logger.warning("import_device_from_central: port bounce failed for %s: %s", mac, exc)
 
-    # ── Notify central this site now holds the device ────────────────────────
+    # ?? Notify central this site now holds the device ????????????????????????
     queue_device_registered(device, user)
 
     return device
@@ -317,6 +333,7 @@ def lookup_device_at_central(mac_address: str) -> Optional[dict]:
     """
     if not _central_enabled():
         return None
+    logger.info("central lookup: querying %s for MAC %s", _api_url(), mac_address)
     try:
         resp = requests.get(
             f"{_api_url()}/api/v1/device/{mac_address}",
@@ -324,16 +341,18 @@ def lookup_device_at_central(mac_address: str) -> Optional[dict]:
             timeout=_TIMEOUT,
         )
         if resp.status_code == 200:
+            logger.info("central lookup: found MAC %s at central", mac_address)
             return resp.json()
         if resp.status_code == 404:
+            logger.info("central lookup: MAC %s not known to central", mac_address)
             return None
-        logger.warning("central lookup %s → HTTP %d", mac_address, resp.status_code)
+        logger.warning("central lookup %s ? HTTP %d", mac_address, resp.status_code)
     except Exception as exc:
         logger.warning("central lookup %s failed (fail-open): %s", mac_address, exc)
     return None
 
 
-# ── Internal helpers ──────────────────────────────────────────────────────────
+# ?? Internal helpers ??????????????????????????????????????????????????????????
 
 def _enqueue(event_type: str, payload: dict) -> None:
     """Insert and commit an outbound event into the local DB queue.
@@ -368,13 +387,45 @@ def _send_event(event_type: str, payload: dict):
         # 4xx errors (except 429) are permanent failures — the central server
         # will never accept this event, so don't retry it.
         if resp.status_code != 429 and 400 <= resp.status_code < 500:
-            logger.debug("central event %s → HTTP %d (permanent, dropping): %s",
+            logger.debug("central event %s ? HTTP %d (permanent, dropping): %s",
                          event_type, resp.status_code, resp.text[:200])
             return {"_dropped": True}
-        logger.warning("central event %s → HTTP %d: %s", event_type, resp.status_code, resp.text[:200])
+        logger.warning("central event %s ? HTTP %d: %s", event_type, resp.status_code, resp.text[:200])
     except Exception as exc:
         logger.warning("central event %s failed: %s", event_type, exc)
     return False
+
+
+def _eager_send_registration(payload: dict) -> None:
+    """Immediately send a device_registered event to central without waiting
+    for the poll cycle.  Marks the queued row as 'sent' on success so the
+    worker doesn't duplicate it.  On failure the worker will retry normally."""
+    mac = payload.get("mac_address", "").lower()
+    with _app.app_context():
+        try:
+            result = _send_event("device_registered", payload)
+            if result and not (isinstance(result, dict) and result.get("_dropped")):
+                # Mark the most recent pending queued row for this MAC as sent.
+                event = (
+                    _model.query
+                    .filter_by(event_type="device_registered", status="pending")
+                    .filter(_model.payload["mac_address"].astext == mac)
+                    .order_by(_model.created_at.desc())
+                    .first()
+                )
+                if event:
+                    event.status = "sent"
+                    event.attempts = (event.attempts or 0) + 1
+                    event.last_attempt_at = datetime.now(timezone.utc)
+                    _db.session.commit()
+                if isinstance(result, dict):
+                    _handle_registration_response(payload, result)
+                logger.info("central eager send: device_registered for %s succeeded", mac)
+            else:
+                logger.info("central eager send: device_registered for %s failed/dropped, "
+                            "worker will retry", mac)
+        except Exception as exc:
+            logger.warning("central eager send for %s failed: %s — worker will retry", mac, exc)
 
 
 def _outbound_worker() -> None:
@@ -564,7 +615,7 @@ def _apply_inbound(event_type: str, data: dict) -> None:
         # won't help because DHCP DISCOVER still goes out on the current VLAN).
         replug_switch_port_for_mac(mac)
         logger.info(
-            "central: updated wired device %s VLAN %s → %s, port bounce queued",
+            "central: updated wired device %s VLAN %s ? %s, port bounce queued",
             mac, old_vlan, new_vlan,
         )
 

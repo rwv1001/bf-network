@@ -313,7 +313,6 @@ def _sweep_expired_ip_leases():
                     try:
                         if lease.dns_hijacked:
                             manage_dns_hijack('unhijack', lease.ip_address)
-                            lease.dns_hijacked = False
                         # Always attempt ACL removal — harmless if rule absent.
                         if lease.vlan_id and not lease.from_blocked_pool:
                             manage_switch_acl('unblock', lease.ip_address, lease.vlan_id)
@@ -321,11 +320,14 @@ def _sweep_expired_ip_leases():
                             "Lease sweep: cleaned up %s (VLAN %s) — lease expired at %s",
                             lease.ip_address, lease.vlan_id, lease.lease_expiry,
                         )
-                        db.session.delete(lease)
                         changed = True
                     except Exception as exc:
                         logger.warning("Lease sweep cleanup failed for %s: %s", lease.ip_address, exc)
                 if changed:
+                    # Bulk delete by primary key — avoids SAWarning when a row
+                    # was already removed by a concurrent lease-event handler.
+                    expired_ids = [l.id for l in expired]
+                    IPLease.query.filter(IPLease.id.in_(expired_ids)).delete(synchronize_session=False)
                     db.session.commit()
 
                 # Spec: set internet_accessible=null for any MAC in devices that
@@ -3212,6 +3214,16 @@ def register():
                                        ip_address=ip_address,
                                        mac_address=mac_address,
                                        admin_email=os.getenv('ADMIN_EMAIL', 'admin@example.com'))
+            # Registered, non-blocked device reached the portal — the Kea hook
+            # should have already unhijacked, but if central was unreachable
+            # during DHCP (bad key, timeout, etc.) the hijack may still be
+            # active.  Clean it up proactively so the user gets internet
+            # access as soon as they dismiss/leave the portal page.
+            if ip_address:
+                vlan_id = device.current_vlan or device.assigned_vlan
+                manage_dns_hijack('unhijack', ip_address)
+                if vlan_id:
+                    manage_switch_acl('unblock', ip_address, vlan_id)
             # Build prefill from the device's user so the hidden form fields
             # carry valid data when the JS password-entry prompt submits.
             _user_pf = device.user
