@@ -1949,6 +1949,7 @@ def reset_test_data():
     db.session.execute(text("DELETE FROM nat_sessions"))
     db.session.execute(text("DELETE FROM dns_resolutions"))
     db.session.execute(text("DELETE FROM mac_port_cache"))
+    db.session.execute(text("DELETE FROM central_outbound_events"))
     db.session.commit()
 
     # Truncate the Kea CSV lease file so Kea's in-memory allocator starts

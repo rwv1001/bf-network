@@ -150,11 +150,12 @@ if is_wired is not None:
     is_wired = bool(is_wired)
 connection_type  = "wired" if is_wired else (data.get("connection_type") or "unknown")
 device_name      = (data.get("device_name") or "")
+ssid             = (data.get("ssid") or "")
 first_name       = (data.get("first_name") or "")
 last_name        = (data.get("last_name") or "")
 phone            = (data.get("phone_number") or "")
 _dbg(f"parsed: email={email!r} device_blocked={device_blocked} assigned_vlan={assigned_vlan} "
-     f"is_wired={is_wired} connection_type={connection_type!r} device_name={device_name!r}")
+     f"is_wired={is_wired} connection_type={connection_type!r} ssid={ssid!r} device_name={device_name!r}")
 
 # ── write to portal DB ────────────────────────────────────────────────────────
 
@@ -208,24 +209,25 @@ if is_wired is None:
 vlan_val          = str(assigned_vlan) if assigned_vlan else "NULL"
 is_wired_val      = "true" if is_wired else "false"
 conn_type_escaped = connection_type.replace("'", "''")
+ssid_escaped      = ssid.replace("'", "''")
 # internet_blocked: NULL means "not blocked" in this schema; True means blocked.
 internet_blocked_val = "true" if device_blocked else "NULL"
 # registration_status reflects the central block state.
 reg_status = "blocked" if device_blocked else "registered"
 _dbg(f"device upsert values: vlan_val={vlan_val} is_wired_val={is_wired_val} "
      f"internet_blocked_val={internet_blocked_val} reg_status={reg_status!r} "
-     f"conn_type={conn_type_escaped!r}")
+     f"conn_type={conn_type_escaped!r} ssid={ssid_escaped!r}")
 
 psql(f"""
 INSERT INTO devices (
     mac_address, device_name, internet_blocked,
     assigned_vlan, ownership_validated, first_seen, registered_at,
-    registration_status, is_wired, connection_type
+    registration_status, is_wired, connection_type, ssid
 )
 VALUES (
     '{MAC}', '{q(device_name)}', {internet_blocked_val},
     {vlan_val}, true, '{now}', '{now}',
-    '{reg_status}', {is_wired_val}, '{conn_type_escaped}'
+    '{reg_status}', {is_wired_val}, '{conn_type_escaped}', '{ssid_escaped}'
 )
 ON CONFLICT (mac_address) DO UPDATE SET
     internet_blocked    = {internet_blocked_val},
@@ -233,7 +235,8 @@ ON CONFLICT (mac_address) DO UPDATE SET
     assigned_vlan       = {vlan_val},
     ownership_validated = true,
     is_wired            = CASE WHEN {is_wired_val} THEN true ELSE devices.is_wired END,
-    connection_type     = CASE WHEN {is_wired_val} THEN '{conn_type_escaped}' ELSE devices.connection_type END;
+    connection_type     = CASE WHEN {is_wired_val} THEN '{conn_type_escaped}' ELSE devices.connection_type END,
+    ssid                = CASE WHEN '{ssid_escaped}' <> '' THEN '{ssid_escaped}' ELSE devices.ssid END;
 """)
 _dbg("devices upsert done")
 
