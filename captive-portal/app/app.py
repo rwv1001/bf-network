@@ -3284,7 +3284,20 @@ def register():
                         'phone_number': existing_user.phone_number or '',
                     },
                 })
+            # Not known locally — ask central before requiring the user to retype
+            # their name (they may have already registered at a different site).
+            central_user = central_client.lookup_user_at_central(email_check)
+            if central_user and (central_user.get('first_name') or central_user.get('last_name')):
+                return jsonify({
+                    'status': 'user_found',
+                    'prefill': {
+                        'first_name':   central_user.get('first_name')   or '',
+                        'last_name':    central_user.get('last_name')    or '',
+                        'phone_number': central_user.get('phone_number') or '',
+                    },
+                })
             return jsonify({'status': 'need_details'})
+
 
         # ── Field extraction ──────────────────────────────────────────────────
         email        = (request.form.get('email')        or '').strip().lower()
@@ -4419,6 +4432,7 @@ def user_home():
             user.last_name    = (request.form.get('last_name')    or '').strip() or user.last_name
             user.phone_number = (request.form.get('phone_number') or '').strip() or user.phone_number
             db.session.commit()
+            central_client.queue_user_updated(user)
             flash('Profile updated.', 'success')
 
         # ── Password change ───────────────────────────────────────────────────
@@ -4432,6 +4446,7 @@ def user_home():
             else:
                 user.set_network_password(new_pw)
                 db.session.commit()
+                central_client.queue_user_updated(user)
                 flash('Password changed.', 'success')
 
         # ── Abandon a device (spec 5a) ─────────────────────────────────────────

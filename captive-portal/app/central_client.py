@@ -352,6 +352,38 @@ def lookup_device_at_central(mac_address: str) -> Optional[dict]:
     return None
 
 
+def lookup_user_at_central(email: str) -> Optional[dict]:
+    """
+    Query central for a known user by email address.
+    Returns a dict with first_name, last_name, phone_number (and blocked status),
+    or None if not found or central is unreachable (fail-open).
+
+    Used during the step-1 registration check to pre-fill name fields when the
+    user has already registered at a different site.
+    """
+    if not _central_enabled():
+        return None
+    logger.info("central user lookup: querying %s for email %s", _api_url(), email)
+    try:
+        import urllib.parse
+        encoded = urllib.parse.quote(email, safe="")
+        resp = requests.get(
+            f"{_api_url()}/api/v1/user/{encoded}",
+            headers=_headers(),
+            timeout=_TIMEOUT,
+        )
+        if resp.status_code == 200:
+            logger.info("central user lookup: found email %s at central", email)
+            return resp.json()
+        if resp.status_code == 404:
+            logger.info("central user lookup: email %s not known to central", email)
+            return None
+        logger.warning("central user lookup %s → HTTP %d", email, resp.status_code)
+    except Exception as exc:
+        logger.warning("central user lookup %s failed (fail-open): %s", email, exc)
+    return None
+
+
 # ?? Internal helpers ??????????????????????????????????????????????????????????
 
 def _enqueue(event_type: str, payload: dict) -> None:
