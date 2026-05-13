@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 set -eu
 
 ACTION="${1:-}"
@@ -84,14 +84,18 @@ fi
 SAFE_IP="$(echo "$IP_ADDRESS" | tr '.' '_')"
 DEDUP_FILE="$QUEUE_BASE/.dedup-${ACTION}-${SAFE_IP}-${SAFE_HOST}"
 now=$(date +%s)
-if [ -f "$DEDUP_FILE" ]; then
-  last=$(cat "$DEDUP_FILE" 2>/dev/null || echo 0)
-  if [ $((now - last)) -lt "$DEDUP_WINDOW" ]; then
-    log "SKIP_DUP action=$ACTION ip=$IP_ADDRESS age_sec=$((now - last))"
-    exit 0
+# Only deduplicate in queue mode. When the queue worker calls us with
+# QUEUE_DISABLE=1 it is the authoritative execution — always proceed.
+if [ "${ACL_QUEUE_DISABLE:-0}" != "1" ]; then
+  if [ -f "$DEDUP_FILE" ]; then
+    last=$(cat "$DEDUP_FILE" 2>/dev/null || echo 0)
+    if [ $((now - last)) -lt "$DEDUP_WINDOW" ]; then
+      log "SKIP_DUP action=$ACTION ip=$IP_ADDRESS age_sec=$((now - last))"
+      exit 0
+    fi
   fi
+  printf '%s' "$now" > "$DEDUP_FILE" 2>/dev/null || true
 fi
-printf '%s' "$now" > "$DEDUP_FILE" 2>/dev/null || true
 
 # Resolve VLAN and host offset using Kea config
 MAP_OUT=""
@@ -137,9 +141,59 @@ if [ -z "$VLAN_ID" ] || [ -z "$HOST_OFFSET" ]; then
   exit 0
 fi
 
-# Apply to both uplink ACLs (3951=UDM/Vlan1, 3953=TEL/Vlan2)
-# Rule number: vlan_id * 150 + host_offset (unique across all VLANs, stays below 20000)
-RULE_NUM=$((VLAN_ID * 150 + HOST_OFFSET))
+# ---------------------------------------------------------------------------
+# Rule number allocation
+# Prefer a database-backed allocation (unique per IP, reuses freed numbers,
+# guaranteed to stay below 20000).  Falls back to the arithmetic formula if
+# DATABASE_URL is unavailable (e.g. running outside Docker without .env).
+# ---------------------------------------------------------------------------
+RULE_NUM=""
+PSQL_BIN="$(command -v psql 2>/dev/null || true)"
+DB_URL="${DATABASE_URL:-}"
+
+if [ -n "$PSQL_BIN" ] && [ -n "$DB_URL" ]; then
+  if [ "$ACTION" = "block" ]; then
+    # Allocate lowest available rule number (1–19999) for this IP, or return
+    # the existing one if the IP is already in the table.
+    _psql_out=$(
+      "$PSQL_BIN" "$DB_URL" -t -A 2>/dev/null << EOSQL
+BEGIN;
+SELECT pg_advisory_xact_lock(88001);
+INSERT INTO acl_rule_allocations (ip_address, rule_num)
+SELECT '${IP_ADDRESS}', COALESCE(
+    (SELECT MIN(n) FROM generate_series(1, 19999) n
+     WHERE n NOT IN (SELECT rule_num FROM acl_rule_allocations)),
+    -1
+)
+ON CONFLICT (ip_address) DO UPDATE
+    SET allocated_at = NOW()
+RETURNING rule_num;
+COMMIT;
+EOSQL
+    )
+    RULE_NUM=$(printf '%s\n' "$_psql_out" | grep -E '^[0-9]+$' | tail -1)
+    if [ -z "$RULE_NUM" ] || [ "$RULE_NUM" = "-1" ]; then
+      log "WARN action=$ACTION ip=$IP_ADDRESS reason=rule_alloc_failed fallback=formula"
+      RULE_NUM=""
+    fi
+  else
+    # Look up the previously allocated rule number for this IP.
+    RULE_NUM=$(
+      "$PSQL_BIN" "$DB_URL" -t -A \
+        -c "SELECT rule_num FROM acl_rule_allocations WHERE ip_address = '${IP_ADDRESS}';" \
+        2>/dev/null | grep -E '^[0-9]+$' | tail -1
+    )
+    if [ -z "$RULE_NUM" ]; then
+      log "WARN action=$ACTION ip=$IP_ADDRESS reason=no_rule_alloc_found fallback=formula"
+    fi
+  fi
+fi
+
+# Formula fallback (VLAN_ID * 150 + HOST_OFFSET is unique for the standard
+# VLAN set but may collide when VLAN IDs exceed ~133 or subnets are large).
+if [ -z "$RULE_NUM" ]; then
+  RULE_NUM=$((VLAN_ID * 150 + HOST_OFFSET))
+fi
 
 # Safety: never add a per-IP rule for an IP already covered by a blanket
 # blocked-pool range rule.  Blanket rules are added by hp5130-acl-baseline.sh
@@ -218,6 +272,8 @@ run_ssh() {
   return $status
 }
 
+log "APPLY action=$ACTION ip=$IP_ADDRESS vlan=$VLAN_ID acl=3951+3953 rule=$RULE_NUM host=$SWITCH_HOST"
+
 if [ "$ACTION" = "block" ]; then
   CMDS=$(cat <<EOF
 system-view
@@ -260,6 +316,14 @@ if [ "$QUEUE_DISABLE" = "1" ]; then
   apply_end=$(date +%s)
   apply_duration=$((apply_end - apply_start))
   log "END action=$ACTION phase=apply_save ip=$IP_ADDRESS status=$ssh_status duration_sec=$apply_duration"
+
+  # Free the rule number allocation after a successful unblock.
+  if [ "$ACTION" = "unblock" ] && [ "$ssh_status" = "0" ] \
+     && [ -n "${PSQL_BIN:-}" ] && [ -n "${DB_URL:-}" ]; then
+    "$PSQL_BIN" "$DB_URL" -c \
+      "DELETE FROM acl_rule_allocations WHERE ip_address = '${IP_ADDRESS}';" \
+      2>/dev/null || true
+  fi
 
   exit $ssh_status
 fi

@@ -29,6 +29,7 @@ services:
     volumes:
       - ./captive-portal/data/postgres:/var/lib/postgresql/data
       - ./captive-portal/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+      - /etc/localtime:/etc/localtime:ro
     network_mode: host
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-portal_user} -d ${DB_NAME:-captive_portal}"]
@@ -41,6 +42,8 @@ services:
     image: redis:7-alpine
     container_name: captive-portal-redis
     restart: unless-stopped
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
     network_mode: host
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -131,6 +134,7 @@ services:
       - ./watchdog:/watchdog-data
       - ${GIT_REPO_DIR}:${GIT_REPO_DIR}
       - /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro
+      - /etc/localtime:/etc/localtime:ro
     network_mode: host
     privileged: true
     depends_on:
@@ -173,6 +177,7 @@ services:
       - /home/admin/.ssh:/config:ro
       - ./scripts:/scripts:ro
       - ./captive-portal/data/nat-parser:/state
+      - /etc/localtime:/etc/localtime:ro
     network_mode: host
     depends_on:
       db:
@@ -194,6 +199,7 @@ services:
       PIHOLE_POLL_INTERVAL_SECONDS: ${PIHOLE_POLL_INTERVAL_SECONDS:-30}
     volumes:
       - ./pihole/logs:/logs:ro
+      - /etc/localtime:/etc/localtime:ro
     network_mode: host
     depends_on:
       db:
@@ -209,6 +215,7 @@ services:
     volumes:
       - /home/admin/.ssh:/keys:ro
       - ./captive-portal/tunnel-entrypoint.sh:/tunnel-entrypoint.sh:ro
+      - /etc/localtime:/etc/localtime:ro
     environment:
       ORACLE_VPS_HOST: ${ORACLE_VPS_HOST:-}
       ORACLE_VPS_USER: ${ORACLE_VPS_USER:-ubuntu}
@@ -232,6 +239,7 @@ services:
       - ./freeradius/raddb/sites-enabled/coa:/etc/freeradius/sites-enabled/coa:ro
       - ./freeradius/raddb/sites-enabled/default:/etc/freeradius/sites-enabled/default:ro
       - ./freeradius/entrypoint.sh:/entrypoint.sh:ro
+      - /etc/localtime:/etc/localtime:ro
     entrypoint: ["/entrypoint.sh"]
 
   # ── Pi-Hole DNS ───────────────────────────────────────────────────────────────
@@ -256,6 +264,7 @@ services:
     volumes:
       - ./pihole/etc-pihole:/etc/pihole
       - ./pihole/logs:/var/log/pihole
+      - /etc/localtime:/etc/localtime:ro
     entrypoint:
       - /bin/bash
       - -c
@@ -282,6 +291,7 @@ services:
       - ./.env
     volumes:
       - /var/log:/var/log
+      - /etc/localtime:/etc/localtime:ro
 
   # ── Syslog receiver ───────────────────────────────────────────────────────────
   rsyslog:
@@ -294,6 +304,7 @@ services:
     volumes:
       - ./syslog-container/logs:/var/log
       - ./syslog-container/rsyslog.conf:/etc/syslog-ng/syslog-ng.conf:ro
+      - /etc/localtime:/etc/localtime:ro
     cap_add:
       - SYSLOG
     logging:
@@ -310,6 +321,7 @@ services:
     volumes:
       - ./npm/data:/data
       - ./npm/letsencrypt:/etc/letsencrypt
+      - /etc/localtime:/etc/localtime:ro
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:81/api/"]
       interval: 10s
@@ -325,6 +337,7 @@ services:
       - ./.env
     volumes:
       - ./npm/setup.py:/setup.py:ro
+      - /etc/localtime:/etc/localtime:ro
     command: ["python", "/setup.py"]
     depends_on:
       npm:
@@ -377,6 +390,7 @@ services:
       - /home/admin/.ssh:/keys:ro
       # Syslog log directory — for staleness check
       - ./syslog-container/logs:/logs:ro
+      - /etc/localtime:/etc/localtime:ro
     logging:
       driver: "json-file"
       options:

@@ -60,9 +60,9 @@
       "max-reclaim-time": 250,
       "unwarned-reclaim-cycles": 5
     },
-    "renew-timer": 150,
-    "rebind-timer": 240,
-    "valid-lifetime": 300,
+    "renew-timer": 300,
+    "rebind-timer": 480,
+    "valid-lifetime": 600,
     "option-data": [
       {
         "name": "domain-name",
@@ -289,14 +289,14 @@
         ]
       },
       {
-        "subnet": "192.168.48.0/22",
+        "subnet": "192.168.50.0/23",
         "id": 50,
         "pools": [
           {
-            "pool": "192.168.48.1 - 192.168.51.95"
+            "pool": "192.168.50.1 - 192.168.51.175"
           },
           {
-            "pool": "192.168.51.96 - 192.168.51.255",
+            "pool": "192.168.51.176 - 192.168.51.255",
             "client-classes": [
               "BLOCKED"
             ]

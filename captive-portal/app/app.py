@@ -2235,12 +2235,16 @@ def _is_blocked_pool_ip(ip_address):
 def cleanup_orphan_hijack_rules():
     """Remove DNS/portal DNAT rules for IPs not assigned to any device."""
     try:
-        active_ips = {
-            d.ip_address
-            for d in Device.query.filter(Device.ip_address.isnot(None)).all()
-            if d.ip_address
-        }
+        # Device.ip_address is a @property backed by IPLease — query IPLease directly.
         now = datetime.utcnow()
+        active_ips = {
+            lease.ip_address
+            for lease in IPLease.query.filter(
+                IPLease.ip_address.isnot(None),
+                IPLease.lease_expiry > now,
+            ).all()
+            if lease.ip_address
+        }
         active_unregistered_ips = {
             lease.ip_address
             for lease in UnregisteredLease.query.filter(UnregisteredLease.ip_address.isnot(None)).all()
@@ -2448,8 +2452,8 @@ def manage_switch_acl(action, ip_address, vlan_id):
 
         # Fallback: apply directly via SSH
         if action == 'block':
-            logger.info("Adding ACL deny rule for %s on VLAN %s via SSH to %s",
-                        ip_address, vlan_id, switch_host)
+            logger.info("Adding ACL deny rule for %s on VLAN %s via SSH to %s (acl=3951+3953 rule=%s)",
+                        ip_address, vlan_id, switch_host, rule_num)
             commands = [
                 "system-view",
                 "acl advanced 3951",
@@ -2460,8 +2464,8 @@ def manage_switch_acl(action, ip_address, vlan_id):
                 "quit", "quit", "save force"
             ]
         elif action == 'unblock':
-            logger.info("Removing ACL deny rule for %s on VLAN %s via SSH to %s",
-                        ip_address, vlan_id, switch_host)
+            logger.info("Removing ACL deny rule for %s on VLAN %s via SSH to %s (acl=3951+3953 rule=%s)",
+                        ip_address, vlan_id, switch_host, rule_num)
             commands = [
                 "system-view",
                 "acl advanced 3951",
@@ -2675,7 +2679,7 @@ def replug_switch_port_for_mac(mac_address):
         return False
 
 
-def apply_device_block(device, flash_messages=False):
+def apply_device_block(device, flash_messages=False, notify_central=True):
     """Block a device per spec B/C: set internet_blocked=True, internet_accessible=null,
     apply DNS hijack and ACL block to the device's current IP.
 
@@ -2721,10 +2725,11 @@ def apply_device_block(device, flash_messages=False):
         logger.warning("Block: no IP/VLAN for device %s", device.mac_address)
 
     cleanup_orphan_hijack_rules()
-    central_client.queue_device_blocked(device)
+    if notify_central:
+        central_client.queue_device_blocked(device)
 
 
-def apply_device_unblock(device, flash_messages=False):
+def apply_device_unblock(device, flash_messages=False, notify_central=True):
     """Unblock a device per spec B/C:
     - Clear internet_blocked.
     - If conditions for internet access are met (correct VLAN, ownership validated),
@@ -5828,9 +5833,13 @@ def admin_reset_test():
                 except Exception as exc:
                     logger.warning("Test reset: Kea restart failed: %s", exc)
 
+                logger.warning("Test reset: calling clear_mac_auth_sessions")
                 mac_auth_cleared = clear_mac_auth_sessions()
+                logger.warning("Test reset: reset_user_ports")
                 ports_reset = reset_user_ports()
+                logger.warning("Test reset: push_pbr_nqa_to_switches")
                 nqa_ok = push_pbr_nqa_to_switches()
+                logger.warning("Test reset: push_pbr_nqa_to_switches completed")
                 if acl_ok and mac_auth_cleared and ports_reset and nqa_ok:
                     logger.info("Test reset: background switch tasks complete (all OK)")
                 else:
@@ -7816,7 +7825,7 @@ def admin_dashboard():
     # Spec Section A: Unregistered devices — Device rows with no active device_ownership entry
     active_ownership_macs = db.session.query(DeviceOwnership.mac_address).filter(
         DeviceOwnership.end_datetime.is_(None)
-    ).subquery()
+    ).scalar_subquery()
     unregistered_devices = db.session.query(Device).filter(
         ~Device.mac_address.in_(active_ownership_macs)
     ).order_by(Device.last_seen.desc()).all()
@@ -8734,45 +8743,26 @@ def _build_remove_isp_router_vlan(vlan_id):
 
 
 def _build_isp_router_block_acl(acl_number, router, excluded_subnets):
-    """Build an outbound ACL for this ISP router's uplink SVI to block source
-    traffic from VLANs that are assigned to a different ISP router.
+    """Inject or refresh foreign-VLAN deny rules (50–99) in the existing uplink
+    ACL (3951 for UDM id=1, 3953 for TEL id=3 — formula: 3950 + router.id).
 
-    This prevents silent internet fallback via this router when a VLAN's own
-    ISP router goes down and PBR falls back to normal IP routing.
+    HP5130 only supports one outbound packet-filter per interface, so these
+    rules MUST live inside the same ACL that hp5130-acl-baseline.sh creates.
+    The baseline owns the ACL lifecycle (undo + recreate + packet-filter apply);
+    this function only updates rules in the 50–99 range without touching the rest.
 
-    acl_number:        ACL number to use (e.g. 3951 for router.id=1)
+    acl_number:        ACL number (3950 + router.id)
     excluded_subnets:  list of (network_address_str, wildcard_str) tuples
-    Always returns a non-None command string — when excluded_subnets is empty,
-    generates cleanup commands to remove any stale ACL and packet-filter so that
-    stale deny rules do not persist after a VLAN switches to this router.
     """
-    if not excluded_subnets:
-        # No foreign VLANs to block — remove stale ACL and packet-filter if present.
-        return '\n'.join([
-            'system-view',
-            f'interface Vlan-interface{router.vlan_id}',
-            f' undo packet-filter {acl_number} outbound',
-            'quit',
-            f'undo acl advanced {acl_number}',
-            'quit',
-            'save force',
-        ])
-    lines = [
-        'system-view',
-        f'undo acl advanced {acl_number}',
-        f'acl advanced {acl_number}',
-        f' description ISP-{router.pbr_name}-block-foreign-VLANs',
-    ]
+    lines = ['system-view', f'acl advanced {acl_number}']
+    # Remove any stale foreign-VLAN deny rules in the reserved 50–99 range.
+    for rule_num in range(50, 100):
+        lines.append(f' undo rule {rule_num}')
+    # Add updated foreign-VLAN deny rules (step 1 → 50 slots available).
     for i, (network, wildcard) in enumerate(excluded_subnets):
-        rule_num = 10 + i * 10
+        rule_num = 50 + i
         lines.append(f' rule {rule_num} deny ip source {network} {wildcard}')
-    lines.append(' rule 500 permit ip')
-    lines.append('quit')
-    lines.append(f'interface Vlan-interface{router.vlan_id}')
-    lines.append(f' packet-filter {acl_number} outbound')
-    lines.append('quit')
-    lines.append('quit')
-    lines.append('save force')
+    lines.extend(['quit', 'quit', 'save force'])
     return '\n'.join(lines)
 
 
@@ -8815,7 +8805,9 @@ def push_pbr_nqa_to_switches():
     next-hop goes DOWN — because Comware 7 PBR falls through to normal IP routing
     when a track-bound node becomes invalid, bypassing any subsequent PBR nodes.
 
-    ACL numbers used: 3950 + router.id  (e.g. 3951 for UDM id=1, 3952 for TEL id=2)
+    ACL numbers used: 3950 + router.id  (e.g. 3951 for UDM id=1, 3953 for TEL id=3)
+    Foreign-VLAN deny rules are injected at rule 50–99 inside these same ACLs so
+    that only one outbound packet-filter is needed per ISP uplink interface.
 
     Idempotent — safe to call on reset or after config changes.  Returns True
     if every switch/router combination succeeded, False if any failed.
@@ -8865,7 +8857,7 @@ def push_pbr_nqa_to_switches():
         for other_router in routers:
             if other_router.id != router.id:
                 excluded.extend(router_subnets.get(other_router.id, []))
-        acl_number = 3950 + router.id
+        acl_number = 3950 + router.id  # 3951 for UDM (id=1), 3953 for TEL (id=3)
         block_cfg = _build_isp_router_block_acl(acl_number, router, excluded)
         for host in switch_hosts:
             tasks.append((f'{host}/{router.pbr_name}/block-acl', host, block_cfg))
@@ -11113,6 +11105,48 @@ def _startup_write_prefix_map():
 # the fresh-data check inside ensures only the first worker actually does the work).
 _startup_switch_discovery()
 _startup_write_prefix_map()
+
+
+def _startup_acl_baseline():
+    """Push ACL baseline to all switches shortly after startup.
+    Uses a postgres advisory lock so only one gunicorn worker does the work.
+    """
+    import threading
+    import time as _time
+
+    def _run():
+        _time.sleep(10 + (os.getpid() % 4))
+        try:
+            lock_acquired = False
+            with app.app_context():
+                lock_acquired = db.session.execute(
+                    text("SELECT pg_try_advisory_lock(99002)")
+                ).scalar()
+            if not lock_acquired:
+                logger.info("ACL baseline lock held by another worker, skipping")
+                return
+        except Exception as e:
+            logger.warning("ACL baseline startup: could not acquire lock: %s", e)
+            return
+        try:
+            logger.info("Startup ACL baseline push starting…")
+            with app.app_context():
+                ok = reset_acl_baseline()
+            logger.info("Startup ACL baseline push %s", "succeeded" if ok else "failed")
+        except Exception as e:
+            logger.warning("Startup ACL baseline push error: %s", e)
+        finally:
+            try:
+                with app.app_context():
+                    db.session.execute(text("SELECT pg_advisory_unlock(99002)"))
+                    db.session.commit()
+            except Exception:
+                pass
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+_startup_acl_baseline()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=True)

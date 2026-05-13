@@ -1,6 +1,7 @@
 // #include <config.h>  // Not needed for basic hooks
 #include <hooks/hooks.h>
 #include <dhcp/pkt4.h>
+#include <dhcp/dhcp4.h>
 #include <dhcp/hwaddr.h>
 #include <dhcpsrv/subnet.h>
 #include <dhcpsrv/host_mgr.h>
@@ -555,6 +556,153 @@ void manage_lease_event(const std::string& action,
     waitpid(pid, &wstatus, 0);
 }
 
+enum class AdminState {
+    BLOCKED,
+    UNBLOCKED
+};
+
+bool get_bool_context(CalloutHandle& handle, const std::string& name) {
+    bool value = false;
+    try {
+        handle.getContext(name, value);
+    } catch (...) {
+        value = false;
+    }
+    return value;
+}
+
+IOAddress requested_addr_from_ciaddr_or_option50(const Pkt4Ptr& query) {
+    if (!query) {
+        return IOAddress("0.0.0.0");
+    }
+
+    if (query->getCiaddr().toText() != "0.0.0.0") {
+        return query->getCiaddr();
+    }
+
+    OptionPtr opt = query->getOption(DHO_DHCP_REQUESTED_ADDRESS);
+    if (opt) {
+        const OptionBuffer& data = opt->getData();
+        if (data.size() == 4) {
+            std::stringstream ip;
+            ip << static_cast<unsigned>(data[0]) << "."
+               << static_cast<unsigned>(data[1]) << "."
+               << static_cast<unsigned>(data[2]) << "."
+               << static_cast<unsigned>(data[3]);
+            return IOAddress(ip.str());
+        }
+    }
+
+    return IOAddress("0.0.0.0");
+}
+
+bool is_in_blocked_pool(const IOAddress& addr) {
+    return is_blocked_pool_ip(addr.toText());
+}
+
+bool is_in_unblocked_pool(const IOAddress& addr) {
+    const std::string ip = addr.toText();
+    return ip != "0.0.0.0" && !is_blocked_pool_ip(ip);
+}
+
+AdminState admin_state_for(const Pkt4Ptr& query) {
+    if (!query) {
+        return AdminState::UNBLOCKED;
+    }
+
+    HWAddrPtr hwaddr = query->getHWAddr();
+    if (!hwaddr || hwaddr->hwaddr_.empty()) {
+        return AdminState::UNBLOCKED;
+    }
+
+    ConstHostPtr host = HostMgr::instance().get4Any(SUBNET_ID_GLOBAL,
+                                                     Host::IDENT_HWADDR,
+                                                     &hwaddr->hwaddr_[0],
+                                                     hwaddr->hwaddr_.size());
+    if (host) {
+        return is_blocked_host(host) ? AdminState::BLOCKED : AdminState::UNBLOCKED;
+    }
+
+    const std::string mac_clean = hwaddr->toText(false);
+    const std::string central_status = query_central_for_mac(mac_clean);
+    if (central_status == "blocked") {
+        return AdminState::BLOCKED;
+    }
+    return AdminState::UNBLOCKED;
+}
+
+void apply_policy_actions(const Lease4Ptr& lease, bool admin_blocked) {
+    if (!lease || !lease->hwaddr_) {
+        return;
+    }
+
+    const std::string ip_address = lease->addr_.toText();
+    const std::string mac_address = lease->hwaddr_->toText(false);
+
+    if (admin_blocked) {
+        manage_dns_hijack_pools("hijack-blocked-pools");
+        manage_dns_hijack("hijack", ip_address);
+        manage_acl("block", ip_address, lease->subnet_id_);
+        manage_lease_event("expire", mac_address, ip_address,
+                           lease->subnet_id_, 0, false, true);
+    } else {
+        manage_dns_hijack("unhijack", ip_address);
+        manage_acl("unblock", ip_address, lease->subnet_id_);
+        manage_lease_event("expire", mac_address, ip_address,
+                           lease->subnet_id_, 0, true, false);
+    }
+}
+
+int pkt4_receive(CalloutHandle& handle) {
+    Pkt4Ptr query;
+    handle.getArgument("query4", query);
+
+    if (!query) {
+        return 0;
+    }
+
+    const uint8_t msg_type = query->getType();
+    if (msg_type != DHCPDISCOVER && msg_type != DHCPREQUEST) {
+        return 0;
+    }
+
+    const AdminState state = admin_state_for(query);
+    const IOAddress requested = requested_addr_from_ciaddr_or_option50(query);
+    const bool has_requested_addr = (requested.toText() != "0.0.0.0");
+    const bool client_requests_blocked_pool_ip =
+        has_requested_addr && is_in_blocked_pool(requested);
+    const bool client_requests_unblocked_pool_ip =
+        has_requested_addr && is_in_unblocked_pool(requested);
+
+    // Keep class assignment in sync with current admin state so pool selection
+    // on DHCPDISCOVER remains deterministic.
+    if (state == AdminState::BLOCKED) {
+        query->addClass("BLOCKED");
+    } else {
+        query->addClass("UNBLOCKED");
+    }
+
+    if (msg_type == DHCPDISCOVER) {
+        return 0;
+    }
+
+    if (state == AdminState::BLOCKED && client_requests_unblocked_pool_ip) {
+        handle.setContext("policy_skip_lease_change", true);
+        handle.setContext("policy_drop_reply", true);
+        handle.setContext("policy_force_nak", false);
+        handle.setContext("policy_state_blocked", true);
+    }
+
+    if (state == AdminState::UNBLOCKED && client_requests_blocked_pool_ip) {
+        handle.setContext("policy_skip_lease_change", true);
+        handle.setContext("policy_force_nak", true);
+        handle.setContext("policy_drop_reply", false);
+        handle.setContext("policy_state_blocked", false);
+    }
+
+    return 0;
+}
+
 // Synchronously query the portal DB to check whether a registered device's
 // assigned_vlan matches the VLAN subnet being allocated.
 // Returns true if there is a mismatch (device is on the wrong network segment
@@ -620,9 +768,25 @@ bool is_assigned_vlan_mismatch(const std::string& mac_colon, uint32_t lease_vlan
     }
 }
 
-
 int lease4_select(CalloutHandle& handle) {
     try {
+        bool fake_allocation = true;
+        handle.getArgument("fake_allocation", fake_allocation);
+
+        const bool skip_lease_change =
+            get_bool_context(handle, "policy_skip_lease_change");
+        const bool force_nak =
+            get_bool_context(handle, "policy_force_nak");
+
+        if (!fake_allocation && (skip_lease_change || force_nak)) {
+            Lease4Ptr policy_lease;
+            handle.getArgument("lease4", policy_lease);
+            apply_policy_actions(policy_lease,
+                                 get_bool_context(handle, "policy_state_blocked"));
+            handle.setStatus(CalloutHandle::NEXT_STEP_SKIP);
+            return 0;
+        }
+
         // Get the lease that was selected
         Lease4Ptr lease;
         handle.getArgument("lease4", lease);
@@ -819,6 +983,19 @@ int lease4_renew(CalloutHandle& handle) {
     std::cout.flush();
 
     try {
+        const bool skip_lease_change =
+            get_bool_context(handle, "policy_skip_lease_change");
+        const bool force_nak =
+            get_bool_context(handle, "policy_force_nak");
+        if (skip_lease_change || force_nak) {
+            Lease4Ptr policy_lease;
+            handle.getArgument("lease4", policy_lease);
+            apply_policy_actions(policy_lease,
+                                 get_bool_context(handle, "policy_state_blocked"));
+            handle.setStatus(CalloutHandle::NEXT_STEP_SKIP);
+            return 0;
+        }
+
         Lease4Ptr lease;
         handle.getArgument("lease4", lease);
 
@@ -905,7 +1082,11 @@ int lease4_renew(CalloutHandle& handle) {
                 manage_acl("block", ip_address, lease->subnet_id_);
                 manage_lease_event("expire", mac_address, ip_address,
                                    lease->subnet_id_, 0, false, true);
-                handle.setStatus(CalloutHandle::NEXT_STEP_DROP);
+                handle.setContext("policy_skip_lease_change", true);
+                handle.setContext("policy_drop_reply", true);
+                handle.setContext("policy_force_nak", false);
+                handle.setContext("policy_state_blocked", true);
+                handle.setStatus(CalloutHandle::NEXT_STEP_SKIP);
                 return 0;
             }
 
@@ -922,7 +1103,11 @@ int lease4_renew(CalloutHandle& handle) {
                 manage_acl("unblock", ip_address, lease->subnet_id_);
                 manage_lease_event("expire", mac_address, ip_address,
                                    lease->subnet_id_, 0, true, false);
-                handle.setStatus(CalloutHandle::NEXT_STEP_DROP);
+                handle.setContext("policy_skip_lease_change", true);
+                handle.setContext("policy_force_nak", true);
+                handle.setContext("policy_drop_reply", false);
+                handle.setContext("policy_state_blocked", false);
+                handle.setStatus(CalloutHandle::NEXT_STEP_SKIP);
                 return 0;
             }
 
@@ -1003,6 +1188,39 @@ int lease4_renew(CalloutHandle& handle) {
     }
 }
 
+int pkt4_send(CalloutHandle& handle) {
+    const bool force_nak =
+        get_bool_context(handle, "policy_force_nak");
+    const bool drop_reply =
+        get_bool_context(handle, "policy_drop_reply");
+
+    if (force_nak) {
+        Pkt4Ptr response;
+        handle.getArgument("response4", response);
+        if (!response) {
+            return 0;
+        }
+
+        response->setType(DHCPNAK);
+        response->setYiaddr(IOAddress("0.0.0.0"));
+
+        response->delOption(DHO_DHCP_LEASE_TIME);
+        response->delOption(DHO_DHCP_RENEWAL_TIME);
+        response->delOption(DHO_DHCP_REBINDING_TIME);
+        response->delOption(DHO_SUBNET_MASK);
+        response->delOption(DHO_ROUTERS);
+        response->delOption(DHO_DOMAIN_NAME_SERVERS);
+        return 0;
+    }
+
+    if (drop_reply) {
+        handle.setStatus(CalloutHandle::NEXT_STEP_DROP);
+        return 0;
+    }
+
+    return 0;
+}
+
 // Called when a lease expires (cleanup ACL for released IP)
 int lease4_expire(CalloutHandle& handle) {
     try {
@@ -1019,44 +1237,10 @@ int lease4_expire(CalloutHandle& handle) {
         if (hwaddr) {
             mac_address = hwaddr->toText(false);
         }
-        bool ip_is_blocked_pool = is_blocked_pool_ip(ip_address);
-
-        // Look up whether this device is currently admin-blocked.
-        bool admin_blocked = false;
-        if (hwaddr && !hwaddr->hwaddr_.empty()) {
-            ConstHostPtr host = HostMgr::instance().get4Any(
-                SUBNET_ID_GLOBAL, Host::IDENT_HWADDR,
-                &hwaddr->hwaddr_[0], hwaddr->hwaddr_.size());
-            if (!host) {
-                host = HostMgr::instance().get4Any(
-                    lease->subnet_id_, Host::IDENT_HWADDR,
-                    &hwaddr->hwaddr_[0], hwaddr->hwaddr_.size());
-            }
-            admin_blocked = is_blocked_host(host);
-        }
-
-        std::cout << "DNS Hijack Hook: Lease expired - IP: " << ip_address
-                  << " blocked_pool=" << ip_is_blocked_pool
-                  << " admin_blocked=" << admin_blocked << std::endl;
+        std::cout << "DNS Hijack Hook: Lease expired - removing ACL for IP: " << ip_address << std::endl;
         std::cout.flush();
 
-        // Skip ACL unblock for:
-        //   1. Blocked-pool IPs — they are covered by range rules (no per-IP
-        //      rule was ever added), so there is nothing to undo.
-        //   2. IPs belonging to currently admin-blocked devices — the per-IP
-        //      deny rule should remain active until the device re-DISCOVERs
-        //      and gets a blocked-pool IP via lease4_select.
-        if (!ip_is_blocked_pool && !admin_blocked) {
-            manage_acl("unblock", ip_address, lease->subnet_id_);
-        } else {
-            std::cout << "DNS Hijack Hook: Skipping ACL unblock for " << ip_address
-                      << " (ip_is_blocked_pool=" << ip_is_blocked_pool
-                      << " admin_blocked=" << admin_blocked << ")" << std::endl;
-            std::cout.flush();
-        }
-
-        // Always clean up DNS hijack rules — the device will get fresh ones on
-        // its next lease (in the blocked pool if it is admin-blocked).
+        manage_acl("unblock", ip_address, lease->subnet_id_);
         manage_dns_hijack("unhijack", ip_address);
         if (!mac_address.empty()) {
             manage_unregistered_lease("expire", mac_address, ip_address, 0);

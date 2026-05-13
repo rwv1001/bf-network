@@ -97,4 +97,5 @@ sessions/
 
 kea-compare/
 shared/
+captive-portal/acl-queue/
 pihole/etc-pihole/hosts/custom.list

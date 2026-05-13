@@ -375,7 +375,11 @@ def _send_event(event_type: str, payload: dict):
     try:
         resp = requests.post(
             f"{_api_url()}/api/v1/event",
-            json={"event_type": event_type, "data": payload},
+            json={
+                "event_type": event_type,
+                "source_site_id": os.getenv("CENTRAL_SITE_ID", ""),
+                "data": payload,
+            },
             headers=_headers(),
             timeout=_TIMEOUT,
         )
@@ -514,20 +518,20 @@ def _apply_inbound(event_type: str, data: dict) -> None:
 
     logger.info("central inbound: %s %s", event_type, data)
 
-    if event_type == "block_device":
+    if event_type in ("block_device", "device_blocked"):
         mac = data.get("mac_address", "").lower()
         device = Device.query.filter_by(mac_address=mac).first()
         if device:
-            apply_device_block(device, flash_messages=False)
+            apply_device_block(device, flash_messages=False, notify_central=False)
             logger.info("central: blocked device %s", mac)
         else:
             logger.warning("central block_device: MAC %s not found locally", mac)
 
-    elif event_type == "unblock_device":
+    elif event_type in ("unblock_device", "device_unblocked"):
         mac = data.get("mac_address", "").lower()
         device = Device.query.filter_by(mac_address=mac).first()
         if device:
-            apply_device_unblock(device, flash_messages=False)
+            apply_device_unblock(device, flash_messages=False, notify_central=False)
             logger.info("central: unblocked device %s", mac)
 
     elif event_type == "block_user":
@@ -541,7 +545,7 @@ def _apply_inbound(event_type: str, data: dict) -> None:
                 DeviceOwnership.query.filter_by(user_id=user.id, end_datetime=None).all()
             ]
             for device in Device.query.filter(Device.mac_address.in_(active_macs)).all():
-                apply_device_block(device, flash_messages=False)
+                apply_device_block(device, flash_messages=False, notify_central=False)
             logger.info("central: blocked user %s", email)
         else:
             logger.warning("central block_user: email %s not found locally", email)

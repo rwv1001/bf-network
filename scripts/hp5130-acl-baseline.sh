@@ -1,5 +1,7 @@
-#!/bin/sh
+#!/bin/bash
 set -eu
+
+log() { echo "[acl-baseline] $*" >&2; }
 
 SWITCH_HOST="$(printf '%s' "${SWITCH_HOSTS:-}" | awk '{print $1}')"
 [ -n "$SWITCH_HOST" ] || { echo "SWITCH_HOSTS required" >&2; exit 1; }
@@ -211,7 +213,15 @@ quit
 # The isolation ACLs (3x01) are outbound-only and will be rebuilt by the
 # _push_vlan_isolation_acls() call in app.py after this script exits.
 
-printf "%s" "$CMDS" | ssh -tt $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}"
+log "--- Phase 1: ACL ${ACL_UDM} / ${ACL_TEL} rebuild + ACL 3099 ---"
+log "BLOCK_RULES:"
+printf '%s\n' "${BLOCK_RULES:-<empty>}" >&2
+log "Full command block:"
+printf '%s\n' "$CMDS" >&2
+log "Sending to switch ${SWITCH_HOST}..."
+SWITCH_OUT=$(printf "%s" "$CMDS" | ssh -tt $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}" 2>&1 || true)
+log "Switch output:"
+printf '%s\n' "$SWITCH_OUT" >&2
 
 build_acl_commands() {
   VLAN_ID="$1"
@@ -239,4 +249,11 @@ quit
 quit
 "
 
-printf "%s" "$CMDS" | ssh -tt $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}"
+log "--- Phase 2: Remove legacy per-VLAN ACLs ---"
+log "Full command block:"
+printf '%s\n' "$CMDS" >&2
+log "Sending to switch ${SWITCH_HOST}..."
+SWITCH_OUT=$(printf "%s" "$CMDS" | ssh -tt $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}" 2>&1 || true)
+log "Switch output:"
+printf '%s\n' "$SWITCH_OUT" >&2
+log "Done."

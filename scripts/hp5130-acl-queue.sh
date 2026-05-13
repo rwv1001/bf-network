@@ -168,96 +168,37 @@ process_queue() {
   # Deduplicate: last action per IP wins, preserve last-seen order
   awk -F'|' 'NF>=3 {action=$2; ip=$3; if (ip!="") {last[ip]=action; order[++n]=ip}} END {for (i=1;i<=n;i++){ip=order[i]; if(!seen[ip]++){print last[ip] "|" ip}}}' "$tmp" > "$dedup"
 
-  for vlan in 10 20 30 40 50 60 70 80 90 99; do
-    : > "/tmp/hp5130-acl.${vlan}.$$"
-  done
-
+  fail=0
   while IFS='|' read -r action ip; do
     [ -z "$action" ] && continue
     [ -z "$ip" ] && continue
-    map_out=""
-    if [ -n "$PYTHON_BIN" ] && [ -f "$KEA_CONFIG_PATH" ]; then
-    map_out=$($PYTHON_BIN - <<'PY' "$KEA_CONFIG_PATH" "$ip"
-import ipaddress
-import json
-import sys
-
-config_path = sys.argv[1]
-ip_str = sys.argv[2]
-
-with open(config_path, 'r', encoding='utf-8') as handle:
-    data = json.load(handle)
-
-ip = ipaddress.ip_address(ip_str)
-
-for entry in data.get('Dhcp4', {}).get('subnet4', []):
-    try:
-        vlan_id = int(entry.get('id'))
-    except Exception:
-        continue
-    network = ipaddress.ip_network(entry.get('subnet'), strict=False)
-    if ip in network:
-        offset = int(ip) - int(network.network_address)
-        print(f"VLAN_ID={vlan_id}")
-        print(f"OFFSET={offset}")
-        break
-PY
-    )
-      fi
-    vlan=$(printf '%s\n' "$map_out" | awk -F= '/^VLAN_ID=/{print $2}')
-    host=$(printf '%s\n' "$map_out" | awk -F= '/^OFFSET=/{print $2}')
-    if [ -z "$vlan" ] || [ -z "$host" ]; then
-      vlan=$(echo "$ip" | awk -F. '{print $3}')
-      host=$(echo "$ip" | awk -F. '{print $4}')
-    fi
-    [ -z "$vlan" ] && continue
-    [ -z "$host" ] && continue
-    echo "$action|$ip|$host" >> "/tmp/hp5130-acl.${vlan}.$$"
-  done < "$dedup"
-
-  fail=0
-  for vlan in 10 20 30 40 50 60 70 80 90 99; do
-    vlan_file="/tmp/hp5130-acl.${vlan}.$$"
-    [ -s "$vlan_file" ] || continue
-    acl=$((3000 + vlan * 10))
-
     apply_start=$(date +%s)
-    log "BATCH_START phase=apply_save vlan=$vlan acl=$acl host=$SWITCH_HOST"
-    cmd_file="/tmp/hp5130-acl.cmd.${vlan}.$$"
-    {
-      echo "system-view"
-      echo "acl advanced $acl"
-      while IFS='|' read -r action ip host; do
-        rule=$((RULE_BASE + host))
-        if [ "$action" = "block" ]; then
-          echo "rule $rule deny ip source $ip 0"
-        else
-          echo "undo rule $rule"
-        fi
-      done < "$vlan_file"
-      echo "quit"
-      echo "quit"
-      echo "quit"
-      echo "save force"
-      echo "quit"
-    } > "$cmd_file"
-    run_ssh_cmdfile "apply_save" "$cmd_file"
+    log "DISPATCH action=$action ip=$ip host=$SWITCH_HOST"
+    set +e
+    SWITCH_HOSTS="$SWITCH_HOST" \
+    SWITCH_USER="$SWITCH_USER" \
+    SWITCH_SSH_PORT="$SWITCH_SSH_PORT" \
+    SWITCH_KEY_PATH="$SWITCH_KEY_PATH" \
+    KEA_CONFIG_PATH="$KEA_CONFIG_PATH" \
+    PYTHON_BIN="$PYTHON_BIN" \
+    ACL_QUEUE_DIR="$QUEUE_BASE" \
+    ACL_QUEUE_DISABLE=1 \
+      "$SCRIPT_DIR/hp5130-acl.sh" "$action" "$ip"
     apply_status=$?
+    set -e
     apply_end=$(date +%s)
-    apply_duration=$((apply_end - apply_start))
-    log "BATCH_END phase=apply_save vlan=$vlan status=$apply_status duration_sec=$apply_duration"
-
+    log "DISPATCH_END action=$action ip=$ip status=$apply_status duration_sec=$((apply_end - apply_start))"
     if [ "$apply_status" -ne 0 ]; then
       fail=1
     fi
-  done
+  done < "$dedup"
 
   if [ "$fail" -ne 0 ]; then
     cat "$tmp" >> "$QUEUE_FILE"
     log "BATCH_REQUEUE reason=ssh_failure"
   fi
 
-  rm -f "$tmp" "$dedup" /tmp/hp5130-acl.*.$$ /tmp/hp5130-acl.cmd.*.$$ 2>/dev/null || true
+  rm -f "$tmp" "$dedup" 2>/dev/null || true
   return 0
 }
 

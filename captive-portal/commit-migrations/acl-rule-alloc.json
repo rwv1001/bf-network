@@ -1,0 +1,14 @@
+{
+  "description": "Create acl_rule_allocations table. Replaces the arithmetic formula (VLAN_ID * 150 + HOST_OFFSET) used by hp5130-acl.sh to assign per-IP deny rule numbers in ACLs 3951 and 3953. The table maps each blocked IP address to a unique rule number in the range 1–19999 (below the blanket blocked-pool rules that start at 20000). Rule numbers are allocated on demand (lowest available) and freed when the block is removed, preventing collisions regardless of VLAN numbering.",
+  "db": {
+    "up":   "commit-migrations/acl-rule-alloc-up.sh",
+    "down": "commit-migrations/acl-rule-alloc-down.sh",
+    "verify_up": [
+      {"type": "table", "name": "acl_rule_allocations"}
+    ],
+    "verify_down": [
+      {"type": "table_absent", "name": "acl_rule_allocations"}
+    ]
+  },
+  "notes": "hp5130-acl.sh falls back to the old formula if DATABASE_URL is unset, so the migration is non-breaking. After applying, any pre-existing manual block rules on the switch will retain their old rule numbers until removed and re-applied."
+}

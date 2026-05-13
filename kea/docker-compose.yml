@@ -14,9 +14,10 @@ services:
       - ./leases:/kea/leases
       - ./sockets:/kea/sockets
       - ../scripts:/scripts:ro
-      - ../shared/acl-queue:/acl-queue
+      - ../captive-portal/acl-queue:/acl-queue
       - /home/admin/.ssh:/keys:ro
       - /home/admin/bf-network/kea/logs:/kea/logs
+      - /etc/localtime:/etc/localtime:ro
     environment:
       PORTAL_IP: ${PORTAL_IP:?PORTAL_IP is required – set it in kea/.env}
       PORTAL_URL: ${PORTAL_URL:-}
@@ -43,6 +44,7 @@ services:
       DB_NAME: ${DB_NAME:-captive_portal}
       DB_USER: ${DB_USER:-portal_user}
       DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required – set it in kea/.env}
+      DATABASE_URL: postgresql://${DB_USER:-portal_user}:${DB_PASSWORD}@${DB_HOST:-127.0.0.1}:${DB_PORT:-5432}/${DB_NAME:-captive_portal}
       CENTRAL_API_URL: ${CENTRAL_API_URL:-}
       CENTRAL_API_KEY: ${CENTRAL_API_KEY:-}
       CENTRAL_SITE_ID: ${CENTRAL_SITE_ID:-}
@@ -76,6 +78,20 @@ services:
       chmod 2775 /acl-queue || true
       chmod 755 /kea/leases || true
       umask 0002
+      # Ensure the ACL rule-number allocation table exists.
+      # This is idempotent — safe to run on every restart and means the system
+      # works even if the commit-migration was never manually applied.
+      psql "$DATABASE_URL" -c "
+        CREATE TABLE IF NOT EXISTS acl_rule_allocations (
+          ip_address   TEXT        NOT NULL PRIMARY KEY,
+          rule_num     INTEGER     NOT NULL,
+          allocated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CONSTRAINT acl_rule_allocations_rule_num_unique UNIQUE (rule_num),
+          CONSTRAINT acl_rule_allocations_rule_num_range  CHECK (rule_num BETWEEN 1 AND 19999)
+        );
+        CREATE INDEX IF NOT EXISTS idx_acl_rule_allocations_rule_num
+          ON acl_rule_allocations (rule_num);
+      " >&2 2>&1 || true
       # Restore DNS hijack iptables rules from previous session and re-apply
       # switch ACL blocks for any pending devices already in the DB.
       # This ensures hijacking survives Kea restarts and host reboots.

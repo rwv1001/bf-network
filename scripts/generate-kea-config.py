@@ -242,9 +242,9 @@ def main():
                 "max-reclaim-time": 250,
                 "unwarned-reclaim-cycles": 5,
             },
-            "renew-timer": 150,
-            "rebind-timer": 240,
-            "valid-lifetime": 300,
+            "renew-timer": 300,
+            "rebind-timer": 480,
+            "valid-lifetime": 600,
             "option-data": [
                 {"name": "domain-name",         "data": "blackfriars.local"},
                 {"name": "domain-name-servers",  "data": portal_ip},
