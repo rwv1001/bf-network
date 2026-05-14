@@ -16,6 +16,7 @@ KEA_CONFIG_PATH="${KEA_CONFIG_PATH:-}"
 PYTHON_BIN="${PYTHON_BIN:-}"
 BLOCK_RULE_BASE="${ACL_BLOCK_RULE_BASE:-20000}"
 PERMIT_RULE_NUM="${ACL_PERMIT_RULE_NUM:-30000}"
+NET="${NETWORK_WORD:-192.168}"
 
 # ACLs applied outbound on Vlan-interface1 (UDM) and Vlan-interface2 (TEL)
 ACL_UDM="${ACL_UDM:-3951}"
@@ -81,8 +82,8 @@ fi
 if [ -z "$BLOCK_RULES" ]; then
   RULE_NUM="$BLOCK_RULE_BASE"
   for VLAN_ID in $VLAN_LIST; do
-    BLOCK_RULES="${BLOCK_RULES}rule ${RULE_NUM} deny ip source 192.168.${VLAN_ID}.216 0.0.0.7
-rule $((RULE_NUM + 10)) deny ip source 192.168.${VLAN_ID}.224 0.0.0.31
+    BLOCK_RULES="${BLOCK_RULES}rule ${RULE_NUM} deny ip source ${NET}.${VLAN_ID}.216 0.0.0.7
+rule $((RULE_NUM + 10)) deny ip source ${NET}.${VLAN_ID}.224 0.0.0.31
 "
     RULE_NUM=$((RULE_NUM + 20))
   done
@@ -94,16 +95,16 @@ fi
 DOT_DOH_RULES=""
 RULE_NUM=20
 for IP in $DOH_DOT_IPS; do
-  DOT_DOH_RULES="${DOT_DOH_RULES}rule ${RULE_NUM} deny tcp source 192.168.0.0 0.0.255.255 destination ${IP} 0 destination-port eq 443
+  DOT_DOH_RULES="${DOT_DOH_RULES}rule ${RULE_NUM} deny tcp source ${NET}.0.0 0.0.255.255 destination ${IP} 0 destination-port eq 443
 "
   RULE_NUM=$((RULE_NUM + 1))
 done
 RULE_NUM=30
 for IP in $DOH_DOT_IPS; do
-  DOT_DOH_RULES="${DOT_DOH_RULES}rule ${RULE_NUM} deny tcp source 192.168.0.0 0.0.255.255 destination ${IP} 0 destination-port eq 853
+  DOT_DOH_RULES="${DOT_DOH_RULES}rule ${RULE_NUM} deny tcp source ${NET}.0.0 0.0.255.255 destination ${IP} 0 destination-port eq 853
 "
   RULE_NUM=$((RULE_NUM + 1))
-  DOT_DOH_RULES="${DOT_DOH_RULES}rule ${RULE_NUM} deny udp source 192.168.0.0 0.0.255.255 destination ${IP} 0 destination-port eq 853
+  DOT_DOH_RULES="${DOT_DOH_RULES}rule ${RULE_NUM} deny udp source ${NET}.0.0 0.0.255.255 destination ${IP} 0 destination-port eq 853
 "
   RULE_NUM=$((RULE_NUM + 1))
 done
@@ -115,21 +116,21 @@ done
 TEL_DOT_DOH_RULES=""
 RULE_NUM=100
 for IP in $DOH_DOT_IPS; do
-  TEL_DOT_DOH_RULES="${TEL_DOT_DOH_RULES}rule ${RULE_NUM} deny tcp source 192.168.0.0 0.0.255.255 destination ${IP} 0 destination-port eq 443
+  TEL_DOT_DOH_RULES="${TEL_DOT_DOH_RULES}rule ${RULE_NUM} deny tcp source ${NET}.0.0 0.0.255.255 destination ${IP} 0 destination-port eq 443
 "
   RULE_NUM=$((RULE_NUM + 1))
 done
 RULE_NUM=110
 for IP in $DOH_DOT_IPS; do
-  TEL_DOT_DOH_RULES="${TEL_DOT_DOH_RULES}rule ${RULE_NUM} deny tcp source 192.168.0.0 0.0.255.255 destination ${IP} 0 destination-port eq 853
+  TEL_DOT_DOH_RULES="${TEL_DOT_DOH_RULES}rule ${RULE_NUM} deny tcp source ${NET}.0.0 0.0.255.255 destination ${IP} 0 destination-port eq 853
 "
   RULE_NUM=$((RULE_NUM + 1))
-  TEL_DOT_DOH_RULES="${TEL_DOT_DOH_RULES}rule ${RULE_NUM} deny udp source 192.168.0.0 0.0.255.255 destination ${IP} 0 destination-port eq 853
+  TEL_DOT_DOH_RULES="${TEL_DOT_DOH_RULES}rule ${RULE_NUM} deny udp source ${NET}.0.0 0.0.255.255 destination ${IP} 0 destination-port eq 853
 "
   RULE_NUM=$((RULE_NUM + 1))
 done
 
-MGMT_IP_SECONDARY="${MGMT_IP_SECONDARY:-192.168.99.5}"
+MGMT_IP_SECONDARY="${MGMT_IP_SECONDARY:-${NET}.99.5}"
 
 CMDS="system-view
 undo acl advanced ${ACL_UDM}
@@ -143,42 +144,42 @@ undo acl advanced ${ACL_TEL}
 acl advanced ${ACL_TEL}
  description \"TEL Uplink Outbound - Force PiHole + Block DoH/DoT + Block Foreign VLANs\"
  rule 5 permit ip source ${PORTAL_IP} 0
- rule 10 deny ip source 192.168.8.0 0.0.3.255
- rule 20 deny ip source 192.168.20.0 0.0.0.255
- rule 30 deny ip source 192.168.30.0 0.0.0.255
- rule 40 deny ip source 192.168.48.0 0.0.3.255
- rule 50 deny ip source 192.168.68.0 0.0.3.255
+ rule 10 deny ip source ${NET}.8.0 0.0.3.255
+ rule 20 deny ip source ${NET}.20.0 0.0.0.255
+ rule 30 deny ip source ${NET}.30.0 0.0.0.255
+ rule 40 deny ip source ${NET}.48.0 0.0.3.255
+ rule 50 deny ip source ${NET}.68.0 0.0.3.255
 ${TEL_DOT_DOH_RULES}${BLOCK_RULES}
  rule ${PERMIT_RULE_NUM} permit ip
 quit
 undo acl advanced 3098
 undo acl number 3099
 acl number 3099 name VLAN99_EGRESS
- rule 10 permit tcp source 192.168.0.0 0.0.255.255 destination ${PORTAL_IP} 0 destination-port eq 22
- rule 11 permit tcp source 192.168.0.0 0.0.255.255 destination ${MGMT_IP_SECONDARY} 0 destination-port eq 22
- rule 12 permit tcp source 192.168.0.0 0.0.255.255 destination ${PORTAL_IP} 0 destination-port gt 1023
- rule 20 permit udp source 192.168.0.0 0.0.255.255 destination ${PORTAL_IP} 0 destination-port eq dns
- rule 21 permit tcp source 192.168.0.0 0.0.255.255 destination ${PORTAL_IP} 0 destination-port eq dns
- rule 22 permit udp source 192.168.0.0 0.0.255.255 destination ${MGMT_IP_SECONDARY} 0 destination-port eq dns
- rule 23 permit tcp source 192.168.0.0 0.0.255.255 destination ${MGMT_IP_SECONDARY} 0 destination-port eq dns
- rule 30 permit tcp source 192.168.0.0 0.0.255.255 destination ${PORTAL_IP} 0 destination-port eq www
- rule 31 permit tcp source 192.168.0.0 0.0.255.255 destination ${PORTAL_IP} 0 destination-port eq 443
- rule 32 permit tcp source 192.168.0.0 0.0.255.255 destination ${PORTAL_IP} 0 destination-port eq 8080
- rule 33 permit tcp source 192.168.0.0 0.0.255.255 destination ${MGMT_IP_SECONDARY} 0 destination-port eq www
- rule 34 permit tcp source 192.168.0.0 0.0.255.255 destination ${MGMT_IP_SECONDARY} 0 destination-port eq 443
- rule 35 permit tcp source 192.168.0.0 0.0.255.255 destination ${MGMT_IP_SECONDARY} 0 destination-port eq 8080
- rule 36 permit tcp source 192.168.0.0 0.0.255.255 destination ${PORTAL_IP} 0 destination-port eq 81
- rule 40 permit udp source 192.168.0.0 0.0.255.255 destination ${PORTAL_IP} 0 destination-port eq 1812
- rule 41 permit icmp source 192.168.0.0 0.0.255.255 destination ${MGMT_IP_SECONDARY} 0
- rule 42 permit udp source 192.168.0.0 0.0.255.255 destination ${PORTAL_IP} 0 destination-port eq 3799
- rule 43 permit udp source 192.168.0.0 0.0.255.255 destination ${PORTAL_IP} 0 destination-port eq 1813
- rule 50 permit icmp source 192.168.0.0 0.0.255.255 destination ${PORTAL_IP} 0
- rule 51 permit udp source 192.168.0.0 0.0.255.255 destination ${MGMT_IP_SECONDARY} 0 destination-port eq ntp
- rule 55 permit udp source 192.168.0.0 0.0.255.255 destination ${PORTAL_IP} 0 destination-port eq ntp
+ rule 10 permit tcp source ${NET}.0.0 0.0.255.255 destination ${PORTAL_IP} 0 destination-port eq 22
+ rule 11 permit tcp source ${NET}.0.0 0.0.255.255 destination ${MGMT_IP_SECONDARY} 0 destination-port eq 22
+ rule 12 permit tcp source ${NET}.0.0 0.0.255.255 destination ${PORTAL_IP} 0 destination-port gt 1023
+ rule 20 permit udp source ${NET}.0.0 0.0.255.255 destination ${PORTAL_IP} 0 destination-port eq dns
+ rule 21 permit tcp source ${NET}.0.0 0.0.255.255 destination ${PORTAL_IP} 0 destination-port eq dns
+ rule 22 permit udp source ${NET}.0.0 0.0.255.255 destination ${MGMT_IP_SECONDARY} 0 destination-port eq dns
+ rule 23 permit tcp source ${NET}.0.0 0.0.255.255 destination ${MGMT_IP_SECONDARY} 0 destination-port eq dns
+ rule 30 permit tcp source ${NET}.0.0 0.0.255.255 destination ${PORTAL_IP} 0 destination-port eq www
+ rule 31 permit tcp source ${NET}.0.0 0.0.255.255 destination ${PORTAL_IP} 0 destination-port eq 443
+ rule 32 permit tcp source ${NET}.0.0 0.0.255.255 destination ${PORTAL_IP} 0 destination-port eq 8080
+ rule 33 permit tcp source ${NET}.0.0 0.0.255.255 destination ${MGMT_IP_SECONDARY} 0 destination-port eq www
+ rule 34 permit tcp source ${NET}.0.0 0.0.255.255 destination ${MGMT_IP_SECONDARY} 0 destination-port eq 443
+ rule 35 permit tcp source ${NET}.0.0 0.0.255.255 destination ${MGMT_IP_SECONDARY} 0 destination-port eq 8080
+ rule 36 permit tcp source ${NET}.0.0 0.0.255.255 destination ${PORTAL_IP} 0 destination-port eq 81
+ rule 40 permit udp source ${NET}.0.0 0.0.255.255 destination ${PORTAL_IP} 0 destination-port eq 1812
+ rule 41 permit icmp source ${NET}.0.0 0.0.255.255 destination ${MGMT_IP_SECONDARY} 0
+ rule 42 permit udp source ${NET}.0.0 0.0.255.255 destination ${PORTAL_IP} 0 destination-port eq 3799
+ rule 43 permit udp source ${NET}.0.0 0.0.255.255 destination ${PORTAL_IP} 0 destination-port eq 1813
+ rule 50 permit icmp source ${NET}.0.0 0.0.255.255 destination ${PORTAL_IP} 0
+ rule 51 permit udp source ${NET}.0.0 0.0.255.255 destination ${MGMT_IP_SECONDARY} 0 destination-port eq ntp
+ rule 55 permit udp source ${NET}.0.0 0.0.255.255 destination ${PORTAL_IP} 0 destination-port eq ntp
  rule 56 permit icmp destination ${PORTAL_IP} 0
  rule 62 permit tcp source ${PORTAL_IP} 0 destination-port eq 443
- rule 65 permit udp source 192.168.1.1 0 destination ${PORTAL_IP} 0 destination-port eq syslog
- rule 66 permit tcp source 192.168.1.1 0 destination ${PORTAL_IP} 0 destination-port eq cmd
+ rule 65 permit udp source ${NET}.1.1 0 destination ${PORTAL_IP} 0 destination-port eq syslog
+ rule 66 permit tcp source ${NET}.1.1 0 destination ${PORTAL_IP} 0 destination-port eq cmd
  rule 71 permit tcp source 8.8.8.8 0 destination ${PORTAL_IP} 0 source-port eq 443 established
  rule 74 permit tcp destination ${PORTAL_IP} 0 source-port eq www established
  rule 75 permit tcp destination ${PORTAL_IP} 0 source-port eq 8080 established

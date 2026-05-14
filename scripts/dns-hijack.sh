@@ -8,6 +8,7 @@ IP_ADDRESS="$2"
 # Required environment variables – fail loudly if not set
 PORTAL_IP="${PORTAL_IP:?PORTAL_IP environment variable is required (Pi VLAN-99 IP, e.g. 192.168.99.4)}"
 HIJACK_DNS_IP="${HIJACK_DNS_IP:?HIJACK_DNS_IP environment variable is required (dnsmasq hijack alias, e.g. 192.168.99.5)}"
+NET="${NETWORK_WORD:-192.168}"
 
 # Use sudo if not running as root
 if [ "$(id -u)" -ne 0 ]; then
@@ -118,7 +119,7 @@ add_blocked_pool_rules() {
 
     VLANS="10 20 30 40 50 60 70 80 90"
     for VLAN in $VLANS; do
-        RANGE="192.168.$VLAN.214-192.168.$VLAN.254"
+        RANGE="${NET}.$VLAN.214-${NET}.$VLAN.254"
         $SUDO iptables -t nat -C PREROUTING -m iprange --src-range "$RANGE" -p udp --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null
         if [ $? -ne 0 ]; then
             $SUDO iptables -t nat -A PREROUTING -m iprange --src-range "$RANGE" -p udp --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53
@@ -153,7 +154,7 @@ remove_blocked_pool_rules() {
 
     VLANS="10 20 30 40 50 60 70 80 90"
     for VLAN in $VLANS; do
-        RANGE="192.168.$VLAN.214-192.168.$VLAN.254"
+        RANGE="${NET}.$VLAN.214-${NET}.$VLAN.254"
         $SUDO iptables -t nat -D PREROUTING -m iprange --src-range "$RANGE" -p udp --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null
         if [ $? -eq 0 ]; then
             echo "DNS hijack removed for $RANGE (UDP)"

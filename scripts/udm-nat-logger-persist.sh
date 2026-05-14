@@ -17,11 +17,11 @@ cat > /mnt/data/nat_logger.sh << 'NATEOF'
 # NAT Logger for UDM Pro - Logs only user VLANs (192.168.2-67, 69-95) with timestamp + local_src + dst
 
 SYSLOG_TAG="NAT-Logger"
-REMOTE_SYSLOG="192.168.99.4"
+REMOTE_SYSLOG="__PORTAL_IP__"
 
 # User VLAN range (2-67, 69-95) - excludes VLAN 1 (mgmt) and VLAN 68 (Teltonika)
-USER_VLAN_MIN="192.168.2.0"
-USER_VLAN_MAX="192.168.95.255"
+USER_VLAN_MIN="__USER_VLAN_MIN__"
+USER_VLAN_MAX="__USER_VLAN_MAX__"
 
 # Log startup - send to both local and remote syslog
 logger -t "$SYSLOG_TAG" "NAT Logger starting - logging to $REMOTE_SYSLOG"
@@ -54,9 +54,9 @@ NATEOF
 
 # Substitute site-specific values from environment
 sed -i \
-    -e "s|REMOTE_SYSLOG=\"192.168.99.4\"|REMOTE_SYSLOG=\"${PORTAL_IP}\"|" \
-    -e "s|USER_VLAN_MIN=\"192.168.2.0\"|USER_VLAN_MIN=\"${USER_VLAN_MIN}\"|" \
-    -e "s|USER_VLAN_MAX=\"192.168.95.255\"|USER_VLAN_MAX=\"${USER_VLAN_MAX}\"|" \
+    -e "s|__PORTAL_IP__|${PORTAL_IP}|" \
+    -e "s|__USER_VLAN_MIN__|${USER_VLAN_MIN}|" \
+    -e "s|__USER_VLAN_MAX__|${USER_VLAN_MAX}|" \
     /mnt/data/nat_logger.sh
 
 chmod +x /mnt/data/nat_logger.sh

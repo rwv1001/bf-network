@@ -12,6 +12,7 @@ SWITCH_KEY_PATH="${SWITCH_KEY_PATH:-/home/admin/.ssh/id_rsa}"
 VLAN_LIST="${VLAN_LIST:-}"
 KEA_CONFIG_PATH="${KEA_CONFIG_PATH:-}"
 PYTHON_BIN="${PYTHON_BIN:-}"
+NETWORK_WORD="${NETWORK_WORD:-192.168}"
 
 if [ -z "$VLAN_LIST" ]; then
   echo "No VLAN_LIST provided for interface update" >&2
@@ -44,13 +45,14 @@ SSH_OPTS="-i $SWITCH_KEY_PATH -p $SWITCH_SSH_PORT -o HostKeyAlgorithms=+ssh-rsa 
 
 build_interface_commands() {
   VLAN_ID="$1"
-  PY_OUT=$($PYTHON_BIN - <<'PY' "$KEA_CONFIG_PATH" "$VLAN_ID"
+  PY_OUT=$($PYTHON_BIN - <<'PY' "$KEA_CONFIG_PATH" "$VLAN_ID" "$NETWORK_WORD"
 import json
 import ipaddress
 import sys
 
 config_path = sys.argv[1]
 vlan_id = int(sys.argv[2])
+network_word = sys.argv[3]
 
 with open(config_path, 'r', encoding='utf-8') as handle:
   data = json.load(handle)
@@ -76,7 +78,7 @@ for option in subnet.get('option-data', []):
     break
 
 if not router_ip:
-  router_ip = f"192.168.{vlan_id}.1"
+  router_ip = f"{network_word}.{vlan_id}.1"
 
 print(f"ROUTER_IP={router_ip}")
 print(f"NETMASK={network.netmask}")

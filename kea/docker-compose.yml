@@ -81,7 +81,7 @@ services:
       # Ensure the ACL rule-number allocation table exists.
       # This is idempotent — safe to run on every restart and means the system
       # works even if the commit-migration was never manually applied.
-      psql "$DATABASE_URL" -c "
+      psql "$$DATABASE_URL" -c "
         CREATE TABLE IF NOT EXISTS acl_rule_allocations (
           ip_address   TEXT        NOT NULL PRIMARY KEY,
           rule_num     INTEGER     NOT NULL,

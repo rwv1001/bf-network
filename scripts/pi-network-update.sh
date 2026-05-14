@@ -5,6 +5,7 @@ VLAN_LIST="${VLAN_LIST:-}"
 KEA_CONFIG_PATH="${KEA_CONFIG_PATH:-}"
 PYTHON_BIN="${PYTHON_BIN:-}"
 NETWORK_DIR="${NETWORK_DIR:-/etc/systemd/network}"
+NETWORK_WORD="${NETWORK_WORD:-192.168}"
 
 if [ -z "$VLAN_LIST" ]; then
   echo "No VLAN_LIST provided for Pi network update" >&2
@@ -84,13 +85,14 @@ PY
 
 lookup_address() {
   VLAN_ID="$1"
-  $PYTHON_BIN - <<'PY' "$KEA_CONFIG_PATH" "$VLAN_ID"
+  $PYTHON_BIN - <<'PY' "$KEA_CONFIG_PATH" "$VLAN_ID" "$NETWORK_WORD"
 import json
 import ipaddress
 import sys
 
 config_path = sys.argv[1]
 vlan_id = int(sys.argv[2])
+network_word = sys.argv[3]
 
 with open(config_path, 'r', encoding='utf-8') as handle:
   data = json.load(handle)
@@ -109,7 +111,7 @@ if not subnet:
   sys.exit(1)
 
 network = ipaddress.ip_network(subnet['subnet'], strict=False)
-preferred = ipaddress.IPv4Address(f"192.168.{vlan_id}.4")
+preferred = ipaddress.IPv4Address(f"{network_word}.{vlan_id}.4")
 if preferred in network:
   address = preferred
 else:

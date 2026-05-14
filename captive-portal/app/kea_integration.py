@@ -509,6 +509,28 @@ class KeaIntegration:
                 if not keep_ip:
                     reservation.pop("ip-address", None)
 
+                # Clean up any global (subnet_id=0) BLOCKED reservation that
+                # central_import.py may have inserted directly into PostgreSQL.
+                # Older imports used subnet_id=0; newer ones use the device's
+                # actual subnet_id.  Delete both to be safe.
+                try:
+                    for gid in (0, subnet_id):
+                        if gid == subnet_id and existing:
+                            # The subnet-specific one is handled by del_cmd below.
+                            continue
+                        del_global = {
+                            "command": "reservation-del",
+                            "service": ["dhcp4"],
+                            "arguments": {
+                                "subnet-id": gid,
+                                "identifier-type": "hw-address",
+                                "identifier": mac,
+                            },
+                        }
+                        self._send_command(del_global)  # ignore result/errors
+                except Exception as _e:
+                    logger.debug(f"Global reservation cleanup for {mac}: {_e}")
+
             if existing:
                 del_cmd = {
                     "command": "reservation-del",

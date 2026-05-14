@@ -42,7 +42,12 @@ def _dbg(*parts):
 # ── args ──────────────────────────────────────────────────────────────────────
 
 MAC = sys.argv[1].lower().strip() if len(sys.argv) > 1 else ""
-_dbg("=== central_import.py called MAC=%r" % MAC)
+# subnet_id passed by the hook (lease->subnet_id_); use it for the Kea host
+# reservation so the admin unblock can find and update it via the normal
+# reservation-del / reservation-add path.  Default 0 (global) for callers
+# that don't pass it, but the hook always does.
+SUBNET_ID = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+_dbg("=== central_import.py called MAC=%r SUBNET_ID=%d" % (MAC, SUBNET_ID))
 if not MAC:
     _dbg("ERROR: no MAC argument")
     print("error")
@@ -263,7 +268,7 @@ client_class = "BLOCKED" if device_blocked else "REGISTERED"
 
 # MAC as raw hex bytes (binary) — Kea stores it as bytea
 mac_hex = MAC.replace(":", "")
-_dbg(f"INSERT hosts: mac_hex={mac_hex!r} client_class={client_class!r} dhcp4_subnet_id=0")
+_dbg(f"INSERT hosts: mac_hex={mac_hex!r} client_class={client_class!r} dhcp4_subnet_id={SUBNET_ID}")
 
 psql(f"""
 INSERT INTO hosts (
@@ -275,7 +280,7 @@ INSERT INTO hosts (
 VALUES (
     decode('{mac_hex}', 'hex'),
     0,
-    0,
+    {SUBNET_ID},
     '{client_class}'
 )
 ON CONFLICT (dhcp_identifier, dhcp_identifier_type, dhcp4_subnet_id)

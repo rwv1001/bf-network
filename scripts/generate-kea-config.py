@@ -99,19 +99,23 @@ def make_vlan_subnet(network_word: str, vlan: int, prefix: int, switch_hosts_raw
         "id": vlan,
         "pools": [
             {
-                "pool": (
-                    f"{ip_at_offset(network, bounds['registered_start'])}"
-                    f" - "
-                    f"{ip_at_offset(network, bounds['registered_end'])}"
-                )
-            },
-            {
+                # Blocked pool FIRST — Kea picks the first eligible pool.
+                # BLOCKED devices match this pool and stop here; registered
+                # and unclassed devices skip it (no BLOCKED class) and fall
+                # through to the regular pool below.
                 "pool": (
                     f"{ip_at_offset(network, bounds['blocked_start'])}"
                     f" - "
                     f"{ip_at_offset(network, bounds['blocked_end'])}"
                 ),
                 "client-classes": ["BLOCKED"],
+            },
+            {
+                "pool": (
+                    f"{ip_at_offset(network, bounds['registered_start'])}"
+                    f" - "
+                    f"{ip_at_offset(network, bounds['registered_end'])}"
+                )
             },
         ],
         "interface": f"eth0.{vlan}",
@@ -249,6 +253,9 @@ def main():
                 {"name": "domain-name",         "data": "blackfriars.local"},
                 {"name": "domain-name-servers",  "data": portal_ip},
             ],
+            # Allow Kea to use global host reservations (dhcp4_subnet_id=0) for
+            # client-class assignment (e.g. BLOCKED class set by central_import.py).
+            "reservations-global": True,
             "client-classes": [
                 {"name": "BLOCKED", "test": "0 == 1"}
             ],
