@@ -153,15 +153,18 @@ DB_URL="${DATABASE_URL:-}"
 
 if [ -n "$PSQL_BIN" ] && [ -n "$DB_URL" ]; then
   if [ "$ACTION" = "block" ]; then
-    # Allocate lowest available rule number (1–19999) for this IP, or return
-    # the existing one if the IP is already in the table.
+    # Allocate lowest available rule number (RULE_BASE–19999) for this IP, or
+    # return the existing one if the IP is already in the table.
+    # Starting at RULE_BASE (default 10000) ensures dynamic per-IP deny rules
+    # never collide with static baseline rules (portal permit at rule 5,
+    # VLAN deny rules at 10–50, DoH/DoT rules at lower hundreds).
     _psql_out=$(
       "$PSQL_BIN" "$DB_URL" -t -A 2>/dev/null << EOSQL
 BEGIN;
 SELECT pg_advisory_xact_lock(88001);
 INSERT INTO acl_rule_allocations (ip_address, rule_num)
 SELECT '${IP_ADDRESS}', COALESCE(
-    (SELECT MIN(n) FROM generate_series(1, 19999) n
+    (SELECT MIN(n) FROM generate_series(${RULE_BASE}, 19999) n
      WHERE n NOT IN (SELECT rule_num FROM acl_rule_allocations)),
     -1
 )

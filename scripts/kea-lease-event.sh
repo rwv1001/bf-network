@@ -129,6 +129,22 @@ WHERE NOT EXISTS (
 );
 COMMIT;
 ENDSQL
+
+        # ── Blocked-pool transition: expire old regular-pool leases ───────────
+        # When a device lands in the blocked pool, any per-IP ACL/DNS rules that
+        # were applied to its previous regular-pool IP are now redundant (the
+        # blanket blocked-pool range rules cover it).  Expire those rows now so
+        # the portal's lease sweep cleans up the stale rules within ~20 seconds.
+        # force_lease_renewal uses lease4-del which does NOT trigger lease4_expire,
+        # so without this the rows would linger until their original TTL elapsed.
+        if [ "$FROM_BLOCKED_POOL" = "true" ]; then
+            $PSQL -c "UPDATE ip_leases
+                         SET lease_expiry = NOW()
+                       WHERE mac_address     = '${MAC_ADDRESS}'
+                         AND ip_address     != '${IP_ADDRESS}'
+                         AND from_blocked_pool = false
+                         AND lease_expiry    > NOW();"
+        fi
         ;;
 
     expire)

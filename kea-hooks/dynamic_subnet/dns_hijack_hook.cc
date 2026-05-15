@@ -706,7 +706,7 @@ extern "C"
     // prevent shell injection.
 
     std::string query_central_for_mac(const std::string &mac_colon,
-                                       uint32_t subnet_id = 0)
+                                      uint32_t subnet_id = 0)
 
     {
 
@@ -730,8 +730,7 @@ extern "C"
         // Kea host reservation instead of a global (subnet_id=0) one.  This allows
         // the normal set_block_status / reservation-del path to clean it up correctly.
 
-        std::string cmd = "python3 /scripts/central_import.py '" + mac_colon + "' "
-                          + std::to_string(subnet_id) + " 2>/dev/null";
+        std::string cmd = "python3 /scripts/central_import.py '" + mac_colon + "' " + std::to_string(subnet_id) + " 2>/dev/null";
 
         FILE *pipe = popen(cmd.c_str(), "r");
 
@@ -1757,7 +1756,6 @@ extern "C"
                 host = HostMgr::instance().get4Any(SUBNET_ID_GLOBAL, Host::IDENT_HWADDR,
 
                                                    &hwaddr->hwaddr_[0], hwaddr->hwaddr_.size());
-
             }
 
             std::cout << "DNS Hijack Hook: [DEBUG] Reservation check complete, host="
@@ -1848,11 +1846,14 @@ extern "C"
                     // keeps finding the still-valid lease and calling lease4_renew
                     // again, creating an infinite NAK loop instead of moving the
                     // device to the blocked pool.
-                    try {
+                    try
+                    {
                         LeaseMgrFactory::instance().deleteLease(lease);
                         std::cout << "DNS Hijack Hook: Deleted lease " << ip_address
                                   << " to force blocked-pool allocation" << std::endl;
-                    } catch (const std::exception &ex) {
+                    }
+                    catch (const std::exception &ex)
+                    {
                         std::cout << "DNS Hijack Hook: WARNING - failed to delete lease "
                                   << ip_address << ": " << ex.what() << std::endl;
                     }
@@ -1893,11 +1894,14 @@ extern "C"
                     // Delete the existing lease so Kea performs a fresh allocation
                     // (lease4_select) on the next DHCPDISCOVER rather than endlessly
                     // renewing the stale blocked-pool IP.
-                    try {
+                    try
+                    {
                         LeaseMgrFactory::instance().deleteLease(lease);
                         std::cout << "DNS Hijack Hook: Deleted lease " << ip_address
                                   << " to force regular-pool allocation" << std::endl;
-                    } catch (const std::exception &ex) {
+                    }
+                    catch (const std::exception &ex)
+                    {
                         std::cout << "DNS Hijack Hook: WARNING - failed to delete lease "
                                   << ip_address << ": " << ex.what() << std::endl;
                     }
@@ -2198,15 +2202,18 @@ extern "C"
 
         for (const auto &h : all_hosts)
         {
-            if (!h) continue;
+            if (!h)
+                continue;
             if (h->getIPv4SubnetID() == SUBNET_ID_GLOBAL)
             {
-                if (is_blocked_host(h)) global_blocked = true;
+                if (is_blocked_host(h))
+                    global_blocked = true;
             }
             else
             {
                 has_subnet_specific = true;
-                if (is_blocked_host(h)) admin_blocked = true;
+                if (is_blocked_host(h))
+                    admin_blocked = true;
             }
         }
         if (!has_subnet_specific)

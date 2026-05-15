@@ -490,6 +490,10 @@ class KeaIntegration:
             if blocked:
                 reservation["client-classes"] = ["BLOCKED"]
                 reservation["user-context"]["blocked"] = True
+                # Always clear any stale blocked-ip from a previous block before
+                # conditionally re-setting it. Without this, if blocked_ip is None
+                # (e.g. lease not yet in IPLease), the old value persists.
+                reservation["user-context"].pop("blocked-ip", None)
                 if blocked_ip:
                     reservation["user-context"]["blocked-ip"] = blocked_ip
 

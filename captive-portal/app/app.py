@@ -2692,21 +2692,28 @@ def apply_device_block(device, flash_messages=False, notify_central=True):
     clear_unregistered_lease(device.mac_address)
 
     # Ask Kea to flag this MAC for the blocked pool so future renewals land there.
+    # Prefer device.ip_address (IPLease), but fall back to Kea's live lease data
+    # when the lease callback hasn't recorded the entry yet (common race condition).
     kea = get_kea()
+    block_ip = device.ip_address
     if kea and device.current_vlan:
+        if not block_ip:
+            block_ip = kea.get_lease_ip_for_mac(
+                device.mac_address, subnet_id=device.current_vlan
+            )
         kea.set_block_status(device.mac_address, device.current_vlan, True,
-                             blocked_ip=device.ip_address)
-        if device.ip_address:
-            kea.force_lease_renewal(device.mac_address, device.ip_address)
+                             blocked_ip=block_ip)
+        if block_ip:
+            kea.force_lease_renewal(device.mac_address, block_ip)
         kea.get_lease_ip_for_mac(device.mac_address, subnet_id=device.current_vlan)  # refresh Kea cache
 
-    if device.ip_address and device.current_vlan:
+    if block_ip and device.current_vlan:
         # Only apply per-IP rules if the IP is NOT already in the blocked pool
         # (blocked-pool IPs are covered by blanket ranges).
         acl_success = True
-        if not _is_blocked_pool_ip(device.ip_address):
-            manage_dns_hijack('hijack', device.ip_address)
-            acl_success = manage_switch_acl('block', device.ip_address, device.current_vlan)
+        if not _is_blocked_pool_ip(block_ip):
+            manage_dns_hijack('hijack', block_ip)
+            acl_success = manage_switch_acl('block', block_ip, device.current_vlan)
             # Update IPLease record
             lease = _get_active_iplease(device.mac_address)
             if lease:
@@ -2718,7 +2725,7 @@ def apply_device_block(device, flash_messages=False, notify_central=True):
             else:
                 flash(f'Device {device.mac_address} marked as blocked, but ACL update failed.', 'warning')
         logger.info("Blocked device %s at %s (acl_success=%s)", device.mac_address,
-                    device.ip_address, acl_success)
+                    block_ip, acl_success)
     else:
         if flash_messages:
             flash(f'Device {device.mac_address} marked as blocked (no active IP found).', 'warning')
@@ -2785,6 +2792,20 @@ def apply_device_unblock(device, flash_messages=False, notify_central=True):
         logger.info("Unblocked device %s at %s", device.mac_address, device.ip_address)
     else:
         # Can't grant internet yet: wrong VLAN, unvalidated password, or blocked pool.
+        # Always clean up per-IP ACL/DNS rules for the original blocked IP regardless,
+        # because that IP will be re-assigned from the regular pool after reconnect.
+        if blocked_ip and device.current_vlan:
+            if _should_hijack_vlan(device.current_vlan):
+                manage_dns_hijack('unhijack', blocked_ip)
+            manage_switch_acl('unblock', blocked_ip, device.current_vlan)
+        # Also clean up device's current IP if it's in the regular pool and differs
+        # from blocked_ip (covers the case where block was set without a pool move).
+        if (device.ip_address and device.current_vlan
+                and not _is_blocked_pool_ip(device.ip_address)
+                and device.ip_address != blocked_ip):
+            if _should_hijack_vlan(device.current_vlan):
+                manage_dns_hijack('unhijack', device.ip_address)
+            manage_switch_acl('unblock', device.ip_address, device.current_vlan)
         _set_internet_accessible(device, False if device.assigned_vlan else None, commit=True)
         if flash_messages:
             if ip_in_blocked_pool:
