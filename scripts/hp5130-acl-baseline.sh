@@ -190,6 +190,7 @@ acl number 3099 name VLAN99_EGRESS
  rule 83 permit udp source ${PORTAL_IP} 0 destination-port eq ntp
  rule 84 permit udp source ${MGMT_IP_SECONDARY} 0 destination-port eq dns
  rule 85 permit tcp source ${MGMT_IP_SECONDARY} 0 destination-port eq dns
+ rule 86 permit udp destination ${PORTAL_IP} 0 source-port eq ntp
  rule 90 permit udp source 8.8.8.8 0 destination ${PORTAL_IP} 0 source-port eq dns
  rule 91 permit tcp source 8.8.8.8 0 destination ${PORTAL_IP} 0 source-port eq dns established
  rule 92 permit udp destination ${PORTAL_IP} 0 source-port gt 1023
