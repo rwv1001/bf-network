@@ -11,7 +11,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Retrieve IP addresses visible on a given switch interface"
     )
-    parser.add_argument("--host", required=True, help="Switch IP/hostname")
+    parser.add_argument(
+        "--host",
+        default=os.environ.get("SWITCH_HOST", "192.168.99.2"),
+        help="Switch IP/hostname (default: $SWITCH_HOST or 192.168.99.2)",
+    )
     parser.add_argument(
         "--interface", required=True, help="Interface name (e.g. Ge1/0/17)"
     )
