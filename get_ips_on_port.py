@@ -7,6 +7,22 @@ import subprocess
 import sys
 
 
+def _normalise_interface(ifname: str) -> str:
+    """Convert a verbose interface name to the short form used by HP switches.
+
+    Examples:
+        Gigabitethernet1/0/17 -> GE1/0/17
+        gigabitethernet1/0/17 -> GE1/0/17
+        Ge1/0/17             -> Ge1/0/17 (unchanged)
+        GE1/0/17             -> GE1/0/17 (unchanged)
+    """
+    prefix = "gigabitethernet"
+    if ifname.lower().startswith(prefix):
+        suffix = ifname[len(prefix):]
+        return "GE" + suffix
+    return ifname
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Retrieve IP addresses visible on a given switch interface"
@@ -34,6 +50,11 @@ def main() -> None:
         "--identity",
         default=os.path.expanduser("~/.ssh/id_rsa"),
         help="Path to SSH private key",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print the raw ARP output to stderr for troubleshooting",
     )
 
     args = parser.parse_args()
@@ -72,12 +93,19 @@ def main() -> None:
         sys.exit(1)
 
     output = result.stdout
+
+    if args.debug:
+        print("=== Raw ARP output ===", file=sys.stderr)
+        print(output, file=sys.stderr)
+        print("=== End raw ===", file=sys.stderr)
+
     ips: list[str] = []
 
-    # Parse each line for the desired interface
+    # Normalise the interface name so we also try the short form
+    search_strings = [interface, _normalise_interface(interface)]
+
     for line in output.splitlines():
-        if interface.lower() in line.lower():
-            # Extract the first IPv4 address on the line
+        if any(s.lower() in line.lower() for s in search_strings):
             ip_matches = re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", line)
             if ip_matches:
                 ips.append(ip_matches[0])
@@ -86,6 +114,10 @@ def main() -> None:
     if args.subnet:
         network = ipaddress.ip_network(args.subnet, strict=False)
         ips = [ip for ip in ips if ipaddress.ip_address(ip) in network]
+
+    if not ips:
+        print("No IP addresses matched. Use --debug to inspect the ARP table.",
+              file=sys.stderr)
 
     # Print the IPs, one per line
     for ip in ips:
