@@ -8535,6 +8535,8 @@ def _build_port_config(port_name, role, description=''):
 
     if role == 'wired':
         body = [
+            # Undo any previous AP uplink config before applying wired user-port settings
+            'port link-type access',
             'port link-type hybrid',
             'undo port hybrid vlan 1',
             'port hybrid vlan 10 20 30 40 50 60 70 80 90 99 untagged',
@@ -8552,13 +8554,24 @@ def _build_port_config(port_name, role, description=''):
         ]
     elif role == 'ap':
         body = [
+            'undo port-security port-mode',
+            'undo port hybrid pvid',
+            'undo mac-vlan enable',
+            'undo mac-authentication guest-vlan',
+            'undo dhcp snooping binding record',
+            # AP uplink config
+            'port link-type access',
             'port link-type hybrid',
-            'port hybrid vlan 10 20 30 40 50 60 70 99 tagged',
+            'port hybrid vlan 10 20 30 40 50 60 70 80 90 99 tagged',
+            'undo port hybrid vlan 250',
             'port hybrid vlan 1 untagged',
+            'ip verify source ip-address mac-address',
             'mac-authentication max-user 256',
             'mac-authentication domain macauth',
             'mac-authentication host-mode multi-vlan',
             'dhcp snooping check mac-address',
+            'undo web-auth domain',
+            'undo web-auth enable',
         ]
     elif role == 'pi':
         body = [
