@@ -90,7 +90,7 @@
         attempts += 1;
         let index = 0;
 
-        fetch(apiUrl('/api/registration-status')).catch(() => {});
+        fetch(apiUrl('{{ url_for("portal.registration_status") }}')).catch(() => {});
 
         const tryNext = () => {
             const url = internetCheckUrls[index];
@@ -133,14 +133,13 @@
   <strong>Checking your connection status&hellip;</strong>
 </div>
 {% endif %}
-<form method="POST" action="{{ url_for('register') }}"
+<form method="POST" action="{{ url_for('portal.register') }}"
     {%- if show_status %} style="display:none"{% endif %}>
     <input type="hidden" name="registration_step" id="registrationStepInput" value="1">
     {% if show_status and device and device.wired_target_vlan %}
     <input type="hidden" name="wired_vlan_id" value="{{ device.wired_target_vlan }}">
     {% endif %}
 
-    <!-- ── Step 1: email, device type, agreement ── -->
     <div id="step1-fields">
       <div class="form-group">
           <label for="email">Email Address <span class="required">*</span></label>
@@ -189,9 +188,8 @@
           </label>
       </div>
       {% endif %}
-    </div><!-- /#step1-fields -->
+    </div>
 
-    <!-- ── Step 2: name and phone (only shown when email not yet in the system) ── -->
     <div id="step2-fields" style="display:none">
       <p style="color:#555; font-size:0.95em; margin-bottom:16px;">
           We don&rsquo;t have a record for that email address yet &mdash; please enter your details
@@ -215,7 +213,7 @@
       <p style="margin: 4px 0 12px;">
           <a href="#" id="backToStep1Link" style="font-size:0.9em; color:#555;">&larr; Back</a>
       </p>
-    </div><!-- /#step2-fields -->
+    </div>
 
     <div id="validationBox" class="validation-box">
         <strong>Please complete the following:</strong>
@@ -274,13 +272,11 @@ document.addEventListener('DOMContentLoaded', function() {
     let accessInterval = null;
     let registrationSubmitted = false;
     let pollingStarted = false;
-    let currentPrefill = null;  // To store submitted data for resubmit
+    let currentPrefill = null;
     let mismatchPolling = false;
     let mismatchInterval = null;
     let accessConfirmed = false;
-    let registrationStep = 1;  // 1 = step 1 (email/device), 2 = step 2 (name/phone)
-
-    // Remove applyPendingPage and loadPendingPage - not needed anymore
+    let registrationStep = 1;
 
     const fieldValidators = [
         {
@@ -304,7 +300,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 return checkbox ? checkbox.checked : false;
             }
         },
-        // Step 2 only: name fields are required once step 2 is visible.
         {
             id: 'first_name',
             message: 'First name is required.',
@@ -353,8 +348,7 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 
     updateValidationState();
-    
-    // ── switchToStep1 / switchToStep2 ─────────────────────────────────────────
+
     function switchToStep2() {
         registrationStep = 2;
         document.getElementById('registrationStepInput').value = 'final';
@@ -389,7 +383,6 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
 
-        // ── Two-step: step 1 checks whether the email is already known ────────
         if (registrationStep === 1) {
             registerBtn.disabled = true;
             registerBtn.textContent = 'Checking\u2026';
@@ -405,13 +398,11 @@ document.addEventListener('DOMContentLoaded', function() {
             .then(async r => {
                 const d = await r.json().catch(() => ({}));
                 if (d.status === 'user_found') {
-                    // Known user: silently populate name/phone and continue.
                     document.getElementById('first_name').value   = d.prefill.first_name   || '';
                     document.getElementById('last_name').value    = d.prefill.last_name    || '';
                     document.getElementById('phone_number').value = d.prefill.phone_number || '';
                     document.getElementById('registrationStepInput').value = 'final';
                     registrationStep = 2;
-                    // Re-fire submit to run the full registration path.
                     form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
                 } else if (d.status === 'need_details') {
                     switchToStep2();
@@ -430,7 +421,6 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
 
-        // ── Full registration submit (step 2 / returning user) ────────────────
         setTimeout(() => {
             registerBtn.disabled = true;
             registerBtn.textContent = 'Registering...';
@@ -450,7 +440,6 @@ document.addEventListener('DOMContentLoaded', function() {
         })
         .then(async response => {
             const data = await response.json().catch(() => ({}));
-            // Handle user-blocked response (HTTP 403) before the generic error check.
             if (response.status === 403 && (data.status === 'blocked')) {
                 const rejMsg = 'The administrator has blocked you from connecting any devices to the internet.'
                     + (data.reason && data.reason !== rejMsg ? ' ' + data.reason : '');
@@ -479,15 +468,14 @@ document.addEventListener('DOMContentLoaded', function() {
                     }
                     startAccessCheck();
                 }
-                form.style.display = 'none';  // Hide form on success
+                form.style.display = 'none';
                 return;
             }
 
             if (status === 'pending') {
                 showStatus(message, 'info');
-                currentPrefill = data.prefill;  // Store for resubmit
+                currentPrefill = data.prefill;
 
-                // Display submitted details and resubmit button
                 const detailsDiv = document.createElement('div');
                 detailsDiv.id = 'submittedDetails';
                 detailsDiv.innerHTML = `
@@ -502,13 +490,9 @@ document.addEventListener('DOMContentLoaded', function() {
                     <button id="resubmitBtn" class="btn">Edit and Resubmit</button>
                 `;
                 statusMessage.appendChild(detailsDiv);
-
-                // Hide form while pending
                 form.style.display = 'none';
 
-                // Resubmit button logic
                 document.getElementById('resubmitBtn').addEventListener('click', function() {
-                    // Prefill form and show it
                     document.getElementById('email').value = currentPrefill.email;
                     document.getElementById('first_name').value = currentPrefill.first_name;
                     document.getElementById('last_name').value = currentPrefill.last_name;
@@ -518,8 +502,6 @@ document.addEventListener('DOMContentLoaded', function() {
                     form.style.display = 'block';
                     registerBtn.disabled = false;
                     registerBtn.textContent = 'Resubmit Registration';
-
-                    // Optional: Hide details on resubmit start
                     detailsDiv.style.display = 'none';
                 });
 
@@ -530,7 +512,6 @@ document.addEventListener('DOMContentLoaded', function() {
             if (status === 'pending_password') {
                 showStatus(message, 'info');
                 form.style.display = 'none';
-                // Suggest resubmitting with phone number if none was entered
                 const submittedPhone = (document.getElementById('phone_number')?.value || '').trim();
                 if (!submittedPhone) {
                     const hintDiv = document.createElement('div');
@@ -555,7 +536,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 return;
             }
 
-            // Handle other statuses (e.g., error, rejected)
             showStatus(message, 'info');
         })
         .catch((error) => {
@@ -565,9 +545,6 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
 
-    // Show a password-entry prompt. Used when: (a) the server returned password_required
-    // on form submit, (b) polling transitions from pending_password to enter_password, or
-    // (c) checkInitialStatus finds enter_password on page load.
     function showNetworkPasswordPrompt(msg) {
         const oldPwdDiv = document.getElementById('passwordPrompt');
         if (oldPwdDiv) oldPwdDiv.remove();
@@ -611,7 +588,7 @@ document.addEventListener('DOMContentLoaded', function() {
             forgotData.set('email', emailVal);
             const link = document.getElementById('forgotNetworkPwdLink');
             link.textContent = 'Sending...';
-            fetch('/forgot-network-password', {
+            fetch('{{ url_for("portal.forgot_network_password") }}', {
                 method: 'POST',
                 body: forgotData,
                 credentials: 'same-origin',
@@ -621,8 +598,6 @@ document.addEventListener('DOMContentLoaded', function() {
             .then(data => {
                 pwdDiv.remove();
                 showStatus((data.message || 'If that email has a network account, a reset link has been sent. Please check your email, set your new password, then return here.'), 'info');
-                // Poll so the portal detects when the password has been reset and
-                // the device becomes registered (or enter_password becomes available).
                 startPolling();
             })
             .catch(() => {
@@ -669,7 +644,6 @@ document.addEventListener('DOMContentLoaded', function() {
                         startAccessCheck();
                     }
                 } else if (data.status === 'pending') {
-                    // Password correct but admin must still approve (admin_required mode)
                     pwdDiv.remove();
                     showStatus(data.message || 'Password accepted. Your registration has been submitted for admin approval. Please wait...', 'info');
                     pollingStarted = false;
@@ -695,14 +669,13 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
-    // Modified polling: Update DOM instead of redirect
     function startPolling() {
         if (accessConfirmed) return;
         if (pollingStarted) return;
         pollingStarted = true;
 
         pollInterval = setInterval(function() {
-            fetch(apiUrl('/api/registration-status'))
+            fetch(apiUrl('{{ url_for("portal.registration_status") }}'))
                 .then(response => response.json())
                 .then(data => {
                     if (data.status === 'registered') {
@@ -720,7 +693,6 @@ document.addEventListener('DOMContentLoaded', function() {
                             }
                             startAccessCheck();
                         }
-                        // Optional: Hide pending details/form
                         const details = document.getElementById('submittedDetails');
                         if (details) details.remove();
                         form.style.display = 'none';
@@ -729,7 +701,6 @@ document.addEventListener('DOMContentLoaded', function() {
                         const rejMsg = 'The administrator has refused to grant this device internet access.'
                             + (data.reason ? ' Reason: ' + data.reason : '');
                         showStatus(rejMsg, 'error');
-                        // Show resubmit button again if needed
                         const resubmitBtn = document.getElementById('resubmitBtn');
                         if (resubmitBtn) resubmitBtn.style.display = 'block';
                     } else if (data.status === 'enter_password') {
@@ -739,8 +710,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     } else if (data.status === 'wrong_vlan') {
                         clearInterval(pollInterval);
                         pollingStarted = false;
-                        // Fetch device-status for the correct assigned_vlan/ssid (spec 4b.ii.2.c)
-                        fetch(apiUrl('/api/device-status'))
+                        fetch(apiUrl('{{ url_for("portal.api_device_status") }}'))
                             .then(r => r.json())
                             .then(d => {
                                 const assigned = d.assigned_ssid || (d.assigned_vlan ? `VLAN ${d.assigned_vlan}` : 'the assigned network');
@@ -755,17 +725,14 @@ document.addEventListener('DOMContentLoaded', function() {
                                     'error'
                                 );
                             });
-                    } else if (data.status === 'pending' || data.status === 'pending_password') {
-                        // Do nothing, keep polling
                     }
                 })
                 .catch(error => {
                     console.error('Status check failed:', error);
                 });
-        }, 2000);  // Poll every 2 seconds
+        }, 2000);
     }
 
-    // Your existing startAccessCheck and showStatus functions (unchanged)
     function startAccessCheck() {
         if (accessConfirmed) {
             return;
@@ -809,11 +776,8 @@ document.addEventListener('DOMContentLoaded', function() {
                         mismatchInterval = null;
                     }
                     showStatus('You now have full internet access.', 'success');
-                    // Spec 4b.ii.2.a.ii.2: show user_home link once internet is confirmed.
-                    // We fetch device-status to get ownership_validated so we can show
-                    // the password note when needed.
                     if (userHomeLink && !userHomeLink.querySelector('a')) {
-                        fetch(apiUrl('/api/device-status'))
+                        fetch(apiUrl('{{ url_for("portal.api_device_status") }}'))
                             .then(r => r.json())
                             .then(d => {
                                 const url = (d && d.user_home_url) || (portalBase + '/user_home');
@@ -840,9 +804,10 @@ document.addEventListener('DOMContentLoaded', function() {
         accessInterval = setInterval(checkAccess, 2000);
         checkAccess();
     }
+
     function showStatus(message, type) {
         statusMessage.style.display = 'block';
-        statusMessage.textContent = message;  // Note: Changed to textContent for simplicity; use innerHTML if needed for HTML
+        statusMessage.textContent = message;
 
         if (type === 'success' && institutionUrl && institutionButtonText) {
             institutionLink.innerHTML = `<a href="${institutionUrl}" target="_blank" rel="noopener" class="btn" style="display: inline-block;">${institutionButtonText}</a>`;
@@ -851,7 +816,7 @@ document.addEventListener('DOMContentLoaded', function() {
             institutionLink.style.display = 'none';
             institutionLink.textContent = '';
         }
-        
+
         if (type === 'success') {
             statusMessage.style.backgroundColor = '#d4edda';
             statusMessage.style.color = '#155724';
@@ -878,9 +843,9 @@ document.addEventListener('DOMContentLoaded', function() {
 
     let ownershipPollInterval = null;
     function startOwnershipPoll() {
-        if (ownershipPollInterval) return; // already running
+        if (ownershipPollInterval) return;
         ownershipPollInterval = setInterval(function() {
-            fetch(apiUrl('/api/device-status'))
+            fetch(apiUrl('{{ url_for("portal.api_device_status") }}'))
                 .then(r => r.json())
                 .then(data => {
                     if (data.ownership_validated === true) {
@@ -899,12 +864,11 @@ document.addEventListener('DOMContentLoaded', function() {
         }, 3000);
     }
 
-    // Your checkInitialStatus - modify to avoid redirects if needed
     const checkInitialStatus = () => {
         if (accessConfirmed) {
             return;
         }
-        fetch(apiUrl('/api/registration-status'))
+        fetch(apiUrl('{{ url_for("portal.registration_status") }}'))
             .then(response => response.json())
             .then(data => {
                 const loadingEl = document.getElementById('statusCheckLoading');
@@ -937,8 +901,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     form.style.display = 'none';
                     startPolling();
                 } else if (data.status === 'wrong_vlan') {
-                    // Spec 4b.ii.2.c: admin assigned a different VLAN
-                    fetch(apiUrl('/api/device-status'))
+                    fetch(apiUrl('{{ url_for("portal.api_device_status") }}'))
                         .then(r => r.json())
                         .then(d => {
                             const assigned = d.assigned_ssid || (d.assigned_vlan ? `VLAN ${d.assigned_vlan}` : 'the assigned network');
@@ -954,7 +917,6 @@ document.addEventListener('DOMContentLoaded', function() {
                             );
                         });
                 } else {
-                    // Unknown status — reveal the registration form as a fallback
                     form.style.display = 'block';
                 }
             })
@@ -971,8 +933,6 @@ document.addEventListener('DOMContentLoaded', function() {
         checkInitialStatus();
     }
 
-    // If the page loaded with the confirm warning already visible (server-side render),
-    // start the ownership poll immediately so acceptance is reflected without a full reload.
     (function() {
         const cw = document.getElementById('confirmWarning');
         if (cw && cw.style.display !== 'none' && cw.offsetParent !== null) {
@@ -980,7 +940,6 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     })();
 
-    // ── Spec 4b.ii.2 status-page polling (used when device already has ownership) ──
     function startDeviceStatusPolling() {
         let devicePollInterval = null;
         let devicePollStopped  = false;
@@ -999,15 +958,12 @@ document.addEventListener('DOMContentLoaded', function() {
                         showNetworkPasswordPrompt('Please enter your network password to continue.');
                         stopDevicePoll();
                     } else {
-                        // Password not yet set — show info message only (no input form).
-                        // Keep polling so we detect when the user sets the password via email.
                         showStatus(
                             'You need to set a password before accessing this network. ' +
                             'An email has been sent to you with a link to set your password.',
                             'info'
                         );
                         form.style.display = 'none';
-                        // Don't stop polling — next poll will detect has_password=true
                     }
                     break;
 
@@ -1033,7 +989,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         btn.addEventListener('click', function() {
                             btn.disabled = true;
                             btn.textContent = 'Sending...';
-                            fetch(apiUrl('/api/request-unblock'), {
+                            fetch(apiUrl('{{ url_for("portal.api_request_unblock") }}'), {
                                 method: 'POST',
                                 credentials: 'same-origin',
                                 headers: { 'X-Requested-With': 'XMLHttpRequest' }
@@ -1064,8 +1020,6 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (data.ownership_validated === false) {
                         showConfirmWarning(data.confirm_timeout_minutes);
                     }
-                    // showStatus sets institutionLink to the institution URL button;
-                    // use the separate userHomeLink div so it isn't overwritten.
                     if (data.user_home_url) {
                         userHomeLink.innerHTML = `<a href="${data.user_home_url}" class="btn" style="display:inline-block;">Go to your home page</a>`;
                         userHomeLink.style.display = 'block';
@@ -1089,7 +1043,6 @@ document.addEventListener('DOMContentLoaded', function() {
                         `The administrator has not granted you access to this network, but has instead granted you access to ${assigned}. Please connect to that network.`,
                         'error'
                     );
-                    // Keep polling — user may reconnect to the correct network.
                     break;
                 }
 
@@ -1098,16 +1051,14 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         };
 
-        // Immediate first check
-        fetch(apiUrl('/api/device-status'))
+        fetch(apiUrl('{{ url_for("portal.api_device_status") }}'))
             .then(r => r.json())
             .then(handleDeviceStatus)
             .catch(() => { if (loadingEl) loadingEl.style.display = 'none'; });
 
-        // Then poll every 3 seconds
         devicePollInterval = setInterval(() => {
             if (devicePollStopped) return;
-            fetch(apiUrl('/api/device-status'))
+            fetch(apiUrl('{{ url_for("portal.api_device_status") }}'))
                 .then(r => r.json())
                 .then(handleDeviceStatus)
                 .catch(() => {});
@@ -1121,7 +1072,7 @@ document.addEventListener('DOMContentLoaded', function() {
         mismatchPolling = true;
 
         mismatchInterval = setInterval(() => {
-            fetch(apiUrl('/api/registration-status'))
+            fetch(apiUrl('{{ url_for("portal.registration_status") }}'))
                 .then(response => response.json())
                 .then(data => {
                     if (accessConfirmed) {
@@ -1134,7 +1085,6 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (data.current_ip && detectedIpEl) {
                         detectedIpEl.textContent = data.current_ip;
                     }
-
                     if (data.status === 'registered' && !data.network_mismatch) {
                         showStatus('Device is on the correct network. Checking access...', 'success');
                         startAccessCheck();

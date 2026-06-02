@@ -23,7 +23,7 @@
 
         <h3 style="color: #263326; margin-top: 30px;">What should I do?</h3>
         <p>Please contact the network administrator to resolve this issue:</p>
-        
+
         <div style="background-color: #f5f5f5; padding: 15px; border-radius: 4px; margin: 20px 0;">
             <p style="margin: 0;"><strong>Email:</strong> {{ admin_email }}</p>
         </div>
@@ -44,8 +44,7 @@
             <strong>Note:</strong> This block affects all network services. You will not be able to access the internet or internal resources until the block is removed.
         </p>
     </div>
-    
-    <!-- Status checking message -->
+
     <div id="statusCheck" style="margin-top: 20px; padding: 15px; background-color: #e3f2fd; border-left: 4px solid #2196f3; border-radius: 4px; display: none;">
         <p style="margin: 0; color: #1565c0;">
             ⏳ Checking if your device has been unblocked...
@@ -54,20 +53,16 @@
 </div>
 
 <script>
-// Poll every 5 seconds to check if device has been unblocked
 let checkInterval = setInterval(function() {
-    fetch('/api/block-status')
+    fetch('{{ url_for("portal.api_block_status") }}')
         .then(response => response.json())
         .then(data => {
             if (data.blocked === false) {
                 clearInterval(checkInterval);
-                // Show success message
                 document.getElementById('statusCheck').style.display = 'block';
                 document.getElementById('statusCheck').style.backgroundColor = '#e8f5e9';
                 document.getElementById('statusCheck').style.borderColor = '#4caf50';
                 document.getElementById('statusCheck').innerHTML = '<p style="margin: 0; color: #2e7d32;">✓ Your device has been unblocked! Redirecting...</p>';
-                
-                // Redirect to test internet connectivity
                 setTimeout(function() {
                     window.location.href = 'http://captive.apple.com/hotspot-detect.html';
                 }, 2000);
@@ -78,7 +73,6 @@ let checkInterval = setInterval(function() {
         });
 }, 5000);
 
-// Show initial checking message after 10 seconds
 setTimeout(function() {
     document.getElementById('statusCheck').style.display = 'block';
 }, 10000);

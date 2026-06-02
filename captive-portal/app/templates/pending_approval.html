@@ -28,9 +28,9 @@
 
 <div id="resubmitDiv" style="margin-top: 20px; text-align: center;">
     {% if portal_url %}
-        <a class="btn" href="{{ portal_url.rstrip('/') }}{{ url_for('register', **prefill) }}">Resubmit Request</a>
+        <a class="btn" href="{{ portal_url.rstrip('/') }}{{ url_for('portal.register', **prefill) }}">Resubmit Request</a>
     {% else %}
-        <a class="btn" href="{{ url_for('register', **prefill) }}">Resubmit Request</a>
+        <a class="btn" href="{{ url_for('portal.register', **prefill) }}">Resubmit Request</a>
     {% endif %}
 </div>
 
@@ -72,17 +72,17 @@
     };
 
     const checkStatus = () => {
-        fetch(apiUrl('/api/registration-status'))
+        fetch(apiUrl('{{ url_for("portal.registration_status") }}'))
             .then(res => res.json())
             .then(data => {
                 if (data.status === 'registered') {
                     clearInterval(timer);
-                    window.location.href = pageUrl('/registered');
+                    window.location.href = pageUrl('{{ url_for("portal.registered_success") }}');
                     return;
                 }
                 if (data.status === 'wrong_vlan') {
                     clearInterval(timer);
-                    window.location.href = pageUrl('/wrong-vlan'
+                    window.location.href = pageUrl('{{ url_for("portal.wrong_vlan_page") }}'
                         + '?assigned_vlan=' + encodeURIComponent(data.expected_vlan || '')
                         + '&assigned_ssid=' + encodeURIComponent(data.expected_ssid || ''));
                     return;
@@ -91,9 +91,7 @@
                     showRejected(data.reason || '');
                 }
             })
-            .catch(() => {
-                // keep polling quietly
-            });
+            .catch(() => {});
     };
 
     timer = setInterval(checkStatus, pollInterval);

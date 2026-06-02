@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% set home_url = url_for('portal.index') if 'portal' in request.blueprints else '/' %}
 
 {% block title %}{{ code }} — Network Access Portal{% endblock %}
 
@@ -39,6 +40,6 @@
     {% if code == 500 %}
     <p class="refresh-note">This page will automatically refresh in 10 seconds.</p>
     {% endif %}
-    <a href="/" class="btn btn-primary">Go to homepage</a>
+    <a href="{{ home_url }}" class="btn btn-primary">Go to homepage</a>
 </div>
 {% endblock %}

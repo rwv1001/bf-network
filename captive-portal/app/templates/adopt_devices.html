@@ -146,7 +146,7 @@
                     <td>{{ device.vlan_label or device.vlan_id }}</td>
                     <td>
                         {% if device.connection_type == 'wired' %}
-                        <form method="POST" action="{{ url_for('adopt_change_vlan') }}" class="wired-vlan-form">
+                        <form method="POST" action="{{ url_for('portal.adopt_change_vlan') }}" class="wired-vlan-form">
                             <input type="hidden" name="device_id" value="{{ device.device_id }}">
                             <select name="target_vlan" required>
                                 <option value="" disabled {% if not device.vlan_id %}selected{% endif %}>Select VLAN</option>
@@ -195,7 +195,7 @@
             <td>{{ device.last_seen.strftime('%Y-%m-%d %H:%M') if device.last_seen else '-' }}</td>
             <td>{{ device.age or '-' }}</td>
             <td>
-                <form method="POST" action="{{ url_for('adopt_device') }}" class="adopt-form" id="adopt-form-{{ loop.index }}">
+                <form method="POST" action="{{ url_for('portal.adopt_device') }}" class="adopt-form" id="adopt-form-{{ loop.index }}">
                     <input type="hidden" name="mac_address" value="{{ device.mac_address }}">
                     <input type="hidden" name="vlan_id" value="{{ device.vlan_id }}">
                     <select name="device_type" class="adopt-type" required>
@@ -271,6 +271,6 @@
 {% endif %}
 
 <div style="margin-top: 20px; text-align: center;">
-    <a href="{{ url_for('register') }}" class="btn btn-secondary">Back to Registration</a>
+    <a href="{{ url_for('portal.register') }}" class="btn btn-secondary">Back to Registration</a>
 </div>
 {% endblock %}
