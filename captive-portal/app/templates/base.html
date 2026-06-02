@@ -12,7 +12,7 @@
             padding: 0;
             box-sizing: border-box;
         }
-        
+
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
             line-height: 1.6;
@@ -21,7 +21,7 @@
             min-height: 100vh;
             padding: 20px;
         }
-        
+
         .container {
             max-width: 600px;
             margin: 0 auto;
@@ -30,7 +30,7 @@
             box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
             overflow: hidden;
         }
-        
+
         .header {
             background: linear-gradient(135deg, #1a2b1a 0%, #263326 100%);
             color: white;
@@ -38,35 +38,35 @@
             text-align: center;
             position: relative;
         }
-        
+
         .header .logo {
             max-width: 150px;
             height: auto;
             margin-bottom: 15px;
             filter: drop-shadow(0 2px 4px rgba(0,0,0,0.3));
         }
-        
+
         .header h1 {
             font-size: 28px;
             margin-bottom: 10px;
             text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
         }
-        
+
         .content {
             padding: 30px;
         }
-        
+
         .form-group {
             margin-bottom: 20px;
         }
-        
+
         label {
             display: block;
             margin-bottom: 5px;
             font-weight: 500;
             color: #555;
         }
-        
+
         input[type="text"],
         input[type="email"],
         input[type="tel"],
@@ -81,18 +81,18 @@
             font-size: 16px;
             transition: border-color 0.3s;
         }
-        
+
         input:focus,
         select:focus,
         textarea:focus {
             outline: none;
             border-color: #263326;
         }
-        
+
         .required {
             color: #8B0000;
         }
-        
+
         .btn {
             display: inline-block;
             padding: 12px 30px;
@@ -106,60 +106,60 @@
             text-decoration: none;
             transition: transform 0.2s, box-shadow 0.2s;
         }
-        
+
         .btn:hover {
             transform: translateY(-2px);
             box-shadow: 0 5px 15px rgba(38, 51, 38, 0.5);
         }
-        
+
         .btn-secondary {
             background: #6c757d;
         }
-        
+
         .btn-danger {
             background: #8B0000;
         }
-        
+
         .btn-success {
             background: #28a745;
         }
-        
+
         .btn-small {
             padding: 8px 16px;
             font-size: 14px;
         }
-        
+
         .alert {
             padding: 15px;
             margin-bottom: 20px;
             border-radius: 5px;
             border-left: 4px solid;
         }
-        
+
         .alert-success {
             background-color: #d4edda;
             border-color: #28a745;
             color: #155724;
         }
-        
+
         .alert-error {
             background-color: #f8d7da;
             border-color: #dc3545;
             color: #721c24;
         }
-        
+
         .alert-info {
             background-color: #d1ecf1;
             border-color: #17a2b8;
             color: #0c5460;
         }
-        
+
         .alert-warning {
             background-color: #fff3cd;
             border-color: #ffc107;
             color: #856404;
         }
-        
+
         .info-box {
             background-color: #f8f9fa;
             border-left: 4px solid #263326;
@@ -175,7 +175,7 @@
            margin: 20px 0;
            border-radius: 5px;
         }
-        
+
         .footer {
             text-align: center;
             padding: 20px;
@@ -183,29 +183,29 @@
             font-size: 14px;
             background-color: #f8f9fa;
         }
-        
+
         table {
             width: 100%;
             border-collapse: collapse;
             margin: 20px 0;
         }
-        
+
         th, td {
             padding: 12px;
             text-align: left;
             border-bottom: 1px solid #e0e0e0;
         }
-        
+
         th {
             background-color: #f8f9fa;
             font-weight: 600;
             color: #555;
         }
-        
+
         tr:hover {
             background-color: #f8f9fa;
         }
-        
+
         .badge {
             display: inline-block;
             padding: 4px 12px;
@@ -213,22 +213,22 @@
             font-size: 12px;
             font-weight: 500;
         }
-        
+
         .badge-active {
             background-color: #d4edda;
             color: #155724;
         }
-        
+
         .badge-pending {
             background-color: #fff3cd;
             color: #856404;
         }
-        
+
         .badge-restricted {
             background-color: #f8d7da;
             color: #721c24;
         }
-        
+
         .admin-nav {
             background: #2c3e2c;
             padding: 15px 30px;
@@ -292,7 +292,6 @@
                 margin-left: auto;
             }
 
-            /* Responsive tables: each row becomes a labelled card */
             table.auto-responsive,
             .table-responsive table {
                 display: block;
@@ -355,38 +354,49 @@
             <h1>{% block header %}Blackfriars Captive Portal{% endblock %}</h1>
             {% block subheader %}{% endblock %}
         </div>
-        
+
         {% if current_user and current_user.is_authenticated %}
         <div class="admin-nav">
             <button class="nav-toggle" aria-label="Toggle menu">&#9776;</button>
             {% if current_user.can_manage_users %}
-            <a href="{{ url_for('admin_dashboard') }}" class="{% if request.endpoint == 'admin_dashboard' %}active{% endif %}">Dashboard</a>
+            <a href="{{ url_for('admin.dashboard.index') }}"
+               class="{% if request.endpoint and request.endpoint.startswith('admin.dashboard') %}active{% endif %}">Dashboard</a>
             {% endif %}
             {% if current_user.can_view_traffic %}
-            <a href="{{ url_for('admin_traffic') }}" class="{% if request.endpoint == 'admin_traffic' %}active{% endif %}">Traffic Viewer</a>
+            <a href="{{ url_for('admin.traffic.traffic') }}"
+               class="{% if request.endpoint == 'admin.traffic.traffic' %}active{% endif %}">Traffic Viewer</a>
             {% endif %}
             {% if current_user.can_manage_vlans %}
-            <a href="{{ url_for('admin_vlan_config') }}" class="{% if request.endpoint == 'admin_vlan_config' %}active{% endif %}">VLAN Config</a>
+            <a href="{{ url_for('admin.vlans.vlan_config') }}"
+               class="{% if request.endpoint and request.endpoint.startswith('admin.vlans') %}active{% endif %}">VLAN Config</a>
             {% endif %}
             {% if current_user.can_manage_isp_routers %}
-            <a href="{{ url_for('admin_isp_routers') }}" class="{% if request.endpoint == 'admin_isp_routers' %}active{% endif %}">ISP Routers</a>
+            <a href="{{ url_for('admin.isp_routers.admin_isp_routers') }}"
+               class="{% if request.endpoint and request.endpoint.startswith('admin.isp_routers') %}active{% endif %}">ISP Routers</a>
             {% endif %}
             {% if current_user.can_manage_switch_ports %}
-            <a href="{{ url_for('admin_switch_ports') }}" class="{% if request.endpoint == 'admin_switch_ports' %}active{% endif %}">Switch Ports</a>
-            <a href="{{ url_for('admin_switch_health') }}" class="{% if request.endpoint in ('admin_switch_health', 'admin_switch_health_data') %}active{% endif %}">Switch Health</a>
+            <a href="{{ url_for('admin.switch_ports.list_switch_ports') }}"
+               class="{% if request.endpoint and request.endpoint.startswith('admin.switch_ports') %}active{% endif %}">Switch Ports</a>
+            <a href="{{ url_for('admin.switch_health.switch_health') }}"
+               class="{% if request.endpoint and request.endpoint.startswith('admin.switch_health') %}active{% endif %}">Switch Health</a>
             {% endif %}
             {% if current_user.can_manage_firmware %}
-            <a href="{{ url_for('admin_firmware') }}" class="{% if request.endpoint == 'admin_firmware' %}active{% endif %}">Firmware</a>
+            <a href="{{ url_for('admin.firmware.admin_firmware') }}"
+               class="{% if request.endpoint and request.endpoint.startswith('admin.firmware') %}active{% endif %}">Firmware</a>
             {% endif %}
             {% if current_user.can_manage_pihole %}
-            <a href="{{ url_for('admin_pihole') }}" class="{% if request.endpoint == 'admin_pihole' %}active{% endif %}">Pi-Hole</a>
-            <a href="{{ url_for('admin_pihole_blocked_queries') }}" class="{% if request.endpoint == 'admin_pihole_blocked_queries' %}active{% endif %}">Blocked Queries</a>
+            <a href="{{ url_for('admin.pihole.admin_pihole') }}"
+               class="{% if request.endpoint and request.endpoint.startswith('admin.pihole') %}active{% endif %}">Pi-Hole</a>
+            <a href="{{ url_for('admin.pihole.pihole_blocked_queries') }}"
+               class="{% if request.endpoint == 'admin.pihole.pihole_blocked_queries' %}active{% endif %}">Blocked Queries</a>
             {% endif %}
             {% if current_user.can_manage_admins %}
-            <a href="{{ url_for('admin_manage_admins') }}" class="{% if request.endpoint == 'admin_manage_admins' %}active{% endif %}">Manage Admins</a>
+            <a href="{{ url_for('admin.manage_admins.manage_admins') }}"
+               class="{% if request.endpoint and request.endpoint.startswith('admin.manage_admins') %}active{% endif %}">Manage Admins</a>
             {% endif %}
-            <a href="{{ url_for('admin_mfa_setup') }}" class="{% if request.endpoint == 'admin_mfa_setup' %}active{% endif %}">🔐 Two-Factor Auth</a>
-            <a href="{{ url_for('admin_logout') }}" style="margin-left: auto;">Logout</a>
+            <a href="{{ url_for('admin.manage_admins.mfa_setup') }}"
+               class="{% if request.endpoint == 'admin.manage_admins.mfa_setup' %}active{% endif %}">🔐 Two-Factor Auth</a>
+            <a href="{{ url_for('admin.manage_admins.logout') }}" style="margin-left: auto;">Logout</a>
         </div>
         {% endif %}
 
@@ -400,10 +410,10 @@
                     {% endfor %}
                 {% endif %}
             {% endwith %}
-            
+
             {% block content %}{% endblock %}
         </div>
-        
+
         <div class="footer">
             {% block footer %}
             Blackfriars Network Access Portal &copy; 2025
@@ -420,7 +430,6 @@
         }
 
         // Auto-label table cells for responsive card layout
-        // Skip tables that have a filter-row (e.g. traffic viewer) — those use horizontal scroll instead
         document.addEventListener('DOMContentLoaded', function() {
             document.querySelectorAll('table').forEach(function(table) {
                 if (table.querySelector('tr.filter-row')) return;
