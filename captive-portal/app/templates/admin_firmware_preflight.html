@@ -29,7 +29,6 @@ Firmware {{ action|title }} — Pre-flight Checklist
     .commit-hash { font-family: monospace; font-weight: bold; color: #2b6cb0; }
     .commit-subject { color: #4a5568; margin-left: 8px; }
 
-    /* Env var form */
     .env-table { width: 100%; border-collapse: collapse; margin-top: 8px; }
     .env-table th, .env-table td {
         padding: 8px 12px;
@@ -72,7 +71,6 @@ Firmware {{ action|title }} — Pre-flight Checklist
         margin: 2px;
     }
 
-    /* DB section */
     .db-warning {
         background: #fffbeb;
         border: 1px solid #f59e0b;
@@ -88,7 +86,6 @@ Firmware {{ action|title }} — Pre-flight Checklist
     }
     .db-warning strong { color: #92400e; }
 
-    /* Notes */
     .notes-box {
         background: #ebf8ff;
         border-left: 4px solid #4299e1;
@@ -98,7 +95,6 @@ Firmware {{ action|title }} — Pre-flight Checklist
         font-size: 0.95em;
     }
 
-    /* Action buttons */
     .btn-proceed {
         padding: 10px 28px;
         font-size: 15px;
@@ -143,9 +139,9 @@ Firmware {{ action|title }} — Pre-flight Checklist
     <span class="commit-subject">{{ target_subject }}</span>
 </div>
 
-<form method="POST" action="{{ url_for('admin_firmware_preflight', action=action) }}">
+<form method="POST" action="{{ url_for('admin.firmware.firmware_preflight', action=action) }}">
 
-{# ── Manifest description ───────────────────────────────────────────── #}
+{# ── Manifest description ── #}
 {% if manifest and manifest.description %}
 <div class="preflight-section">
     <h3>What this {{ 'upgrade' if action in ('update', 'update-latest') else 'rollback' }} does</h3>
@@ -158,7 +154,7 @@ Firmware {{ action|title }} — Pre-flight Checklist
 </div>
 {% endif %}
 
-{# ── Environment variables ──────────────────────────────────────────── #}
+{# ── Environment variables ── #}
 {% if action in ('update', 'update-latest') %}
   {% set env_add = (manifest.env.add if manifest and manifest.env else []) %}
   {% set env_remove = (manifest.env.remove if manifest and manifest.env else []) %}
@@ -220,7 +216,7 @@ Firmware {{ action|title }} — Pre-flight Checklist
     {% if env_remove %}
     <p style="margin-top:12px; margin-bottom:4px;">
         The following variables will be <strong>automatically removed</strong> from <code>.env</code>
-        during this update. If you ever roll back, you will be prompted to re-enter their values.
+        during this update.
     </p>
     <ul class="remove-list">
         {% for entry in env_remove %}
@@ -251,9 +247,7 @@ Firmware {{ action|title }} — Pre-flight Checklist
     {% if env_remove %}
     <p style="margin:0 0 8px;">
         The following variables were <strong>removed by this commit</strong>.
-        They will be restored to <code>.env</code> on rollback because
-        <code>docker-compose.yml</code> will reference them again.
-        Please enter their values:
+        They will be restored to <code>.env</code> on rollback. Please enter their values:
     </p>
     <table class="env-table">
         <thead>
@@ -326,7 +320,7 @@ Firmware {{ action|title }} — Pre-flight Checklist
   {% endif %}
 {% endif %}
 
-{# ── Database changes ───────────────────────────────────────────────── #}
+{# ── Database changes ── #}
 <div class="preflight-section">
     <h3>Database schema changes</h3>
     {% if action in ('update', 'update-latest') %}
@@ -348,7 +342,7 @@ Firmware {{ action|title }} — Pre-flight Checklist
     {% endif %}
 </div>
 
-{# ── No manifest case ───────────────────────────────────────────────── #}
+{# ── No manifest case ── #}
 {% if not manifest %}
 <div class="preflight-section">
     <p style="color:#718096; margin:0;">
@@ -358,7 +352,7 @@ Firmware {{ action|title }} — Pre-flight Checklist
 </div>
 {% endif %}
 
-{# ── Confirm buttons ────────────────────────────────────────────────── #}
+{# ── Confirm buttons ── #}
 <div style="margin-top: 20px;">
     <button type="submit"
             class="btn-proceed {% if action in ('update', 'update-latest') %}btn-update-go{% else %}btn-rollback-go{% endif %}">
@@ -370,7 +364,7 @@ Firmware {{ action|title }} — Pre-flight Checklist
             &#9664; Confirm &amp; Roll Back
         {% endif %}
     </button>
-    <a href="{{ url_for('admin_firmware') }}" class="btn-cancel">Cancel</a>
+    <a href="{{ url_for('admin.firmware.admin_firmware') }}" class="btn-cancel">Cancel</a>
 </div>
 
 </form>

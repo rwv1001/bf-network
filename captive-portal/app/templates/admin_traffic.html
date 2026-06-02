@@ -6,27 +6,25 @@
 
 {% block extra_head %}
 <style>
-    
-    /* Filter section */
     .filter-section {
         background: #f8f9fa;
         padding: 20px;
         border-radius: 5px;
         margin-bottom: 20px;
     }
-    
+
     .filter-section h3 {
         margin-bottom: 15px;
         color: #2c3e2c;
     }
-    
+
     .column-selector {
         display: grid;
         grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
         gap: 10px;
         margin-bottom: 20px;
     }
-    
+
     .column-selector label {
         display: flex;
         align-items: center;
@@ -38,42 +36,42 @@
         cursor: pointer;
         transition: background 0.2s;
     }
-    
+
     .column-selector label:hover {
         background: #e9ecef;
     }
-    
+
     .column-selector input[type="checkbox"] {
         margin-right: 8px;
         width: auto;
     }
-    
+
     .filters-grid {
         display: grid;
         grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
         gap: 10px;
         margin-bottom: 15px;
     }
-    
+
     .filter-item {
         display: flex;
         flex-direction: column;
     }
-    
+
     .filter-item label {
         font-size: 12px;
         font-weight: 600;
         margin-bottom: 4px;
         color: #495057;
     }
-    
+
     .filter-item input {
         padding: 6px 10px;
         border: 1px solid #ced4da;
         border-radius: 4px;
         font-size: 13px;
     }
-    
+
     .filter-help {
         background: #e7f3ff;
         border-left: 4px solid #0066cc;
@@ -82,12 +80,12 @@
         font-size: 13px;
         line-height: 1.5;
     }
-    
+
     .filter-help strong {
         display: block;
         margin-bottom: 5px;
     }
-    
+
     .filter-help code {
         background: #fff;
         padding: 2px 6px;
@@ -95,20 +93,19 @@
         font-family: 'Courier New', monospace;
         font-size: 12px;
     }
-    
+
     .filter-actions {
         display: flex;
         gap: 10px;
         margin-top: 15px;
     }
-    
-    /* Filter row in table */
+
     tr.filter-row td {
         padding: 4px 8px;
         background: #f8f9fa;
         border-bottom: 2px solid #dee2e6;
     }
-    
+
     tr.filter-row input {
         width: 100%;
         padding: 4px 8px;
@@ -117,14 +114,13 @@
         font-size: 12px;
         box-sizing: border-box;
     }
-    
+
     tr.filter-row input:focus {
         outline: none;
         border-color: #2c3e2c;
         box-shadow: 0 0 0 2px rgba(44, 62, 44, 0.1);
     }
-    
-    /* Compact table styling */
+
     .table-responsive {
         overflow-x: auto;
         margin: 20px 0;
@@ -132,13 +128,13 @@
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         background: white;
     }
-    
+
     table {
         width: 100%;
         border-collapse: collapse;
         font-size: 13px;
     }
-    
+
     th {
         background: #2c3e2c;
         color: white;
@@ -150,31 +146,30 @@
         z-index: 11;
         white-space: nowrap;
     }
-    
-    /* Filter row sticky positioning */
+
     tr.filter-row td {
         position: sticky;
-        top: 37px; /* Height of th */
+        top: 37px;
         z-index: 10;
     }
-    
+
     th.sortable {
         cursor: pointer;
         user-select: none;
         position: relative;
         padding-right: 25px;
     }
-    
+
     th.sortable:hover {
         background: #3d5a3d;
     }
-    
+
     th.sortable a {
         color: white;
         text-decoration: none;
         display: block;
     }
-    
+
     th.sortable .sort-arrow {
         position: absolute;
         right: 8px;
@@ -182,36 +177,34 @@
         transform: translateY(-50%);
         font-size: 11px;
     }
-    
+
     th.sortable.active {
         background: #4a6f4a;
     }
-    
+
     td {
         padding: 4px 12px;
         border-bottom: 1px solid #e9ecef;
         vertical-align: middle;
     }
-    
+
     tr:hover {
         background: #f8f9fa;
     }
-    
-    /* Truncate long text */
+
     .truncate {
         max-width: 200px;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
     }
-    
+
     .truncate:hover {
         overflow: visible;
         white-space: normal;
         word-break: break-all;
     }
-    
-    /* Pagination */
+
     .pagination-controls {
         display: flex;
         justify-content: space-between;
@@ -221,18 +214,18 @@
         border-radius: 5px;
         margin-top: 20px;
     }
-    
+
     .pagination-info {
         font-size: 14px;
         color: #495057;
     }
-    
+
     .pagination-buttons {
         display: flex;
         gap: 10px;
         align-items: center;
     }
-    
+
     .pagination-buttons a,
     .pagination-buttons span {
         padding: 6px 12px;
@@ -240,29 +233,28 @@
         text-decoration: none;
         font-size: 13px;
     }
-    
+
     .pagination-buttons a {
         background: #2c3e2c;
         color: white;
         transition: background 0.3s;
     }
-    
+
     .pagination-buttons a:hover {
         background: #3d5a3d;
     }
-    
+
     .pagination-buttons span {
         color: #6c757d;
     }
-    
+
     .pagination-buttons select {
         padding: 6px 10px;
         border: 1px solid #ced4da;
         border-radius: 4px;
         font-size: 13px;
     }
-    
-    /* Button styling */
+
     .btn {
         padding: 10px 20px;
         border: none;
@@ -274,42 +266,40 @@
         text-decoration: none;
         display: inline-block;
     }
-    
+
     .btn-primary {
         background: #2c3e2c;
         color: white;
     }
-    
+
     .btn-primary:hover:not(:disabled) {
         background: #3d5a3d;
     }
-    
+
     .btn-primary:disabled {
         opacity: 0.5;
         cursor: not-allowed;
     }
-    
+
     .btn-secondary {
         background: #6c757d;
         color: white;
     }
-    
+
     .btn-secondary:hover {
         background: #5a6268;
     }
-    
-    /* Empty state */
+
     .empty-state {
         text-align: center;
         padding: 60px 20px;
         color: #6c757d;
     }
-    
+
     .empty-state h3 {
         margin-bottom: 10px;
     }
 
-    /* Mobile cards and filter panel (hidden on desktop) */
     .mobile-cards { display: none; }
     .mobile-filter-panel { display: none; }
 
@@ -319,12 +309,10 @@
         .filter-help { font-size: 12px; }
         .filter-actions { flex-wrap: wrap; }
 
-        /* Hide desktop table, show mobile alternatives */
         .table-responsive { display: none !important; }
         .mobile-cards { display: block; }
         .mobile-filter-panel { display: block; }
 
-        /* Mobile session cards */
         .mobile-card {
             border: 1px solid #e0e0e0;
             border-radius: 6px;
@@ -359,7 +347,6 @@
             word-break: break-all;
         }
 
-        /* Mobile filter panel */
         .mobile-filter-panel {
             background: #f0f4f0;
             border: 1px solid #c8d8c8;
@@ -389,15 +376,15 @@
 {% block content %}
 <div class="filter-section">
     <h3>Column Selection & Filters</h3>
-    
-    <form method="get" action="{{ url_for('admin_traffic') }}" id="filterForm">
+
+    <form method="get" action="{{ url_for('admin.traffic.traffic') }}" id="filterForm">
         <!-- Column Selector -->
         <div style="margin-bottom: 20px;">
             <label style="font-weight: 600; margin-bottom: 10px; display: block;">Select Columns to Display:</label>
             <div class="column-selector">
                 {% for col_name, col_label in all_columns %}
                 <label>
-                    <input type="checkbox" name="columns" value="{{ col_name }}" 
+                    <input type="checkbox" name="columns" value="{{ col_name }}"
                            {% if col_name in selected_columns %}checked{% endif %}>
                     {{ col_label }}
                 </label>
@@ -407,21 +394,21 @@
                 <button type="submit" class="btn btn-primary" id="updateColumnsBtn" style="padding: 8px 20px;">Update Columns</button>
             </div>
         </div>
-        
+
         <!-- Filter Help -->
         <div class="filter-help">
             <strong>Filter Syntax (use filters in table below):</strong>
             <div style="margin-left: 15px;">
                 • <strong>Text columns:</strong> Use <code>%</code> as wildcard (e.g., <code>%google%</code> or just <code>google</code>)<br>
-                • <strong>Date columns:</strong> 
-                  <code>2026-02-17</code> (exact day), 
-                  <code>&gt;2026-02-15</code> (after), 
-                  <code>&lt;2026-02-20</code> (before), 
+                • <strong>Date columns:</strong>
+                  <code>2026-02-17</code> (exact day),
+                  <code>&gt;2026-02-15</code> (after),
+                  <code>&lt;2026-02-20</code> (before),
                   <code>2026-02-15 to 2026-02-17</code> (range)<br>
                 • Leave blank to show all results
             </div>
         </div>
-        
+
         <!-- Per Page Selector -->
         <div class="filter-item" style="max-width: 200px;">
             <label for="per_page">Rows per page:</label>
@@ -433,8 +420,8 @@
                 <option value="500" {% if per_page == 500 %}selected{% endif %}>500</option>
             </select>
         </div>
-        
-        <!-- Mobile filter panel: inputs synced to form via JS before submit -->
+
+        <!-- Mobile filter panel -->
         <div class="mobile-filter-panel">
             <h4>Filters</h4>
             <div class="mobile-filter-grid">
@@ -455,11 +442,11 @@
         <!-- Hidden fields for sorting -->
         <input type="hidden" name="sort" value="{{ sort_col }}">
         <input type="hidden" name="order" value="{{ sort_order }}">
-        
+
         <!-- Action Buttons -->
         <div class="filter-actions">
             <button type="submit" class="btn btn-primary">Apply Filters</button>
-            <a href="{{ url_for('admin_traffic') }}" class="btn btn-secondary">Reset</a>
+            <a href="{{ url_for('admin.traffic.traffic') }}" class="btn btn-secondary">Reset</a>
         </div>
     </form>
 </div>
@@ -471,17 +458,17 @@
     </div>
     <div class="pagination-buttons">
         {% if page > 1 %}
-        <a href="{{ url_for('admin_traffic', page=page-1, per_page=per_page, sort=sort_col, order=sort_order, columns=selected_columns, **filters) }}">
+        <a href="{{ url_for('admin.traffic.traffic', page=page-1, per_page=per_page, sort=sort_col, order=sort_order, columns=selected_columns, **filters) }}">
             ← Previous
         </a>
         {% else %}
         <span style="color: #ccc;">← Previous</span>
         {% endif %}
-        
+
         <span>Page {{ page }} of {{ total_pages }}</span>
-        
+
         {% if page < total_pages %}
-        <a href="{{ url_for('admin_traffic', page=page+1, per_page=per_page, sort=sort_col, order=sort_order, columns=selected_columns, **filters) }}">
+        <a href="{{ url_for('admin.traffic.traffic', page=page+1, per_page=per_page, sort=sort_col, order=sort_order, columns=selected_columns, **filters) }}">
             Next →
         </a>
         {% else %}
@@ -510,9 +497,9 @@
             <tr class="filter-row">
                 {% for col_name in selected_columns %}
                 <td>
-                    <input type="text" 
-                           id="filter_{{ col_name }}" 
-                           name="filter_{{ col_name }}" 
+                    <input type="text"
+                           id="filter_{{ col_name }}"
+                           name="filter_{{ col_name }}"
                            value="{{ filters.get(col_name, '') }}"
                            placeholder="{% if col_name in ['session_start', 'session_end'] %}YYYY-MM-DD{% else %}filter...{% endif %}"
                            form="filterForm">
@@ -544,7 +531,7 @@
     </table>
 </div>
 
-<!-- Mobile cards (shown on mobile instead of table) -->
+<!-- Mobile cards -->
 <div class="mobile-cards">
     {% for row in rows %}
     <div class="mobile-card">
@@ -575,7 +562,7 @@
     </div>
     <div class="pagination-buttons">
         {% if page > 1 %}
-        <a href="{{ url_for('admin_traffic', page=page-1, per_page=per_page, sort=sort_col, order=sort_order, columns=selected_columns, **filters) }}">
+        <a href="{{ url_for('admin.traffic.traffic', page=page-1, per_page=per_page, sort=sort_col, order=sort_order, columns=selected_columns, **filters) }}">
             ← Previous
         </a>
         {% else %}
@@ -585,7 +572,7 @@
         <span>Page {{ page }} of {{ total_pages }}</span>
 
         {% if page < total_pages %}
-        <a href="{{ url_for('admin_traffic', page=page+1, per_page=per_page, sort=sort_col, order=sort_order, columns=selected_columns, **filters) }}">
+        <a href="{{ url_for('admin.traffic.traffic', page=page+1, per_page=per_page, sort=sort_col, order=sort_order, columns=selected_columns, **filters) }}">
             Next →
         </a>
         {% else %}
@@ -606,19 +593,17 @@ function sortTable(column) {
     const form = document.getElementById('filterForm');
     const sortInput = form.querySelector('input[name="sort"]');
     const orderInput = form.querySelector('input[name="order"]');
-    
-    // Toggle order if same column, otherwise default to desc
+
     if (sortInput.value === column) {
         orderInput.value = orderInput.value === 'asc' ? 'desc' : 'asc';
     } else {
         sortInput.value = column;
         orderInput.value = 'desc';
     }
-    
+
     form.submit();
 }
 
-// Auto-submit filters when user presses Enter in any filter input
 document.addEventListener('DOMContentLoaded', function() {
     const filterInputs = document.querySelectorAll('tr.filter-row input');
     filterInputs.forEach(input => {
@@ -630,7 +615,6 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
 
-    // Mobile filter inputs: sync to desktop inputs and submit on Enter
     function syncMobileFilters() {
         document.querySelectorAll('.mobile-filter-input').forEach(function(inp) {
             const target = document.getElementById(inp.dataset.target);
@@ -646,12 +630,11 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         });
     });
-    
-    // Column selection tracking
+
     const initialColumns = new Set({{ selected_columns|tojson }});
     const columnCheckboxes = document.querySelectorAll('.column-selector input[type="checkbox"]');
     const updateColumnsBtn = document.getElementById('updateColumnsBtn');
-    
+
     function checkColumnsChanged() {
         const currentColumns = new Set();
         columnCheckboxes.forEach(checkbox => {
@@ -659,11 +642,10 @@ document.addEventListener('DOMContentLoaded', function() {
                 currentColumns.add(checkbox.value);
             }
         });
-        
-        // Check if sets are equal
+
         const changed = initialColumns.size !== currentColumns.size ||
                        [...initialColumns].some(col => !currentColumns.has(col));
-        
+
         updateColumnsBtn.disabled = !changed;
         if (changed) {
             updateColumnsBtn.style.opacity = '1';
@@ -673,19 +655,15 @@ document.addEventListener('DOMContentLoaded', function() {
             updateColumnsBtn.style.cursor = 'not-allowed';
         }
     }
-    
-    // Check initial state
+
     checkColumnsChanged();
-    
-    // Listen for checkbox changes
+
     columnCheckboxes.forEach(checkbox => {
         checkbox.addEventListener('change', checkColumnsChanged);
     });
-    
-    // Disable button on form submit to prevent double submission
+
     const form = document.getElementById('filterForm');
     form.addEventListener('submit', function() {
-        // Sync mobile filter inputs to desktop filter inputs before submit
         syncMobileFilters();
 
         if (!updateColumnsBtn.disabled) {
@@ -696,14 +674,13 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 });
 
-// Auto-refresh every 15 seconds, preserving current URL params (filters, sort, page)
+// Auto-refresh every 15 seconds
 (function() {
     const REFRESH_INTERVAL = 15000;
     let countdown = REFRESH_INTERVAL / 1000;
     let paused = false;
     let timer = null;
 
-    // Inject status bar above the table
     const tableWrapper = document.querySelector('.table-responsive') || document.querySelector('table');
     if (!tableWrapper) return;
 

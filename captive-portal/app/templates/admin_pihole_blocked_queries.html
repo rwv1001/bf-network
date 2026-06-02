@@ -66,7 +66,7 @@ tr:hover td { background: #f7fafc; }
     Updated every 30 seconds by the dns-parser service.
 </p>
 
-<form method="get" action="{{ url_for('admin_pihole_blocked_queries') }}" class="filter-bar">
+<form method="get" action="{{ url_for('admin.pihole.pihole_blocked_queries') }}" class="filter-bar">
     <div>
         <label for="f-user">User</label>
         <select name="user_id" id="f-user">
@@ -113,7 +113,7 @@ tr:hover td { background: #f7fafc; }
     <div style="display:flex; gap:8px; align-items:flex-end;">
         <button type="submit" class="btn">Apply</button>
         {% if user_filter or domain_filter or status_filter or client_ip_filter or mac_filter or date_from_str or date_to_str %}
-        <a href="{{ url_for('admin_pihole_blocked_queries') }}" class="btn btn-secondary">Clear</a>
+        <a href="{{ url_for('admin.pihole.pihole_blocked_queries') }}" class="btn btn-secondary">Clear</a>
         {% endif %}
     </div>
 </form>
@@ -153,7 +153,7 @@ tr:hover td { background: #f7fafc; }
             <td>{{ row.device_name or '' }}</td>
             <td>
                 {% if row.user_id %}
-                    <a href="{{ url_for('admin_pihole_blocked_queries', user_id=row.user_id) }}"
+                    <a href="{{ url_for('admin.pihole.pihole_blocked_queries', user_id=row.user_id) }}"
                        class="user-link" title="Filter by this user">{{ row.first_name }} {{ row.last_name }}</a>
                     <span style="color:#a0aec0; font-size:.8em;">{{ row.email }}</span>
                 {% else %}
@@ -170,7 +170,7 @@ tr:hover td { background: #f7fafc; }
 <div class="pagination">
     {% set pg_args = dict(user_id=user_filter, domain=domain_filter, status=status_filter, client_ip=client_ip_filter, mac=mac_filter, date_from=date_from_str, date_to=date_to_str) %}
     {% if page > 1 %}
-        <a href="{{ url_for('admin_pihole_blocked_queries', page=page-1, **pg_args) }}">&laquo; Prev</a>
+        <a href="{{ url_for('admin.pihole.pihole_blocked_queries', page=page-1, **pg_args) }}">&laquo; Prev</a>
     {% else %}
         <span class="disabled">&laquo; Prev</span>
     {% endif %}
@@ -179,12 +179,12 @@ tr:hover td { background: #f7fafc; }
         {% if p == page %}
             <span class="current">{{ p }}</span>
         {% else %}
-            <a href="{{ url_for('admin_pihole_blocked_queries', page=p, **pg_args) }}">{{ p }}</a>
+            <a href="{{ url_for('admin.pihole.pihole_blocked_queries', page=p, **pg_args) }}">{{ p }}</a>
         {% endif %}
     {% endfor %}
 
     {% if page < total_pages %}
-        <a href="{{ url_for('admin_pihole_blocked_queries', page=page+1, **pg_args) }}">Next &raquo;</a>
+        <a href="{{ url_for('admin.pihole.pihole_blocked_queries', page=page+1, **pg_args) }}">Next &raquo;</a>
     {% else %}
         <span class="disabled">Next &raquo;</span>
     {% endif %}
@@ -199,6 +199,6 @@ tr:hover td { background: #f7fafc; }
 {% endif %}
 
 <p style="margin-top:24px;">
-    <a href="{{ url_for('admin_pihole') }}">&larr; Back to Pi-Hole management</a>
+    <a href="{{ url_for('admin.pihole.admin_pihole') }}">&larr; Back to Pi-Hole management</a>
 </p>
 {% endblock %}

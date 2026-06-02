@@ -84,9 +84,6 @@
         vertical-align: middle;
     }
 
-    tr.row-unclassified td {
-    }
-
     tr:hover { background: #f8fbf8; }
 
     .port-name {
@@ -109,7 +106,6 @@
     .link-adm  { color: #95a5a6; }
     .link-unknown { color: #bdc3c7; }
 
-    /* Role radio buttons */
     .role-group {
         display: flex;
         flex-wrap: wrap;
@@ -134,12 +130,6 @@
     }
 
     .role-group input[type=radio] { display: none; }
-
-    .role-group input[type=radio]:checked + span {
-        font-weight: bold;
-    }
-        /* handled by JS adding .selected class to the label */
-    
 
     .role-group label.selected-ap           { background: #d5f5e3; color: #1d6a3a; border-color: #27ae60; border-width: 3px; font-weight: 700; }
     .role-group label.selected-wired        { background: #d6eaf8; color: #1a5276; border-color: #2980b9; }
@@ -203,7 +193,6 @@
     .status-pending { color: #888; }
     .status-ok      { color: #27ae60; font-weight: 600; }
     .status-err     { color: #c0392b; font-weight: 600; }
-
 </style>
 {% endblock %}
 
@@ -345,13 +334,6 @@ document.querySelectorAll('.role-group').forEach(group => {
         const statusEl = document.getElementById(statusId);
         const row      = group.closest('tr');
 
-        // Remember previous role in case we need to revert
-        const prevRadio = group.querySelector('input[type=radio]:not(:checked)[data-prev]');
-        const prevRole  = group.querySelector('input[type=radio][data-prev]')?.dataset.prev
-                          || [...group.querySelectorAll('input[type=radio]')]
-                               .find(r => r !== radio && r.defaultChecked)?.value
-                          || newRole;
-
         updateRoleStyle(group, newRole);
         if (statusEl) statusEl.innerHTML = '<span class="status-pending">⏳ Updating…</span>';
         setAllGroupsDisabled(true);
@@ -374,7 +356,6 @@ document.querySelectorAll('.role-group').forEach(group => {
                 }
             } else {
                 if (statusEl) statusEl.innerHTML = '<span class="status-err">✗ ' + (data.error || 'Failed') + '</span>';
-                // Revert visual style (can't revert radio check reliably without storing prev)
             }
         })
         .catch(() => {

@@ -183,7 +183,6 @@
             {% else %}
             <div class="affected-dirs commit-none">No compose stacks affected</div>
             {% endif %}
-            {# current_manifest describes what rolling back FROM current TO prev requires #}
             {% if current_manifest %}
             <div class="migration-badge badge-warn">&#9888; Migration required on rollback</div>
             {% if current_manifest.description %}
@@ -223,7 +222,6 @@
             {% else %}
             <div class="affected-dirs commit-none">No compose stacks affected</div>
             {% endif %}
-            {# next_manifest describes what upgrading TO next requires #}
             {% if next_manifest %}
             <div class="migration-badge badge-warn">&#9888; Migration required</div>
             {% if next_manifest.description %}
@@ -247,20 +245,20 @@
 
 </div>
 
-<!-- Action buttons — link to preflight page -->
+<!-- Action buttons -->
 <div class="action-row">
-    <a href="{{ url_for('admin_firmware_preflight', action='rollback') }}"
+    <a href="{{ url_for('admin.firmware.firmware_preflight', action='rollback') }}"
        class="btn-firmware btn-rollback {% if not status.prev_full or not status.back_dirs %}disabled{% endif %}">
         &#8592; Roll Back
     </a>
 
-    <a href="{{ url_for('admin_firmware_preflight', action='update') }}"
+    <a href="{{ url_for('admin.firmware.firmware_preflight', action='update') }}"
        class="btn-firmware btn-update {% if not status.next_full or not status.forward_dirs %}disabled{% endif %}">
         Update &#8594;
     </a>
 
     {% if commits_ahead_count > 1 %}
-    <a href="{{ url_for('admin_firmware_preflight', action='update-latest') }}"
+    <a href="{{ url_for('admin.firmware.firmware_preflight', action='update-latest') }}"
        class="btn-firmware btn-update-latest">
         &#9193; Update to Latest ({{ commits_ahead_count }} commits)
     </a>
@@ -268,7 +266,6 @@
 </div>
 
 {% if test_enabled %}
-<!-- Post-operation verify button (visible only when FIRMWARE_TEST_ENABLED is set) -->
 <div class="test-row">
     {% if last_op %}
     <button type="button" id="btn-verify" onclick="runTest()"
@@ -290,7 +287,7 @@
 </div>
 {% endif %}
 
-<!-- Test results panel (populated by JS) -->
+<!-- Test results panel -->
 <div id="test-results">
     <div id="test-results-header"></div>
     <table>
@@ -336,7 +333,7 @@ function runTest() {
     panel.style.display = 'block';
     panel.scrollIntoView({behavior: 'smooth', block: 'nearest'});
 
-    fetch('/admin/firmware/verify-last')
+    fetch('{{ url_for("admin.firmware.firmware_verify_last") }}')
         .then(r => r.json())
         .then(data => {
             if (data.error) {

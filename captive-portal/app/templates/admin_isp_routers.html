@@ -144,7 +144,6 @@
     .router-hint ul { margin: 6px 0 0 0; padding-left: 18px; }
     .router-hint li { margin-bottom: 3px; }
 
-    /* inline edit form hidden by default */
     .edit-row { display: none; }
     .edit-row td { background: #f8fff8; padding: 14px; }
     .edit-form { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -187,7 +186,7 @@ function pushAllSwitchConfig() {
     status.style.color = '#555';
     status.textContent = 'Starting…';
 
-    fetch('{{ url_for("admin_push_all_switch_config") }}', {
+    fetch('{{ url_for("admin.isp_routers.push_all_switch_config") }}', {
         method: 'POST',
         headers: {'X-CSRFToken': document.querySelector('meta[name=csrf-token]') ? document.querySelector('meta[name=csrf-token]').content : ''},
         credentials: 'same-origin',
@@ -206,7 +205,7 @@ function pushAllSwitchConfig() {
 
 function pollPushStatus(jobId) {
     var status = document.getElementById('pushAllStatus');
-    var pollUrl = '{{ url_for("admin_push_all_switch_config_status", job_id="__JOB__") }}'.replace('__JOB__', jobId);
+    var pollUrl = '{{ url_for("admin.isp_routers.push_all_switch_config_status", job_id="__JOB__") }}'.replace('__JOB__', jobId);
 
     var interval = setInterval(function() {
         fetch(pollUrl, {credentials: 'same-origin'})
@@ -217,7 +216,6 @@ function pollPushStatus(jobId) {
                 clearInterval(interval);
                 resetPushBtn();
                 status.style.color = data.ok ? '#1a7a1a' : '#c00';
-                // Also show as a page-level banner
                 showPushBanner(data.message, data.ok ? 'success' : 'warning');
             }
         })
@@ -480,7 +478,6 @@ function updateHint(key) {
     if (gwEl) gwEl.textContent = gw;
     if (swEl) swEl.textContent = sw;
     hintBox.style.display = 'block';
-    // Keep nat hint gateway in sync when VLAN changes on add form
     const natGwEl = document.getElementById('nat-hint-add-gw');
     if (natGwEl && key === 'add') natGwEl.textContent = gw;
 }
