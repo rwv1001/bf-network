@@ -90,10 +90,10 @@
         </label>
         <select id="vlan_id" name="vlan_id" required>
             <option value="">-- Select VLAN --</option>
-            {% for status in vlan_map.keys() %}
-                {% if status not in ['unregistered', 'restricted', 'wired_unregistered'] %}
-                <option value="{{ vlan_map[status] }}" {% if default_vlan == vlan_map[status] %}selected{% endif %}>
-                    VLAN {{ vlan_map[status] }} ({{ status.title() }})
+            {% for status, vlan_id in vlan_map.items() %}
+                {% if status not in ['unregistered', 'restricted', 'wired_unregistered'] and vlan_id %}
+                <option value="{{ vlan_id }}" {% if default_vlan is not none and default_vlan == vlan_id %}selected{% endif %}>
+                    VLAN {{ vlan_id }} ({{ status.title() }})
                 </option>
                 {% endif %}
             {% endfor %}
@@ -132,8 +132,8 @@
     <input type="hidden" name="action" value="reject">
     
     <div class="form-group">
-        <label for="notes">Rejection Reason</label>
-        <textarea id="notes" name="notes" rows="3" placeholder="Required reason for rejection"></textarea>
+        <label for="reject_notes">Rejection Reason</label>
+        <textarea id="reject_notes" name="notes" rows="3" placeholder="Required reason for rejection"></textarea>
     </div>
     
     <div style="margin-top: 20px;">
