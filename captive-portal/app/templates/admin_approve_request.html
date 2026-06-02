@@ -81,7 +81,7 @@
 </div>
 {% endif %}
 
-<form method="POST" action="{{ url_for('admin_process_request', request_id=request.id) }}">
+<form method="POST" action="{{ url_for('admin.dashboard.process_request', request_id=request.id) }}">
     <input type="hidden" name="action" value="approve">
     
     <div class="form-group">
@@ -128,7 +128,7 @@
 
 <h3 style="color: #dc3545; margin-top: 40px;">Or Reject Request</h3>
 
-<form method="POST" action="{{ url_for('admin_process_request', request_id=request.id) }}">
+<form method="POST" action="{{ url_for('admin.dashboard.process_request', request_id=request.id) }}">
     <input type="hidden" name="action" value="reject">
     
     <div class="form-group">
@@ -140,7 +140,7 @@
         <button type="submit" class="btn btn-danger" onclick="return confirm('Reject this request?')">
             ✗ Reject Request
         </button>
-        <a href="{{ url_for('admin_dashboard') }}" class="btn btn-secondary" style="margin-left: 10px;">Cancel</a>
+        <a href="{{ url_for('admin.dashboard.index') }}" class="btn btn-secondary" style="margin-left: 10px;">Cancel</a>
     </div>
 </form>
 {% endblock %}
