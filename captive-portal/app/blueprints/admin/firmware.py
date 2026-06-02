@@ -1,3 +1,4 @@
+"""
 Admin — Firmware Management (spec section 12 / CODEBASE section 12).
 
 Routes:
