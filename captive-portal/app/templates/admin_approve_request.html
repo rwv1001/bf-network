@@ -92,7 +92,7 @@
             <option value="">-- Select VLAN --</option>
             {% for status, vlan_id in vlan_map.items() %}
                 {% if status not in ['unregistered', 'restricted', 'wired_unregistered'] and vlan_id %}
-                <option value="{{ vlan_id }}" {% if default_vlan is not none and default_vlan == vlan_id %}selected{% endif %}>
+                <option value="{{ vlan_id }}" {% if default_vlan != none and default_vlan == vlan_id %}selected{% endif %}>
                     VLAN {{ vlan_id }} ({{ status.title() }})
                 </option>
                 {% endif %}
