@@ -599,26 +599,34 @@
 
     var _mirroring = false;
 
-    function onVvChange(cb) {
-        syncVvHidden(cb.dataset.row);
-        if (_mirroring) return;
-        _mirroring = true;
-        try {
-            var peerRowIdx = rowIdxForVid(cb.dataset.vid);
-            var thisVid    = vidForRow(cb.dataset.row);
-            if (peerRowIdx !== null && thisVid !== null) {
-                var mirror = document.querySelector(
-                    '.vv-cb[data-row="' + peerRowIdx + '"][data-vid="' + thisVid + '"'
-                );
-                if (mirror && mirror.checked !== cb.checked) {
-                    mirror.checked = cb.checked;
-                    syncVvHidden(peerRowIdx);
-                }
-            }
-        } finally {
-            _mirroring = false;
-        }
+function onVvChange(cb) {
+    if (!cb || !cb.dataset.row || !cb.dataset.vid) {
+        console.warn('onVvChange: missing data attributes on checkbox');
+        return;
     }
+
+    syncVvHidden(cb.dataset.row);
+
+    if (_mirroring) return;
+
+    _mirroring = true;
+    try {
+        var peerRowIdx = rowIdxForVid(cb.dataset.vid);
+        var thisVid = vidForRow(cb.dataset.row);
+
+        if (peerRowIdx !== null && thisVid !== null) {
+            var selector = '.vv-cb[data-row="' + peerRowIdx + '"][data-vid="' + thisVid + '"]';
+            var mirror = document.querySelector(selector);
+
+            if (mirror && mirror.checked !== cb.checked) {
+                mirror.checked = cb.checked;
+                syncVvHidden(peerRowIdx);
+            }
+        }
+    } finally {
+        _mirroring = false;
+    }
+}
 
     document.querySelectorAll('.vv-cb').forEach(function(cb) {
         cb.addEventListener('change', function() { onVvChange(this); });
@@ -684,3 +692,4 @@
     }
 </script>
 {% endblock %}
+
