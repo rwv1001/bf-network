@@ -83,6 +83,6 @@
   },
   "switch_reachable_192.168.99.3": {
     "alerting": true,
-    "consecutive_failures": 8001
+    "consecutive_failures": 8174
   }
 }
