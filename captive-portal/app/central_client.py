@@ -24,7 +24,9 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-# ?? Configuration read from environment ??????????????????????????????????????
+# ---------------------------------------------------------------------------
+# Configuration read from environment
+# ---------------------------------------------------------------------------
 
 def _central_enabled() -> bool:
     return bool(
@@ -45,7 +47,9 @@ def _headers() -> dict:
 _TIMEOUT = int(os.getenv("CENTRAL_REQUEST_TIMEOUT_SEC", "8"))
 _POLL_INTERVAL = int(os.getenv("CENTRAL_POLL_INTERVAL_SEC", "10"))
 
-# ?? Module-level app reference (set by init_central_client) ??????????????????
+# ---------------------------------------------------------------------------
+# Module-level app reference (set by init_central_client)
+# ---------------------------------------------------------------------------
 
 _app = None         # Flask app — needed for background threads that need app context
 _db = None          # SQLAlchemy db instance
@@ -77,7 +81,9 @@ def init_central_client(app, db, central_event_model):
     ).start()
 
 
-# ?? Public API — called from app.py ??????????????????????????????????????????
+# ---------------------------------------------------------------------------
+# Public API — called from blueprints / app.py
+# ---------------------------------------------------------------------------
 
 def queue_device_registered(device, user) -> None:
     """Queue a device_registered event to central after successful local registration.
@@ -220,7 +226,7 @@ def import_device_from_central(mac_address: str, central_data: dict) -> Optional
 
     now = _dt.datetime.now(_dt.timezone.utc)
 
-    # ?? Upsert user ??????????????????????????????????????????????????????????
+    # Upsert user
     user = User.query.filter_by(email=email).first()
     if not user:
         user = User(
@@ -245,7 +251,7 @@ def import_device_from_central(mac_address: str, central_data: dict) -> Optional
         user.blocked = True
         logger.info("import_device_from_central: user %s marked blocked (from central)", email)
 
-    # ?? Upsert device ????????????????????????????????????????????????????????
+    # Upsert device
     device = Device.query.filter_by(mac_address=mac).first()
     device_blocked = bool(central_data.get("device_blocked") or central_data.get("user_blocked"))
     is_wired_device = bool(central_data.get("is_wired"))
@@ -273,7 +279,7 @@ def import_device_from_central(mac_address: str, central_data: dict) -> Optional
             device.is_wired = True
             device.connection_type = "wired"
 
-    # ?? Upsert ownership ?????????????????????????????????????????????????????
+    # Upsert ownership
     existing_ownership = DeviceOwnership.query.filter_by(
         mac_address=mac, end_datetime=None
     ).first()
@@ -288,7 +294,7 @@ def import_device_from_central(mac_address: str, central_data: dict) -> Optional
 
     device.ownership_validated = True
 
-    # ?? Wired cross-site: trigger port bounce if on wrong VLAN ???????????????
+    # Wired cross-site: trigger port bounce if on wrong VLAN
     # The device arrived on VLAN 250 (wired_unregistered). RADIUS placed it
     # there because it had no local record. Now that we've imported it, queue a
     # port bounce so the switch re-auths via RADIUS, which will now return the
@@ -317,7 +323,7 @@ def import_device_from_central(mac_address: str, central_data: dict) -> Optional
         except Exception as exc:
             logger.warning("import_device_from_central: port bounce failed for %s: %s", mac, exc)
 
-    # ?? Notify central this site now holds the device ????????????????????????
+    # Notify central this site now holds the device
     queue_device_registered(device, user)
 
     return device
@@ -346,7 +352,7 @@ def lookup_device_at_central(mac_address: str) -> Optional[dict]:
         if resp.status_code == 404:
             logger.info("central lookup: MAC %s not known to central", mac_address)
             return None
-        logger.warning("central lookup %s ? HTTP %d", mac_address, resp.status_code)
+        logger.warning("central lookup %s → HTTP %d", mac_address, resp.status_code)
     except Exception as exc:
         logger.warning("central lookup %s failed (fail-open): %s", mac_address, exc)
     return None
@@ -384,7 +390,9 @@ def lookup_user_at_central(email: str) -> Optional[dict]:
     return None
 
 
-# ?? Internal helpers ??????????????????????????????????????????????????????????
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 def _enqueue(event_type: str, payload: dict) -> None:
     """Insert and commit an outbound event into the local DB queue.
@@ -423,10 +431,10 @@ def _send_event(event_type: str, payload: dict):
         # 4xx errors (except 429) are permanent failures — the central server
         # will never accept this event, so don't retry it.
         if resp.status_code != 429 and 400 <= resp.status_code < 500:
-            logger.debug("central event %s ? HTTP %d (permanent, dropping): %s",
+            logger.debug("central event %s → HTTP %d (permanent, dropping): %s",
                          event_type, resp.status_code, resp.text[:200])
             return {"_dropped": True}
-        logger.warning("central event %s ? HTTP %d: %s", event_type, resp.status_code, resp.text[:200])
+        logger.warning("central event %s → HTTP %d: %s", event_type, resp.status_code, resp.text[:200])
     except Exception as exc:
         logger.warning("central event %s failed: %s", event_type, exc)
     return False
@@ -438,6 +446,8 @@ def _eager_send_registration(payload: dict) -> None:
     worker doesn't duplicate it.  On failure the worker will retry normally."""
     mac = payload.get("mac_address", "").lower()
     with _app.app_context():
+        # db imported inside context — must not be imported at module level
+        from extensions import db
         try:
             result = _send_event("device_registered", payload)
             if result and not (isinstance(result, dict) and result.get("_dropped")):
@@ -453,7 +463,7 @@ def _eager_send_registration(payload: dict) -> None:
                     event.status = "sent"
                     event.attempts = (event.attempts or 0) + 1
                     event.last_attempt_at = datetime.now(timezone.utc)
-                    _db.session.commit()
+                    db.session.commit()
                 if isinstance(result, dict):
                     _handle_registration_response(payload, result)
                 logger.info("central eager send: device_registered for %s succeeded", mac)
@@ -461,7 +471,10 @@ def _eager_send_registration(payload: dict) -> None:
                 logger.info("central eager send: device_registered for %s failed/dropped, "
                             "worker will retry", mac)
         except Exception as exc:
+            db.session.rollback()
             logger.warning("central eager send for %s failed: %s — worker will retry", mac, exc)
+        finally:
+            db.session.remove()
 
 
 def _outbound_worker() -> None:
@@ -479,28 +492,36 @@ def _outbound_worker() -> None:
             continue
         try:
             with _app.app_context():
-                pending = (
-                    _model.query
-                    .filter_by(status="pending")
-                    .order_by(_model.created_at)
-                    .limit(50)
-                    .all()
-                )
-                for item in pending:
-                    result = _send_event(item.event_type, item.payload)
-                    success = bool(result)
-                    item.attempts += 1
-                    item.last_attempt_at = datetime.now(timezone.utc)
-                    item.status = "sent" if success else "pending"
-                    # For device_registered, central tells us whether the
-                    # device/user is blocked at another site.
-                    if success and not isinstance(result, dict) or (isinstance(result, dict) and not result.get("_dropped")):
-                        if item.event_type == "device_registered" and isinstance(result, dict):
-                            _handle_registration_response(item.payload, result)
-                if pending:
-                    _db.session.commit()
+                # db imported inside context — must not be imported at module level
+                from extensions import db
+                try:
+                    pending = (
+                        _model.query
+                        .filter_by(status="pending")
+                        .order_by(_model.created_at)
+                        .limit(50)
+                        .all()
+                    )
+                    for item in pending:
+                        result = _send_event(item.event_type, item.payload)
+                        success = bool(result)
+                        item.attempts += 1
+                        item.last_attempt_at = datetime.now(timezone.utc)
+                        item.status = "sent" if success else "pending"
+                        # For device_registered, central tells us whether the
+                        # device/user is blocked at another site.
+                        if success and not isinstance(result, dict) or (isinstance(result, dict) and not result.get("_dropped")):
+                            if item.event_type == "device_registered" and isinstance(result, dict):
+                                _handle_registration_response(item.payload, result)
+                    if pending:
+                        db.session.commit()
+                except Exception as exc:
+                    db.session.rollback()
+                    logger.error("outbound worker error: %s", exc)
+                finally:
+                    db.session.remove()
         except Exception as exc:
-            logger.error("outbound worker error: %s", exc)
+            logger.error("outbound worker error (context): %s", exc)
         try:
             from app import _heartbeat
             _heartbeat('central-outbound')
@@ -510,9 +531,13 @@ def _outbound_worker() -> None:
 
 def _handle_registration_response(payload: dict, central_response: dict) -> None:
     """After central ACKs a device_registered event, apply any block the central
-    server indicates is already in effect for that device or its user."""
+    server indicates is already in effect for that device or its user.
+
+    Must be called from within an active app context (e.g. inside _outbound_worker
+    or _eager_send_registration).
+    """
     from models import Device, User, DeviceOwnership
-    from app import apply_device_block, db as app_db
+    from extensions import db
 
     mac = payload.get("mac_address", "").lower()
     if not mac:
@@ -524,6 +549,7 @@ def _handle_registration_response(payload: dict, central_response: dict) -> None
 
     if central_response.get("device_blocked") and not device.internet_blocked:
         logger.info("central: device %s is blocked at another site — applying block locally", mac)
+        from app import apply_device_block
         apply_device_block(device, flash_messages=False)
         return
 
@@ -533,20 +559,25 @@ def _handle_registration_response(payload: dict, central_response: dict) -> None
         if user and not getattr(user, "blocked", False):
             logger.info("central: user %s is blocked at another site — applying block locally", email)
             user.blocked = True
-            app_db.session.commit()
+            db.session.commit()
             active_macs = [
                 o.mac_address for o in
                 DeviceOwnership.query.filter_by(user_id=user.id, end_datetime=None).all()
             ]
+            from app import apply_device_block
             for d in Device.query.filter(Device.mac_address.in_(active_macs)).all():
                 apply_device_block(d, flash_messages=False)
 
 
 def _apply_inbound(event_type: str, data: dict) -> None:
-    """Apply an instruction received from central to the local DB and network."""
-    # Import here to avoid circular imports at module load time
+    """Apply an instruction received from central to the local DB and network.
+
+    Called from the /api/v1/push endpoint which already has a request (and
+    therefore app) context active.
+    """
     from models import Device, User, DeviceOwnership
-    from app import apply_device_block, apply_device_unblock, db as app_db
+    from extensions import db
+    from app import apply_device_block, apply_device_unblock
 
     logger.info("central inbound: %s %s", event_type, data)
 
@@ -571,7 +602,7 @@ def _apply_inbound(event_type: str, data: dict) -> None:
         user = User.query.filter_by(email=email).first()
         if user:
             user.blocked = True
-            app_db.session.commit()
+            db.session.commit()
             active_macs = [
                 o.mac_address for o in
                 DeviceOwnership.query.filter_by(user_id=user.id, end_datetime=None).all()
@@ -587,7 +618,7 @@ def _apply_inbound(event_type: str, data: dict) -> None:
         user = User.query.filter_by(email=email).first()
         if user:
             user.blocked = False
-            app_db.session.commit()
+            db.session.commit()
             logger.info("central: unblocked user %s (devices remain individually blocked)", email)
 
     elif event_type == "update_user":
@@ -614,13 +645,13 @@ def _apply_inbound(event_type: str, data: dict) -> None:
                 user.adoptable_vlans_override = data["adoptable_vlans_override"] or None
             if data.get("adoptable_vlans_deny") is not None:
                 user.adoptable_vlans_deny = data["adoptable_vlans_deny"] or None
-            app_db.session.commit()
+            db.session.commit()
             logger.info("central: updated profile for user %s", email)
         else:
             logger.info("central update_user: %s not found locally — skipping", email)
 
     elif event_type == "update_device_vlan":
-        from app import send_coa_change, get_kea, replug_switch_port_for_mac
+        from app import replug_switch_port_for_mac
         mac = data.get("mac_address", "").lower()
         new_vlan = data.get("assigned_vlan")
         device = Device.query.filter_by(mac_address=mac).first()
@@ -645,13 +676,13 @@ def _apply_inbound(event_type: str, data: dict) -> None:
         device.connection_type = "wired"
         if old_vlan != new_vlan:
             device.registration_status = "wrong_vlan"
-        app_db.session.commit()
+        db.session.commit()
         # Trigger RADIUS re-auth via port bounce — this is the only reliable
         # way to move a wired device to a new VLAN (short lease expiry alone
         # won't help because DHCP DISCOVER still goes out on the current VLAN).
         replug_switch_port_for_mac(mac)
         logger.info(
-            "central: updated wired device %s VLAN %s ? %s, port bounce queued",
+            "central: updated wired device %s VLAN %s → %s, port bounce queued",
             mac, old_vlan, new_vlan,
         )
 
@@ -679,7 +710,7 @@ def _apply_inbound(event_type: str, data: dict) -> None:
         device.unregister_token = None
         device.profile_snapshot = None
         _sync_registration_status(device)
-        app_db.session.commit()
+        db.session.commit()
         logger.info("central: unregistered device %s via central push", mac)
 
     else:

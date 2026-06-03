@@ -25,7 +25,7 @@
       "alerting": false
     },
     "freeradius": {
-      "restart_count": 1,
+      "restart_count": 0,
       "alerting": false
     },
     "pihole": {
@@ -66,7 +66,7 @@
     "consecutive_failures": 0
   },
   "syslog_stale": {
-    "alerting": false,
+    "alerting": true,
     "consecutive_failures": 0
   },
   "switch_health_192.168.99.2": {
@@ -82,7 +82,7 @@
     "consecutive_failures": 0
   },
   "switch_reachable_192.168.99.3": {
-    "alerting": true,
-    "consecutive_failures": 8174
+    "alerting": false,
+    "consecutive_failures": 0
   }
 }

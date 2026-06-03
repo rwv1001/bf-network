@@ -30,4 +30,6 @@ USER portal
 EXPOSE 8080
 
 # Run the application
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--timeout", "120", "app:app"]
+# --preload: create_app() runs once in the master process before workers fork,
+# so db.init_app() and background sweeper threads are initialised exactly once.
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--timeout", "120", "--preload", "app:app"]

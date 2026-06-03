@@ -83,9 +83,14 @@ def create_app():
     app.register_blueprint(admin_bp)
 
     # ── Central sync client ───────────────────────────────────────────────────
+    # NOTE: do NOT wrap this in app.app_context(). init_central_client only
+    # stores references and spawns a daemon thread. The thread creates its own
+    # fresh app context each iteration via `with _app.app_context():`. If we
+    # push a context here and it is popped when the `with` block exits, the
+    # spawned thread is left holding a reference to a dead context, which causes
+    # the "SQLAlchemy instance not registered" error on every subsequent loop.
     import central_client
-    with app.app_context():
-        central_client.init_central_client(app, db, CentralOutboundEvent)
+    central_client.init_central_client(app, db, CentralOutboundEvent)
 
     # ── Central inbound push endpoint ─────────────────────────────────────────
     @app.route('/api/v1/push', methods=['POST'])
