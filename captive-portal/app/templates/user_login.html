@@ -9,7 +9,7 @@
 {% endblock %}
 
 {% block content %}
-<form method="POST" action="{{ url_for('user_login') }}">
+<form method="POST" action="{{ url_for('portal.user_login') }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
     <div class="form-group">
@@ -28,14 +28,14 @@
 
 <p style="margin-top: 20px; text-align: center; font-size: 0.9em; color: #666;">
     Don't have an account yet?
-    <a href="{{ url_for('register') }}">Register your device</a>
+    <a href="{{ url_for('portal.register') }}">Register your device</a>
 </p>
 
 <details style="margin-top: 20px; font-size: 0.9em; color: #666; border: 1px solid #ddd; border-radius: 5px; padding: 10px;">
     <summary style="cursor: pointer; font-weight: 500;">Forgotten your password or never set one?</summary>
     <div style="margin-top: 10px;">
         <p style="margin-bottom: 10px;">Enter your email address below and we will send you a link to set or reset your portal password.</p>
-        <form method="POST" action="{{ url_for('forgot_network_password') }}" id="forgotForm">
+        <form method="POST" action="{{ url_for('portal.forgot_network_password') }}" id="forgotForm">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <div style="display: flex; gap: 8px; flex-wrap: wrap;">
                 <input type="email" name="email" class="form-control" placeholder="your@email.com"

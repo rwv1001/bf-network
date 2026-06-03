@@ -178,7 +178,7 @@
 {% block content %}
 <div class="page-actions">
     <button id="refreshBtn" class="btn btn-primary" onclick="loadHealth()">&#8635; Refresh</button>
-    <a href="{{ url_for('admin_switch_ports') }}" class="btn btn-secondary">&#8592; Switch Ports</a>
+    <a href="{{ url_for('admin.switch_ports.refresh_switch_ports') }}" class="btn btn-secondary">&#8592; Switch Ports</a>
     <span id="refresh-ts"></span>
 </div>
 
@@ -227,7 +227,7 @@ const SECTIONS = [
 function getRps(host) { return !!_rpsSettings[host]; }
 
 function initRpsCheckboxes() {
-    fetch('{{ url_for("admin_switch_health_rps_get") }}')
+    fetch('{{ url_for("admin.switch_health.rps_get") }}')
         .then(r => r.json())
         .then(data => {
             _rpsSettings = data || {};
@@ -247,7 +247,7 @@ function onRpsChange(host, idx, checked) {
     _rpsSettings[host] = checked;
     var savingEl = document.getElementById('rps-saving-' + idx);
     if (savingEl) savingEl.style.display = 'inline';
-    fetch('{{ url_for("admin_switch_health_rps_set") }}', {
+    fetch('{{ url_for("admin.switch_health.rps_set") }}', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({host: host, rps: checked})
@@ -469,7 +469,7 @@ function loadHealth() {
         if (s) s.innerHTML = '<div class="loading-spinner"><div class="spinner-icon"></div>'
             + '<span>Connecting\u2026 (may take up to 30s)</span></div>';
     });
-    fetch('{{ url_for("admin_switch_health_data") }}')
+    fetch('{{ url_for("admin.switch_health.switch_health_data") }}')
         .then(r => r.json())
         .then(data => {
             if (data.error) throw new Error('Server error: ' + data.error);

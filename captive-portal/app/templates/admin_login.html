@@ -5,7 +5,7 @@
 {% block header %}Administrator Login{% endblock %}
 
 {% block content %}
-<form method="POST" action="{{ url_for('admin_login') }}">
+<form method="POST" action="{{ url_for('admin.manage_admins.login') }}">
     <div class="form-group">
         <label for="username">Username</label>
         <input type="text" id="username" name="username" required autofocus>
@@ -20,13 +20,13 @@
 </form>
 
 <div style="margin-top: 14px; text-align: center;">
-    <a href="{{ url_for('admin_forgot_password') }}" style="color: #667eea; font-size: 14px; text-decoration: none;">
+    <a href="{{ url_for('admin.manage_admins.forgot_password') }}" style="color: #667eea; font-size: 14px; text-decoration: none;">
         Forgot password?
     </a>
 </div>
 
 <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid #e0e0e0; text-align: center;">
-    <a href="{{ url_for('index') }}" style="color: #667eea; text-decoration: none;">
+    <a href="{{ url_for('admin.dashboard.index') }}" style="color: #667eea; text-decoration: none;">
         ← Back to portal
     </a>
 </div>

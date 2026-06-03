@@ -139,7 +139,7 @@
             Use Google Authenticator, Microsoft Authenticator, Authy, or any TOTP app to get your verification code.
         </div>
         
-        <form method="post" action="{{ url_for('admin_mfa_verify') }}">
+        <form method="post" action="{{ url_for('admin.manage_admins.mfa_verify') }}">
             <div class="form-group">
                 <label for="code">Verification Code</label>
                 <input type="text" id="code" name="code" 
@@ -155,7 +155,7 @@
         </form>
         
         <div class="back-link">
-            <a href="{{ url_for('admin_login') }}">← Back to Login</a>
+            <a href="{{ url_for('admin.manage_admins.login') }}">← Back to Login</a>
         </div>
     </div>
     

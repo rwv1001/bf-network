@@ -170,7 +170,7 @@ function changeEmail(adminId, username, currentEmail) {
 
 <div id="createAdminForm" class="create-admin-form" style="display: none;">
     <h3 style="margin-top: 0;">Create New Admin User</h3>
-    <form method="post" action="{{ url_for('admin_create_admin') }}">
+    <form method="post" action="{{ url_for('admin.manage_admins.create_admin') }}">
         <div class="form-group">
             <label for="username">Username: *</label>
             <input type="text" id="username" name="username" required autocomplete="off">
@@ -292,7 +292,7 @@ function changeEmail(adminId, username, currentEmail) {
                         <span style="color: #999;" title="MFA Disabled">✗</span>
                     {% endif %}
                 </td>
-                <form method="post" action="{{ url_for('admin_update_admin_permissions', admin_id=admin.id) }}" id="updateForm{{ admin.id }}">
+                <form method="post" action="{{ url_for('admin.manage_admins.update_admin_permissions', admin_id=admin.id) }}" id="updateForm{{ admin.id }}">
                     <td style="text-align: center;">
                         <input type="checkbox" name="can_manage_users" value="1" 
                                {% if admin.can_manage_users %}checked{% endif %}
@@ -345,25 +345,25 @@ function changeEmail(adminId, username, currentEmail) {
                     <button onclick="changePassword({{ admin.id }}, '{{ admin.username }}')" class="btn btn-small" style="background: #2c7a7b;">
                         🔑 Password
                     </button>
-                    <form method="post" action="{{ url_for('admin_change_admin_password', admin_id=admin.id) }}" id="passwordForm{{ admin.id }}" style="display: none;">
+                    <form method="post" action="{{ url_for('admin.manage_admins.change_admin_password', admin_id=admin.id) }}" id="passwordForm{{ admin.id }}" style="display: none;">
                         <input type="hidden" name="new_password" id="newPasswordInput{{ admin.id }}">
                     </form>
                     
                     <button onclick="changeEmail({{ admin.id }}, '{{ admin.username }}', '{{ admin.email if admin.email else '' }}')" class="btn btn-small" style="background: #3b82f6;">
                         ✉️ Email
                     </button>
-                    <form method="post" action="{{ url_for('admin_update_admin_email', admin_id=admin.id) }}" id="emailForm{{ admin.id }}" style="display: none;">
+                    <form method="post" action="{{ url_for('admin.manage_admins.update_admin_email', admin_id=admin.id) }}" id="emailForm{{ admin.id }}" style="display: none;">
                         <input type="hidden" name="email" id="newEmailInput{{ admin.id }}">
                     </form>
                     
                     {% if admin.mfa_enabled %}
-                    <form method="post" action="{{ url_for('admin_reset_mfa', admin_id=admin.id) }}" style="display: inline;" onsubmit="return confirm('Reset MFA for {{ admin.username }}? They will need to set it up again.');">
+                    <form method="post" action="{{ url_for('admin.manage_admins.reset_mfa', admin_id=admin.id) }}" style="display: inline;" onsubmit="return confirm('Reset MFA for {{ admin.username }}? They will need to set it up again.');">
                         <button type="submit" class="btn btn-small" style="background: #ff9800;" title="Reset MFA for this admin">🔓 Reset MFA</button>
                     </form>
                     {% endif %}
                     
                     {% if not admin.is_current %}
-                    <form method="post" action="{{ url_for('admin_delete_admin', admin_id=admin.id) }}" style="display: inline;" onsubmit="return confirmDelete('{{ admin.username }}');">
+                    <form method="post" action="{{ url_for('admin.manage_admins.delete_admin', admin_id=admin.id) }}" style="display: inline;" onsubmit="return confirmDelete('{{ admin.username }}');">
                         <button type="submit" class="btn btn-small" style="background: #c0392b;">🗑 Delete</button>
                     </form>
                     {% endif %}
