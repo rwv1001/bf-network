@@ -560,10 +560,13 @@ def stream(action):
                 return
 
             # Step 3 — restart affected stacks (update / rollback)
-            changed_dirs = changed_dirs if 'changed_dirs' in dir() else []
+            yield emit(f"DEBUG: changed_dirs from status = {changed_dirs}")
+            yield emit(f"DEBUG: type = {type(changed_dirs)}")
             if changed_dirs:
                 restart_list = _normalize_restart_dirs(changed_dirs)
+                yield emit(f"DEBUG: After normalization → {restart_list}")
                 yield emit(f"=== Step 3/3: Restarting affected stacks: {', '.join(changed_dirs)} ===")
+                yield emit(f"DEBUG: Running command: /scripts/firmware-manager.sh restart-dirs {' '.join(restart_list)}")
                 rc = yield from stream_proc(
                     ['/bin/bash', '/scripts/firmware-manager.sh', 'restart-dirs'] + restart_list,
                     env=script_env,
@@ -573,6 +576,7 @@ def stream(action):
                     yield emit("__EXIT__:1")
                     return
             else:
+                yield emit("DEBUG: changed_dirs is empty or falsy → skipping restart step")
                 yield emit("=== Step 3/3: No containers to restart ===")
 
             op = "UPDATE" if action == 'update' else "ROLLBACK"
