@@ -85,6 +85,8 @@ import central_client
 from kea_integration import get_kea_client
 from radius_coa import send_coa_change
 
+from security import limiter
+
 logger = logging.getLogger(__name__)
 
 portal_bp = Blueprint('portal', __name__)
@@ -1252,6 +1254,7 @@ def reject_device(token):
 # ---------------------------------------------------------------------------
 
 @portal_bp.route('/login', methods=['GET', 'POST'])
+@limiter.limit("5 per minute")
 def user_login():
     if request.method == 'POST':
         email    = (request.form.get('email')    or '').strip().lower()
@@ -1275,6 +1278,11 @@ def user_login():
                     return redirect(url_for('portal.user_home'))
     return render_template('user_login.html')
 
+@portal_bp.route('/logout')
+def logout():
+    session.pop('portal_user_id', None)
+    flash('You have been logged out.', 'info')
+    return redirect(url_for('portal.index'))
 
 @portal_bp.route('/user_home', methods=['GET', 'POST'])
 def user_home():
@@ -1453,6 +1461,7 @@ def user_home():
 # ---------------------------------------------------------------------------
 
 @portal_bp.route('/set-network-password/<token>', methods=['GET', 'POST'])
+@limiter.limit("3 per minute")
 def set_network_password(token):
     user = User.query.filter_by(network_password_set_token=token).first()
     if not user:
@@ -1486,6 +1495,7 @@ def set_network_password(token):
 
 
 @portal_bp.route('/forgot-network-password', methods=['POST'])
+@limiter.limit("3 per minute")
 def forgot_network_password():
     email    = (request.form.get('email') or '').strip().lower()
     is_ajax  = request.headers.get('X-Requested-With') == 'XMLHttpRequest'

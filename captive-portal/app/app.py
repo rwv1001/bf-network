@@ -29,6 +29,7 @@ from models import (
     Admin, CentralOutboundEvent, Device, DeviceOwnership, IPLease,
     RegistrationRequest, UnregisteredLease, User, VlanMapping,
 )
+from security import init_security
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -188,6 +189,8 @@ def create_app():
     # Run the potentially slow ACL baseline push in a background thread
     # so it doesn't block Gunicorn master/worker creation under --preload
     threading.Thread(target=startup_acl_baseline, args=(app,), daemon=True).start()
+
+    init_security(app)
 
     return app
 

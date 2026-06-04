@@ -34,6 +34,7 @@ from extensions import db, login_manager
 from models import Admin
 from core.auth import AdminUser, make_admin_user, permission_required
 from email_service import send_admin_password_reset_email
+from security import limiter
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,7 @@ manage_admins_bp = Blueprint('manage_admins', __name__)
 # ---------------------------------------------------------------------------
 
 @manage_admins_bp.route('/login', methods=['GET', 'POST'])
+@limiter.limit("5 per minute")
 def login():
     if current_user and current_user.is_authenticated:
         return redirect(url_for('admin.dashboard.index'))
@@ -134,7 +136,7 @@ def forgot_password():
             'info',
         )
         return redirect(url_for('admin.manage_admins.forgot_password'))
-    return render_template('admin_forgot_password.html')
+    return render_template('admin.manage_admins.forgot_password.html')
 
 
 @manage_admins_bp.route('/reset-password/<token>', methods=['GET', 'POST'])

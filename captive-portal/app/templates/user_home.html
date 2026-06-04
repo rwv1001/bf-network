@@ -6,7 +6,15 @@
 
 {% block subheader %}
 <p style="margin-top: 10px; opacity: 0.9;">Manage your registered devices</p>
-<p style="margin-top: 6px; font-size: 0.9em; opacity: 0.8;">{{ user.email }}</p>
+<p style="margin-top: 6px; font-size: 0.9em; opacity: 0.8;">
+    {{ user.email }}
+    <span style="margin-left: 12px;">
+        <a href="{{ url_for('portal.logout') }}" 
+           style="color: #e57373; font-size: 0.85em; text-decoration: none;">
+            Logout
+        </a>
+    </span>
+</p>
 {% endblock %}
 
 {% block content %}
