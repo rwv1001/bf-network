@@ -164,14 +164,18 @@
 </div>
 {% endif %}
 
-{% if TRUE %}
-<div class="flash warning" style="margin-bottom: 24px; border-left: 6px solid #c05621; background: #fffaf0;">
+{% if restart_needed %}
+<div class="flash warning" style="margin-bottom: 24px; padding: 10px; border: 6px solid #c05621; background: #fffaf0;">
     <strong>Operation complete.</strong><br>
-    Please <strong>manually restart</strong> these stacks before continuing:
+    Please <strong>manually restart</strong> the following stacks:
     <ul style="margin: 10px 0 6px 20px; padding: 0;">
-        {% for stack in restart_needed %}
-            <li style="margin-bottom: 4px;"><strong>{{ stack }}</strong></li>
-        {% endfor %}
+        {% if restart_needed is iterable and restart_needed is not string %}
+            {% for stack in restart_needed %}
+                <li style="margin-bottom: 4px;"><strong>{{ stack }}</strong></li>
+            {% endfor %}
+        {% else %}
+            <li style="margin-bottom: 4px;"><strong>Root stack (main application)</strong></li>
+        {% endif %}
     </ul>
     <small style="color:#744210;">
         Run <code>docker compose up -d --build</code> in the relevant directory.

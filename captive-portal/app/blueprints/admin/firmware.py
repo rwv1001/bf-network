@@ -190,6 +190,12 @@ def admin_firmware():
             error = (result.stderr or result.stdout or 'Script returned non-zero exit').strip()
     except Exception as exc:
         error = str(exc)
+
+    restart_needed = (
+        session.pop('firmware_restart_needed', None)
+        or (request.args.get('show_restart') == '1')
+    )
+
     return render_template(
         'admin_firmware.html',
         status=status,
@@ -199,10 +205,7 @@ def admin_firmware():
         last_op=session.get('firmware_last_op'),
         test_enabled=os.getenv('FIRMWARE_TEST_ENABLED', '').lower() not in ('', '0', 'false', 'no'),
         commits_ahead_count=len(status.get('commits_ahead', [])),
-        restart_needed=(
-            session.pop('firmware_restart_needed', None) 
-            or request.args.get('show_restart') == '1'
-        ),
+        restart_needed=restart_needed,
     )
 
 
