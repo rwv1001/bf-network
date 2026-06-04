@@ -40,9 +40,6 @@ def _run_firmware_script(action, extra_args=None):
     env['GIT_REPO_DIR'] = git_repo_dir
     return subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
 
-def _normalize_restart_dirs(dirs):
-    """Convert '.' (root) to empty string so restart-dirs works from repo root."""
-    return ["" if d == "." else d for d in dirs]
 
 
 def _load_commit_manifest(tree_hash, file_hash):
@@ -202,6 +199,7 @@ def admin_firmware():
         last_op=session.get('firmware_last_op'),
         test_enabled=os.getenv('FIRMWARE_TEST_ENABLED', '').lower() not in ('', '0', 'false', 'no'),
         commits_ahead_count=len(status.get('commits_ahead', [])),
+        restart_needed=session.pop('firmware_restart_needed', None),   # ← Add this
     )
 
 
@@ -305,7 +303,7 @@ def preflight(action):
                 'admin_firmware_preflight.html',
                 action=action, status=status, manifest=manifest,
                 target_hash=target_hash, target_short=target_short,
-                target_subject=target_subject, current_env=current_env,
+                target_subject=target_subject, current_env=current_env,                
             )
 
         if new_vars:
@@ -323,7 +321,7 @@ def preflight(action):
         'admin_firmware_preflight.html',
         action=action, status=status, manifest=manifest,
         target_hash=target_hash, target_short=target_short,
-        target_subject=target_subject, current_env=current_env,
+        target_subject=target_subject, current_env=current_env,        
     )
 
 
@@ -537,19 +535,6 @@ def stream(action):
                         yield emit("  No DB migration for this commit.")
                     yield emit("")
 
-                    if all_changed_dirs:
-                        restart_list = _normalize_restart_dirs(all_changed_dirs)
-                        yield emit(f"=== Restarting affected stacks: {', '.join(all_changed_dirs)} ===")
-                        rc = yield from stream_proc(
-                            ['/bin/bash', '/scripts/firmware-manager.sh', 'restart-dirs'] + restart_list,
-                            env=script_env,
-                        )
-                    if rc != 0:
-                        yield emit("ERROR: Stack restart failed.")
-                        yield emit("__EXIT__:1")
-                        return
-                else:
-                    yield emit("=== No containers to restart ===")
 
                 yield emit("")
                 yield emit("=" * 50)
@@ -559,25 +544,21 @@ def stream(action):
                 yield emit("__EXIT__:0")
                 return
 
-            # Step 3 — restart affected stacks (update / rollback)
-            yield emit(f"DEBUG: changed_dirs from status = {changed_dirs}")
-            yield emit(f"DEBUG: type = {type(changed_dirs)}")
-            if changed_dirs:
-                restart_list = _normalize_restart_dirs(changed_dirs)
-                yield emit(f"DEBUG: After normalization → {restart_list}")
-                yield emit(f"=== Step 3/3: Restarting affected stacks: {', '.join(changed_dirs)} ===")
-                yield emit(f"DEBUG: Running command: /scripts/firmware-manager.sh restart-dirs {' '.join(restart_list)}")
-                rc = yield from stream_proc(
-                    ['/bin/bash', '/scripts/firmware-manager.sh', 'restart-dirs'] + restart_list,
-                    env=script_env,
-                )
-                if rc != 0:
-                    yield emit("ERROR: Stack restart failed.")
-                    yield emit("__EXIT__:1")
-                    return
-            else:
-                yield emit("DEBUG: changed_dirs is empty or falsy → skipping restart step")
-                yield emit("=== Step 3/3: No containers to restart ===")
+            
+            # === Collect affected stacks for manual restart message ===
+            affected_stacks = []
+            if action in ('update', 'rollback') and 'changed_dirs' in locals():
+                affected_stacks = changed_dirs
+            elif action == 'update-latest' and 'all_changed_dirs' in locals():
+                affected_stacks = all_changed_dirs
+
+            if affected_stacks:
+                def _friendly(d):
+                    return "Root stack (main application)" if d == "." else d
+                session['firmware_restart_needed'] = [_friendly(d) for d in affected_stacks]
+                session.modified = True
+
+            yield emit("=== Step 3/3: No automatic restart — please restart manually ===")
 
             op = "UPDATE" if action == 'update' else "ROLLBACK"
             yield emit("")
