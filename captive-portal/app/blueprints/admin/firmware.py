@@ -40,6 +40,10 @@ def _run_firmware_script(action, extra_args=None):
     env['GIT_REPO_DIR'] = git_repo_dir
     return subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
 
+def _normalize_restart_dirs(dirs):
+    """Convert '.' (root) to empty string so restart-dirs works from repo root."""
+    return ["" if d == "." else d for d in dirs]
+
 
 def _load_commit_manifest(tree_hash, file_hash):
     if not tree_hash or not file_hash:
@@ -533,12 +537,13 @@ def stream(action):
                         yield emit("  No DB migration for this commit.")
                     yield emit("")
 
-                if all_changed_dirs:
-                    yield emit(f"=== Restarting affected stacks: {', '.join(all_changed_dirs)} ===")
-                    rc = yield from stream_proc(
-                        ['/bin/bash', '/scripts/firmware-manager.sh', 'restart-dirs'] + all_changed_dirs,
-                        env=script_env,
-                    )
+                    if all_changed_dirs:
+                        restart_list = _normalize_restart_dirs(all_changed_dirs)
+                        yield emit(f"=== Restarting affected stacks: {', '.join(all_changed_dirs)} ===")
+                        rc = yield from stream_proc(
+                            ['/bin/bash', '/scripts/firmware-manager.sh', 'restart-dirs'] + restart_list,
+                            env=script_env,
+                        )
                     if rc != 0:
                         yield emit("ERROR: Stack restart failed.")
                         yield emit("__EXIT__:1")
@@ -557,9 +562,10 @@ def stream(action):
             # Step 3 — restart affected stacks (update / rollback)
             changed_dirs = changed_dirs if 'changed_dirs' in dir() else []
             if changed_dirs:
+                restart_list = _normalize_restart_dirs(changed_dirs)
                 yield emit(f"=== Step 3/3: Restarting affected stacks: {', '.join(changed_dirs)} ===")
                 rc = yield from stream_proc(
-                    ['/bin/bash', '/scripts/firmware-manager.sh', 'restart-dirs'] + changed_dirs,
+                    ['/bin/bash', '/scripts/firmware-manager.sh', 'restart-dirs'] + restart_list,
                     env=script_env,
                 )
                 if rc != 0:
