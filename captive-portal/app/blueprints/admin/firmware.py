@@ -199,7 +199,10 @@ def admin_firmware():
         last_op=session.get('firmware_last_op'),
         test_enabled=os.getenv('FIRMWARE_TEST_ENABLED', '').lower() not in ('', '0', 'false', 'no'),
         commits_ahead_count=len(status.get('commits_ahead', [])),
-        restart_needed=session.pop('firmware_restart_needed', None),   # ← Add this
+        restart_needed=(
+            session.pop('firmware_restart_needed', None) 
+            or request.args.get('show_restart') == '1'
+        ),
     )
 
 

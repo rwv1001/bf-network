@@ -85,7 +85,7 @@ Firmware {{ action|title }} — Running
                 fetch('/admin/firmware/mark-done/' + action, {method: 'POST'})
                     .finally(function() {
                         setTimeout(function() {
-                            window.location.href = '/admin/firmware';
+                            window.location.href = '/admin/firmware?show_restart=1';
                         }, 2500);
                     });
                 return;
@@ -130,7 +130,7 @@ Firmware {{ action|title }} — Running
                             donePara.textContent = '✓ Container is back — loading firmware page…';
                             fetch('/admin/firmware/mark-done/' + action, {method: 'POST'})
                                 .finally(function() {
-                                    window.location.href = '/admin/firmware';
+                                    window.location.href = '/admin/firmware?show_restart=1';
                                 });
                         } else {
                             elapsed += POLL_INTERVAL / 1000;
