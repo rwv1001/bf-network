@@ -15,9 +15,7 @@ services:
     build: .
     container_name: docker-agent
     restart: unless-stopped
-    user: "1200:1200"                    # Run as non-root user
-    group_add:
-      - docker                           # Allow access to Docker socket
+
     environment:
       QUEUE_DIR: /restart-queue
       GIT_REPO_DIR: ${GIT_REPO_DIR:-/home/admin/bf-network}

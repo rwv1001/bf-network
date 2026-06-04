@@ -15,8 +15,8 @@ AGENT_USER="${AGENT_USER:-1200:1200}"
 mkdir -p "$QUEUE_DIR"
 
 # Fix ownership so the agent (and job submitters) can read/write the queue
-chown -R "$AGENT_USER" "$QUEUE_DIR" 2>/dev/null || true
-chmod 2770 "$QUEUE_DIR" 2>/dev/null || true
+chown -R 0:0 "$QUEUE_DIR" 2>/dev/null || true
+chmod 2775 "$QUEUE_DIR" 2>/dev/null || true
 
 echo "[docker-agent] Started as user $(id -u):$(id -g). Watching ${QUEUE_DIR} for jobs..."
 
