@@ -1,3 +1,25 @@
+# Blackfriars Network Portal — Codebase Overview
+
+> **Note**: This document describes the **logical architecture**, data model, and business rules of the system.  
+> The implementation has been refactored into a modular structure:
+> - `app.py` is now a slim application factory
+> - Routes live in `blueprints/`
+> - Shared logic lives in `core/`
+>
+> The rules and data model described below remain the authoritative reference.
+
+## Current Code Organisation
+
+| Layer              | Location                    | Responsibility |
+|--------------------|-----------------------------|----------------|
+| Application Factory| `app.py`                    | `create_app()`, config, blueprint registration, startup |
+| Public Routes      | `blueprints/portal.py`      | Captive portal, registration, user home, adoption |
+| Admin Routes       | `blueprints/admin/`         | Dashboard, user/device management |
+| Business Logic     | `core/`                     | Device utils, network control, VLAN logic, sweepers, central sync |
+| Data Model         | `models.py`                 | SQLAlchemy models |
+
+> The table purposes and relationships described below are stable and have not changed during the code refactor.
+
 Network Device Registration and Access Control System
 1. Purpose
 

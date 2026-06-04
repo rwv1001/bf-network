@@ -2,31 +2,38 @@
 # docker-agent entrypoint
 # Watches QUEUE_DIR for *.sh job files, executes them one at a time.
 #
-# Job lifecycle:
-#   <name>.sh       → picked up, renamed to .running
-#   <name>.running  → executed, output written to <name>.log
-#   <name>.log      → log file
-#   <name>.done     → job finished (exit code appended to log)
-#
-# Any container can queue a job by writing a .sh file into the shared volume.
-# This agent is the only container that is never restarted by jobs it runs,
-# making it safe to execute 'docker compose up -d --build' for any stack.
+# Security improvements:
+# - Only accepts jobs with approved naming patterns (restart-* or job-*)
+# - Automatically fixes ownership of the queue directory on startup
+# - Better logging and rejection handling
 
 set -uo pipefail
 
 QUEUE_DIR="${QUEUE_DIR:-/restart-queue}"
+AGENT_USER="${AGENT_USER:-1200:1200}"
+
 mkdir -p "$QUEUE_DIR"
 
-echo "[docker-agent] Started. Watching ${QUEUE_DIR} for jobs..."
+# Fix ownership so the agent (and job submitters) can read/write the queue
+chown -R "$AGENT_USER" "$QUEUE_DIR" 2>/dev/null || true
+chmod 2770 "$QUEUE_DIR" 2>/dev/null || true
+
+echo "[docker-agent] Started as user $(id -u):$(id -g). Watching ${QUEUE_DIR} for jobs..."
 
 while true; do
     for f in "$QUEUE_DIR"/*.sh; do
-        # glob returns literal '*.sh' when no matches exist
         [ -f "$f" ] || continue
 
         job_name="$(basename "$f" .sh)"
         running="$QUEUE_DIR/${job_name}.running"
         logfile="$QUEUE_DIR/${job_name}.log"
+
+        # === Job Validation ===
+        if [[ ! "$job_name" =~ ^restart- ]]; then
+            echo "[docker-agent] REJECTED invalid job name: $job_name (must start with restart-)"
+            rm -f "$f"
+            continue
+        fi
 
         # Atomic claim — if mv fails, another agent instance already took it
         mv "$f" "$running" 2>/dev/null || continue

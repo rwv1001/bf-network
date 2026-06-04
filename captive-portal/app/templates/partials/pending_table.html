@@ -92,7 +92,7 @@
                 {% endif %}
             </td>
             <td>
-                <a href="{{ url_for('admin_approve_request', token=req.approval_token) }}" class="btn btn-success btn-small">
+                <a href="{{ url_for('admin.approvals.approve_request', token=req.approval_token) }}" class="btn btn-success btn-small">
                     Review
                 </a>
                 {% if req.submitted_times|length > 1 %}

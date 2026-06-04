@@ -3,8 +3,8 @@
     <h2>&#128101; Authorized Users ({{ users_total }})</h2>
     {% if current_user.can_manage_users %}
     <div style="display:flex; gap:8px;">
-        <a href="{{ url_for('admin_import_users') }}" class="btn-pane btn">&#8679; Import Users</a>
-        <a href="{{ url_for('admin_add_user') }}" class="btn-pane btn">+ Add User</a>
+        <a href="{{ url_for('admin.users.import_users') }}" class="btn-pane btn">&#8679; Import Users</a>
+        <a href="{{ url_for('admin.users.add_user') }}" class="btn-pane btn">+ Add User</a>
     </div>
     {% endif %}
 </div>
@@ -131,18 +131,18 @@
             </td>
             <td>{{ user.devices|length }}</td>
             <td>
-                <a href="{{ url_for('admin_edit_user', user_id=user.id) }}" class="btn btn-small">
+                <a href="{{ url_for('admin.users.edit_user', user_id=user.id) }}" class="btn btn-small">
                     Edit
                 </a>
                 {% if user.blocked %}
-                <form method="POST" action="{{ url_for('admin_unblock_user', user_id=user.id) }}" style="display: inline; margin-left: 5px;">
+                <form method="POST" action="{{ url_for('admin.users.unblock_user', user_id=user.id) }}" style="display: inline; margin-left: 5px;">
                     <button type="submit" class="btn btn-success btn-small"
                             onclick="return confirm('Unblock all devices for this user?')">
                         ✅ Unblock
                     </button>
                 </form>
                 {% else %}
-                <form method="POST" action="{{ url_for('admin_block_user', user_id=user.id) }}" style="display: inline; margin-left: 5px;">
+                <form method="POST" action="{{ url_for('admin.users.block_user', user_id=user.id) }}" style="display: inline; margin-left: 5px;">
                     <button type="submit" class="btn btn-danger btn-small"
                             onclick="return confirm('Block all devices for this user?')">
                         🚫 Block
@@ -151,7 +151,7 @@
                 {% endif %}
                 {% if current_user.can_manage_users %}
                 {% if user.devices|length == 0 %}
-                <form method="POST" action="{{ url_for('admin_delete_user', user_id=user.id) }}" style="display: inline; margin-left: 5px;">
+                <form method="POST" action="{{ url_for('admin.users.delete_user', user_id=user.id) }}" style="display: inline; margin-left: 5px;">
                     <button type="submit" class="btn btn-small" style="background: #dc3545;"
                             onclick="return confirm('Permanently delete user {{ user.email }}? This cannot be undone.')">
                         🗑️ Delete
