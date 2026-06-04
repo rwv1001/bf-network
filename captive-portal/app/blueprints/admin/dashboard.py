@@ -414,21 +414,53 @@ def reset_test():
 
     def _background_reset():
         from app import app as _app
-        with _app.app_context():
-            try:
+        from extensions import db as _db
+
+        logger.info("Test reset: starting background tasks")
+
+        try:
+            # 1. ACL baseline (short context)
+            with _app.app_context():
                 reset_acl_baseline()
-                restart_kea_container()
-                from core.network import clear_mac_auth_sessions, reset_user_ports
+                _db.session.commit()
+            logger.info("Test reset: ACL baseline done")
+
+            # 2. Kea restart — no DB context needed
+            restart_kea_container()
+            logger.info("Test reset: Kea container restarted")
+
+            # 3. Clear MAC auth sessions (short context)
+            with _app.app_context():
+                from core.network import clear_mac_auth_sessions
                 clear_mac_auth_sessions()
+                _db.session.commit()
+            logger.info("Test reset: MAC auth sessions cleared")
+
+            # 4. Reset user ports (short context)
+            with _app.app_context():
+                from core.network import reset_user_ports
                 reset_user_ports()
-                # push_pbr_nqa_to_switches is in isp_routers blueprint
-                try:
-                    from blueprints.admin.isp_routers import push_pbr_nqa_to_switches
+                _db.session.commit()
+            logger.info("Test reset: user ports reset")
+            
+            # 5. PBR/NQA push (needs app context, but we still keep it in its own short block)
+            try:
+                from blueprints.admin.isp_routers import push_pbr_nqa_to_switches
+                with _app.app_context():
                     push_pbr_nqa_to_switches()
-                except Exception as exc:
-                    logger.warning("Test reset: PBR/NQA push failed: %s", exc)
+                logger.info("Test reset: PBR/NQA push done")
             except Exception as exc:
-                logger.error("Test reset background tasks failed: %s", exc)
+                logger.warning("Test reset: PBR/NQA push failed: %s", exc)
+
+        except Exception as exc:
+            logger.error("Test reset background tasks failed: %s", exc, exc_info=True)
+        finally:
+            # Extra safety cleanup
+            try:
+                with _app.app_context():
+                    _db.session.remove()
+            except Exception:
+                pass
 
     threading.Thread(target=_background_reset, daemon=True).start()
 

@@ -50,7 +50,7 @@ def create_app():
     app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
         'pool_pre_ping':      True,
         'pool_recycle':       300,
-        'pool_reset_on_return': None,
+        'pool_reset_on_return': 'rollback',
     }
     app.config['WTF_CSRF_CHECK_DEFAULT'] = False
 
@@ -184,7 +184,10 @@ def create_app():
     start_ip_lease_sweeper(app)
     startup_switch_discovery(app)
     startup_write_prefix_map(app)
-    startup_acl_baseline(app)
+
+    # Run the potentially slow ACL baseline push in a background thread
+    # so it doesn't block Gunicorn master/worker creation under --preload
+    threading.Thread(target=startup_acl_baseline, args=(app,), daemon=True).start()
 
     return app
 

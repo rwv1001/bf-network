@@ -441,31 +441,35 @@ def _send_event(event_type: str, payload: dict):
 
 
 def _eager_send_registration(payload: dict) -> None:
-    """Immediately send a device_registered event to central without waiting
-    for the poll cycle.  Marks the queued row as 'sent' on success so the
-    worker doesn't duplicate it.  On failure the worker will retry normally."""
     mac = payload.get("mac_address", "").lower()
     with _app.app_context():
-        # db imported inside context — must not be imported at module level
+
         from extensions import db
         try:
             result = _send_event("device_registered", payload)
             if result and not (isinstance(result, dict) and result.get("_dropped")):
-                # Mark the most recent pending queued row for this MAC as sent.
-                event = (
+                # === ROBUST VERSION - no JSON operators needed ===
+                recent_pending = (
                     _model.query
                     .filter_by(event_type="device_registered", status="pending")
-                    .filter(_model.payload["mac_address"].astext == mac)
                     .order_by(_model.created_at.desc())
-                    .first()
+                    .limit(30)          # plenty — queue is tiny
+                    .all()
+                )
+                event = next(
+                    (e for e in recent_pending 
+                     if isinstance(e.payload, dict) and e.payload.get("mac_address") == mac),
+                    None
                 )
                 if event:
                     event.status = "sent"
                     event.attempts = (event.attempts or 0) + 1
                     event.last_attempt_at = datetime.now(timezone.utc)
                     db.session.commit()
+
                 if isinstance(result, dict):
                     _handle_registration_response(payload, result)
+
                 logger.info("central eager send: device_registered for %s succeeded", mac)
             else:
                 logger.info("central eager send: device_registered for %s failed/dropped, "
