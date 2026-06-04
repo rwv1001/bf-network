@@ -130,6 +130,46 @@ JOBSCRIPT
     echo "=== Done: $dir ==="
 }
 
+# === Improved Changed Dirs Detection (more robust) ===
+
+_get_affected_stacks() {
+    local base="$1"
+    local target="$2"
+
+    local -A seen=()
+    local -a stacks=()
+
+    while IFS= read -r path; do
+        [[ -z "$path" ]] && continue
+
+        dir=$(dirname "$path")
+
+        # Walk up looking for docker-compose.yml
+        found=false
+        while [[ "$dir" != "." && "$dir" != "/" ]]; do
+            if [[ -f "$GIT_REPO_DIR/$dir/docker-compose.yml" ]]; then
+                if [[ -z "${seen[$dir]:-}" ]]; then
+                    stacks+=("$dir")
+                    seen["$dir"]=1
+                fi
+                found=true
+                break
+            fi
+            dir=$(dirname "$dir")
+        done
+
+        # If we reached root and it has docker-compose.yml, treat root as the stack
+        if [[ "$found" == false ]]; then
+            if [[ -f "$GIT_REPO_DIR/docker-compose.yml" && -z "${seen[root]:-}" ]]; then
+                stacks+=(".")
+                seen["root"]=1
+            fi
+        fi
+
+    done < <(git diff --name-only "$base" "$target" 2>/dev/null)
+
+    printf '%s\n' "${stacks[@]}"
+}
 
 # ---------------------------------------------------------------------------
 # Helper: safely get short hash — returns empty string on failure
@@ -180,7 +220,7 @@ _cmd_status() {
             git diff --name-only HEAD "$NEXT_FULL" 2>/dev/null \
                 | cut -d/ -f1 | sort -u | grep -v '^$'
         )
-        mapfile -t _fstacks < <(_dirs_to_stacks "${fdirs[@]}")
+        mapfile -t _fstacks < <(_get_affected_stacks "HEAD" "$NEXT_FULL")
         compose_fdirs=()
         for d in "${_fstacks[@]}"; do 
             [[ -n "$d" ]] && compose_fdirs+=("\"$d\"")
@@ -195,7 +235,7 @@ _cmd_status() {
             git diff --name-only HEAD^ HEAD 2>/dev/null \
                 | cut -d/ -f1 | sort -u | grep -v '^$'
         )
-        mapfile -t _bstacks < <(_dirs_to_stacks "${bdirs[@]}")
+        mapfile -t _bstacks < <(_get_affected_stacks "HEAD^" "HEAD")
         compose_bdirs=()
         for d in "${_bstacks[@]}"; do
             [[ -n "$d" ]] && compose_bdirs+=("\"$d\"")
@@ -230,7 +270,7 @@ _cmd_status() {
             git diff --name-only HEAD "$LATEST_FULL" 2>/dev/null \
                 | cut -d/ -f1 | sort -u | grep -v '^$'
         )
-        mapfile -t _lstacks < <(_dirs_to_stacks "${ldirs[@]}")
+        mapfile -t _lstacks < <(_get_affected_stacks "HEAD" "$LATEST_FULL")
         compose_ldirs=()
         for d in "${_lstacks[@]}"; do 
             [[ -n "$d" ]] && compose_ldirs+=("\"$d\"")
