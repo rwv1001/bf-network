@@ -178,11 +178,13 @@ _cmd_status() {
     if [[ -n "$NEXT_FULL" ]]; then
         mapfile -t fdirs < <(
             git diff --name-only HEAD "$NEXT_FULL" 2>/dev/null \
-                | cut -d/ -f1 | sort -u
+                | cut -d/ -f1 | sort -u | grep -v '^$'
         )
         mapfile -t _fstacks < <(_dirs_to_stacks "${fdirs[@]}")
         compose_fdirs=()
-        for d in "${_fstacks[@]}"; do compose_fdirs+=("\"$d\""); done
+        for d in "${_fstacks[@]}"; do 
+            [[ -n "$d" ]] && compose_fdirs+=("\"$d\"")
+        done
         FORWARD_DIRS_JSON="[$(IFS=,; echo "${compose_fdirs[*]}")]"
     fi
 
@@ -191,11 +193,13 @@ _cmd_status() {
     if [[ -n "$PREV_FULL" ]]; then
         mapfile -t bdirs < <(
             git diff --name-only HEAD^ HEAD 2>/dev/null \
-                | cut -d/ -f1 | sort -u
+                | cut -d/ -f1 | sort -u | grep -v '^$'
         )
         mapfile -t _bstacks < <(_dirs_to_stacks "${bdirs[@]}")
         compose_bdirs=()
-        for d in "${_bstacks[@]}"; do compose_bdirs+=("\"$d\""); done
+        for d in "${_bstacks[@]}"; do
+            [[ -n "$d" ]] && compose_bdirs+=("\"$d\"")
+        done
         BACK_DIRS_JSON="[$(IFS=,; echo "${compose_bdirs[*]}")]"
     fi
 
@@ -224,11 +228,13 @@ _cmd_status() {
         LATEST_DIRS_JSON="[]"
         mapfile -t ldirs < <(
             git diff --name-only HEAD "$LATEST_FULL" 2>/dev/null \
-                | cut -d/ -f1 | sort -u
+                | cut -d/ -f1 | sort -u | grep -v '^$'
         )
         mapfile -t _lstacks < <(_dirs_to_stacks "${ldirs[@]}")
         compose_ldirs=()
-        for d in "${_lstacks[@]}"; do compose_ldirs+=("\"$d\""); done
+        for d in "${_lstacks[@]}"; do 
+            [[ -n "$d" ]] && compose_ldirs+=("\"$d\"")
+        done
         LATEST_DIRS_JSON="[$(IFS=,; echo "${compose_ldirs[*]}")]"
 
         # Build commits_ahead JSON array: [{full, short, subject, from_full, from_short}]
