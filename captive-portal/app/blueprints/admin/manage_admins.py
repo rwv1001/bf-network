@@ -54,17 +54,36 @@ def login():
         username = request.form.get('username', '').strip()
         password = request.form.get('password', '').strip()
 
+        logger.info(f"[LOGIN] Attempt for username: {username}")
+
         admin = Admin.query.filter_by(username=username).first()
 
+        logger.info(f"[LOGIN] Admin found in DB: {admin is not None}")
+        if admin:
+            logger.info(f"[LOGIN] admin.mfa_enabled = {admin.mfa_enabled}, has_mfa_secret = {bool(admin.mfa_secret)}")
+
         if admin and admin.check_password(password):
+            logger.info("[LOGIN] Password correct")
+
             if admin.mfa_enabled and admin.mfa_secret:
+                logger.info("[LOGIN] → Taking MFA path")
                 session['mfa_admin_id'] = admin.id
+                session.permanent = True
+                session.modified = True
+                logger.info(f"[LOGIN] Redirecting to mfa_verify. Session keys: {list(session.keys())}")
                 return redirect(url_for('admin.manage_admins.mfa_verify'))
 
+            # Normal login (no MFA)
+            logger.info("[LOGIN] → Normal login (no MFA)")
             admin.last_login = datetime.utcnow()
             db.session.commit()
             login_user(make_admin_user(admin))
             return redirect(url_for('admin.dashboard.index'))
+
+        else:
+            logger.info("[LOGIN] Password incorrect or admin not found")
+            flash('Invalid credentials', 'error')
+            return render_template('admin_login.html')
 
         # Legacy env-var fallback
         from werkzeug.security import check_password_hash, generate_password_hash
@@ -100,7 +119,7 @@ def login():
 @login_required
 def logout():
     logout_user()
-    return redirect(url_for('portal.index'))
+    return redirect(url_for('admin.manage_admins.login'))
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +307,7 @@ def mfa_setup():
                 return redirect(url_for('admin.manage_admins.mfa_setup'))
 
             totp = pyotp.TOTP(secret)
-            if totp.verify(code, valid_window=1):
+            if totp.verify(code, valid_window=1):                
                 admin.mfa_enabled = True
                 admin.mfa_secret  = secret
                 db.session.commit()
@@ -296,6 +315,8 @@ def mfa_setup():
                 session.pop('mfa_setup_admin_id', None)
                 current_user.mfa_enabled = True
                 logger.info("Admin '%s' enabled MFA", admin.username)
+                
+                session.modified = True
                 flash(
                     'MFA has been enabled successfully! '
                     'You will need to use your authenticator app for future logins.',
@@ -340,7 +361,12 @@ def mfa_setup():
 def mfa_verify():
     import pyotp
 
+    logger.info("[MFA_VERIFY] Page reached")
+    logger.info(f"[MFA_VERIFY] Session keys: {list(session.keys())}")
+    logger.info(f"[MFA_VERIFY] mfa_admin_id present: {'mfa_admin_id' in session}")
+
     if 'mfa_admin_id' not in session:
+        logger.warning("[MFA_VERIFY] No mfa_admin_id in session — redirecting to login")
         flash('Session expired. Please log in again.', 'error')
         return redirect(url_for('admin.manage_admins.login'))
 

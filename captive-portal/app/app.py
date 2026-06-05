@@ -30,6 +30,7 @@ from models import (
     RegistrationRequest, UnregisteredLease, User, VlanMapping,
 )
 from security import init_security
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -54,6 +55,13 @@ def create_app():
         'pool_reset_on_return': 'rollback',
     }
     app.config['WTF_CSRF_CHECK_DEFAULT'] = False
+
+    app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+    app.config['SESSION_COOKIE_SECURE'] = True   # Set to True in production (HTTPS)
+    app.config['SESSION_COOKIE_HTTPONLY'] = True
+    app.config['PERMANENT_SESSION_LIFETIME'] = 3600 * 8
+
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
     # ── Extensions ────────────────────────────────────────────────────────────
     db.init_app(app)
