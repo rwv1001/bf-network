@@ -41,7 +41,7 @@
       "alerting": false
     },
     "kea": {
-      "restart_count": 1,
+      "restart_count": 0,
       "alerting": false
     }
   },

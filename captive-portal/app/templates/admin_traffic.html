@@ -413,28 +413,23 @@
         <div class="filter-item" style="max-width: 200px;">
             <label for="per_page">Rows per page:</label>
             <select name="per_page" id="per_page">
-                <option value="25" {% if per_page == 25 %}selected{% endif %}>25</option>
-                <option value="50" {% if per_page == 50 %}selected{% endif %}>50</option>
-                <option value="100" {% if per_page == 100 %}selected{% endif %}>100</option>
-                <option value="250" {% if per_page == 250 %}selected{% endif %}>250</option>
-                <option value="500" {% if per_page == 500 %}selected{% endif %}>500</option>
+                ... existing options ...
             </select>
         </div>
 
-        <!-- Mobile filter panel -->
-        <div class="mobile-filter-panel">
-            <h4>Filters</h4>
-            <div class="mobile-filter-grid">
+        <!-- Filter Inputs (moved inside the form for reliable submission) -->
+        <div style="margin: 15px 0;">
+            <label style="font-weight: 600; display: block; margin-bottom: 8px;">Filters</label>
+            <div class="filters-grid">
                 {% for col_name in selected_columns %}
-                {% set col_label = dict(all_columns)[col_name] %}
-                <div class="filter-item">
-                    <label>{{ col_label }}</label>
-                    <input type="text"
-                           class="mobile-filter-input"
-                           data-target="filter_{{ col_name }}"
-                           value="{{ filters.get(col_name, '') }}"
-                           placeholder="{% if col_name in ['session_start', 'session_end'] %}YYYY-MM-DD{% else %}filter...{% endif %}">
-                </div>
+                    {% set col_label = dict(all_columns)[col_name] %}
+                    <div class="filter-item">
+                        <label>{{ col_label }}</label>
+                        <input type="text"
+                               name="filter_{{ col_name }}"
+                               value="{{ filters.get(col_name, '') }}"
+                               placeholder="{% if col_name in ['session_start', 'session_end'] %}YYYY-MM-DD{% else %}filter...{% endif %}">
+                    </div>
                 {% endfor %}
             </div>
         </div>
@@ -452,6 +447,7 @@
 </div>
 
 <!-- Results -->
+
 <div class="pagination-controls">
     <div class="pagination-info">
         Showing {{ ((page - 1) * per_page) + 1 if total > 0 else 0 }} - {{ [page * per_page, total]|min }} of {{ total }} sessions
@@ -477,7 +473,7 @@
     </div>
 </div>
 
-{% if rows %}
+
 <div class="table-responsive">
     <table>
         <thead>
@@ -494,19 +490,8 @@
                 </th>
                 {% endfor %}
             </tr>
-            <tr class="filter-row">
-                {% for col_name in selected_columns %}
-                <td>
-                    <input type="text"
-                           id="filter_{{ col_name }}"
-                           name="filter_{{ col_name }}"
-                           value="{{ filters.get(col_name, '') }}"
-                           placeholder="{% if col_name in ['session_start', 'session_end'] %}YYYY-MM-DD{% else %}filter...{% endif %}"
-                           form="filterForm">
-                </td>
-                {% endfor %}
-            </tr>
         </thead>
+        {% if rows %}
         <tbody>
             {% for row in rows %}
             <tr>
@@ -528,11 +513,13 @@
             </tr>
             {% endfor %}
         </tbody>
+        {% endif %}
     </table>
 </div>
 
 <!-- Mobile cards -->
 <div class="mobile-cards">
+    {% if rows %}
     {% for row in rows %}
     <div class="mobile-card">
         {% for col_name in selected_columns %}
@@ -551,11 +538,12 @@
                 {% endif %}
             </span>
         </div>
-        {% endfor %}
+        {% endfor %}        
     </div>
     {% endfor %}
+    {% endif %}
 </div>
-
+{% if rows %}
 <div class="pagination-controls">
     <div class="pagination-info">
         Showing {{ ((page - 1) * per_page) + 1 if total > 0 else 0 }} - {{ [page * per_page, total]|min }} of {{ total }} sessions
@@ -580,7 +568,8 @@
         {% endif %}
     </div>
 </div>
-
+{% endif %}
+{% if rows %}
 {% else %}
 <div class="empty-state">
     <h3>No traffic sessions found</h3>
@@ -674,9 +663,9 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 });
 
-// Auto-refresh every 15 seconds
+// Auto-refresh every 60 seconds
 (function() {
-    const REFRESH_INTERVAL = 15000;
+    const REFRESH_INTERVAL = 60000;
     let countdown = REFRESH_INTERVAL / 1000;
     let paused = false;
     let timer = null;

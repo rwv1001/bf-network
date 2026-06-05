@@ -6,7 +6,6 @@
 #
 # Kept separate by design:
 #   kea/          – restarted by the web service on pool-config changes
-#   docker-agent/ – must be outside any stack it manages
 #
 # Common operations (run from /home/admin/bf-network):
 #   docker compose up -d                  start / reconcile everything

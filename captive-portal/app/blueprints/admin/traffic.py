@@ -89,7 +89,7 @@ def traffic():
         selected_columns = _DEFAULT_COLUMNS
 
     # Filters
-    filters = {}
+    filters = {}    
     for col_name, _ in ALL_COLUMNS:
         if has_query_params:
             filter_value = request.args.get(f'filter_{col_name}', '').strip()
@@ -149,6 +149,8 @@ def traffic():
     select_cols = ['session_id'] + [c for c in selected_columns if c != 'session_id']
     select_clause = ', '.join(select_cols)
 
+
+
     where_clauses = []
     params = {}
     param_counter = 0
@@ -198,6 +200,18 @@ def traffic():
 
     where_clause = ' AND '.join(where_clauses) if where_clauses else '1=1'
 
+    # ====================== DEBUG: SQL Queries ======================
+    logger.info("=" * 80)
+    logger.info("=== TRAFFIC VIEWER DEBUG ===")
+    logger.info(f"has_query_params: {has_query_params}")
+    logger.info(f"Filters being applied: {filters}")
+
+    count_sql = f"SELECT COUNT(*) FROM nat_sessions_enriched WHERE {where_clause}"
+    logger.info("COUNT SQL:")
+    logger.info(count_sql)
+    logger.info(f"PARAMS: {params}")
+    # ================================================================
+
     from sqlalchemy import text as _text
     total = db.session.execute(
         _text(f"SELECT COUNT(*) FROM nat_sessions_enriched WHERE {where_clause}"),
@@ -206,17 +220,26 @@ def traffic():
 
     offset = (page - 1) * per_page
     order_clause = f"{sort_col} {sort_order.upper()}"
-    result = db.session.execute(
-        _text(f"""
-            SELECT {select_clause}
-            FROM nat_sessions_enriched
-            WHERE {where_clause}
-            ORDER BY {order_clause}
-            LIMIT :limit OFFSET :offset
-        """),
-        {**params, 'limit': per_page, 'offset': offset},
-    )
+
+    main_sql = f"""
+        SELECT {select_clause}
+        FROM nat_sessions_enriched
+        WHERE {where_clause}
+        ORDER BY {order_clause}
+        LIMIT :limit OFFSET :offset
+    """
+
+    logger.info("MAIN SELECT SQL:")
+    logger.info(main_sql.strip())
+    exec_params = {**params, 'limit': per_page, 'offset': offset}
+    logger.info(f"EXEC PARAMS: {exec_params}")
+
+
+    result = db.session.execute(_text(main_sql), exec_params)
     rows = [dict(row._mapping) for row in result]
+
+    logger.info(f"Results: total={total}, rows returned={len(rows)}")
+    logger.info("=" * 80)
 
     total_pages = (total + per_page - 1) // per_page if per_page > 0 else 0
 
