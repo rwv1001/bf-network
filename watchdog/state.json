@@ -21,7 +21,7 @@
       "alerting": false
     },
     "portal-tunnel": {
-      "restart_count": 0,
+      "restart_count": 13,
       "alerting": false
     },
     "freeradius": {

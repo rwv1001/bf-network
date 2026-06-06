@@ -15,6 +15,30 @@ from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
 
+COMMON_PORT_UNDO_COMMANDS = [
+    ' undo description',
+    ' undo ip verify source',    
+    ' undo port-security port-mode',
+    ' undo port-security intrusion-mode',
+    ' undo port-security max-mac-count',
+    ' undo port access vlan',
+    ' undo port link-type',
+    ' undo port trunk permit vlan all',
+    ' undo mac-vlan enable',
+    ' undo mac-authentication',
+    ' undo web-auth enable',
+    ' undo web-auth domain',
+    ' undo dhcp snooping trust',
+    ' undo arp detection trust',
+    ' undo dhcp snooping check mac-address',
+    ' undo mac-authentication max-user',
+    ' undo mac-authentication domain',
+    ' undo mac-authentication host-mode',
+    ' undo dhcp snooping binding record',
+    ' undo mac-authentication guest-vlan',
+    ' undo port-security enable',
+]
+
 
 # ---------------------------------------------------------------------------
 # Low-level SSH execution
@@ -35,6 +59,8 @@ def run_switch_command(host: str, command: str, extra_input: str = '',
 
     Returns the command stdout as a string, or None on failure.
     """
+    import shlex
+
     switch_user = os.getenv('SWITCH_USER', 'robert')
     switch_port = os.getenv('SWITCH_SSH_PORT', '22')
     switch_key  = os.getenv('SWITCH_KEY_PATH', '')
@@ -56,6 +82,11 @@ def run_switch_command(host: str, command: str, extra_input: str = '',
     preamble = 'screen-length disable\n' if disable_paging else ''
     stdin_data = f'{preamble}{command}\n{extra_input}quit\n'
 
+    # === DEBUG OUTPUT ===
+    ssh_cmd_str = ' '.join(shlex.quote(arg) for arg in ssh_args)
+    logger.info("SSH command to %s:\n%s", host, ssh_cmd_str)
+    logger.info("stdin being sent to switch:\n%s", stdin_data)
+
     try:
         result = subprocess.run(
             ssh_args,
@@ -64,15 +95,28 @@ def run_switch_command(host: str, command: str, extra_input: str = '',
             text=True,
             timeout=timeout,
         )
+
+        # Enhanced result logging
         if result.returncode != 0:
             logger.warning(
-                "SSH to %s exited %d: %s",
-                host, result.returncode,
-                result.stderr.strip()[:200],
+                "SSH to %s exited with code %d\n"
+                "=== STDERR ===\n%s\n"
+                "=== STDOUT (first 500 chars) ===\n%s",
+                host,
+                result.returncode,
+                result.stderr.strip()[:1000],
+                result.stdout.strip()[:500],
             )
-        return result.stdout if result.stdout.strip() else None
+        else:
+            logger.info(
+                "SSH to %s succeeded (returncode=0). Output length: %d chars",
+                host, len(result.stdout or "")
+            )
+
+        return result.stdout if result.stdout and result.stdout.strip() else None
+
     except subprocess.TimeoutExpired:
-        logger.warning("SSH command timed out for %s", host)
+        logger.warning("SSH command timed out for %s after %s seconds", host, timeout)
         return None
     except Exception as exc:
         logger.warning("SSH command failed for %s: %s", host, exc)

@@ -27,6 +27,7 @@ from models import ISPRouter, VlanMapping, Setting
 from core.auth import permission_required
 from core.network import reset_acl_baseline, reapply_all_ip_blocks, reset_vlan_interface_masks
 from core.switch import (
+    COMMON_PORT_UNDO_COMMANDS,
     expand_switch_iface_name, get_switch_hosts, get_switch_host_for_isp_router,
     run_switch_command, switch_host_for_port,
 )
@@ -143,20 +144,18 @@ def _build_isp_router_switch_config(router: ISPRouter, switch_host: str) -> str:
 def _build_isp_router_port_config(port_name: str, router: ISPRouter) -> str:
     expanded   = expand_switch_iface_name(port_name)
     name_upper = router.name.upper().replace(' ', '_')
+
     lines = [
         'system-view',
         f'interface {expanded}',
-        f' description UPLINK-TO-{name_upper}',
-        ' undo ip verify source',
-        ' port link-type access',
-        ' undo port access vlan',
-        f' port access vlan {router.vlan_id}',
+    ] + COMMON_PORT_UNDO_COMMANDS + [
+        f'interface {expanded}',
+        f' description TRUNK-TO-{name_upper}',
+        ' port link-type trunk',
+        ' port trunk permit vlan 1',
+        f' port trunk permit vlan {router.vlan_id}',
         ' dhcp snooping trust',
-        ' dhcp snooping check mac-address',
-        ' port-security max-mac-count 1',
-        ' port-security port-mode autolearn',
-        ' port-security intrusion-mode blockmac',
-        ' port-security enable',
+        ' arp detection trust',
         'quit',
         'quit',
         'save force',
@@ -246,11 +245,7 @@ def _build_reset_port_config(port_name: str) -> str:
     return '\n'.join([
         'system-view',
         f'interface {expanded}',
-        ' undo description',
-        ' undo port access vlan',
-        ' undo port-security port-mode',
-        ' undo port-security intrusion-mode',
-        ' undo port-security max-mac-count',
+        ] + COMMON_PORT_UNDO_COMMANDS + [
         'quit',
         'quit',
         'save force',

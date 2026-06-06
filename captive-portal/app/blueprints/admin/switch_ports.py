@@ -19,6 +19,7 @@ from sqlalchemy import text
 from extensions import db
 from core.auth import permission_required
 from core.switch import (
+    COMMON_PORT_UNDO_COMMANDS,
     expand_switch_iface_name, find_switch_port_for_mac,
     get_switch_hosts, normalize_switch_mac, persist_switch_port,
     run_switch_command, switch_port_allowed,
@@ -231,6 +232,8 @@ def _get_isp_router_locked_ports() -> dict:
 def _build_port_config(port_name: str, role: str, description: str = '') -> str:
     """Build the complete HP5130 config command block for a given port role."""
     from models import ISPRouter
+    from core.switch import COMMON_PORT_UNDO_COMMANDS, expand_switch_iface_name
+
     expanded = expand_switch_iface_name(port_name)
 
     CANONICAL_DESC = {
@@ -244,12 +247,15 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
     desc = (description or '').strip() or CANONICAL_DESC.get(role, '')
 
     head = ['system-view', f'interface {expanded}']
-    if desc:
-        head.append(f'description {desc}')
+
+
+    # Start with common cleanup commands for all roles
+    body = list(COMMON_PORT_UNDO_COMMANDS)
 
     if role == 'wired':
-        body = [
-            'port link-type access',
+        body.extend([
+             f'interface {expanded}', 
+            'port link-type access', 
             'port link-type hybrid',
             'undo port hybrid vlan 1',
             'port hybrid vlan 10 20 30 40 50 60 70 80 90 99 untagged',
@@ -264,57 +270,64 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
             'port-security port-mode mac-authentication',
             'dhcp snooping binding record',
             'dhcp snooping check mac-address',
-        ]
+        ])
+
     elif role == 'ap':
-        body = [
-            'undo port-security port-mode',
-            'undo port hybrid pvid',
-            'undo mac-vlan enable',
-            'undo mac-authentication guest-vlan',
-            'undo dhcp snooping binding record',
-            'port link-type access',
+        body.extend([
+            f'interface {expanded}',
+            'port link-type access', 
             'port link-type hybrid',
             'port hybrid vlan 10 20 30 40 50 60 70 80 90 99 tagged',
             'undo port hybrid vlan 250',
             'port hybrid vlan 1 untagged',
-            'ip verify source ip-address mac-address',
-            'mac-authentication max-user 256',
-            'mac-authentication domain macauth',
-            'mac-authentication host-mode multi-vlan',
             'dhcp snooping check mac-address',
-            'undo web-auth domain',
-            'undo web-auth enable',
-        ]
+            'arp detection trust'
+        ])
+
     elif role == 'pi':
-        body = [
+        body.extend([
+            f'interface {expanded}', 
             'port link-type access',
             'port link-type trunk',
             'undo port trunk permit vlan 1',
-            'port trunk permit vlan 10 20 30 40 50 60 70 80 90 99',
-            'port trunk permit vlan 250',
+            'port trunk permit vlan 10 20 30 40 50 60 70 80 90',
+            'port trunk permit vlan 99 250',
             'port trunk pvid vlan 1028',
             'arp detection trust',
             'dhcp snooping trust',
-        ]
+        ])
+
     elif role == 'uplink_udm':
-        body = ['dhcp snooping trust']
+        body.extend([
+            f'interface {expanded}', 
+            'port link-type access',
+            'port link-type trunk',
+            'port trunk permit vlan 1',
+            'dhcp snooping trust',
+        ])
+
     elif role == 'inter_switch':
         try:
             isp_vlan_ids = [str(r.vlan_id) for r in ISPRouter.query.order_by(ISPRouter.vlan_id).all()]
         except Exception:
             isp_vlan_ids = ['1']
         isp_vlan_str = ' '.join(isp_vlan_ids) if isp_vlan_ids else '1'
-        body = [
+        body.extend([
+            f'interface {expanded}', 
+            'port link-type access',
             'port link-type trunk',
             'port trunk permit vlan 10 20 30 40 50 60 70 80 90',
             'port trunk permit vlan 99 250',
             f'port trunk permit vlan {isp_vlan_str}',
-            'port trunk pvid vlan 1028',
+            'port trunk pvid vlan 1',
             'arp detection trust',
             'dhcp snooping trust',
-        ]
-    else:
-        body = []
+        ])
+
+    if desc:
+        body.append(f'description {desc}')
+
+    # unknown role → just apply the common undos + description (if any)
 
     return '\n'.join(head + body + ['quit', 'quit', 'save force'])
 
