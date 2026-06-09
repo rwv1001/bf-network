@@ -6,6 +6,7 @@ Routes:
   GET      /api/admin/kea-config           return current dhcp4.json as text
   GET      /api/admin/vlan-push-status     poll background push job status
   POST     /api/admin/push-acl-baseline    trigger ACL baseline push
+  GET      /api/admin/switch-current-config  return 'display current-configuration' output from all switches
 """
 
 import json
@@ -452,3 +453,22 @@ def push_acl_baseline():
 
     threading.Thread(target=_run, daemon=True).start()
     return jsonify({'ok': True, 'job_id': job_id})
+
+
+# ---------------------------------------------------------------------------
+# Switch current configuration API
+# ---------------------------------------------------------------------------
+
+@vlans_bp.route('/api/admin/switch-current-config')
+@login_required
+@permission_required('manage_vlans')
+def switch_current_config():
+    """Return the output of 'display current-configuration' from all configured HP5130 switches."""
+    from core.switch import get_switch_hosts, run_switch_command
+
+    hosts = get_switch_hosts()
+    results = {}
+    for host in hosts:
+        output = run_switch_command(host, 'display current-configuration', disable_paging=True)
+        results[host] = output if output is not None else '# Failed to retrieve configuration from this switch.'
+    return jsonify(results)

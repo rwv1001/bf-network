@@ -364,7 +364,7 @@
     <div class="button-group">
         <button type="button" class="btn-cancel-vlan" onclick="window.location.href='{{ url_for('admin.dashboard.index') }}'">Cancel</button>
         <button type="button" class="btn-cancel-vlan" id="push-acl-btn"
-                title="Re-push ACL baseline and inter-VLAN isolation rules to all switches without changing any configuration">
+                title="Re-apply ACL baseline and inter-VLAN isolation rules to all switches without changing any configuration">
             &#128279; Push ACLs to Switches
         </button>
         <button id="save-config-button" type="submit" class="btn-save" disabled>
@@ -393,6 +393,13 @@
     {% else %}
     <p style="color: #888;">Config file not found ({{ kea_config_path if kea_config_path is defined else '/kea/config/dhcp4.json' }}).</p>
     {% endif %}
+</div>
+
+<div class="section-container" id="switch-config-section" style="margin-top: 2rem;">
+    <h2>Current Switch Configuration (<code>display current-configuration</code>)</h2>
+    <div id="switch-config-content" style="margin-top: 1rem;">
+        <p style="color: #888;">Loading switch configuration&#8230;</p>
+    </div>
 </div>
 
 <script>
@@ -690,6 +697,48 @@ function onVvChange(cb) {
             });
         });
     }
+</script>
+
+<script>
+    (function() {
+        var container = document.getElementById('switch-config-content');
+        if (!container) return;
+
+        fetch('{{ url_for("admin.vlans.switch_current_config") }}', {credentials: 'same-origin'})
+            .then(function(r) {
+                if (!r.ok) throw new Error('Server error');
+                return r.json();
+            })
+            .then(function(data) {
+                var html = '';
+                for (var host in data) {
+                    if (!data.hasOwnProperty(host)) continue;
+
+                    var cfgText = (data[host] || '')
+                        .replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                        .replace(/\r\n/g, '\n')
+                        // === IMPROVED: collapse blank lines and whitespace-only lines ===
+                        .replace(/\n[ \t]*\n/g, '\n')   // remove lines that are blank or only spaces/tabs
+                        .replace(/\n{3,}/g, '\n\n')     // safety: never more than one blank line
+                        .trim();
+
+                    html += '<h3 style="font-size:16px; margin:20px 0 10px; color:#333;">Switch ' + host + '</h3>';
+                    html += '<pre style="' +
+                        'background:#1e1e1e; color:#d4d4d4; font-family:Consolas,Menlo,monospace; ' +
+                        'font-size:12px; line-height:1.15; padding:1rem; border-radius:6px; ' +
+                        'overflow:auto; max-height:500px; white-space:pre; tab-size:2;">' +
+                        cfgText +
+                        '</pre>';
+                }
+                if (!html) {
+                    html = '<p style="color: #888;">No switch configuration available.</p>';
+                }
+                container.innerHTML = html;
+            })
+            .catch(function(err) {
+                container.innerHTML = '<p style="color: #d9534f;">Failed to load switch configuration (' + err.message + ').</p>';
+            });
+    })();
 </script>
 {% endblock %}
 
