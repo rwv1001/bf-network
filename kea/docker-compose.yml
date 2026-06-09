@@ -33,6 +33,12 @@ services:
       SWITCH_PORT_LOOKUP_ENABLED: "1"
       # How long (seconds) a cached port entry is considered fresh (skip SSH re-query)
       SWITCH_PORT_LOOKUP_CACHE_TTL: ${SWITCH_PORT_LOOKUP_CACHE_TTL:-120}
+      WIRED_VLAN: ${WIRED_VLAN:-250}
+      SWITCH_HOSTS_BYTES: ${SWITCH_HOSTS_BYTES:-2}
+      UNREGISTERED_GW_BYTE: ${UNREGISTERED_GW_BYTE:-2}
+      MANAGEMENT_VLAN: ${MANAGEMENT_VLAN:-99}
+      PORTAL_IP_BYTE: ${PORTAL_IP_BYTE:-4}
+      HIJACK_DNS_IP_BYTE: ${HIJACK_DNS_IP_BYTE:-5}
       LFC_INTERVAL: "300"
       ACL_QUEUE_DISABLE: "1"
       ACL_QUEUE_DIR: /acl-queue

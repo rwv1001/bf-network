@@ -171,8 +171,17 @@ def detect_connection_type(ip_address: str) -> tuple:
     """
     Detect if a connection is WiFi or wired based on source IP/VLAN.
     Returns (connection_type, vlan_id, ssid).
+
+    The wired-unregistered VLAN (WIRED_VLAN env var, default 250) and the
+    management VLAN (MANAGEMENT_VLAN env var, default 99) are treated as
+    wired connections with no SSID.
     """
-    from core.vlan_utils import vlan_from_ip, get_wired_unregistered_vlan_id, get_ssid_for_vlan
+    from core.vlan_utils import (
+        vlan_from_ip,
+        get_wired_unregistered_vlan_id,
+        get_management_vlan_id,
+        get_ssid_for_vlan,
+    )
     if not ip_address:
         return ('unknown', None, None)
 
@@ -181,7 +190,9 @@ def detect_connection_type(ip_address: str) -> tuple:
         return ('unknown', None, None)
 
     wired_unregistered_vlan = get_wired_unregistered_vlan_id()
-    if vlan_id in {99, wired_unregistered_vlan}:
+    mgmt_vlan = get_management_vlan_id()
+
+    if vlan_id in {mgmt_vlan, wired_unregistered_vlan}:
         return ('wired', vlan_id, None)
 
     ssid = get_ssid_for_vlan(vlan_id)

@@ -12,6 +12,8 @@
 
 set -euo pipefail
 
+WIRED_VLAN="${WIRED_VLAN:-250}"
+
 SWITCH_IP="${SWITCH_IP:?SWITCH_IP is required}"   # SSH target – current switch IP before reip
 SWITCH_NEW_IP="$(printf '%s' "${SWITCH_HOSTS:-}" | awk '{print $1}')"  # New VLAN99 address after reip
 [ -n "$SWITCH_NEW_IP" ] || { echo "SWITCH_HOSTS required" >&2; exit 1; }
@@ -79,13 +81,13 @@ interface Vlan-interface80
  ip address ${NET}.80.${SW_OCTET} 255.255.255.0
 quit
 
-interface Vlan-interface250
- ip address ${NET}.250.${SW_OCTET} 255.255.255.0
+interface Vlan-interface${WIRED_VLAN}
+ ip address ${NET}.${WIRED_VLAN}.${SW_OCTET} 255.255.255.0
 quit
 
 acl number 3000 name PREAUTH
  undo rule 12
- rule 12 permit ip destination ${NET}.250.${SW_OCTET} 0
+ rule 12 permit ip destination ${NET}.${WIRED_VLAN}.${SW_OCTET} 0
 quit
 
 radius scheme rad1

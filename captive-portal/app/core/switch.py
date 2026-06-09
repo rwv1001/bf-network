@@ -4,6 +4,17 @@ HP5130 switch SSH helpers.
 All low-level SSH communication with the switch lives here.
 Higher-level ACL / PBR / port-config builders live in core/network.py
 and blueprints/admin/isp_routers.py / switch_ports.py.
+
+Switch host resolution
+----------------------
+Switch management IPs are derived from three env vars:
+
+  NETWORK_WORD          e.g. 192.168
+  MANAGEMENT_VLAN       e.g. 99
+  SWITCH_HOSTS_BYTES    e.g. 2,3   → 192.168.99.2, 192.168.99.3
+
+The legacy SWITCH_HOSTS env var (space-separated IPs) is still accepted as a
+fallback so existing deployments continue to work without changes.
 """
 
 import logging
@@ -17,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 COMMON_PORT_UNDO_COMMANDS = [
     ' undo description',
-    ' undo ip verify source',    
+    ' undo ip verify source',
     ' undo port-security port-mode',
     ' undo port-security intrusion-mode',
     ' undo port-security max-mac-count',
@@ -96,7 +107,6 @@ def run_switch_command(host: str, command: str, extra_input: str = '',
             timeout=timeout,
         )
 
-        # Enhanced result logging
         if result.returncode != 0:
             logger.warning(
                 "SSH to %s exited with code %d\n"
@@ -128,15 +138,25 @@ def run_switch_command(host: str, command: str, extra_input: str = '',
 # ---------------------------------------------------------------------------
 
 def get_switch_hosts() -> list:
-    """Return the list of switch management IPs from SWITCH_HOSTS env var."""
-    raw = os.getenv('SWITCH_HOSTS', '')
-    return [h.strip() for h in raw.split() if h.strip()]
+    """
+    Return the list of switch management IP addresses.
+
+    Resolution order:
+    1. SWITCH_HOSTS_BYTES (comma-separated last octets) combined with
+       NETWORK_WORD and MANAGEMENT_VLAN.
+       e.g. NETWORK_WORD=192.168, MANAGEMENT_VLAN=99, SWITCH_HOSTS_BYTES=2,3
+            → ['192.168.99.2', '192.168.99.3']
+    2. Legacy SWITCH_HOSTS env var (space-separated full IPs) — kept for
+       backwards compatibility with existing deployments.
+    """
+    from core.vlan_utils import get_switch_host_ips
+    return get_switch_host_ips()
 
 
 def switch_host_for_port(port_name: str) -> str:
     """
     Return the switch_host for the given port by looking it up in switch_ports.
-    Falls back to the first SWITCH_HOSTS entry if the port is not found.
+    Falls back to the first switch host if the port is not found.
     """
     from extensions import db as _db
     if port_name:
@@ -154,7 +174,7 @@ def get_switch_host_for_isp_router(router) -> str:
     """
     Return the switch host for the HP5130 that physically hosts this ISP
     router's uplink port.  Uses ISPRouter.switch_host when set; falls back
-    to the first SWITCH_HOSTS entry.
+    to the first switch host.
     """
     if router and router.switch_host:
         return router.switch_host
@@ -166,7 +186,7 @@ def get_switch_host_for_vlan(vlan_id) -> str:
     """
     Return the HP5130 switch_host that hosts the ISP router for the given
     device VLAN.  Resolves via VlanMapping.isp_router_id -> ISPRouter.switch_host.
-    Falls back to first SWITCH_HOSTS entry.
+    Falls back to first switch host.
     """
     if vlan_id:
         try:
@@ -221,13 +241,13 @@ def switch_port_allowed(iface: str) -> bool:
 
 def find_switch_port_for_mac(mac_address: str):
     """
-    Scan all switches in SWITCH_HOSTS for the given MAC address.
+    Scan all switches in the switch hosts list for the given MAC address.
     Returns (switch_host, iface) for the first switch that reports the MAC,
     or None if not found on any switch.
     """
     switch_hosts = get_switch_hosts()
     if not switch_hosts:
-        logger.warning('find_switch_port_for_mac: no SWITCH_HOSTS configured')
+        logger.warning('find_switch_port_for_mac: no switch hosts configured')
         return None
 
     normalized = normalize_switch_mac(mac_address)

@@ -2,27 +2,24 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "🚀 Launch Aider (Claude 4.6 Sonnet)",
+      "label": "🚀 Launch Aider (DeepSeek V4 Pro)",
       "type": "shell",
       "command": "aider",
       "args": [
         "--model",
-        "claude-sonnet-4-6",
-        "--no-show-model-warnings"
+        "deepseek/deepseek-v4-pro",
+        "--no-auto-commits"
       ],
       "options": {
-        "cwd": "${workspaceFolder}",
         "env": {
-          "DEEPSEEK_API_KEY": "${env:DEEPSEEK_API_KEY}",
-          "ANTHROPIC_API_KEY": "${env:ANTHROPIC_API_KEY}"
+          "DEEPSEEK_API_KEY": "${env:DEEPSEEK_API_KEY}"
         }
       },
       "presentation": {
         "echo": true,
         "reveal": "always",
         "focus": true,
-        "panel": "dedicated",
-        "clear": false
+        "panel": "dedicated"
       },
       "problemMatcher": []
     }

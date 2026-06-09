@@ -10,6 +10,11 @@ PORTAL_IP="${PORTAL_IP:?PORTAL_IP environment variable is required (Pi VLAN-99 I
 HIJACK_DNS_IP="${HIJACK_DNS_IP:?HIJACK_DNS_IP environment variable is required (dnsmasq hijack alias, e.g. 192.168.99.5)}"
 NET="${NETWORK_WORD:-192.168}"
 
+# Management VLAN and list of possible user VLANs (comma-separated)
+MANAGEMENT_VLAN="${MANAGEMENT_VLAN:-99}"
+VALID_VLANS="${VALID_VLANS:-10,20,30,40,50,60,70,80,90}"
+VLAN_LIST=$(echo "$VALID_VLANS" | tr ',' ' ')
+
 # Use sudo if not running as root
 if [ "$(id -u)" -ne 0 ]; then
     SUDO="sudo"
@@ -50,12 +55,13 @@ get_blocked_pool_ranges() {
         return 1
     fi
 
-    python3 - <<'PY' "$CONFIG_PATH"
+    python3 - <<'PY' "$CONFIG_PATH" "$MANAGEMENT_VLAN"
 import json
 import ipaddress
 import sys
 
 config_path = sys.argv[1]
+mgmt_vlan = int(sys.argv[2]) if len(sys.argv) > 2 else 99
 try:
     with open(config_path, 'r', encoding='utf-8') as handle:
         data = json.load(handle)
@@ -67,7 +73,7 @@ for subnet in data.get('Dhcp4', {}).get('subnet4', []):
         vlan_id = int(subnet.get('id'))
     except Exception:
         continue
-    if vlan_id == 99:
+    if vlan_id == mgmt_vlan:
         continue
     blocked_pool = None
     for pool in subnet.get('pools', []):
@@ -117,8 +123,8 @@ add_blocked_pool_rules() {
         return 0
     fi
 
-    VLANS="10 20 30 40 50 60 70 80 90"
-    for VLAN in $VLANS; do
+    # Fallback without Kea config: use the list of possible VLANs
+    for VLAN in $VLAN_LIST; do
         RANGE="${NET}.$VLAN.214-${NET}.$VLAN.254"
         $SUDO iptables -t nat -C PREROUTING -m iprange --src-range "$RANGE" -p udp --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null
         if [ $? -ne 0 ]; then
@@ -152,8 +158,7 @@ remove_blocked_pool_rules() {
         return 0
     fi
 
-    VLANS="10 20 30 40 50 60 70 80 90"
-    for VLAN in $VLANS; do
+    for VLAN in $VLAN_LIST; do
         RANGE="${NET}.$VLAN.214-${NET}.$VLAN.254"
         $SUDO iptables -t nat -D PREROUTING -m iprange --src-range "$RANGE" -p udp --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null
         if [ $? -eq 0 ]; then
@@ -184,62 +189,62 @@ case "$ACTION" in
             $SUDO iptables -t nat -A PREROUTING -s "$IP_ADDRESS" -p udp --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53
             echo "DNS hijack enabled for $IP_ADDRESS (UDP)"
         fi
-        
+
         $SUDO iptables -t nat -C PREROUTING -s "$IP_ADDRESS" -p tcp --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null
         if [ $? -ne 0 ]; then
             $SUDO iptables -t nat -A PREROUTING -s "$IP_ADDRESS" -p tcp --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53
             echo "DNS hijack enabled for $IP_ADDRESS (TCP)"
         fi
         ;;
-        
+
     unhijack)
         # Remove DNS redirect rules for this IP
         $SUDO iptables -t nat -D PREROUTING -s "$IP_ADDRESS" -p udp --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null
         if [ $? -eq 0 ]; then
             echo "DNS hijack removed for $IP_ADDRESS (UDP)"
         fi
-        
+
         $SUDO iptables -t nat -D PREROUTING -s "$IP_ADDRESS" -p tcp --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null
         if [ $? -eq 0 ]; then
             echo "DNS hijack removed for $IP_ADDRESS (TCP)"
         fi
         ;;
-        
+
     block)
         # DNS HIJACKING ONLY - Internet blocking happens via VLAN on HP5130
         # This just hijacks DNS to trigger captive portal detection
-        
+
         $SUDO iptables -t nat -C PREROUTING -s "$IP_ADDRESS" -p udp --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null
         if [ $? -ne 0 ]; then
             $SUDO iptables -t nat -A PREROUTING -s "$IP_ADDRESS" -p udp --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53
             echo "DNS hijack enabled for $IP_ADDRESS (UDP)"
         fi
-        
+
         $SUDO iptables -t nat -C PREROUTING -s "$IP_ADDRESS" -p tcp --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null
         if [ $? -ne 0 ]; then
             $SUDO iptables -t nat -A PREROUTING -s "$IP_ADDRESS" -p tcp --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53
             echo "DNS hijack enabled for $IP_ADDRESS (TCP)"
         fi
-        
+
         echo "Device $IP_ADDRESS DNS hijacked - actual blocking via VLAN 90 on HP5130"
         ;;
-        
+
     unblock)
         # Remove DNS hijacking only (VLAN change handled by Kea/RADIUS)
-        
+
         $SUDO iptables -t nat -D PREROUTING -s "$IP_ADDRESS" -p udp --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null
         if [ $? -eq 0 ]; then
             echo "DNS hijack removed for $IP_ADDRESS (UDP)"
         fi
-        
+
         $SUDO iptables -t nat -D PREROUTING -s "$IP_ADDRESS" -p tcp --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null
         if [ $? -eq 0 ]; then
             echo "DNS hijack removed for $IP_ADDRESS (TCP)"
         fi
-        
+
         echo "Device $IP_ADDRESS DNS unhijacked"
         ;;
-        
+
     *)
         echo "Error: Unknown action '$ACTION'"
         echo "Usage: $0 {hijack|unhijack|block|unblock} <ip_address>"

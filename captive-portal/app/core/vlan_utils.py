@@ -7,6 +7,18 @@ Covers:
 - Kea config updates
 - IP-to-VLAN resolution
 - Blocked-pool IP detection
+
+Environment variables
+---------------------
+WIRED_VLAN            VLAN ID for wired-unregistered devices (default: 250)
+MANAGEMENT_VLAN       VLAN ID for management / switch hosts (default: 99)
+UNREGISTERED_GW_BYTE  Last octet of the unregistered gateway IP (default: 2)
+                      Gateway is derived as NETWORK_WORD.MANAGEMENT_VLAN.<byte>
+                      e.g. 192.168.99.2  — replaces the old UNREGISTERED_GW var.
+SWITCH_HOSTS_BYTES    Comma-separated last octets of switch management IPs (default: 2)
+                      Hosts are derived as NETWORK_WORD.MANAGEMENT_VLAN.<byte>
+                      e.g. "2,3" → 192.168.99.2, 192.168.99.3
+                      Falls back to the legacy SWITCH_HOSTS env var if set.
 """
 
 import ipaddress
@@ -35,6 +47,88 @@ def _net_word() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Dynamic VLAN ID helpers (replaces hardcoded 250 / 99)
+# ---------------------------------------------------------------------------
+
+def get_wired_vlan_id() -> int:
+    """Return the wired-unregistered VLAN ID (env WIRED_VLAN, default 250)."""
+    try:
+        return int(os.getenv('WIRED_VLAN', '250'))
+    except (TypeError, ValueError):
+        return 250
+
+
+def get_management_vlan_id() -> int:
+    """Return the management VLAN ID (env MANAGEMENT_VLAN, default 99)."""
+    try:
+        return int(os.getenv('MANAGEMENT_VLAN', '99'))
+    except (TypeError, ValueError):
+        return 99
+
+
+def get_unregistered_gw() -> str:
+    """
+    Return the unregistered-network gateway IP.
+
+    Derived from NETWORK_WORD + MANAGEMENT_VLAN + UNREGISTERED_GW_BYTE.
+    Example: NETWORK_WORD=192.168, MANAGEMENT_VLAN=99, UNREGISTERED_GW_BYTE=2
+             → 192.168.99.2
+
+    Falls back to the legacy UNREGISTERED_GW env var if set, so existing
+    deployments that still have that variable continue to work unchanged.
+    """
+    legacy = os.getenv('UNREGISTERED_GW', '').strip()
+    if legacy:
+        return legacy
+    try:
+        gw_byte = int(os.getenv('UNREGISTERED_GW_BYTE', '2'))
+    except (TypeError, ValueError):
+        gw_byte = 2
+    mgmt_vlan = get_management_vlan_id()
+    return f"{_net_word()}.{mgmt_vlan}.{gw_byte}"
+
+
+def get_switch_host_ips() -> list:
+    """
+    Return the list of switch management IP addresses.
+
+    Derived from NETWORK_WORD + MANAGEMENT_VLAN + SWITCH_HOSTS_BYTES.
+    Example: NETWORK_WORD=192.168, MANAGEMENT_VLAN=99, SWITCH_HOSTS_BYTES=2,3
+             → ['192.168.99.2', '192.168.99.3']
+
+    Falls back to the legacy SWITCH_HOSTS env var (space-separated IPs) if
+    SWITCH_HOSTS_BYTES is not set, so existing deployments are unaffected.
+    """
+    bytes_raw = os.getenv('SWITCH_HOSTS_BYTES', '').strip()
+    if bytes_raw:
+        mgmt_vlan = get_management_vlan_id()
+        hosts = []
+        for part in bytes_raw.split(','):
+            part = part.strip()
+            if part.isdigit():
+                hosts.append(f"{_net_word()}.{mgmt_vlan}.{part}")
+        if hosts:
+            return hosts
+
+    # Legacy fallback
+    legacy = os.getenv('SWITCH_HOSTS', '').strip()
+    if legacy:
+        return [h.strip() for h in legacy.split() if h.strip()]
+
+    return []
+
+
+def get_switch_hosts_str() -> str:
+    """
+    Return switch management IPs as a space-separated string suitable for
+    passing to shell scripts via the SWITCH_HOSTS environment variable.
+
+    Example: 'SWITCH_HOSTS_BYTES=2,3' → '192.168.99.2 192.168.99.3'
+    """
+    return ' '.join(get_switch_host_ips())
+
+
+# ---------------------------------------------------------------------------
 # VLAN map / entry helpers
 # ---------------------------------------------------------------------------
 
@@ -47,8 +141,8 @@ def get_vlan_map() -> dict:
     return {
         'friars': 10, 'staff': 20, 'students': 30, 'guests': 40,
         'contractors': 50, 'volunteers': 60, 'iot': 70,
-        'restricted': 90, 'unregistered': 99,
-        WIRED_UNREGISTERED_STATUS: 250,
+        'restricted': 90, 'unregistered': get_management_vlan_id(),
+        WIRED_UNREGISTERED_STATUS: get_wired_vlan_id(),
     }
 
 
@@ -108,8 +202,10 @@ def vlan_requires_password(vlan_id) -> bool:
 
 
 def get_wired_unregistered_vlan_id() -> int:
+    """Return the wired-unregistered VLAN ID (reads WIRED_VLAN env var)."""
     vlan_map = get_vlan_map()
-    return vlan_map.get(WIRED_UNREGISTERED_STATUS, 250)
+    # Prefer the DB mapping; fall back to the env-var-derived value.
+    return vlan_map.get(WIRED_UNREGISTERED_STATUS, get_wired_vlan_id())
 
 
 def get_wired_assignable_entries() -> list:
@@ -229,7 +325,7 @@ def build_pools_for_vlan(vlan_id: int, prefix: int) -> tuple:
 # ---------------------------------------------------------------------------
 
 def vlan_from_ip(ip_address: str):
-    """Return the VLAN ID for an IP address (excludes VLAN 99)."""
+    """Return the VLAN ID for an IP address (excludes management VLAN)."""
     if not ip_address:
         return None
     try:
@@ -237,9 +333,10 @@ def vlan_from_ip(ip_address: str):
     except Exception:
         return None
 
+    mgmt_vlan = get_management_vlan_id()
     prefix_by_id = get_vlan_prefix_by_id()
     for vlan_id, prefix in prefix_by_id.items():
-        if vlan_id == 99:
+        if vlan_id == mgmt_vlan:
             continue
         try:
             network = ipaddress.IPv4Network(f"{_net_word()}.{vlan_id}.0/{prefix}", strict=False)
@@ -309,7 +406,8 @@ def is_registered_pool_ip(ip_address: str, vlan_id) -> bool:
     except Exception:
         return False
 
-    if int(vlan_id) == 99:
+    mgmt_vlan = get_management_vlan_id()
+    if int(vlan_id) == mgmt_vlan:
         return False
 
     prefix_by_id = get_vlan_prefix_by_id()

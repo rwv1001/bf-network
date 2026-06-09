@@ -11,6 +11,14 @@ set -e
 #   SWITCH_USER - SSH username
 #   USER_DEVICE_INTERFACES - Comma-separated list of interface numbers (e.g., "12,13,14,15,16")
 #
+# The wired-unregistered VLAN ID is read from the WIRED_VLAN env var (default 250).
+# The management VLAN ID is read from MANAGEMENT_VLAN (default 99).
+# The list of possible user VLANs is read from VALID_VLANS (default 10,20,...,90).
+
+WIRED_VLAN="${WIRED_VLAN:-250}"
+MANAGEMENT_VLAN="${MANAGEMENT_VLAN:-99}"
+VALID_VLANS="${VALID_VLANS:-10,20,30,40,50,60,70,80,90}"
+VLANS_LIST=$(echo "$VALID_VLANS" | tr ',' ' ')
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BASE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -61,7 +69,7 @@ log() {
 # Required variables
 : "${USER_DEVICE_INTERFACES:?USER_DEVICE_INTERFACES not set}"
 
-log "START action=reset_ports switch=$SWITCH_HOST user=$SWITCH_USER interfaces=$USER_DEVICE_INTERFACES"
+log "START action=reset_ports switch=$SWITCH_HOST user=$SWITCH_USER interfaces=$USER_DEVICE_INTERFACES wired_vlan=$WIRED_VLAN mgmt_vlan=$MANAGEMENT_VLAN vlans_list=$VLANS_LIST"
 
 # SSH configuration (match hp5130-acl.sh)
 SSH_TTY_FLAG="${SSH_TTY_FLAG:--tt}"
@@ -85,23 +93,23 @@ COMMANDS="system-view"
 for IFACE_NUM in $(echo "$USER_DEVICE_INTERFACES" | tr ',' ' '); do
     # Trim whitespace
     IFACE_NUM=$(echo "$IFACE_NUM" | xargs)
-    
+
     log "CONFIG interface=GigabitEthernet1/0/${IFACE_NUM}"
-    
+
     # Build commands for this interface
     COMMANDS="$COMMANDS
 interface GigabitEthernet1/0/${IFACE_NUM}
 shutdown
 port link-type hybrid
 undo port hybrid vlan 1
-port hybrid vlan 10 20 30 40 50 60 70 80 90 99 untagged
-port hybrid vlan 250 untagged
-port hybrid pvid vlan 250
+port hybrid vlan ${VLANS_LIST} ${MANAGEMENT_VLAN} untagged
+port hybrid vlan ${WIRED_VLAN} untagged
+port hybrid pvid vlan ${WIRED_VLAN}
 mac-vlan enable
 ip verify source ip-address mac-address
 mac-authentication max-user 16
 mac-authentication domain macauth
-mac-authentication guest-vlan 250
+mac-authentication guest-vlan ${WIRED_VLAN}
 mac-authentication host-mode multi-vlan
 port-security port-mode mac-authentication
 dhcp snooping binding record

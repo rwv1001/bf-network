@@ -19,6 +19,7 @@ import argparse
 from getpass import getpass
 
 _sh_raw = os.getenv('SWITCH_HOSTS', '')
+portal_ip_byte = os.getenv('PORTAL_IP_BYTE', '4').strip()
 _sh_hosts = [h.strip() for h in _sh_raw.split() if h.strip()]
 
 # Switch connection details
@@ -52,13 +53,13 @@ def update_acl_for_blocked_pool(connection, vlan_id):
     # These are added AFTER the existing rule 60 but BEFORE rule 100
     commands.extend([
         f' rule 65 permit udp source {network}.224 0.0.0.31 destination 255.255.255.255 0 destination-port eq bootps',
-        f' rule 66 permit tcp source {network}.224 0.0.0.31 destination {network}.4 0 destination-port eq www',
-        f' rule 67 permit tcp source {network}.224 0.0.0.31 destination {network}.4 0 destination-port eq 443',
-        f' rule 68 permit tcp source {network}.224 0.0.0.31 destination {network}.4 0 destination-port eq 8080',
+        f' rule 66 permit tcp source {network}.224 0.0.0.31 destination {network}.{portal_ip_byte} 0 destination-port eq www',
+        f' rule 67 permit tcp source {network}.224 0.0.0.31 destination {network}.{portal_ip_byte} 0 destination-port eq 443',
+        f' rule 68 permit tcp source {network}.224 0.0.0.31 destination {network}.{portal_ip_byte} 0 destination-port eq 8080',
         f' rule 69 permit udp source {network}.224 0.0.0.31 destination-port eq dns',
         f' rule 70 permit tcp source {network}.224 0.0.0.31 destination-port eq dns',
         f' rule 71 permit udp source {network}.224 0.0.0.31 destination-port eq ntp',
-        f' rule 72 permit icmp source {network}.224 0.0.0.31 destination {network}.4 0',
+        f' rule 72 permit icmp source {network}.224 0.0.0.31 destination {network}.{portal_ip_byte} 0',
     ])
     
     # Deny all other traffic from blocked pool

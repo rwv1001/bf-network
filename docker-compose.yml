@@ -73,7 +73,7 @@ services:
       INSTITUTION_URL: ${INSTITUTION_URL:-}
       INSTITUTION_BUTTON_TEXT: ${INSTITUTION_BUTTON_TEXT:-}
       USAGE_POLICY_TEXT: ${USAGE_POLICY_TEXT:-}
-      VALID_VLANS: ${VALID_VLANS:-}
+      VALID_VLANS: ${VALID_VLANS:-10,20,30,40,50,60,70,80,90}
       VLAN_SUBNET_ID_MAP: ${VLAN_SUBNET_ID_MAP:-}
       EMAIL_VERIFICATION_REQUIRED: ${EMAIL_VERIFICATION_REQUIRED:-false}
       VERIFICATION_TIMEOUT_MINUTES: ${VERIFICATION_TIMEOUT_MINUTES:-15}
@@ -90,6 +90,7 @@ services:
       KEA_CONTROL_SOCKET: ${KEA_CONTROL_SOCKET:-/kea/sockets/kea4-ctrl-socket}
       SWITCH_HOSTS: ${SWITCH_HOSTS:?SWITCH_HOSTS is required – set it in .env}
       PORTAL_IP: ${PORTAL_IP:?PORTAL_IP is required – set it in .env}
+      PORTAL_IP_BYTE: ${PORTAL_IP_BYTE:-4}
       HIJACK_DNS_IP: ${HIJACK_DNS_IP:?HIJACK_DNS_IP is required – set it in .env}
       SWITCH_USER: ${SWITCH_USER:-robert}
       SWITCH_PASS: ${SWITCH_PASS}
@@ -117,6 +118,8 @@ services:
       RESTART_QUEUE_DIR: /restart-queue
       PIHOLE_WEBPASSWORD: ${PIHOLE_WEBPASSWORD:-}
       NETWORK_WORD: ${NETWORK_WORD:-192.168}
+      WIRED_VLAN: ${WIRED_VLAN:-250}
+      MANAGEMENT_VLAN: ${MANAGEMENT_VLAN:-99}
       ORACLE_VPS_HOST: ${ORACLE_VPS_HOST:?ORACLE_VPS_HOST is required – set it in .env}
     volumes:
       - ./captive-portal/app:/app
@@ -158,6 +161,7 @@ services:
       KEA_LEASES_FILE: /kea/leases/kea-leases4.csv
       UDM_HOST: ${UDM_HOST:-}  # Optional: overrides UDM gateway_ip from DB if set
       PORTAL_IP: ${PORTAL_IP:?PORTAL_IP is required}
+      PORTAL_IP_BYTE: ${PORTAL_IP_BYTE:-4}
       USER_VLAN_MIN: ${USER_VLAN_MIN:-192.168.2.0}
       USER_VLAN_MAX: ${USER_VLAN_MAX:-192.168.95.255}
       UDM_SSH_KEY: /config/udm_key
@@ -255,11 +259,16 @@ services:
     environment:
       FTLCONF_webserver_api_password: ${PIHOLE_WEBPASSWORD:-changeme}
       FTLCONF_dns_listeningMode: SINGLE
-      FTLCONF_dns_interface: eth0.99
+      FTLCONF_dns_interface: eth0.${MANAGEMENT_VLAN:-99}
       FTLCONF_dns_upstreams: "8.8.8.8;8.8.4.4"
       FTLCONF_webserver_port: "8055"
       FTLCONF_webserver_api_max_sessions: "100"
       FTLCONF_misc_etc_dnsmasq_d: "true"
+      MANAGEMENT_VLAN: ${MANAGEMENT_VLAN:-99}
+      VALID_VLANS: ${VALID_VLANS:-10,20,30,40,50,60,70,80,90}
+      NETWORK_WORD: ${NETWORK_WORD:-192.168}
+      PORTAL_IP: ${PORTAL_IP:?PORTAL_IP is required}
+      PORTAL_IP_BYTE: ${PORTAL_IP_BYTE:-4}
     volumes:
       - ./pihole/etc-pihole:/etc/pihole
       - ./pihole/logs:/var/log/pihole
@@ -275,6 +284,12 @@ services:
         fi
         mkdir -p /etc/dnsmasq.d
         printf 'bind-interfaces\nexcept-interface=eth0.99\nlisten-address=127.0.0.1\nlisten-address=%s\n' "$${PORTAL_IP}" > /etc/dnsmasq.d/99-local-bind.conf
+        # Replace placeholders in static config files with environment values
+        if [ -n "$${MANAGEMENT_VLAN:-}" ]; then
+          sed -i "s/eth0\.\$${MANAGEMENT_VLAN:-99}/eth0.$${MANAGEMENT_VLAN}/g" /etc/pihole/dnsmasq.conf
+          sed -i "s/eth0\.\$${MANAGEMENT_VLAN:-99}/eth0.$${MANAGEMENT_VLAN}/g" /etc/dnsmasq.d/99-local-bind.conf
+          find /etc/pihole -type f \( -name custom.list -o -name 'captive-portal.hosts' \) -exec sed -i "s/192\.168\.\$${MANAGEMENT_VLAN:-99}/192.168.$${MANAGEMENT_VLAN}/g" {} \;
+        fi
         exec /usr/bin/start.sh
 
   # ── DNSmasq hijack (captive-portal redirect for unregistered devices) ─────────

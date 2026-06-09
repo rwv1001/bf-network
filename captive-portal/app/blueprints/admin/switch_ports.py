@@ -24,6 +24,7 @@ from core.switch import (
     get_switch_hosts, normalize_switch_mac, persist_switch_port,
     run_switch_command, switch_port_allowed,
 )
+from core.vlan_utils import get_wired_vlan_id, get_management_vlan_id
 
 logger = logging.getLogger(__name__)
 
@@ -236,6 +237,14 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
 
     expanded = expand_switch_iface_name(port_name)
 
+    wired_vlan = str(get_wired_vlan_id())
+    mgmt_vlan  = str(get_management_vlan_id())
+
+    # VALID_VLANS env var: comma-separated VLAN IDs that may appear on the
+    # hybrid or trunk ports (defaults cover all current / future usable VLANs).
+    possible_vlans_raw = os.getenv('VALID_VLANS', '10,20,30,40,50,60,70,80,90')
+    vlans_list = ' '.join(possible_vlans_raw.split(','))
+
     CANONICAL_DESC = {
         'ap':           'Uplink to UniFi AP',
         'wired':        'wired port',
@@ -248,24 +257,23 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
 
     head = ['system-view', f'interface {expanded}']
 
-
     # Start with common cleanup commands for all roles
     body = list(COMMON_PORT_UNDO_COMMANDS)
 
     if role == 'wired':
         body.extend([
-             f'interface {expanded}', 
-            'port link-type access', 
+            f'interface {expanded}',
+            'port link-type access',
             'port link-type hybrid',
             'undo port hybrid vlan 1',
-            'port hybrid vlan 10 20 30 40 50 60 70 80 90 99 untagged',
-            'port hybrid vlan 250 untagged',
-            'port hybrid pvid vlan 250',
+            f'port hybrid vlan {vlans_list} {mgmt_vlan} untagged',
+            f'port hybrid vlan {wired_vlan} untagged',
+            f'port hybrid pvid vlan {wired_vlan}',
             'mac-vlan enable',
             'ip verify source ip-address mac-address',
             'mac-authentication max-user 16',
             'mac-authentication domain macauth',
-            'mac-authentication guest-vlan 250',
+            f'mac-authentication guest-vlan {wired_vlan}',
             'mac-authentication host-mode multi-vlan',
             'port-security port-mode mac-authentication',
             'dhcp snooping binding record',
@@ -275,23 +283,23 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
     elif role == 'ap':
         body.extend([
             f'interface {expanded}',
-            'port link-type access', 
+            'port link-type access',
             'port link-type hybrid',
-            'port hybrid vlan 10 20 30 40 50 60 70 80 90 99 tagged',
-            'undo port hybrid vlan 250',
+            f'port hybrid vlan {vlans_list} {mgmt_vlan} tagged',
+            f'undo port hybrid vlan {wired_vlan}',
             'port hybrid vlan 1 untagged',
             'dhcp snooping check mac-address',
-            'arp detection trust'
+            'arp detection trust',
         ])
 
     elif role == 'pi':
         body.extend([
-            f'interface {expanded}', 
+            f'interface {expanded}',
             'port link-type access',
             'port link-type trunk',
             'undo port trunk permit vlan 1',
-            'port trunk permit vlan 10 20 30 40 50 60 70 80 90',
-            'port trunk permit vlan 99 250',
+            f'port trunk permit vlan {vlans_list}',
+            f'port trunk permit vlan {mgmt_vlan} {wired_vlan}',
             'port trunk pvid vlan 1028',
             'arp detection trust',
             'dhcp snooping trust',
@@ -299,7 +307,7 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
 
     elif role == 'uplink_udm':
         body.extend([
-            f'interface {expanded}', 
+            f'interface {expanded}',
             'port link-type access',
             'port link-type trunk',
             'port trunk permit vlan 1',
@@ -313,11 +321,11 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
             isp_vlan_ids = ['1']
         isp_vlan_str = ' '.join(isp_vlan_ids) if isp_vlan_ids else '1'
         body.extend([
-            f'interface {expanded}', 
+            f'interface {expanded}',
             'port link-type access',
             'port link-type trunk',
-            'port trunk permit vlan 10 20 30 40 50 60 70 80 90',
-            'port trunk permit vlan 99 250',
+            f'port trunk permit vlan {vlans_list}',
+            f'port trunk permit vlan {mgmt_vlan} {wired_vlan}',
             f'port trunk permit vlan {isp_vlan_str}',
             'port trunk pvid vlan 1',
             'arp detection trust',

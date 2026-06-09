@@ -6,8 +6,23 @@ Pool bounds for regular VLANs are computed from VLAN_PREFIX_MAP so the config
 stays correct when subnet sizes change, with no hardcoded IP ranges.
 
 Special subnets:
-  VLAN 250 – unregistered clients (single pool, hijack DNS, separate gateway)
-  VLAN  99 – management / infrastructure (static range .100-.254, public DNS)
+  WIRED_VLAN      (default 250) – unregistered wired clients (single pool,
+                                   hijack DNS, separate gateway)
+  MANAGEMENT_VLAN (default 99)  – management / infrastructure (static range
+                                   .100-.254, public DNS)
+
+Environment variables
+---------------------
+WIRED_VLAN              VLAN ID for wired-unregistered devices (default: 250)
+MANAGEMENT_VLAN         VLAN ID for management / switch hosts (default: 99)
+UNREGISTERED_GW_BYTE    Last octet of the unregistered gateway IP (default: 2)
+                        Gateway = NETWORK_WORD.MANAGEMENT_VLAN.<byte>
+                        e.g. 192.168.99.2
+                        Falls back to legacy UNREGISTERED_GW env var if set.
+SWITCH_HOSTS_BYTES      Comma-separated last octets of switch management IPs
+                        (default: 2).  First entry is used as the management
+                        VLAN gateway.
+                        Falls back to legacy SWITCH_HOSTS env var if set.
 """
 
 import ipaddress
@@ -52,6 +67,67 @@ def pool_bounds(prefix: int) -> dict:
 
 def ip_at_offset(network: ipaddress.IPv4Network, offset: int) -> str:
     return str(ipaddress.IPv4Address(int(network.network_address) + offset))
+
+
+def _get_wired_vlan() -> int:
+    """Return the wired-unregistered VLAN ID (WIRED_VLAN env var, default 250)."""
+    try:
+        return int(os.environ.get("WIRED_VLAN", "250"))
+    except (TypeError, ValueError):
+        return 250
+
+
+def _get_management_vlan() -> int:
+    """Return the management VLAN ID (MANAGEMENT_VLAN env var, default 99)."""
+    try:
+        return int(os.environ.get("MANAGEMENT_VLAN", "99"))
+    except (TypeError, ValueError):
+        return 99
+
+
+def _get_switch_host_ips(network_word: str) -> list:
+    """
+    Return the list of switch management IP addresses.
+
+    Resolution order:
+    1. SWITCH_HOSTS_BYTES (comma-separated last octets) combined with
+       NETWORK_WORD and MANAGEMENT_VLAN.
+    2. Legacy SWITCH_HOSTS env var (space-separated full IPs).
+    """
+    bytes_raw = os.environ.get("SWITCH_HOSTS_BYTES", "").strip()
+    if bytes_raw:
+        mgmt_vlan = _get_management_vlan()
+        hosts = []
+        for part in bytes_raw.split(","):
+            part = part.strip()
+            if part.isdigit():
+                hosts.append(f"{network_word}.{mgmt_vlan}.{part}")
+        if hosts:
+            return hosts
+
+    legacy = os.environ.get("SWITCH_HOSTS", "").strip()
+    if legacy:
+        return [h.strip() for h in legacy.split() if h.strip()]
+
+    return []
+
+
+def _get_unregistered_gw(network_word: str) -> str:
+    """
+    Return the unregistered-network gateway IP.
+
+    Derived from NETWORK_WORD + MANAGEMENT_VLAN + UNREGISTERED_GW_BYTE.
+    Falls back to the legacy UNREGISTERED_GW env var if set.
+    """
+    legacy = os.environ.get("UNREGISTERED_GW", "").strip()
+    if legacy:
+        return legacy
+    try:
+        gw_byte = int(os.environ.get("UNREGISTERED_GW_BYTE", "2"))
+    except (TypeError, ValueError):
+        gw_byte = 2
+    mgmt_vlan = _get_management_vlan()
+    return f"{network_word}.{mgmt_vlan}.{gw_byte}"
 
 
 def infra_ghost_reservations(network_word: str, vlan: int, switch_hosts_raw: str) -> list:
@@ -127,7 +203,10 @@ def make_vlan_subnet(network_word: str, vlan: int, prefix: int, switch_hosts_raw
 
 
 def main():
-    network_word   = require_env("NETWORK_WORD")
+    network_word = require_env("NETWORK_WORD")
+
+    wired_vlan      = _get_wired_vlan()
+    management_vlan = _get_management_vlan()
 
     # Prefer a prefix-map file written by the captive portal (kept up-to-date
     # when the admin changes subnet sizes via the UI) over the env var, which
@@ -153,30 +232,38 @@ def main():
     db_user     = require_env("DB_USER")
     db_password = require_env("DB_PASSWORD")
 
-    portal_ip        = require_env("PORTAL_IP")
-    portal_url       = os.environ.get("PORTAL_URL", "").strip()
-    hijack_dns_ip    = require_env("HIJACK_DNS_IP")
-    switch_hosts_raw = require_env("SWITCH_HOSTS")
-    switch_host      = switch_hosts_raw.split()[0]
-    unregistered_gw  = require_env("UNREGISTERED_GW")
+    portal_ip     = require_env("PORTAL_IP")
+    hijack_dns_ip = require_env("HIJACK_DNS_IP")
 
-    # VLANs 250 (unregistered) and 99 (management) are handled by the explicit
+    # Derive switch hosts and gateway from new env vars (with legacy fallback)
+    switch_host_ips  = _get_switch_host_ips(network_word)
+    switch_hosts_raw = " ".join(switch_host_ips)
+    if not switch_host_ips:
+        print("ERROR: no switch hosts configured "
+              "(set SWITCH_HOSTS_BYTES or SWITCH_HOSTS)", file=sys.stderr)
+        sys.exit(1)
+    # First switch host is used as the management VLAN gateway
+    mgmt_gateway = switch_host_ips[0]
+
+    unregistered_gw = _get_unregistered_gw(network_word)
+
+    # VLANs for wired-unregistered and management are handled by the explicit
     # blocks below with their own pool/DNS/gateway config — skip them here.
-    SPECIAL_VLANS = {99, 250}
+    SPECIAL_VLANS = {wired_vlan, management_vlan}
     subnet4 = [
         make_vlan_subnet(network_word, vlan, prefix, switch_hosts_raw)
         for vlan, prefix in sorted(vlan_prefix_map.items())
         if vlan not in SPECIAL_VLANS
     ]
 
-    # Unregistered clients — single pool, no blocked split, hijack DNS
+    # Wired-unregistered clients — single pool, no blocked split, hijack DNS
     subnet4.append({
-        "subnet": f"{network_word}.250.0/24",
-        "id": 250,
+        "subnet": f"{network_word}.{wired_vlan}.0/24",
+        "id": wired_vlan,
         "pools": [
-            {"pool": f"{network_word}.250.1 - {network_word}.250.255"}
+            {"pool": f"{network_word}.{wired_vlan}.1 - {network_word}.{wired_vlan}.255"}
         ],
-        "interface": "eth0.250",
+        "interface": f"eth0.{wired_vlan}",
         "option-data": [
             {"name": "routers",             "data": unregistered_gw},
             {"name": "domain-name-servers", "data": hijack_dns_ip},
@@ -186,14 +273,14 @@ def main():
 
     # Management VLAN — lower range reserved for static infra, public DNS
     subnet4.append({
-        "subnet": f"{network_word}.99.0/24",
-        "id": 99,
+        "subnet": f"{network_word}.{management_vlan}.0/24",
+        "id": management_vlan,
         "pools": [
-            {"pool": f"{network_word}.99.100 - {network_word}.99.254"}
+            {"pool": f"{network_word}.{management_vlan}.100 - {network_word}.{management_vlan}.254"}
         ],
-        "interface": "eth0.99",
+        "interface": f"eth0.{management_vlan}",
         "option-data": [
-            {"name": "routers",             "data": switch_host},
+            {"name": "routers",             "data": mgmt_gateway},
             {"name": "domain-name-servers", "data": "8.8.8.8, 8.8.4.4"},
         ],
         "reservations": [],
@@ -201,7 +288,7 @@ def main():
 
     interfaces = (
         [f"eth0.{v}" for v in sorted(vlan_prefix_map) if v not in SPECIAL_VLANS]
-        + ["eth0.250", "eth0.99"]
+        + [f"eth0.{wired_vlan}", f"eth0.{management_vlan}"]
     )
 
     config = {
@@ -250,8 +337,8 @@ def main():
             "rebind-timer": 480,
             "valid-lifetime": 600,
             "option-data": [
-                {"name": "domain-name",         "data": "blackfriars.local"},
-                {"name": "domain-name-servers",  "data": portal_ip},
+                {"name": "domain-name",        "data": "blackfriars.local"},
+                {"name": "domain-name-servers", "data": portal_ip},
             ],
             # Allow Kea to use global host reservations (dhcp4_subnet_id=0) for
             # client-class assignment (e.g. BLOCKED class set by central_import.py).

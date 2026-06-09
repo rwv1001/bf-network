@@ -31,6 +31,11 @@
 
 set -euo pipefail
 
+WIRED_VLAN="${WIRED_VLAN:-250}"
+MANAGEMENT_VLAN="${MANAGEMENT_VLAN:-99}"
+VALID_VLANS="${VALID_VLANS:-10,20,30,40,50,60,70,80,90}"
+VLANS_LIST=$(echo "$VALID_VLANS" | tr ',' ' ')
+
 # ─── Config ──────────────────────────────────────────────────────────────────
 TARGET_HOST="${TARGET_HOST:?TARGET_HOST is required (initial/factory IP of the switch to configure)}"
 TARGET_USER="${TARGET_USER:-admin}"
@@ -111,7 +116,7 @@ web-auth free-ip ${PORTAL_IP} 255.255.255.255
 port-security enable
 #
 dhcp snooping enable
-dhcp snooping enable vlan 10 20 30 40 50 60 70 80 90 250
+dhcp snooping enable vlan ${VLANS_LIST} ${WIRED_VLAN}
 #
 dns proxy enable
 dns source-interface Vlan-interface1
@@ -169,10 +174,10 @@ vlan 90
  dhcp snooping binding record
  arp detection enable
 quit
-vlan 99
+vlan ${MANAGEMENT_VLAN}
  name management
 quit
-vlan 250
+vlan ${WIRED_VLAN}
  name unregistered
  dhcp snooping binding record
 quit
@@ -214,20 +219,20 @@ interface Vlan-interface80
 quit
 interface Vlan-interface90
 quit
-interface Vlan-interface99
- description GW_VLAN99
+interface Vlan-interface${MANAGEMENT_VLAN}
+ description GW_VLAN${MANAGEMENT_VLAN}
  ip address ${TARGET_IP} 255.255.255.0
 quit
-interface Vlan-interface250
- description GW_VLAN250
- ip address ${NET}.250.${SW_OCTET} 255.255.255.0
+interface Vlan-interface${WIRED_VLAN}
+ description GW_VLAN${WIRED_VLAN}
+ ip address ${NET}.${WIRED_VLAN}.${SW_OCTET} 255.255.255.0
 quit
 #
 interface Ten-GigabitEthernet3/0/52
  description TRUNK-TO-SW1
  port link-type trunk
- port trunk permit vlan 1 10 20 30 40 50 60 70 80 90 99
- port trunk permit vlan 250
+ port trunk permit vlan 1 ${VLANS_LIST} ${MANAGEMENT_VLAN}
+ port trunk permit vlan ${WIRED_VLAN}
  arp detection trust
  dhcp snooping trust
 quit
@@ -274,21 +279,21 @@ acl number 3000 name PREAUTH
  rule 9 permit icmp destination ${HIJACK_DNS_IP} 0
  rule 10 permit tcp destination ${PORTAL_IP} 0 destination-port eq www
  rule 11 permit tcp destination ${PORTAL_IP} 0 destination-port eq 443
- rule 12 permit ip destination ${NET}.250.4 0
+ rule 12 permit ip destination ${NET}.${WIRED_VLAN}.4 0
  rule 100 deny ip
 quit
 acl number 3099 name VLAN99_EGRESS
- rule 0 permit ip source ${NET}.99.0 0.0.0.255 destination ${NET}.1.0 0.0.0.255
+ rule 0 permit ip source ${NET}.${MANAGEMENT_VLAN}.0 0.0.0.255 destination ${NET}.1.0 0.0.0.255
  rule 1 permit ip source ${PORTAL_IP} 0
- rule 2 permit ip source ${NET}.99.0 0.0.0.255
- rule 5 deny ip source ${NET}.99.0 0.0.0.255
+ rule 2 permit ip source ${NET}.${MANAGEMENT_VLAN}.0 0.0.0.255
+ rule 5 deny ip source ${NET}.${MANAGEMENT_VLAN}.0 0.0.0.255
  rule 100 permit ip
 quit
 #
-interface Vlan-interface250
+interface Vlan-interface${WIRED_VLAN}
  packet-filter 3000 inbound
 quit
-interface Vlan-interface99
+interface Vlan-interface${MANAGEMENT_VLAN}
  packet-filter 3099 inbound
  packet-filter 3099 outbound
 quit
@@ -395,8 +400,8 @@ system-view
 interface ${SW1_TRUNK_PORT}
  description TRUNK-TO-${SW_SYSNAME}
  port link-type trunk
- port trunk permit vlan 1 10 20 30 40 50 60 70 80 90 99
- port trunk permit vlan 250
+ port trunk permit vlan 1 ${VLANS_LIST} ${MANAGEMENT_VLAN}
+ port trunk permit vlan ${WIRED_VLAN}
  arp detection trust
  dhcp snooping trust
 quit
@@ -439,7 +444,7 @@ echo " Setup complete!"
 echo ""
 echo " Summary:"
 echo "   Switch sysname           : ${SW_SYSNAME}"
-echo "   VLAN99 management IP     : ${TARGET_IP}"
+echo "   VLAN${MANAGEMENT_VLAN} management IP     : ${TARGET_IP}"
 echo "   Initial IP (factory)     : ${TARGET_HOST}"
 echo "   SSH as robert (key auth) : ssh -i $KEY -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa robert@${TARGET_IP}"
 echo ""

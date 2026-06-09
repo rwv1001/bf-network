@@ -21,11 +21,11 @@
       "alerting": false
     },
     "portal-tunnel": {
-      "restart_count": 13,
+      "restart_count": 0,
       "alerting": false
     },
     "freeradius": {
-      "restart_count": 0,
+      "restart_count": 1,
       "alerting": false
     },
     "pihole": {
@@ -66,7 +66,7 @@
     "consecutive_failures": 0
   },
   "syslog_stale": {
-    "alerting": true,
+    "alerting": false,
     "consecutive_failures": 0
   },
   "switch_health_192.168.99.2": {

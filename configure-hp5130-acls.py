@@ -47,7 +47,8 @@ VLANS = [
 ]
 
 # Portal IP suffix (e.g., .4 means 192.168.X.4)
-PORTAL_IP_SUFFIX = '.4'
+portal_ip_byte = os.getenv('PORTAL_IP_BYTE', '4').strip()
+PORTAL_IP_SUFFIX = f'.{portal_ip_byte}'
 
 # IP ranges
 UNREGISTERED_START = '.128'

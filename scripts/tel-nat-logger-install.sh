@@ -5,11 +5,20 @@
 
 set -e
 
-PORTAL_IP="${PORTAL_IP:?PORTAL_IP required}"
+# === New preferred variables (from .env) ===
+NETWORK_WORD="${NETWORK_WORD:-192.168}"
+MANAGEMENT_VLAN="${MANAGEMENT_VLAN:-99}"
+PORTAL_IP_BYTE="${PORTAL_IP_BYTE:-4}"
+
+# Derive the portal IP (e.g. 192.168.99.4)
+PORTAL_IP="${NETWORK_WORD}.${MANAGEMENT_VLAN}.${PORTAL_IP_BYTE}"
+
+# These still need to be provided (user VLAN range for logging)
 USER_VLAN_MIN="${USER_VLAN_MIN:?USER_VLAN_MIN is required}"
 USER_VLAN_MAX="${USER_VLAN_MAX:?USER_VLAN_MAX is required}"
 
 echo "=== Teltonika NAT Logger Installation ==="
+echo "Using portal IP: ${PORTAL_IP}"
 
 # 1. Create the NAT logger script in /etc (persists across reboots via overlay FS)
 echo "Creating NAT logger script..."

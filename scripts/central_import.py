@@ -299,20 +299,11 @@ _dbg("hosts upsert done")
 # whichever VLAN the switch port is currently on, not the target VLAN.
 if is_wired and assigned_vlan and not device_blocked:
     _dbg(f"wired device on wrong VLAN check: is_wired={is_wired} assigned_vlan={assigned_vlan} device_blocked={device_blocked}")
-    # Find wired_unregistered VLAN ID from Kea config to confirm we're on it
-    wired_unreg_vlan = 250  # default fallback
-    kea_cfg = os.getenv("KEA_CONFIG_PATH", "/kea/config/dhcp4.json")
-    try:
-        import json as _json
-        with open(kea_cfg) as _fh:
-            _kea = _json.load(_fh)
-        for _s in _kea.get("Dhcp4", {}).get("subnet4", []):
-            _ctx = _s.get("user-context", {})
-            if _ctx.get("vlan_status") == "wired_unregistered":
-                wired_unreg_vlan = int(_s["id"])
-                break
-    except Exception:
-        pass
+    # The wired-unregistered VLAN ID is read from the WIRED_VLAN env var
+    # (default 250), which is the same value used by the captive-portal
+    # frontend and Kea config generator.  This replaces the old hardcoded 250
+    # so a single setting controls all components.
+    wired_unreg_vlan = int(os.getenv('WIRED_VLAN', '250'))
 
     current_vlan_row = psql(
         f"SELECT current_vlan FROM devices WHERE mac_address = '{MAC}';"

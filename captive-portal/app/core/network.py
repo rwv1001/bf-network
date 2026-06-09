@@ -41,6 +41,28 @@ def _get_iptables_base_cmd() -> list:
     return ["iptables"]
 
 
+def _make_script_env(switch_host: str = None) -> dict:
+    """
+    Build an environment dict for subprocess calls to shell scripts that
+    require SWITCH_HOSTS.
+
+    If switch_host is given, that single host is used.  Otherwise the full
+    derived list (from SWITCH_HOSTS_BYTES / MANAGEMENT_VLAN / NETWORK_WORD,
+    with legacy SWITCH_HOSTS fallback) is used as a space-separated string.
+    """
+    from core.vlan_utils import get_switch_hosts_str
+    env = os.environ.copy()
+    if switch_host:
+        env['SWITCH_HOSTS'] = switch_host
+    else:
+        derived = get_switch_hosts_str()
+        if derived:
+            env['SWITCH_HOSTS'] = derived
+    if not env.get('SWITCH_KEY_PATH'):
+        env['SWITCH_KEY_PATH'] = '/keys/id_rsa'
+    return env
+
+
 # ---------------------------------------------------------------------------
 # DNS hijack
 # ---------------------------------------------------------------------------
@@ -130,7 +152,7 @@ def manage_switch_acl(action: str, ip_address: str, vlan_id) -> bool:
 
     all_switch_hosts = get_switch_hosts()
     if not all_switch_hosts:
-        logger.error("manage_switch_acl: no SWITCH_HOSTS configured")
+        logger.error("manage_switch_acl: no switch hosts configured")
         return False
 
     if action == 'block':
@@ -161,8 +183,7 @@ def manage_switch_acl(action: str, ip_address: str, vlan_id) -> bool:
     for switch_host in switch_hosts:
         if use_acl_script and os.path.isfile(acl_script):
             try:
-                env = os.environ.copy()
-                env['SWITCH_HOSTS'] = switch_host
+                env = _make_script_env(switch_host)
                 result = subprocess.run(
                     [acl_script, action, ip_address],
                     capture_output=True, text=True, timeout=15, env=env,
@@ -222,16 +243,12 @@ def reset_acl_baseline() -> bool:
 
     switch_hosts = get_switch_hosts()
     if not switch_hosts:
-        logger.error("reset_acl_baseline: no SWITCH_HOSTS configured")
+        logger.error("reset_acl_baseline: no switch hosts configured")
         return False
 
     all_ok = True
     for host in switch_hosts:
-        env = os.environ.copy()
-        env['SWITCH_HOSTS'] = host
-        if not env.get("SWITCH_KEY_PATH"):
-            env["SWITCH_KEY_PATH"] = "/keys/id_rsa"
-
+        env = _make_script_env(host)
         result = subprocess.run([script_path], capture_output=True, text=True,
                                 timeout=120, env=env)
         if result.returncode != 0:
@@ -669,9 +686,10 @@ def replug_switch_port_for_mac(mac_address: str) -> bool:
     if os.path.isfile(replug_script):
         try:
             delay = os.getenv('SWITCH_REPLUG_DELAY_SEC', '3')
+            env = _make_script_env()
             result = subprocess.run(
                 [replug_script, mac_address, delay],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, text=True, timeout=30, env=env,
             )
             if result.returncode == 0:
                 logger.info("Replug script succeeded for %s", mac_address)
@@ -718,9 +736,7 @@ def clear_mac_auth_sessions() -> bool:
     if not os.path.isfile(script_path):
         logger.warning("MAC auth clear script not found: %s", script_path)
         return False
-    env = os.environ.copy()
-    if not env.get("SWITCH_KEY_PATH"):
-        env["SWITCH_KEY_PATH"] = "/keys/id_rsa"
+    env = _make_script_env()
     result = subprocess.run([script_path], capture_output=True, text=True, timeout=60, env=env)
     if result.returncode != 0:
         logger.error("MAC auth clear failed (exit=%s). stderr=%s stdout=%s",
@@ -736,9 +752,7 @@ def reset_user_ports() -> bool:
     if not os.path.isfile(script_path):
         logger.warning("Reset user ports script not found: %s", script_path)
         return False
-    env = os.environ.copy()
-    if not env.get("SWITCH_KEY_PATH"):
-        env["SWITCH_KEY_PATH"] = "/keys/id_rsa"
+    env = _make_script_env()
     result = subprocess.run([script_path], capture_output=True, text=True, timeout=120, env=env)
     if result.returncode != 0:
         logger.error("Reset user ports failed (exit=%s). stderr=%s stdout=%s",
@@ -757,11 +771,8 @@ def reset_vlan_interface_masks(vlan_ids: list) -> bool:
     if not os.path.isfile(script_path):
         logger.error("VLAN interface script not found: %s", script_path)
         return False
-    env = os.environ.copy()
-    if not env.get("SWITCH_KEY_PATH"):
-        env["SWITCH_KEY_PATH"] = "/keys/id_rsa"
+    env = _make_script_env()
     env["VLAN_LIST"] = " ".join(vlan_ids)
-    env["SWITCH_HOSTS"] = os.getenv('SWITCH_HOSTS', '')
     result = subprocess.run([script_path], capture_output=True, text=True, timeout=120, env=env)
     if result.returncode != 0:
         logger.error("VLAN interface update failed (exit=%s). stderr=%s stdout=%s",
