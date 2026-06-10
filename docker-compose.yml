@@ -15,6 +15,144 @@
 # =============================================================================
 
 services:
+  kea:
+    build:
+      context: .
+      dockerfile: kea/Dockerfile
+    image: kea-custom:3.0-alpine
+    container_name: kea
+    restart: unless-stopped
+    network_mode: host
+    cap_add: [ NET_ADMIN, NET_RAW ]
+    command: ["-c", "/kea/config/dhcp4.json"]
+    volumes:
+      - ./kea/config:/kea/config
+      - ./kea/leases:/kea/leases
+      - ./kea/sockets:/kea/sockets
+      - ./scripts:/scripts:ro
+      - ./shared/acl-queue:/acl-queue
+      - /home/admin/.ssh:/keys:ro
+      - ./kea/logs:/kea/logs
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      PORTAL_IP: ${PORTAL_IP:?PORTAL_IP is required – set it in .env}
+      PORTAL_URL: ${PORTAL_URL:-}
+      HIJACK_DNS_IP: ${HIJACK_DNS_IP:?HIJACK_DNS_IP is required – set it in .env}
+      UNREGISTERED_GW: ${UNREGISTERED_GW:?UNREGISTERED_GW is required – set it in .env}
+      SWITCH_HOSTS: ${SWITCH_HOSTS:?SWITCH_HOSTS is required – set it in .env}
+      NETWORK_WORD: ${NETWORK_WORD:?NETWORK_WORD is required – set it in .env}
+      VLAN_PREFIX_MAP: ${VLAN_PREFIX_MAP:?VLAN_PREFIX_MAP is required – set it in .env}
+      SWITCH_USER: ${SWITCH_USER:-robert}
+      SWITCH_SSH_PORT: ${SWITCH_SSH_PORT:-22}
+      SWITCH_KEY_PATH: /keys/id_rsa
+      # Set to "1" to enable async switch port lookup on every DHCP lease/renew
+      SWITCH_PORT_LOOKUP_ENABLED: "1"
+      # How long (seconds) a cached port entry is considered fresh (skip SSH re-query)
+      SWITCH_PORT_LOOKUP_CACHE_TTL: ${SWITCH_PORT_LOOKUP_CACHE_TTL:-120}
+      WIRED_VLAN: ${WIRED_VLAN:-250}
+      SWITCH_HOSTS_BYTES: ${SWITCH_HOSTS_BYTES:-2}
+      UNREGISTERED_GW_BYTE: ${UNREGISTERED_GW_BYTE:-2}
+      MANAGEMENT_VLAN: ${MANAGEMENT_VLAN:-99}
+      PORTAL_IP_BYTE: ${PORTAL_IP_BYTE:-4}
+      HIJACK_DNS_IP_BYTE: ${HIJACK_DNS_IP_BYTE:-5}
+      LFC_INTERVAL: "300"
+      ACL_QUEUE_DISABLE: "1"
+      ACL_QUEUE_DIR: /acl-queue
+      ACL_QUEUE_INTERVAL: "3"
+      ACL_QUEUE_UMASK: "0002"
+      ACL_QUEUE_GID: ${PORTAL_GID:-1000}
+      DB_HOST: ${DB_HOST:-127.0.0.1}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_NAME: ${DB_NAME:-captive_portal}
+      DB_USER: ${DB_USER:-portal_user}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required – set it in .env}
+      DATABASE_URL: postgresql://${DB_USER:-portal_user}:${DB_PASSWORD}@${DB_HOST:-127.0.0.1}:${DB_PORT:-5432}/${DB_NAME:-captive_portal}
+      CENTRAL_API_URL: ${CENTRAL_API_URL:-}
+      CENTRAL_API_KEY: ${CENTRAL_API_KEY:-}
+      CENTRAL_SITE_ID: ${CENTRAL_SITE_ID:-}
+      KEA_CONTROL_SOCKET: /kea/sockets/kea4-ctrl-socket
+    entrypoint: |
+      sh -c '
+      # Abort early if any required variable is missing
+      : ${DB_NAME:?DB_NAME is required – set it in .env}
+      : ${DB_USER:?DB_USER is required – set it in .env}
+      : ${DB_PASSWORD:?DB_PASSWORD is required – set it in .env}
+      : ${DB_HOST:?DB_HOST is required – set it in .env}
+      : ${DB_PORT:?DB_PORT is required – set it in .env}
+      : ${PORTAL_IP:?PORTAL_IP is required – set it in .env}
+      : ${HIJACK_DNS_IP:?HIJACK_DNS_IP is required – set it in .env}
+      : ${NETWORK_WORD:?NETWORK_WORD is required – set it in .env}
+      : ${VLAN_PREFIX_MAP:?VLAN_PREFIX_MAP is required – set it in .env}
+      # Generate dhcp4.json — pool bounds computed from VLAN_PREFIX_MAP
+      python3 /scripts/generate-kea-config.py > /kea/config/dhcp4.json
+      echo "$(date -Iseconds) kea-entrypoint: dhcp4.json generated" >&2
+      rm -f /usr/local/var/run/kea/dhcp4.kea-dhcp4.pid
+      mkdir -p /usr/local/var/run/kea
+      ln -sfn /usr/local/var/run/kea /run/kea
+      mkdir -p /kea/sockets
+      chown -R 0:1000 /kea/sockets || true
+      chmod 750 /kea/sockets || true
+      mkdir -p /kea/leases
+      chgrp -R ${PORTAL_GID:-1000} /kea/leases || true
+      chmod 2775 /kea/leases || true
+      mkdir -p /acl-queue
+      chgrp -R ${PORTAL_GID:-1000} /acl-queue || true
+      chmod 2775 /acl-queue || true
+      chmod 755 /kea/leases || true
+      umask 0002
+      # Ensure the ACL rule-number allocation table exists.
+      # This is idempotent — safe to run on every restart and means the system
+      # works even if the commit-migration was never manually applied.
+      psql "$$DATABASE_URL" -c "
+        CREATE TABLE IF NOT EXISTS acl_rule_allocations (
+          ip_address   TEXT        NOT NULL PRIMARY KEY,
+          rule_num     INTEGER     NOT NULL,
+          allocated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CONSTRAINT acl_rule_allocations_rule_num_unique UNIQUE (rule_num),
+          CONSTRAINT acl_rule_allocations_rule_num_range  CHECK (rule_num BETWEEN 1 AND 19999)
+        );
+        CREATE INDEX IF NOT EXISTS idx_acl_rule_allocations_rule_num
+          ON acl_rule_allocations (rule_num);
+      " >&2 2>&1 || true
+      # Restore DNS hijack iptables rules from previous session and re-apply
+      # switch ACL blocks for any pending devices already in the DB.
+      # This ensures hijacking survives Kea restarts and host reboots.
+      if [ -x /scripts/kea-startup-restore.sh ]; then
+        /scripts/kea-startup-restore.sh || true
+      fi
+      kea-dhcp4 -c /kea/config/dhcp4.json &
+      KEA_PID=$!
+      (
+        while true; do
+          if [ -f /kea/leases/kea-leases4.csv ]; then
+            echo "$(date -Iseconds) kea-lfc: running lease file cleanup" >&2
+            /usr/sbin/kea-lfc -4 \
+              -c /kea/config/dhcp4.json \
+              -p /usr/local/var/run/kea/kea-lfc.pid \
+              -x /kea/leases/kea-leases4.csv.1 \
+              -i /kea/leases/kea-leases4.csv.2 \
+              -o /kea/leases/kea-leases4.csv.3 \
+              -f /kea/leases/kea-leases4.csv.4 || true
+          fi
+          sleep ${LFC_INTERVAL:-300}
+        done
+      ) &
+      (
+        while true; do
+          if [ -f /kea/leases/kea-leases4.csv ]; then
+            chgrp ${PORTAL_GID:-1000} /kea/leases/kea-leases4.csv || true
+            chmod 664 /kea/leases/kea-leases4.csv || true
+          fi
+          sleep 5
+        done
+      ) &
+      sleep 3
+      chown 0:1000 /kea/sockets/kea4-ctrl-socket || true
+      chmod 660 /kea/sockets/kea4-ctrl-socket || true
+      chmod 664 /kea/leases/kea-leases4.csv || true
+      wait $$KEA_PID
+      '
+
 
   # ── PostgreSQL ────────────────────────────────────────────────────────────────
   db:

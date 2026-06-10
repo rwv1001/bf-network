@@ -1,7 +1,7 @@
 FROM jonasal/kea-dhcp4:3.0-alpine as builder
 
 # Build the DNS hijack hook against this exact Kea version
-RUN apk add --no-cache build-base cmake boost-dev openssl-dev postgresql-dev log4cplus-dev
+RUN apk add --no-cache build-base cmake boost-dev openssl-dev postgresql-dev log4cplus-dev 
 COPY kea-hooks/dynamic_subnet/dns_hijack_hook.cc /src/
 COPY kea-hooks/dynamic_subnet/CMakeLists.txt /src/
 WORKDIR /src

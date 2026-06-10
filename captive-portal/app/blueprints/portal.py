@@ -1133,79 +1133,87 @@ def unregister(token):
     if not token:
         flash('Invalid unregister link', 'error')
         return redirect(url_for('portal.index'))
+
     device = Device.query.filter_by(unregister_token=token).first()
     if not device:
         return render_template('unregister_confirmation.html', success=False)
+
     if request.method == 'GET':
         return render_template('unregister_confirmation.html', confirm=True, token=token)
+
     if request.form.get('js') != '1':
         return render_template('unregister_confirmation.html', confirm=True, token=token)
 
-    mac_address = device.mac_address
+    mac_address     = device.mac_address
     connection_type = device.connection_type
-    vlan_id = device.current_vlan
-    user = device.user
-    user_email = user.email if user else 'Unknown'
+    vlan_id         = device.current_vlan
+    user            = device.user
+    user_email      = user.email if user else 'Unknown'
 
-    if user and device.profile_snapshot:
-        try:
-            snapshot = json.loads(device.profile_snapshot)
-        except Exception:
-            snapshot = None
-        if snapshot:
-            previous = snapshot.get('previous') or {}
-            new_snap = snapshot.get('new') or {}
-            current_profile = {
-                'first_name':   user.first_name or '',
-                'last_name':    user.last_name or '',
-                'phone_number': user.phone_number or '',
-            }
-            if current_profile == {
-                'first_name':   new_snap.get('first_name', ''),
-                'last_name':    new_snap.get('last_name', ''),
-                'phone_number': new_snap.get('phone_number', ''),
-            }:
-                user.first_name   = previous.get('first_name') or None
-                user.last_name    = previous.get('last_name') or None
-                user.phone_number = previous.get('phone_number') or None
+    # === Get current active IP (best effort) ===
+    lease = get_active_iplease(mac_address)
+    current_ip = lease.ip_address if lease else device.ip_address
 
-    ip_address = device.ip_address
-    if device.internet_accessible and ip_address and not is_blocked_pool_ip(ip_address):
-        lease_expiry = get_lease_expiry_for_mac(mac_address, subnet_id=vlan_id)
-        if lease_expiry and lease_expiry > datetime.utcnow():
-            if vlan_id:
-                manage_switch_acl('block', ip_address, vlan_id)
-            if _should_hijack_vlan(vlan_id):
-                manage_dns_hijack('hijack', ip_address)
-            upsert_iplease(
-                mac_address=mac_address, ip_address=ip_address, vlan_id=vlan_id,
-                lease_start=datetime.utcnow(), lease_expiry=lease_expiry,
-                from_blocked_pool=False,
-                dns_hijacked=bool(_should_hijack_vlan(vlan_id)),
-            )
-
-    if connection_type == 'wifi' and device.internet_accessible:
+    # Fallback to Kea if we still don't have an IP
+    if not current_ip:
         kea = _get_kea()
+        if kea:
+            try:
+                current_ip = kea.get_lease_ip_for_mac(mac_address)
+            except Exception:
+                pass
+
+    # Decide whether we will block + hijack
+    will_block   = bool(current_ip and not is_blocked_pool_ip(current_ip))
+    will_hijack  = bool(current_ip and _should_hijack_vlan(vlan_id))
+
+    # Apply ACL block + DNS hijack
+    if will_block:
+        if vlan_id:
+            manage_switch_acl('block', current_ip, vlan_id)
+        if will_hijack:
+            manage_dns_hijack('hijack', current_ip)
+
+        if lease:
+            lease.dns_hijacked = True
+            db.session.add(lease)
+
+    # === Kea / CoA cleanup ===
+    kea = _get_kea()
+
+    if connection_type == 'wifi':
         if kea and vlan_id:
-            kea.unregister_mac(mac=mac_address, vlan=vlan_id)
+            try:
+                kea.unregister_mac(mac=mac_address, vlan=vlan_id)
+            except Exception as exc:
+                logger.warning("Kea unregister_mac failed for %s: %s", mac_address, exc)
+
     elif connection_type == 'wired':
         vlan_map = get_vlan_map()
         send_coa_change(mac_address, vlan_map['unregistered'])
 
+    # === Cleanup device state ===
     close_ownership(mac_address, commit=False)
-    device.device_name             = None
-    device.assigned_vlan           = None
-    device.internet_accessible     = None
-    device.internet_blocked        = None
-    device.ownership_validated     = None
-    device.unregister_token        = None
-    device.profile_snapshot        = None
+
+    device.device_name               = None
+    device.assigned_vlan             = None
+    device.internet_accessible       = None
+    device.internet_blocked          = None
+    device.ownership_validated       = None
+    device.unregister_token          = None
+    device.profile_snapshot          = None
     device.confirmation_confirmed_at = None
-    device.confirmation_deadline   = None
+    device.confirmation_deadline     = None
+
     sync_registration_status(device)
     central_client.queue_device_unregistered(mac_address)
     db.session.commit()
-    logger.info("Device %s (user: %s) unregistered via email token", mac_address, user_email)
+
+    # Log what actually happened
+    logger.info(
+        "Unregister: mac=%s ip=%s vlan=%s → block=%s hijack=%s",
+        mac_address, current_ip, vlan_id, will_block, will_hijack
+    )
     return render_template('unregister_confirmation.html', success=True)
 
 
