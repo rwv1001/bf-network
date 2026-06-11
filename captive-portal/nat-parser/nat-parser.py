@@ -182,7 +182,8 @@ class NATParser:
 
         # Step 3: Combine into IP-keyed result
         result = {}
-        for ip, mac in ip_to_mac.items():
+        for ip, data in ip_to_mac.items():
+            mac = data['mac_address']
             port = mac_to_port.get(mac, {})
             result[ip] = {
                 'src_mac':     mac,
@@ -285,24 +286,33 @@ class NATParser:
             # Update devices table with new IPs
             updated_count = 0
             with self.db_conn.cursor() as cur:
-                for ip, mac in ip_to_mac.items():
+                for ip, data in ip_to_mac.items():
+                    mac = data['mac_address']
+                    expire = data['expire']                    # ← Get expire from parsed data
+
                     cur.execute("""
-                        UPDATE devices
-                        SET ip_address = %s
+                        UPDATE ip_leases
+                        SET ip_address = %s,
+                            lease_expiry = to_timestamp(%s)
                         WHERE mac_address = %s
-                            AND registration_status = 'registered'
-                            AND (ip_address IS NULL OR ip_address != %s)
-                    """, (ip, mac, ip))
-                    
+                        AND from_blocked_pool = false
+                        AND EXISTS (
+                            SELECT 1 
+                            FROM devices d 
+                            WHERE d.mac_address = ip_leases.mac_address 
+                                AND d.registration_status = 'registered'
+                        )
+                    """, (ip, expire, mac))
+
                     if cur.rowcount > 0:
                         updated_count += 1
-                        logger.info(f"Updated device IP: {mac} -> {ip}")
-                
+                        logger.info(f"Updated IP lease: {mac} -> {ip}")
+
                 if updated_count > 0:
                     self.db_conn.commit()
-                    logger.info(f"Device IP sync complete: updated {updated_count} devices")
+                    logger.info(f"Device IP sync complete: updated {updated_count} leases")
                 else:
-                    logger.info(f"Checked {len(ips_to_check)} IPs, no device updates needed")
+                    logger.info(f"Checked {len(ips_to_check)} IPs, no updates needed")
                     
         except Exception as e:
             logger.error(f"Failed to update device IPs: {e}")
@@ -311,49 +321,49 @@ class NATParser:
             except:
                 pass
     
-    def _parse_kea_leases(self, ip_list: list) -> Dict[str, str]:
-        """
-        Parse Kea leases CSV file and return IP -> MAC mappings for given IPs.
-        Returns dict of {ip_address: mac_address}
-        """
-        ip_set = set(ip_list)
-        ip_to_mac = {}
-        
-        try:
-            if not os.path.exists(KEA_LEASES_FILE):
-                logger.warning(f"Kea leases file not found: {KEA_LEASES_FILE}")
-                return {}
-            
-            with open(KEA_LEASES_FILE, 'r') as f:
-                reader = csv.DictReader(f)
-                current_time = int(time.time())
-                
-                for row in reader:
-                    try:
-                        ip_address = row.get('address', '')
-                        hwaddr = row.get('hwaddr', '')
-                        expire = int(row.get('expire', 0))
-                        state = int(row.get('state', 1))
-                        
-                        # Skip expired or released leases (state 0 = default/allocated)
-                        if state != 0 or expire < current_time:
-                            continue
-                        
-                        if ip_address in ip_set and hwaddr:
-                            # Kea stores MAC as colon-separated hex (xx:xx:xx:xx:xx:xx)
-                            # Just use it directly after converting to lowercase
-                            mac_address = hwaddr.lower()
-                            ip_to_mac[ip_address] = mac_address
-                    except (ValueError, KeyError) as e:
-                        logger.debug(f"Skipping malformed lease entry: {e}")
-                        continue
-            
-            logger.debug(f"Found {len(ip_to_mac)} IP->MAC mappings from Kea leases")
-            return ip_to_mac
-            
-        except Exception as e:
-            logger.error(f"Failed to parse Kea leases file: {e}")
+    def _parse_kea_leases(self, ip_list: list) -> Dict[str, dict]:
+    """
+    Parse Kea leases CSV file and return data for given IPs.
+    Returns: {ip_address: {'mac_address': str, 'expire': int}}
+    """
+    ip_set = set(ip_list)
+    result = {}
+
+    try:
+        if not os.path.exists(KEA_LEASES_FILE):
+            logger.warning(f"Kea leases file not found: {KEA_LEASES_FILE}")
             return {}
+
+        current_time = int(time.time())
+
+        with open(KEA_LEASES_FILE, 'r') as f:
+            reader = csv.DictReader(f)
+
+            for row in reader:
+                try:
+                    ip_address = row.get('address', '')
+                    hwaddr = row.get('hwaddr', '')
+                    expire = int(row.get('expire', 0))
+                    state = int(row.get('state', 1))
+
+                    if state != 0 or expire < current_time:
+                        continue
+
+                    if ip_address in ip_set and hwaddr:
+                        result[ip_address] = {
+                            'mac_address': hwaddr.lower(),
+                            'expire': expire
+                        }
+                except (ValueError, KeyError) as e:
+                    logger.debug(f"Skipping malformed lease entry: {e}")
+                    continue
+
+        logger.debug(f"Found {len(result)} active IP->MAC mappings from Kea leases")
+        return result
+
+    except Exception as e:
+        logger.error(f"Failed to parse Kea leases file: {e}")
+        return {}
     
     def flush_active_sessions(self):
         """Upsert all in-progress sessions to DB without closing them.

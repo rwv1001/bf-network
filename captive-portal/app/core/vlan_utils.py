@@ -29,17 +29,125 @@ import subprocess
 
 logger = logging.getLogger(__name__)
 
+from typing import Dict, List
+
+def get_vlan_defaults() -> Dict[int, str]:
+    """Parse VLAN_DEFAULTS from .env into {vlan_id: name}"""
+    raw = os.getenv('VLAN_DEFAULTS', '').strip()
+    if not raw:
+        return {}
+
+    result = {}
+    for pair in raw.split(','):
+        pair = pair.strip()
+        if not pair or ':' not in pair:
+            continue
+        try:
+            vid_str, name = pair.split(':', 1)
+            vid = int(vid_str.strip())
+            name = name.strip()
+            if vid > 0 and name:
+                result[vid] = name
+        except ValueError:
+            continue
+    return result
+
+
+def get_vlan_name(vlan_id: int) -> str:
+    """Return the configured name for a VLAN ID, or a fallback."""
+    defaults = get_vlan_defaults()
+    return defaults.get(vlan_id, f"vlan-{vlan_id}")
+
+
+def get_fixed_vlan_statuses() -> List[str]:
+    """Return list of status names that should be protected (from VLAN_DEFAULTS)."""
+    defaults = get_vlan_defaults()
+    # You can customize this list if needed
+    protected = {'restricted', 'unregistered', 'wired_unregistered', 'management'}
+    return [name for vid, name in defaults.items() if name not in protected]
+
+
+def get_pool_prefix_statuses() -> List[str]:
+    raw = os.getenv('VLAN_POOL_STATUSES', '').strip()
+    statuses = [s.strip() for s in raw.split(',') if s.strip()]
+
+    # Always include wired_unregistered for subnet configuration
+    if 'wired_unregistered' not in statuses:
+        statuses.append('wired_unregistered')
+
+    return statuses
+
+
+def seed_vlan_mappings() -> int:
+    """
+    Seed vlan_mappings ONLY with entries from VLAN_POOL_STATUSES + wired_unregistered.
+    - Looks up vlan_id from VLAN_DEFAULTS.
+    - wired_unregistered always uses the WIRED_VLAN env var.
+    - Only inserts rows that don't already exist.
+    """
+    from models import db, VlanMapping
+
+    defaults = get_vlan_defaults()                    # from VLAN_DEFAULTS
+    pool_statuses = set(get_pool_prefix_statuses())   # from VLAN_POOL_STATUSES
+
+    if not defaults or not pool_statuses:
+        return 0
+
+    # Always include wired_unregistered for the admin table
+    pool_statuses.add('wired_unregistered')
+
+    existing = {v.status for v in VlanMapping.query.all()}
+    inserted = 0
+
+    wired_vlan_id = get_wired_vlan_id()   # from WIRED_VLAN env var
+
+    for status in pool_statuses:
+        if status in existing:
+            continue
+
+        # Get vlan_id from VLAN_DEFAULTS, with special handling for wired_unregistered
+        if status == 'wired_unregistered':
+            vlan_id = wired_vlan_id
+        else:
+            # Find the vlan_id that corresponds to this status name
+            vlan_id = None
+            for vid, name in defaults.items():
+                if name == status:
+                    vlan_id = vid
+                    break
+
+            if vlan_id is None:
+                logger.warning("Could not find vlan_id for status '%s' in VLAN_DEFAULTS", status)
+                continue
+
+        entry = VlanMapping(
+            status=status,
+            vlan_id=vlan_id,
+            display_name=status.title(),
+            wired_enabled=True,
+            require_password=True,
+            visible_vlans='',
+        )
+        db.session.add(entry)
+        inserted += 1
+
+    if inserted:
+        db.session.commit()
+        logger.info("Seeded %d VLAN mappings from VLAN_POOL_STATUSES + wired_unregistered", inserted)
+
+    return inserted
+
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 POOL_PREFIX_CHOICES = [24, 23, 22, 21]
-POOL_PREFIX_STATUSES = ['friars', 'staff', 'students', 'guests', 'contractors', 'volunteers', 'iot']
+POOL_PREFIX_STATUSES = get_pool_prefix_statuses()
 WIRED_UNREGISTERED_STATUS = 'wired_unregistered'
-FIXED_VLAN_STATUSES = [
-    'friars', 'staff', 'students', 'guests', 'contractors',
-    'volunteers', 'iot', 'restricted', 'unregistered', WIRED_UNREGISTERED_STATUS,
-]
+FIXED_VLAN_STATUSES = get_fixed_vlan_statuses()
+
 
 
 def _net_word() -> str:

@@ -42,11 +42,12 @@ services:
       SWITCH_HOSTS: ${SWITCH_HOSTS:?SWITCH_HOSTS is required – set it in .env}
       NETWORK_WORD: ${NETWORK_WORD:?NETWORK_WORD is required – set it in .env}
       VLAN_PREFIX_MAP: ${VLAN_PREFIX_MAP:?VLAN_PREFIX_MAP is required – set it in .env}
+      VALID_VLANS: ${VALID_VLANS:-10,20,30,40,50,60,70,80,90}
       SWITCH_USER: ${SWITCH_USER:-robert}
       SWITCH_SSH_PORT: ${SWITCH_SSH_PORT:-22}
       SWITCH_KEY_PATH: /keys/id_rsa
       # Set to "1" to enable async switch port lookup on every DHCP lease/renew
-      SWITCH_PORT_LOOKUP_ENABLED: "1"
+      SWITCH_PORT_LOOKUP_ENABLED: ${SWITCH_PORT_LOOKUP_ENABLED:-1}
       # How long (seconds) a cached port entry is considered fresh (skip SSH re-query)
       SWITCH_PORT_LOOKUP_CACHE_TTL: ${SWITCH_PORT_LOOKUP_CACHE_TTL:-120}
       WIRED_VLAN: ${WIRED_VLAN:-250}
@@ -56,9 +57,9 @@ services:
       PORTAL_IP_BYTE: ${PORTAL_IP_BYTE:-4}
       HIJACK_DNS_IP_BYTE: ${HIJACK_DNS_IP_BYTE:-5}
       LFC_INTERVAL: "300"
-      ACL_QUEUE_DISABLE: "1"
+      ACL_QUEUE_DISABLE: "0"
       ACL_QUEUE_DIR: /acl-queue
-      ACL_QUEUE_INTERVAL: "3"
+      ACL_QUEUE_INTERVAL: "1"
       ACL_QUEUE_UMASK: "0002"
       ACL_QUEUE_GID: ${PORTAL_GID:-1000}
       DB_HOST: ${DB_HOST:-127.0.0.1}
@@ -212,6 +213,8 @@ services:
       INSTITUTION_BUTTON_TEXT: ${INSTITUTION_BUTTON_TEXT:-}
       USAGE_POLICY_TEXT: ${USAGE_POLICY_TEXT:-}
       VALID_VLANS: ${VALID_VLANS:-10,20,30,40,50,60,70,80,90}
+      VLAN_DEFAULTS: ${VLAN_DEFAULTS:-10:friars,20:staff,30:students,40:guests,50:contractors,60:iot,70:wifi-registered,80:kiosk,90:printers,99:management,250:wired_unregistered}
+      VLAN_POOL_STATUSES: ${VLAN_POOL_STATUSES:-friars,staff,students,guests,contractors,volunteers,iot}
       VLAN_SUBNET_ID_MAP: ${VLAN_SUBNET_ID_MAP:-}
       EMAIL_VERIFICATION_REQUIRED: ${EMAIL_VERIFICATION_REQUIRED:-false}
       VERIFICATION_TIMEOUT_MINUTES: ${VERIFICATION_TIMEOUT_MINUTES:-15}
@@ -242,7 +245,7 @@ services:
       SWITCH_REPLUG_DENY_PATTERN: ${SWITCH_REPLUG_DENY_PATTERN:-}
       ACL_QUEUE_DISABLE: "0"
       ACL_QUEUE_DIR: /acl-queue
-      ACL_QUEUE_INTERVAL: "3"
+      ACL_QUEUE_INTERVAL: "1"
       ACL_QUEUE_UMASK: "0002"
       ACL_QUEUE_GID: ${PORTAL_GID:-1000}
       PI_NETWORK_DIR: /host-systemd-network

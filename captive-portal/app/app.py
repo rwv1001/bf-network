@@ -69,6 +69,13 @@ def create_app():
     login_manager.init_app(app)
     login_manager.login_view = 'admin.manage_admins.login'
 
+    # ── Seed VLANs from .env on first run (only if table is empty) ────────────
+    with app.app_context():
+        from models import VlanMapping
+        if VlanMapping.query.count() == 0:
+            from core.vlan_utils import seed_vlan_mappings
+            seed_vlan_mappings()
+
     # ── Context processors ────────────────────────────────────────────────────
     @app.context_processor
     def inject_globals():

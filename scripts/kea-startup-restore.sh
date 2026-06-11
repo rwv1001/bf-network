@@ -52,17 +52,14 @@ IPS=$(PGPASSWORD="$DB_PASSWORD" psql \
     -h "$DB_HOST" -p "${DB_PORT:-5432}" -U "$DB_USER" -d "$DB_NAME" \
     --tuples-only --no-align \
     --command="
-        SELECT d.ip_address
+        SELECT DISTINCT l.ip_address
         FROM devices d
+        JOIN ip_leases l ON l.mac_address = d.mac_address
         WHERE d.registration_status NOT IN ('registered', 'approved')
-          AND d.ip_address IS NOT NULL
-          AND d.ip_address <> ''
-          AND NOT EXISTS (
-              SELECT 1 FROM ip_leases l
-              WHERE l.ip_address = d.ip_address
-                AND l.from_blocked_pool = true
-          )
-        ORDER BY d.ip_address
+          AND l.ip_address IS NOT NULL
+          AND l.ip_address <> ''
+          AND l.from_blocked_pool = false
+        ORDER BY l.ip_address
     " 2>/dev/null) || true
 
 # Strip any stray whitespace / blank lines

@@ -36,6 +36,24 @@ MANAGEMENT_VLAN="${MANAGEMENT_VLAN:-99}"
 VALID_VLANS="${VALID_VLANS:-10,20,30,40,50,60,70,80,90}"
 VLANS_LIST=$(echo "$VALID_VLANS" | tr ',' ' ')
 
+# Generate VLAN name commands from VLAN_DEFAULTS
+if [ -n "${VLAN_DEFAULTS:-}" ]; then
+    VLAN_NAME_CMDS=""
+    IFS=',' read -ra pairs <<< "$VLAN_DEFAULTS"
+    for pair in "${pairs[@]}"; do
+        vid="${pair%%:*}"
+        name="${pair#*:}"
+        vid=$(echo "$vid" | tr -d ' ')
+        name=$(echo "$name" | tr -d ' ')
+        if [[ "$vid" =~ ^[0-9]+$ ]] && [ -n "$name" ]; then
+            VLAN_NAME_CMDS+="vlan $vid\n name $name\n dhcp snooping binding record\n arp detection enable\nquit\n"
+        fi
+    done
+else
+    echo "WARNING: VLAN_DEFAULTS not set in environment. Using fallback names."
+    VLAN_NAME_CMDS=""
+fi
+
 # ─── Config ──────────────────────────────────────────────────────────────────
 TARGET_HOST="${TARGET_HOST:?TARGET_HOST is required (initial/factory IP of the switch to configure)}"
 TARGET_USER="${TARGET_USER:-admin}"
@@ -129,58 +147,7 @@ password-recovery enable
 #
 stp global enable
 #
-vlan 10
- name friars
- dhcp snooping binding record
- arp detection enable
-quit
-vlan 20
- name staff
- dhcp snooping binding record
- arp detection enable
-quit
-vlan 30
- name students
- dhcp snooping binding record
- arp detection enable
-quit
-vlan 40
- name guests
- dhcp snooping binding record
- arp detection enable
-quit
-vlan 50
- name contractors
- dhcp snooping binding record
- arp detection enable
-quit
-vlan 60
- name iot
- dhcp snooping binding record
- arp detection enable
-quit
-vlan 70
- name wifi-registered
- dhcp snooping binding record
- arp detection enable
-quit
-vlan 80
- name kiosk
- dhcp snooping binding record
- arp detection enable
-quit
-vlan 90
- name printers
- dhcp snooping binding record
- arp detection enable
-quit
-vlan ${MANAGEMENT_VLAN}
- name management
-quit
-vlan ${WIRED_VLAN}
- name unregistered
- dhcp snooping binding record
-quit
+${VLAN_NAME_CMDS}
 #
 interface Vlan-interface1
  description GW_VLAN1_FROM_5130

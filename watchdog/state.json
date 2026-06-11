@@ -13,8 +13,8 @@
       "alerting": false
     },
     "nat-parser": {
-      "restart_count": 0,
-      "alerting": false
+      "restart_count": 37,
+      "alerting": true
     },
     "dns-parser": {
       "restart_count": 0,

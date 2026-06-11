@@ -840,26 +840,7 @@ session {
 #  additional steps we can take.
 post-auth {
 
-    #
-    # OU ? VLAN mapping (EAP-TLS)
-    #
-    if (&TLS-Client-Cert-Subject =~ /OU=Staff/) {
-        update reply {
-            Tunnel-Type := VLAN
-            Tunnel-Medium-Type := IEEE-802
-            Tunnel-Private-Group-Id := "10"
-            Filter-Id := "OPEN_INTERNET"
-        }
-    }
-    elsif (&TLS-Client-Cert-Subject =~ /OU=Guest/) {
-        update reply {
-            Tunnel-Type := VLAN
-            Tunnel-Medium-Type := IEEE-802
-            Tunnel-Private-Group-Id := "20"
-            Filter-Id := "GUEST_LIMITED"
-        }
-    }
-
+   
     # Dynamic VLAN for wired MAC auth (moved outside TLS checks)
     if (&control:Tmp-String-0 && "%{control:Tmp-String-0}" != "") {
         update reply {

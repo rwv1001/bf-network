@@ -262,6 +262,7 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
 
     if role == 'wired':
         body.extend([
+            'mac-authentication',
             f'interface {expanded}',
             'port link-type access',
             'port link-type hybrid',
@@ -270,12 +271,12 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
             f'port hybrid vlan {wired_vlan} untagged',
             f'port hybrid pvid vlan {wired_vlan}',
             'mac-vlan enable',
+            'mac-authentication',
             'ip verify source ip-address mac-address',
             'mac-authentication max-user 16',
             'mac-authentication domain macauth',
             f'mac-authentication guest-vlan {wired_vlan}',
-            'mac-authentication host-mode multi-vlan',
-            'port-security port-mode mac-authentication',
+            'mac-authentication host-mode multi-vlan',            
             'dhcp snooping binding record',
             'dhcp snooping check mac-address',
         ])

@@ -9,7 +9,6 @@
         "eth0.40",
         "eth0.50",
         "eth0.60",
-        "eth0.70",
         "eth0.250",
         "eth0.99"
       ],
@@ -387,58 +386,6 @@
           {
             "hw-address": "02:00:c0:a8:3c:04",
             "ip-address": "192.168.60.4",
-            "user-context": {
-              "infra-ghost": true
-            }
-          }
-        ]
-      },
-      {
-        "subnet": "192.168.70.0/24",
-        "id": 70,
-        "pools": [
-          {
-            "pool": "192.168.70.216 - 192.168.70.255",
-            "client-classes": [
-              "BLOCKED"
-            ]
-          },
-          {
-            "pool": "192.168.70.1 - 192.168.70.215"
-          }
-        ],
-        "interface": "eth0.70",
-        "option-data": [
-          {
-            "name": "routers",
-            "data": "192.168.70.2"
-          }
-        ],
-        "reservations": [
-          {
-            "hw-address": "02:00:c0:a8:46:01",
-            "ip-address": "192.168.70.1",
-            "user-context": {
-              "infra-ghost": true
-            }
-          },
-          {
-            "hw-address": "02:00:c0:a8:46:02",
-            "ip-address": "192.168.70.2",
-            "user-context": {
-              "infra-ghost": true
-            }
-          },
-          {
-            "hw-address": "02:00:c0:a8:46:03",
-            "ip-address": "192.168.70.3",
-            "user-context": {
-              "infra-ghost": true
-            }
-          },
-          {
-            "hw-address": "02:00:c0:a8:46:04",
-            "ip-address": "192.168.70.4",
             "user-context": {
               "infra-ghost": true
             }

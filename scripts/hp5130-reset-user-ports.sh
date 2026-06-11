@@ -100,18 +100,41 @@ for IFACE_NUM in $(echo "$USER_DEVICE_INTERFACES" | tr ',' ' '); do
     COMMANDS="$COMMANDS
 interface GigabitEthernet1/0/${IFACE_NUM}
 shutdown
+undo description
+undo ip verify source
+undo port-security port-mode
+undo port-security intrusion-mode
+undo port-security max-mac-count
+undo port access vlan
+undo port link-type
+undo port trunk permit vlan all
+undo mac-vlan enable
+undo mac-authentication
+undo web-auth enable
+undo web-auth domain
+undo dhcp snooping trust
+undo arp detection trust
+undo dhcp snooping check mac-address
+undo mac-authentication max-user
+undo mac-authentication domain
+undo mac-authentication host-mode
+undo dhcp snooping binding record
+undo mac-authentication guest-vlan
+undo port-security enable
+interface GigabitEthernet1/0/${IFACE_NUM}
+port link-type access
 port link-type hybrid
 undo port hybrid vlan 1
 port hybrid vlan ${VLANS_LIST} ${MANAGEMENT_VLAN} untagged
 port hybrid vlan ${WIRED_VLAN} untagged
 port hybrid pvid vlan ${WIRED_VLAN}
 mac-vlan enable
+mac-authentication
 ip verify source ip-address mac-address
 mac-authentication max-user 16
 mac-authentication domain macauth
 mac-authentication guest-vlan ${WIRED_VLAN}
 mac-authentication host-mode multi-vlan
-port-security port-mode mac-authentication
 dhcp snooping binding record
 dhcp snooping check mac-address
 undo shutdown

@@ -245,8 +245,7 @@
         <div class="table-responsive">
             <table class="vlan-table" id="vlan-table">
                 <thead>
-                    <tr>
-                        <th>Key</th>
+                    <tr>                        
                         <th>Name</th>
                         <th>VLAN ID</th>
                         <th>SSID</th>
@@ -648,8 +647,7 @@ function onVvChange(cb) {
             if (!tableBody) return;
             const row = document.createElement('tr');
             const rowIdx = _newRowIdx;
-            row.innerHTML = `
-                <td><input type="text" name="vlan_status" placeholder="custom-key"></td>
+            row.innerHTML = `                
                 <td><input type="text" name="vlan_name" placeholder="Display name"></td>
                 <td>
                     <select name="vlan_id">

@@ -399,10 +399,24 @@ def reset_test():
     if not _is_test_env():
         abort(404)
 
+    from models import VlanMapping
+    from core.vlan_utils import seed_vlan_mappings
     from core.device_utils import reset_test_data
     from core.vlan_utils import restart_kea_container
 
+
+
+    
+
     try:
+
+        logger.info("Test reset: Clearing vlan_mappings table")
+        VlanMapping.query.delete()
+        db.session.commit()
+
+        seed_vlan_mappings()
+        logger.info("Test reset: vlan_mappings re-seeded from .env")
+
         reset_test_data()
     except Exception as exc:
         logger.error("Test reset DB cleanup failed: %s", exc)
@@ -449,6 +463,7 @@ def reset_test():
                 with _app.app_context():
                     push_pbr_nqa_to_switches()
                 logger.info("Test reset: PBR/NQA push done")
+                logger.info("Test reset: reset complete")
             except Exception as exc:
                 logger.warning("Test reset: PBR/NQA push failed: %s", exc)
 
