@@ -130,6 +130,19 @@ WHERE NOT EXISTS (
 COMMIT;
 ENDSQL
 
+# ── Set internet_accessible when we granted access ───────────────────
+        if [ "$DNS_HIJACKED" = "false" ]; then
+            $PSQL <<ENDSQL
+UPDATE devices
+   SET internet_accessible = true,
+       internet_blocked    = false,
+       last_seen           = NOW()
+ WHERE mac_address  = '${MAC_ADDRESS}'
+   AND assigned_vlan IS NOT NULL
+   AND current_vlan  = assigned_vlan;
+ENDSQL
+        fi
+
         # ── Blocked-pool transition: expire old regular-pool leases ───────────
         # When a device lands in the blocked pool, any per-IP ACL/DNS rules that
         # were applied to its previous regular-pool IP are now redundant (the

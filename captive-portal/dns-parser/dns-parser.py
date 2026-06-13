@@ -333,8 +333,15 @@ class DNSParser:
                 if lease_row and lease_row[0]:
                     mac_str = ':'.join(f'{b:02x}' for b in lease_row[0])
                     cur.execute("""
-                        SELECT id, user_id, mac_address FROM devices
-                        WHERE mac_address = %s
+                        SELECT d.id, 
+                            do.user_id, 
+                            d.mac_address
+                        FROM devices d
+                        LEFT JOIN device_ownership do 
+                            ON do.mac_address = d.mac_address 
+                            AND do.end_datetime IS NULL
+                        WHERE d.mac_address = %s
+                        LIMIT 1
                     """, (mac_str,))
                     dev_row = cur.fetchone()
                     if dev_row:
@@ -344,9 +351,16 @@ class DNSParser:
 
                 # Fallback: use cached ip_address field; prefer most recently seen
                 cur.execute("""
-                    SELECT id, user_id, mac_address FROM devices
-                    WHERE ip_address = %s
-                    ORDER BY last_seen DESC NULLS LAST
+                    SELECT d.id, 
+                        do.user_id, 
+                        d.mac_address
+                    FROM ip_leases l
+                    JOIN devices d ON d.mac_address = l.mac_address
+                    LEFT JOIN device_ownership do 
+                        ON do.mac_address = d.mac_address 
+                        AND do.end_datetime IS NULL
+                    WHERE l.ip_address = %s
+                    ORDER BY l.lease_start DESC
                     LIMIT 1
                 """, (client_ip,))
                 row = cur.fetchone()

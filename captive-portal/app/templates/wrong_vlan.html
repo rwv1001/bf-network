@@ -9,21 +9,141 @@
 {% endblock %}
 
 {% block content %}
-<div class="alert alert-info">
+<div id="statusAlert" class="alert alert-info">
     <strong>ℹ Access granted on a different network</strong>
     <div style="margin-top: 6px;">
         The administrator has not granted you access to
-        <strong>{{ detected_ssid or 'your current network' }}</strong>,
+        <strong id="detectedNetwork">{{ detected_ssid or 'your current network' }}</strong>,
         but has instead granted you access to
-        <strong>{{ assigned_ssid or ('VLAN ' ~ assigned_vlan) if assigned_vlan else 'another network' }}</strong>.
+        <strong id="assignedNetwork">{{ assigned_ssid or ('VLAN ' ~ assigned_vlan) if assigned_vlan else 'another network' }}</strong>.
     </div>
 </div>
 
-<div class="info-box">
+<div id="instructionsBox" class="info-box">
     <p>To gain internet access, please:</p>
     <ol style="margin: 10px 0 0 20px; line-height: 2;">
-        <li>Disconnect from <strong>{{ detected_ssid or 'your current network' }}</strong></li>
-        <li>Connect to <strong>{{ assigned_ssid or ('VLAN ' ~ assigned_vlan) if assigned_vlan else 'the assigned network' }}</strong></li>
+        <li>Disconnect from <strong id="detectedNetworkStep">{{ detected_ssid or 'your current network' }}</strong></li>
+        <li>Connect to <strong id="assignedNetworkStep">{{ assigned_ssid or ('VLAN ' ~ assigned_vlan) if assigned_vlan else 'the assigned network' }}</strong></li>
     </ol>
+    <p id="pollingNote" style="margin-top: 12px; color: #555;">
+        This page will update automatically once you are on the correct network.
+    </p>
 </div>
+
+<script>
+(() => {
+    const pollInterval = 3000;
+    let timer = null;
+
+    const portalUrl = "{{ portal_url|e }}";
+    const portalPollUrl = "{{ portal_poll_url|e }}";
+
+    const portalBase = portalUrl ? portalUrl.replace(/\/$/, '') : window.location.origin;
+    const pollBase = (() => {
+        const preferred = portalPollUrl ? portalPollUrl.replace(/\/$/, '') : window.location.origin;
+        if (window.location.protocol === 'https:' && preferred.startsWith('http:')) {
+            return window.location.origin;
+        }
+        return preferred;
+    })();
+
+    const apiUrl = (path) => `${pollBase}${path}`;
+    const pageUrl = (path) => `${portalBase}${path}`;
+
+    const statusAlert = document.getElementById('statusAlert');
+    const instructionsBox = document.getElementById('instructionsBox');
+
+    const detectedEls = [
+        document.getElementById('detectedNetwork'),
+        document.getElementById('detectedNetworkStep')
+    ];
+
+    const assignedEls = [
+        document.getElementById('assignedNetwork'),
+        document.getElementById('assignedNetworkStep')
+    ];
+
+    const setText = (els, text) => {
+        els.forEach((el) => {
+            if (el && text) el.textContent = text;
+        });
+    };
+
+    const networkName = (ssid, vlan, fallback) => {
+        if (ssid) return ssid;
+        if (vlan) return `VLAN ${vlan}`;
+        return fallback;
+    };
+
+    const stop = () => {
+        if (timer) {
+            clearInterval(timer);
+            timer = null;
+        }
+    };
+
+    const showFinalMessage = (message, type) => {
+        stop();
+
+        if (statusAlert) {
+            statusAlert.className = type === 'error' ? 'alert alert-error' : 'alert alert-success';
+            statusAlert.innerHTML = message;
+        }
+
+        if (instructionsBox) {
+            instructionsBox.style.display = 'none';
+        }
+    };
+
+    const checkStatus = () => {
+        fetch(apiUrl('{{ url_for("portal.registration_status") }}'), {
+            cache: 'no-store',
+            credentials: 'same-origin',
+            headers: { 'Accept': 'application/json' }
+        })
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'registered' && !data.network_mismatch) {
+                showFinalMessage(
+                    '<strong>✓ Correct network detected</strong><div style="margin-top:6px;">Checking internet access…</div>',
+                    'success'
+                );
+
+                window.location.replace(pageUrl('{{ url_for("portal.registered_success") }}'));
+                return;
+            }
+
+            if (data.status === 'wrong_vlan') {
+                const assigned = networkName(
+                    data.expected_ssid || data.assigned_ssid,
+                    data.expected_vlan || data.assigned_vlan,
+                    'the assigned network'
+                );
+
+                const detected = networkName(
+                    data.current_ssid || data.detected_ssid,
+                    data.current_vlan || data.detected_vlan,
+                    'your current network'
+                );
+
+                setText(assignedEls, assigned);
+                setText(detectedEls, detected);
+                return;
+            }
+
+            if (data.status === 'rejected' || data.status === 'blocked') {
+                const reason = data.reason ? ` Reason: ${data.reason}` : '';
+                showFinalMessage(
+                    `<strong>✗ Access refused</strong><div style="margin-top:6px;">The administrator has refused to grant this device internet access.${reason}</div>`,
+                    'error'
+                );
+            }
+        })
+        .catch(() => {});
+    };
+
+    timer = setInterval(checkStatus, pollInterval);
+    checkStatus();
+})();
+</script>
 {% endblock %}

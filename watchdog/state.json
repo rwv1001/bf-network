@@ -13,7 +13,7 @@
       "alerting": false
     },
     "nat-parser": {
-      "restart_count": 37,
+      "restart_count": 67,
       "alerting": true
     },
     "dns-parser": {
@@ -25,7 +25,7 @@
       "alerting": false
     },
     "freeradius": {
-      "restart_count": 0,
+      "restart_count": 1,
       "alerting": false
     },
     "pihole": {

@@ -73,6 +73,11 @@ def _wait_for_npm(max_wait=180):
 
 
 def _proxy_host_payload(domain, cert_id=0, ssl_forced=False):
+    advanced_config = """proxy_set_header Host $host;
+proxy_set_header X-Real-IP $remote_addr;
+proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+proxy_set_header X-Forwarded-Proto $scheme;
+"""
     return {
         "domain_names":           [domain],
         "forward_scheme":         "http",
@@ -81,7 +86,7 @@ def _proxy_host_payload(domain, cert_id=0, ssl_forced=False):
         "access_list_id":         "0",
         "certificate_id":         cert_id,
         "meta":                   {"letsencrypt_agree": cert_id != 0, "dns_challenge": False},
-        "advanced_config":        "",
+        "advanced_config":        "advanced_config",
         "locations":              [],
         "block_exploits":         False,
         "caching_enabled":        False,

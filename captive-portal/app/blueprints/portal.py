@@ -93,6 +93,30 @@ portal_bp = Blueprint('portal', __name__)
 
 KEA_SOCKET = os.getenv('KEA_CONTROL_SOCKET', '/kea/leases/kea4-ctrl-socket')
 
+from ipaddress import ip_address as parse_ip
+
+def _is_proxy_or_loopback_ip(value):
+    try:
+        ip = parse_ip(value)
+        return ip.is_loopback or str(ip) == '127.0.0.1'
+    except Exception:
+        return True
+
+
+def _effective_device_ip(mac_address, request_ip):
+    if request_ip and not _is_proxy_or_loopback_ip(request_ip):
+        return request_ip
+
+    lease = get_active_iplease(mac_address)
+    if lease and lease.ip_address:
+        return lease.ip_address
+
+    lease_ip = get_ip_for_mac(mac_address)
+    if lease_ip:
+        return lease_ip
+
+    return request_ip
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -272,27 +296,43 @@ def api_request_unblock():
 
 @portal_bp.route('/api/device-status')
 def api_device_status():
+    logger.debug("=== /api/device-status called ===")
+
     mac_address = get_client_mac()
+    request_ip = get_client_ip()
+    ip_address = _effective_device_ip(mac_address, request_ip) if mac_address else request_ip
+
+    logger.debug(f"Detected MAC: {mac_address}, IP: {ip_address}")
+
     if not mac_address:
+        logger.warning("/api/device-status: No MAC address detected")
         return jsonify({'status': 'no_mac'}), 200
 
     device = Device.query.filter_by(mac_address=mac_address).first()
     ownership = get_active_ownership(mac_address) if device else None
 
+    logger.debug(f"Device found: {bool(device)}, Ownership found: {bool(ownership)}")
+
     if not device or not ownership:
+        logger.debug(f"/api/device-status: Device or ownership missing for MAC {mac_address}")
         return jsonify({'status': 'unregistered'}), 200
 
     lease = get_active_iplease(mac_address)
+    logger.debug(f"Active lease found: {bool(lease)}")
 
     if device.internet_blocked:
+        logger.debug(f"Device {mac_address} is internet_blocked=True")
         return jsonify({'status': 'blocked'})
 
-    ip_address = get_client_ip()
-    _, detected_vlan, _ = detect_connection_type(ip_address)
+    _, detected_vlan, detected_ssid = detect_connection_type(ip_address)
     selected_vlan = device.assigned_vlan or detected_vlan
     password_required = vlan_requires_password(selected_vlan) if selected_vlan else False
 
+    logger.debug(f"detected_vlan={detected_vlan}, assigned_vlan={device.assigned_vlan}, "
+                 f"selected_vlan={selected_vlan}, password_required={password_required}")
+
     if password_required and not device.ownership_validated:
+        logger.debug(f"Device {mac_address} requires password")
         return jsonify({
             'status': 'need_password',
             'has_password': device.user.has_network_password if device.user else False,
@@ -302,17 +342,21 @@ def api_device_status():
     assigned_vlan = device.assigned_vlan
 
     if assigned_vlan is None:
+        logger.debug(f"Device {mac_address} has no assigned_vlan → pending_approval")
         return jsonify({'status': 'pending_approval', 'selected_vlan': selected_vlan})
 
     if assigned_vlan != detected_vlan:
+        logger.info(f"VLAN MISMATCH for {mac_address}: assigned={assigned_vlan}, detected={detected_vlan}")
         return jsonify({
             'status': 'wrong_vlan',
             'assigned_vlan': assigned_vlan,
             'assigned_ssid': get_ssid_for_vlan(assigned_vlan),
             'detected_vlan': detected_vlan,
+            'connection_type': device.connection_type,   # helpful for frontend
         })
 
     if device.internet_accessible is True:
+        logger.debug(f"Device {mac_address} has full access (internet_accessible=True)")
         return jsonify({
             'status': 'accessible',
             'user_home_url': build_portal_url(url_for('portal.user_home')),
@@ -320,27 +364,32 @@ def api_device_status():
         })
 
     if device.internet_accessible is False:
+        logger.debug(f"Device {mac_address} has access_refused")
         return jsonify({
             'status': 'access_refused',
             'notes': getattr(device, 'admin_notes', None),
         })
 
-    # internet_accessible is None — provisioning in progress
+    # internet_accessible is None — still provisioning
     from_blocked_pool = lease.from_blocked_pool if lease else False
+    logger.debug(f"Provisioning in progress. from_blocked_pool={from_blocked_pool}")
+
     if from_blocked_pool:
         return jsonify({'status': 'blocked_pool', 'assigned_vlan': assigned_vlan})
 
-    # Spec 4b.ii.2.a.ii.3c: unhijack if conditions are met
+    # Try to unhijack if conditions are met
     if lease and lease.dns_hijacked and not from_blocked_pool:
         if should_have_internet(device):
             ip_addr = lease.ip_address
             if ip_addr:
+                logger.info(f"Unhijacking device {mac_address} on IP {ip_addr}")
                 if _should_hijack_vlan(assigned_vlan):
                     manage_dns_hijack('unhijack', ip_addr)
                 manage_switch_acl('unblock', ip_addr, assigned_vlan)
             lease.dns_hijacked = False
             db.session.commit()
             set_internet_accessible(device, True, commit=True)
+
             if not device.ownership_validated and device.user:
                 _u = device.user
                 _unreg = build_unregister_url(device.unregister_token)
@@ -353,6 +402,7 @@ def api_device_status():
                     confirm_timeout_sec=_ctimeout,
                     registration_details={},
                 )
+
             resp_data = {
                 'status': 'accessible',
                 'user_home_url': build_portal_url(url_for('portal.user_home')),
@@ -362,6 +412,7 @@ def api_device_status():
                 resp_data['confirm_timeout_minutes'] = wifi_confirm_timeout_minutes()
             return jsonify(resp_data)
 
+    logger.debug(f"Device {mac_address} is still in 'pending' state")
     return jsonify({'status': 'pending'})
 
 
@@ -1072,20 +1123,29 @@ def request_rejected():
 def wrong_vlan_page():
     mac_address = get_client_mac()
     device = Device.query.filter_by(mac_address=mac_address).first() if mac_address else None
+
     assigned_vlan = (
         (device.assigned_vlan if device else None)
         or request.args.get('assigned_vlan')
+        or None
     )
-    assigned_ssid = (
-        get_ssid_for_vlan(int(assigned_vlan)) if assigned_vlan
-        else request.args.get('assigned_ssid')
-    )
+
+    assigned_ssid = request.args.get('assigned_ssid')
+    if not assigned_ssid and assigned_vlan:
+        try:
+            assigned_ssid = get_ssid_for_vlan(int(assigned_vlan))
+        except (TypeError, ValueError):
+            assigned_ssid = None
+
     _, detected_vlan, _ = detect_connection_type(get_client_ip())
     detected_ssid = get_ssid_for_vlan(detected_vlan) if detected_vlan else None
+
     return render_template(
         'wrong_vlan.html',
+        mac_address=mac_address,
         assigned_vlan=assigned_vlan,
         assigned_ssid=assigned_ssid,
+        detected_vlan=detected_vlan,
         detected_ssid=detected_ssid,
     )
 

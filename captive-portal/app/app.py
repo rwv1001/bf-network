@@ -32,7 +32,14 @@ from models import (
 from security import init_security
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-logging.basicConfig(level=logging.INFO)
+log_level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+log_level = getattr(logging, log_level_name, logging.INFO)
+
+logging.basicConfig(
+    level=log_level,
+    format="%(asctime)s %(levelname)s:%(name)s:%(message)s",
+    force=True          # Important - resets any previous logging config
+)
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -41,6 +48,7 @@ logger = logging.getLogger(__name__)
 
 def create_app():
     app = Flask(__name__)
+
 
     # ── Core config ───────────────────────────────────────────────────────────
     app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')

@@ -35,9 +35,14 @@ def normalize_mac_input(raw) -> str:
         return None
     return ':'.join(cleaned[i:i + 2] for i in range(0, 12, 2))
 
-
 def get_client_ip() -> str:
-    """Return the client IP address from the request."""
+    logger.debug("=== get_client_ip() headers ===")
+    for h in ['X-Real-IP', 'X-Forwarded-For', 'X-Forwarded-Client-IP', 'CF-Connecting-IP']:
+        val = request.headers.get(h)
+        if val:
+            logger.debug(f"  {h}: {val}")
+
+    # Your existing logic
     if request.headers.get('X-Real-IP'):
         return request.headers.get('X-Real-IP').strip()
     if request.headers.get('X-Forwarded-For'):
@@ -53,25 +58,53 @@ def get_client_mac() -> str:
     3. Kea control socket
     4. ip_leases DB table (fallback)
     """
-    mac = request.headers.get('X-Client-MAC')
-    if not mac:
-        mac = request.args.get('mac')
-    if not mac:
-        mac = request.form.get('mac')
+    logger.debug("=== get_client_mac() called ===")
 
+    # Try direct sources first
+    mac = request.headers.get('X-Client-MAC')
+    if mac:
+        logger.debug(f"[get_client_mac] Found MAC in X-Client-MAC header: {mac}")
+    else:
+        mac = request.args.get('mac')
+        if mac:
+            logger.debug(f"[get_client_mac] Found MAC in query param: {mac}")
+        else:
+            mac = request.form.get('mac')
+            if mac:
+                logger.debug(f"[get_client_mac] Found MAC in form data: {mac}")
+
+    # Fallback to IP-based lookup
     if not mac:
         ip_address = get_client_ip()
+        logger.debug(f"[get_client_mac] No direct MAC found. Trying IP-based lookup for IP: {ip_address}")
+
         if ip_address:
             mac = _mac_from_lease_file(ip_address)
-            if not mac:
+            if mac:
+                logger.debug(f"[get_client_mac] Found MAC via lease file: {mac}")
+            else:
                 mac = _mac_from_kea_socket(ip_address)
-            if not mac:
-                mac = _mac_from_iplease_db(ip_address)
+                if mac:
+                    logger.debug(f"[get_client_mac] Found MAC via Kea control socket: {mac}")
+                else:
+                    mac = _mac_from_iplease_db(ip_address)
+                    if mac:
+                        logger.debug(f"[get_client_mac] Found MAC via ip_leases DB: {mac}")
+                    else:
+                        logger.debug(f"[get_client_mac] No MAC found for IP {ip_address} in any source")
 
+    # Normalize MAC format
     if mac:
+        original_mac = mac
         mac = mac.lower().replace('-', '').replace(':', '')
         if len(mac) == 12:
             mac = ':'.join([mac[i:i + 2] for i in range(0, 12, 2)])
+            logger.debug(f"[get_client_mac] Normalized MAC: {original_mac} → {mac}")
+        else:
+            logger.warning(f"[get_client_mac] MAC found but invalid length after normalization: {mac}")
+            mac = None
+    else:
+        logger.warning("[get_client_mac] No MAC address could be determined")
 
     return mac
 

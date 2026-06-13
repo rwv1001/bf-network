@@ -159,6 +159,9 @@ ssid             = (data.get("ssid") or "")
 first_name       = (data.get("first_name") or "")
 last_name        = (data.get("last_name") or "")
 phone            = (data.get("phone_number") or "")
+network_password_hash = data.get("network_password_hash") or ""
+user_blocked = bool(data.get("user_blocked") or data.get("blocked"))
+_dbg(f"parsed user fields: network_password_hash={'SET' if network_password_hash else 'EMPTY'}, user_blocked={user_blocked}")
 _dbg(f"parsed: email={email!r} device_blocked={device_blocked} assigned_vlan={assigned_vlan} "
      f"is_wired={is_wired} connection_type={connection_type!r} ssid={ssid!r} device_name={device_name!r}")
 
@@ -170,15 +173,24 @@ today = datetime.date.today().isoformat()
 # Upsert user (begin_date is NOT NULL)
 _dbg(f"INSERT/UPDATE users: email={email!r} first_name={first_name!r} last_name={last_name!r}")
 psql(f"""
-INSERT INTO users (email, first_name, last_name, phone_number, begin_date, created_at, updated_at)
+INSERT INTO users (
+    email, first_name, last_name, phone_number,
+    begin_date, created_at, updated_at,
+    network_password_hash, blocked
+)
 VALUES (
-    '{q(email)}', '{q(first_name)}', '{q(last_name)}',
-    '{q(phone)}', '{today}', '{now}', '{now}'
+    '{q(email)}', '{q(first_name)}', '{q(last_name)}', '{q(phone)}',
+    '{today}', '{now}', '{now}',
+    {f"'{q(network_password_hash)}'" if network_password_hash else 'NULL'},
+    {str(user_blocked).lower()}
 )
 ON CONFLICT (email) DO UPDATE SET
-    first_name  = COALESCE(NULLIF(users.first_name,  ''), EXCLUDED.first_name),
-    last_name   = COALESCE(NULLIF(users.last_name,   ''), EXCLUDED.last_name),
-    updated_at  = EXCLUDED.updated_at;
+    first_name              = COALESCE(NULLIF(users.first_name, ''), EXCLUDED.first_name),
+    last_name               = COALESCE(NULLIF(users.last_name,  ''), EXCLUDED.last_name),
+    phone_number            = COALESCE(NULLIF(users.phone_number, ''), EXCLUDED.phone_number),
+    network_password_hash   = COALESCE(NULLIF(EXCLUDED.network_password_hash, ''), users.network_password_hash),
+    blocked                 = EXCLUDED.blocked,
+    updated_at              = EXCLUDED.updated_at;
 """)
 
 user_id = psql(f"SELECT id FROM users WHERE email = '{q(email)}' LIMIT 1;")

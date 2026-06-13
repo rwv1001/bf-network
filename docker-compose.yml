@@ -196,6 +196,8 @@ services:
     restart: unless-stopped
     user: "${PORTAL_UID:-1000}:${PORTAL_GID:-1000}"
     environment:
+      LOG_LEVEL: DEBUG
+      FLASK_ENV: development
       DATABASE_URL: postgresql://${DB_USER:-portal_user}:${DB_PASSWORD:-change_this_password}@127.0.0.1:5432/${DB_NAME:-captive_portal}
       REDIS_URL: redis://127.0.0.1:6379/0
       SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required – set it in .env}
