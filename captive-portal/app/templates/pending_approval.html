@@ -84,7 +84,8 @@
                     clearInterval(timer);
                     window.location.href = pageUrl('{{ url_for("portal.wrong_vlan_page") }}'
                         + '?assigned_vlan=' + encodeURIComponent(data.expected_vlan || '')
-                        + '&assigned_ssid=' + encodeURIComponent(data.expected_ssid || ''));
+                        + '&assigned_ssid=' + encodeURIComponent(data.expected_ssid || '')
+                        + '&mac=' + encodeURIComponent('{{ mac_address or "" }}'));
                     return;
                 }
                 if (data.status === 'rejected' || data.status === 'blocked') {

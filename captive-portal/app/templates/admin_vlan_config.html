@@ -259,13 +259,7 @@
                 </thead>
                 <tbody>
                     {% for entry in vlan_entries %}
-                    <tr data-vlan-id="{{ entry.vlan_id }}">
-                        <td>
-                            <input type="text"
-                                   name="vlan_status"
-                                   value="{{ entry.status }}"
-                                   {% if entry.status in fixed_statuses %}readonly{% endif %}>
-                        </td>
+                    <tr data-vlan-id="{{ entry.vlan_id }}">                        
                         <td>
                             <input type="text"
                                    name="vlan_name"

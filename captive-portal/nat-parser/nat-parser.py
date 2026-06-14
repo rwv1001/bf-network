@@ -322,48 +322,48 @@ class NATParser:
                 pass
     
     def _parse_kea_leases(self, ip_list: list) -> Dict[str, dict]:
-    """
-    Parse Kea leases CSV file and return data for given IPs.
-    Returns: {ip_address: {'mac_address': str, 'expire': int}}
-    """
-    ip_set = set(ip_list)
-    result = {}
+        """
+        Parse Kea leases CSV file and return data for given IPs.
+        Returns: {ip_address: {'mac_address': str, 'expire': int}}
+        """
+        ip_set = set(ip_list)
+        result = {}
 
-    try:
-        if not os.path.exists(KEA_LEASES_FILE):
-            logger.warning(f"Kea leases file not found: {KEA_LEASES_FILE}")
-            return {}
+        try:
+            if not os.path.exists(KEA_LEASES_FILE):
+                logger.warning(f"Kea leases file not found: {KEA_LEASES_FILE}")
+                return {}
 
-        current_time = int(time.time())
+            current_time = int(time.time())
 
-        with open(KEA_LEASES_FILE, 'r') as f:
-            reader = csv.DictReader(f)
+            with open(KEA_LEASES_FILE, 'r') as f:
+                reader = csv.DictReader(f)
 
-            for row in reader:
-                try:
-                    ip_address = row.get('address', '')
-                    hwaddr = row.get('hwaddr', '')
-                    expire = int(row.get('expire', 0))
-                    state = int(row.get('state', 1))
+                for row in reader:
+                    try:
+                        ip_address = row.get('address', '')
+                        hwaddr = row.get('hwaddr', '')
+                        expire = int(row.get('expire', 0))
+                        state = int(row.get('state', 1))
 
-                    if state != 0 or expire < current_time:
+                        if state != 0 or expire < current_time:
+                            continue
+
+                        if ip_address in ip_set and hwaddr:
+                            result[ip_address] = {
+                                'mac_address': hwaddr.lower(),
+                                'expire': expire
+                            }
+                    except (ValueError, KeyError) as e:
+                        logger.debug(f"Skipping malformed lease entry: {e}")
                         continue
 
-                    if ip_address in ip_set and hwaddr:
-                        result[ip_address] = {
-                            'mac_address': hwaddr.lower(),
-                            'expire': expire
-                        }
-                except (ValueError, KeyError) as e:
-                    logger.debug(f"Skipping malformed lease entry: {e}")
-                    continue
+            logger.debug(f"Found {len(result)} active IP->MAC mappings from Kea leases")
+            return result
 
-        logger.debug(f"Found {len(result)} active IP->MAC mappings from Kea leases")
-        return result
-
-    except Exception as e:
-        logger.error(f"Failed to parse Kea leases file: {e}")
-        return {}
+        except Exception as e:
+            logger.error(f"Failed to parse Kea leases file: {e}")
+            return {}
     
     def flush_active_sessions(self):
         """Upsert all in-progress sessions to DB without closing them.

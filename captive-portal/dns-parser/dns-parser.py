@@ -322,27 +322,25 @@ class DNSParser:
             return None, None, None
 
         try:
-            with self.db_conn.cursor() as cur:
-                # Primary: authoritative lease lookup
-                cur.execute("""
-                    SELECT hwaddr FROM lease4
-                    WHERE address = %s
-                      AND expire > NOW()
-                """, (ip_int,))
+            with self.db_conn.cursor() as cur:                
+                cur.execute(
+                    """
+                    SELECT hwaddr FROM lease4 WHERE address = %s AND expire > NOW() 
+                    """, (ip_int,))
                 lease_row = cur.fetchone()
                 if lease_row and lease_row[0]:
                     mac_str = ':'.join(f'{b:02x}' for b in lease_row[0])
                     cur.execute("""
                         SELECT d.id, 
-                            do.user_id, 
+                            downer.user_id, 
                             d.mac_address
                         FROM devices d
-                        LEFT JOIN device_ownership do 
-                            ON do.mac_address = d.mac_address 
-                            AND do.end_datetime IS NULL
+                        LEFT JOIN device_ownership downer 
+                            ON downer.mac_address = d.mac_address 
+                            AND downer.end_datetime IS NULL
                         WHERE d.mac_address = %s
                         LIMIT 1
-                    """, (mac_str,))
+                        """, (mac_str,))
                     dev_row = cur.fetchone()
                     if dev_row:
                         return dev_row[0], dev_row[1], dev_row[2]
@@ -352,17 +350,17 @@ class DNSParser:
                 # Fallback: use cached ip_address field; prefer most recently seen
                 cur.execute("""
                     SELECT d.id, 
-                        do.user_id, 
+                        downer.user_id, 
                         d.mac_address
                     FROM ip_leases l
                     JOIN devices d ON d.mac_address = l.mac_address
-                    LEFT JOIN device_ownership do 
-                        ON do.mac_address = d.mac_address 
-                        AND do.end_datetime IS NULL
+                    LEFT JOIN device_ownership downer 
+                        ON downer.mac_address = d.mac_address 
+                        AND downer.end_datetime IS NULL
                     WHERE l.ip_address = %s
                     ORDER BY l.lease_start DESC
                     LIMIT 1
-                """, (client_ip,))
+                    """, (client_ip,))
                 row = cur.fetchone()
                 if row:
                     return row[0], row[1], row[2]
