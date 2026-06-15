@@ -30,6 +30,7 @@ services:
       - ./kea/leases:/kea/leases
       - ./kea/sockets:/kea/sockets
       - ./scripts:/scripts:ro
+      - ./scripts/scriptdata:/scripts/scriptdata:ro
       - ./shared/acl-queue:/acl-queue
       - /home/admin/.ssh:/keys:ro
       - ./kea/logs:/kea/logs
@@ -72,6 +73,9 @@ services:
       CENTRAL_API_KEY: ${CENTRAL_API_KEY:-}
       CENTRAL_SITE_ID: ${CENTRAL_SITE_ID:-}
       KEA_CONTROL_SOCKET: /kea/sockets/kea4-ctrl-socket
+      HP5130_POLICY_PATH: ${HP5130_POLICY_PATH:-/scripts/scriptdata/hp5130-policy.json}
+      HP5130_CURRENT_CONFIG_PATH: ${HP5130_CURRENT_CONFIG_PATH:-/scripts/scriptdata/hp5130-current-config.json}
+      ACL_BASELINE_SCRIPT: ${ACL_BASELINE_SCRIPT:-/scripts/hp5130-acl-baseline.sh}
     entrypoint: |
       sh -c '
       # Abort early if any required variable is missing
@@ -191,12 +195,18 @@ services:
 
   # ── Captive-portal web app ────────────────────────────────────────────────────
   web:
-    build: ./captive-portal/app
+    build:
+      context: ./captive-portal/app
+      args:
+          PORTAL_UID: ${PORTAL_UID:-1000}
+          PORTAL_GID: ${PORTAL_GID:-1000}
     container_name: captive-portal-web
     restart: unless-stopped
     user: "${PORTAL_UID:-1000}:${PORTAL_GID:-1000}"
     environment:
       LOG_LEVEL: DEBUG
+      PORTAL_GID: 1000
+      PORTAL_UID: 1000
       FLASK_ENV: development
       DATABASE_URL: postgresql://${DB_USER:-portal_user}:${DB_PASSWORD:-change_this_password}@127.0.0.1:5432/${DB_NAME:-captive_portal}
       REDIS_URL: redis://127.0.0.1:6379/0
@@ -264,6 +274,9 @@ services:
       WIRED_VLAN: ${WIRED_VLAN:-250}
       MANAGEMENT_VLAN: ${MANAGEMENT_VLAN:-99}
       ORACLE_VPS_HOST: ${ORACLE_VPS_HOST:?ORACLE_VPS_HOST is required – set it in .env}
+      HP5130_POLICY_PATH: ${HP5130_POLICY_PATH:-/scripts/scriptdata/hp5130-policy.json}
+      HP5130_CURRENT_CONFIG_PATH: ${HP5130_CURRENT_CONFIG_PATH:-/scripts/scriptdata/hp5130-current-config.json}
+      ACL_BASELINE_SCRIPT: ${ACL_BASELINE_SCRIPT:-/scripts/hp5130-acl-baseline.sh}
     volumes:
       - ./captive-portal/app:/app
       - ./shared/restart-queue:/restart-queue
@@ -273,6 +286,7 @@ services:
       - ./kea/docker-compose.yml:/kea/docker-compose.yml:ro
       - /var/run/docker.sock:/var/run/docker.sock
       - ./scripts:/scripts:ro
+      - ./scripts/scriptdata:/scripts/scriptdata
       - ./shared/acl-queue:/acl-queue
       - /home/admin/.ssh:/keys:ro
       - /etc/systemd/network:/host-systemd-network

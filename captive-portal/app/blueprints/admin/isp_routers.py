@@ -26,6 +26,7 @@ from extensions import db
 from models import ISPRouter, VlanMapping, Setting
 from core.auth import permission_required
 from core.network import reset_acl_baseline, reapply_all_ip_blocks, reset_vlan_interface_masks
+from core.hp5130_policy import write_hp5130_policy_file
 from core.switch import (
     COMMON_PORT_UNDO_COMMANDS,
     expand_switch_iface_name, get_switch_hosts, get_switch_host_for_isp_router,
@@ -39,6 +40,18 @@ isp_routers_bp = Blueprint('isp_routers', __name__)
 
 def _net_word() -> str:
     return os.getenv('NETWORK_WORD', '192.168')
+
+
+def _write_hp5130_policy_or_warn(context: str) -> bool:
+    """Refresh /scripts/scriptdata/hp5130-policy.json after DB-backed config changes."""
+    try:
+        policy_path = write_hp5130_policy_file()
+        logger.info("HP5130 policy JSON updated after %s: %s", context, policy_path)
+        return True
+    except Exception as exc:
+        logger.exception("Failed to update HP5130 policy JSON after %s", context)
+        flash(f'HP5130 policy JSON could not be written after {context}: {exc}', 'warning')
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -455,12 +468,16 @@ def admin_isp_routers():
             )
             db.session.add(router)
             db.session.commit()
+            policy_ok = _write_hp5130_policy_or_warn('adding ISP router')
             _apply_isp_router_to_switches(router)
             _update_isl_trunk_vlan(router.vlan_id, add=True)
             if switch_port:
                 _set_isp_router_port(switch_port, router)
-            reset_acl_baseline()
-            reapply_all_ip_blocks()
+            if policy_ok:
+                reset_acl_baseline()
+                reapply_all_ip_blocks()
+            else:
+                flash('ACL baseline was not pushed because the HP5130 policy JSON is stale.', 'warning')
             flash(
                 f'ISP router "{name}" added. '
                 f'⚠ Set the router LAN IP to {router.gateway_ip} and add a '
@@ -493,6 +510,7 @@ def admin_isp_routers():
             if new_nat in ('none', 'udm', 'openwrt'):
                 router.nat_logger_type = new_nat
             db.session.commit()
+            policy_ok = _write_hp5130_policy_or_warn('updating ISP router')
 
             if old_pbr_name != router.pbr_name:
                 _remove_isp_router_pbr_from_switches(old_pbr_name)
@@ -521,8 +539,12 @@ def admin_isp_routers():
                 _update_isl_trunk_vlan(old_vlan_id, add=False)
             _update_isl_trunk_vlan(router.vlan_id, add=True)
 
-            baseline_ok = reset_acl_baseline()
-            pushed, blk_failed = reapply_all_ip_blocks()
+            if policy_ok:
+                baseline_ok = reset_acl_baseline()
+                pushed, blk_failed = reapply_all_ip_blocks()
+            else:
+                baseline_ok = False
+                pushed, blk_failed = 0, 1
             msg = f'ISP router "{router.name}" updated.'
             if baseline_ok and blk_failed == 0:
                 msg += f' ACL baseline pushed and {pushed} block(s) re-applied.'
@@ -539,9 +561,11 @@ def admin_isp_routers():
                 _clear_isp_router_port(router.switch_port, router.switch_host)
             _remove_isp_router_from_switches(router)
             _update_isl_trunk_vlan(vlan_to_remove, add=False)
+            deleted_name = router.name
             db.session.delete(router)
             db.session.commit()
-            flash(f'ISP router "{router.name}" deleted.', 'success')
+            _write_hp5130_policy_or_warn('deleting ISP router')
+            flash(f'ISP router "{deleted_name}" deleted.', 'success')
             return redirect(url_for('admin.isp_routers.admin_isp_routers'))
 
     routers = ISPRouter.query.order_by(ISPRouter.id).all()
@@ -583,6 +607,7 @@ def admin_isp_routers():
 @login_required
 @permission_required('manage_isp_routers')
 def push_pbr_nqa():
+    _write_hp5130_policy_or_warn('manual PBR/NQA push')
     ok = push_pbr_nqa_to_switches()
     if ok:
         flash('PBR/NQA config pushed to all switches successfully.', 'success')
@@ -614,7 +639,8 @@ def push_vlan_interfaces():
 @login_required
 @permission_required('manage_isp_routers')
 def reapply_acl_blocks():
-    baseline_ok = reset_acl_baseline()
+    policy_ok = _write_hp5130_policy_or_warn('manual ACL baseline push')
+    baseline_ok = reset_acl_baseline() if policy_ok else False
     pushed, failed = reapply_all_ip_blocks()
     if baseline_ok and failed == 0:
         flash(f'ACL baseline pushed and {pushed} IP block(s) re-applied to all switches.', 'success')
@@ -640,6 +666,15 @@ def push_all_switch_config():
         with _app.app_context():
             steps = []
             try:
+                _push_job_write(job_id, {'status': 'running', 'message': 'Writing HP5130 policy JSON…'})
+                try:
+                    policy_path = write_hp5130_policy_file()
+                    logger.info("HP5130 policy JSON updated before full switch push: %s", policy_path)
+                except Exception as exc:
+                    logger.exception("Failed to update HP5130 policy JSON before full switch push")
+                    steps.append(('HP5130 policy JSON', False))
+                    raise
+
                 _push_job_write(job_id, {'status': 'running', 'message': 'Pushing PBR/NQA…'})
                 pbr_ok = push_pbr_nqa_to_switches()
                 steps.append(('PBR/NQA', pbr_ok))

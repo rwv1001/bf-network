@@ -169,6 +169,10 @@
         text-transform: uppercase;
         letter-spacing: 0.02em;
     }
+    .vlan-table th:first-child,
+    .vlan-table td:first-child {
+        display: none;
+    }
     .vlan-table input[type="text"], .vlan-table select {
         width: 100%;
         min-width: 80px;
@@ -245,7 +249,8 @@
         <div class="table-responsive">
             <table class="vlan-table" id="vlan-table">
                 <thead>
-                    <tr>                        
+                    <tr> 
+                        <th>Key</th>                       
                         <th>Name</th>
                         <th>VLAN ID</th>
                         <th>SSID</th>
@@ -259,7 +264,13 @@
                 </thead>
                 <tbody>
                     {% for entry in vlan_entries %}
-                    <tr data-vlan-id="{{ entry.vlan_id }}">                        
+                    <tr data-vlan-id="{{ entry.vlan_id }}">
+                        <td>
+                            <input type="text"
+                                   name="vlan_status"
+                                   value="{{ entry.status }}"
+                                   {% if entry.status in fixed_statuses %}readonly{% endif %}>
+                        </td>                        
                         <td>
                             <input type="text"
                                    name="vlan_name"

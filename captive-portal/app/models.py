@@ -251,8 +251,7 @@ class ISPRouter(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     # VLANs routed via this ISP
-    vlan_mappings = db.relationship('VlanMapping', backref='isp_router', lazy=True,
-                                    foreign_keys='VlanMapping.isp_router_id')
+    #vlan_mappings = db.relationship('VlanMapping', backref='isp_router', lazy=True)
 
     @property
     def pbr_name(self):
@@ -285,8 +284,8 @@ class VlanMapping(db.Model):
     wired_enabled = db.Column(db.Boolean, default=False, nullable=False)
     require_password = db.Column(db.Boolean, default=False, nullable=False)
     description = db.Column(db.Text)
-    isp_router_id = db.Column(db.Integer, db.ForeignKey('isp_routers.id',
-                              ondelete='SET NULL'), nullable=True)
+    isp_router_id = db.Column(db.Integer, db.ForeignKey('isp_routers.id', ondelete='SET NULL'), nullable=True)
+    isp_router = db.relationship('ISPRouter', backref=db.backref('vlan_mappings', lazy=True), lazy=True)
     # Comma-separated list of VLAN IDs this VLAN is allowed to reach at IP layer.
     # NULL / empty string = unrestricted (all inter-VLAN traffic permitted).
     visible_vlans = db.Column(db.Text, nullable=True)

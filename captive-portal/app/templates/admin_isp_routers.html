@@ -170,8 +170,8 @@ function pushAllSwitchConfig() {
         'Push ALL HP5130 switch configuration?\n\n' +
         'This will apply:\n' +
         '• PBR / NQA tracking (ISP failover)\n' +
-        '• ACL 3951 + 3953 (uplink outbound: PiHole enforcement, DoH/DoT blocking, blocked-pool denies)\n' +
-        '• VLAN interface IPs (removes old per-VLAN inbound ACLs)\n' +
+        '• Per-router uplink ACLs from hp5130-policy.json (PiHole enforcement, DoH/DoT blocking, blocked-pool denies)\n' +
+        '• VLAN isolation ACLs and VLAN interface PBR assignments from hp5130-policy.json\n' +
         '• All current per-device IP block rules\n\n' +
         'Safe to run at any time — fully idempotent.'
     )) return;
@@ -260,7 +260,7 @@ function showPushBanner(msg, type) {
 
 <!-- Existing routers table -->
 <div class="card">
-    <div class="card-header">🌐 Configured ISP Routers</div>
+    <div class="card-header">ߌ Configured ISP Routers</div>
     <div class="card-body" style="padding: 0;">
         {% if routers %}
         <table>
@@ -366,7 +366,7 @@ function showPushBanner(msg, type) {
                             </select>
                         </div>
                         <div class="router-hint" id="nat-hint-edit-{{ router.id }}" style="display:{% if router.nat_logger_type == 'openwrt' %}block{% else %}none{% endif %}">
-                            🔑 <strong>Copy the shared SSH key to this router (run on the Pi):</strong><br>
+                            ߔ <strong>Copy the shared SSH key to this router (run on the Pi):</strong><br>
                             <code>ssh-copy-id -i /home/admin/.ssh/tel_key.pub root@{{ router.gateway_ip }}</code>
                         </div>
                         <div class="router-hint" id="hint-edit-{{ router.id }}">
@@ -436,7 +436,7 @@ function showPushBanner(msg, type) {
                 </select>
             </div>
             <div class="router-hint" id="nat-hint-add" style="display:none">
-                🔑 <strong>Copy the shared SSH key to this router (run on the Pi):</strong><br>
+                ߔ <strong>Copy the shared SSH key to this router (run on the Pi):</strong><br>
                 <code>ssh-copy-id -i /home/admin/.ssh/tel_key.pub root@<span id="nat-hint-add-gw"></span></code>
             </div>
 

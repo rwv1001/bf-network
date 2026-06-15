@@ -22,6 +22,8 @@ import re
 import shlex
 import shutil
 import subprocess
+
+import json
 from datetime import datetime
 
 from extensions import db
@@ -233,10 +235,71 @@ def manage_switch_acl(action: str, ip_address: str, vlan_id) -> bool:
     return all_ok
 
 
+def parse_switch_isp_routers(config_text: str) -> dict:
+    """
+    Parse 'display current-configuration' output and extract
+    currently configured ISP routers / PBRs / NQAs.
+    """
+    pbr_names = set()
+    nqa_names = set()
+    uplink_vlans = {}  # vlan_id -> router_name
+
+    # Find uplink VLANs
+    for match in re.finditer(
+        r'vlan\s+(\d+)\s*\n\s*description\s+UPLINK-TO-([A-Z0-9_-]+)', 
+        config_text, 
+        re.IGNORECASE | re.MULTILINE
+    ):
+        vlan_id = int(match.group(1))
+        name = match.group(2).upper().replace('-', '_')
+        uplink_vlans[vlan_id] = name
+
+    # Find PBRs
+    for match in re.finditer(r'policy-based-route\s+(PBR-[A-Z0-9_-]+)', config_text, re.IGNORECASE):
+        pbr_names.add(match.group(1).upper())
+
+    # Find NQA entries
+    for match in re.finditer(r'nqa entry admin\s+([a-z0-9_-]+)', config_text, re.IGNORECASE):
+        nqa_names.add(match.group(1).lower())
+
+    return {
+        "pbr_names": sorted(list(pbr_names)),
+        "nqa_names": sorted(list(nqa_names)),
+        "uplink_vlans": uplink_vlans,
+        "timestamp": datetime.utcnow().isoformat() + "Z"
+    }
+
+
 def reset_acl_baseline() -> bool:
-    """Re-apply baseline walled-garden ACLs on ALL configured switches."""
-    from core.switch import get_switch_hosts
-    script_path = os.getenv('ACL_BASELINE_SCRIPT', '/scripts/hp5130-acl-baseline.sh')
+    """
+    Re-apply HP5130 ACL/PBR baseline on ALL configured switches.
+
+    The baseline script reads:
+      - HP5130_POLICY_PATH (desired state)
+      - HP5130_CURRENT_CONFIG_PATH (current state on the switch, used for cleanup)
+
+    This function:
+    - Fetches the current configuration from each switch
+    - Parses it to extract existing PBRs/NQAs
+    - Writes the state to HP5130_CURRENT_CONFIG_PATH
+    - Calls the baseline script with both files available
+    """
+    from core.switch import get_switch_hosts, run_switch_command
+    from core.hp5130_policy import write_hp5130_policy_file    
+
+    script_path = os.getenv(
+        'ACL_BASELINE_SCRIPT',
+        '/scripts/hp5130-acl-baseline.sh',
+    )
+    policy_path = os.getenv(
+        'HP5130_POLICY_PATH',
+        '/scripts/scriptdata/hp5130-policy.json',
+    )
+
+    current_config_path = os.getenv(
+        'HP5130_CURRENT_CONFIG_PATH',
+        '/scripts/scriptdata/hp5130-current-config.json'
+    )
     if not os.path.isfile(script_path):
         logger.error("ACL baseline script not found: %s", script_path)
         return False
@@ -246,24 +309,108 @@ def reset_acl_baseline() -> bool:
         logger.error("reset_acl_baseline: no switch hosts configured")
         return False
 
+    # ------------------------------------------------------------------
+    # Step 1: Fetch and parse current switch configuration
+    # ------------------------------------------------------------------
+    switch_state = {}
+    for host in switch_hosts:
+        try:
+            output = run_switch_command(host, "display current-configuration", disable_paging=True)
+            if output:
+                switch_state[host] = parse_switch_isp_routers(output)
+            else:
+                logger.warning("Failed to get current-configuration from %s", host)
+        except Exception as exc:
+            logger.warning("Error fetching config from %s: %s", host, exc)
+
+    # Write current switch state so the shell script can use it for cleanup
+    try:
+        os.makedirs(os.path.dirname(current_config_path), exist_ok=True)
+        with open(current_config_path, "w", encoding="utf-8") as f:
+            json.dump(switch_state, f, indent=2)
+        logger.info("Current switch state written to %s", current_config_path)
+    except Exception as exc:
+        logger.exception("Failed to write current switch state to %s: %s", current_config_path, exc)
+        return False
+
+    # ------------------------------------------------------------------
+    # Step 2: Refresh HP5130 policy JSON from database
+    # ------------------------------------------------------------------
+    try:
+        write_hp5130_policy_file(policy_path)
+        logger.info("HP5130 policy JSON refreshed: %s", policy_path)
+    except Exception as exc:
+        logger.exception(
+            "Failed to write HP5130 policy JSON at %s: %s",
+            policy_path,
+            exc,
+        )
+        return False
+
+    if not os.path.isfile(policy_path):
+        logger.error("HP5130 policy JSON not found: %s", policy_path)
+        return False
+
+    # ------------------------------------------------------------------
+    # Step 3: Run baseline script on each switch
+    # ------------------------------------------------------------------
+
     all_ok = True
+    timeout = int(os.getenv('ACL_BASELINE_TIMEOUT', '180'))
+
     for host in switch_hosts:
         env = _make_script_env(host)
-        result = subprocess.run([script_path], capture_output=True, text=True,
-                                timeout=120, env=env)
+
+        # Make key paths available to the script
+        env['ACL_BASELINE_SCRIPT'] = script_path
+        env['HP5130_POLICY_PATH'] = policy_path
+        env['HP5130_CURRENT_CONFIG_PATH'] = current_config_path
+        env['POLICY_JSON'] = policy_path  # backward compatibility
+
+        try:
+            result = subprocess.run(
+                [script_path],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+            )
+        except subprocess.TimeoutExpired as exc:
+            logger.error(
+                "ACL baseline timed out for %s after %ss. stdout=%s stderr=%s",
+                host,
+                exc.timeout,
+                (exc.stdout or '').strip() or '<empty>',
+                (exc.stderr or '').strip() or '<empty>',
+            )
+            all_ok = False
+            continue
+        except Exception as exc:
+            logger.exception("ACL baseline failed to launch for %s: %s", host, exc)
+            all_ok = False
+            continue
+
         if result.returncode != 0:
             logger.error(
                 "ACL baseline failed for %s (exit=%s). stderr=%s stdout=%s",
-                host, result.returncode,
+                host,
+                result.returncode,
                 (result.stderr or '').strip() or '<empty>',
                 (result.stdout or '').strip() or '<empty>',
             )
             all_ok = False
         else:
-            logger.info("ACL baseline pushed to %s", host)
-            if not _push_vlan_isolation_acls(host):
-                logger.warning("Inter-VLAN isolation ACLs failed for %s", host)
-                all_ok = False
+            logger.info(
+                "ACL/PBR baseline pushed to %s using policy %s",
+                host,
+                policy_path,
+            )
+            # Debug output (only shown when LOG_LEVEL=DEBUG)
+            if result.stdout:
+                logger.debug("Switch stdout from %s:\n%s", host, result.stdout.strip())
+            if result.stderr:
+                logger.debug("Switch stderr from %s:\n%s", host, result.stderr.strip())
+
     return all_ok
 
 
@@ -803,6 +950,8 @@ def reset_pi_network_masks(vlan_ids: list) -> bool:
                      (result.stdout or '').strip() or '<empty>')
         return False
     return True
+
+
 
 
 def reset_acl_queue_files() -> None:

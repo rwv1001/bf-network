@@ -1,0 +1,16 @@
+{
+  "192.168.99.2": {
+    "pbr_names": [
+      "PBR-TELO",
+      "PBR-UDM"
+    ],
+    "nqa_names": [
+      "pbrtelo",
+      "pbrudm"
+    ],
+    "uplink_vlans": {
+      "2": "TELO"
+    },
+    "timestamp": "2026-06-15T19:30:52.690376Z"
+  }
+}
