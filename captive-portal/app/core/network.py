@@ -846,6 +846,9 @@ def reapply_all_ip_blocks() -> tuple:
     pushed = 0
     failed = 0
 
+    # Get WIRED_VLAN from environment (default 250)
+    wired_vlan = int(os.getenv('WIRED_VLAN', 250))
+
     leases = IPLease.query.filter(
         IPLease.lease_expiry > now,
         IPLease.from_blocked_pool == False,  # noqa: E712
@@ -860,6 +863,8 @@ def reapply_all_ip_blocks() -> tuple:
         vlan_id = lease.vlan_id or device.current_vlan
         if not vlan_id or not lease.ip_address:
             continue
+        if vlan_id == wired_vlan:
+            continue    
         ok = manage_switch_acl('block', lease.ip_address, vlan_id)
         if ok:
             pushed += 1

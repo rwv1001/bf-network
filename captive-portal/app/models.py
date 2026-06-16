@@ -166,45 +166,51 @@ class Device(db.Model):
 
     def __repr__(self):
         return f'<Device {self.mac_address}>'
-    
-    def get_pool_assignment(self):
-        """
-        Determine which DHCP pool this device should be in.
-        
-        Returns:
-            str: 'registered', 'newly_unregistered', or 'old_unregistered'
-        """
-        if self.registration_status == 'registered':
-            return 'registered'
-        
-        # Check how long ago device was first seen
-        if self.first_seen:
-            time_since_first_seen = datetime.utcnow() - self.first_seen
-            if time_since_first_seen < timedelta(minutes=30):
-                return 'newly_unregistered'
-        
-        return 'old_unregistered'
 
-    @property
-    def user_id(self):
-        """Spec Table 6: no user_id column — current owner is resolved via Table 9 (device_ownership)."""
-        o = DeviceOwnership.query.filter_by(mac_address=self.mac_address, end_datetime=None).first()
-        return o.user_id if o else None
+    # ===================== RELATIONSHIPS =====================
+
+    active_ownership = db.relationship(
+    'DeviceOwnership',
+    primaryjoin="and_(Device.mac_address == DeviceOwnership.mac_address, "
+                "DeviceOwnership.end_datetime == None)",
+    uselist=False,
+    lazy='select'
+    )
+
+    # ===================== PROPERTIES =====================
 
     @property
     def user(self):
-        """Current owner (User) resolved via Table 9 (device_ownership)."""
-        uid = self.user_id
-        return User.query.get(uid) if uid else None
+        """Current owner (User) via active DeviceOwnership."""
+        if self.active_ownership:
+            return self.active_ownership.user
+        return None
+
+    @property
+    def user_id(self):
+        """Current owner's user ID."""
+        return self.active_ownership.user_id if self.active_ownership else None
 
     @property
     def ip_address(self):
-        """Spec Table 7: IP is tracked in ip_leases. Returns current active lease IP."""
+        """Returns current active lease IP (from ip_leases table)."""
         lease = IPLease.query.filter(
             IPLease.mac_address == self.mac_address,
             IPLease.lease_expiry > datetime.utcnow(),
         ).order_by(IPLease.lease_start.desc()).first()
         return lease.ip_address if lease else None
+
+    # ===================== METHODS =====================
+
+    def get_pool_assignment(self):
+        if self.registration_status == 'registered':
+            return 'registered'
+
+        if self.first_seen:
+            if datetime.utcnow() - self.first_seen < timedelta(minutes=30):
+                return 'newly_unregistered'
+
+        return 'old_unregistered'
 
 
 class RegistrationRequest(db.Model):
@@ -354,23 +360,26 @@ class UnregisteredLease(db.Model):
 
 class DeviceOwnership(db.Model):
     """Spec Table 9 — historical record of which user owns which MAC address.
-
-    An active ownership is a row where end_datetime IS NULL.  When a device is
-    reassigned or unregistered, end_datetime is set to the current time and a
-    new row (or no row) is created as appropriate.
+    An active ownership is a row where end_datetime IS NULL.
+    When ownership ends, end_datetime is set and (usually) a new row is created.
     """
     __tablename__ = 'device_ownership'
 
     id = db.Column(db.Integer, primary_key=True)
-    mac_address = db.Column(db.String(17), nullable=False, index=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    mac_address = db.Column(db.String(17), db.ForeignKey('devices.mac_address', ondelete='CASCADE'), nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=False)  # ← changed
     start_datetime = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     end_datetime = db.Column(db.DateTime, nullable=True)
 
-    user = db.relationship('User', backref=db.backref('ownerships', lazy=True))
+    user = db.relationship('User', backref='device_ownerships', lazy='select')
+
+    __table_args__ = (
+        db.Index('ix_device_ownership_mac_active', 'mac_address', 'end_datetime'),
+    )
 
     def __repr__(self):
-        return f'<DeviceOwnership mac={self.mac_address} user={self.user_id} active={self.end_datetime is None}>'
+        status = "active" if self.end_datetime is None else "ended"
+        return f'<DeviceOwnership {self.mac_address} → user {self.user_id} ({status})>'
 
 
 class IPLease(db.Model):

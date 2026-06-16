@@ -1011,48 +1011,8 @@ def register():
     )
 
 
-# ---------------------------------------------------------------------------
-# Status / informational pages
-# ---------------------------------------------------------------------------
 
-@portal_bp.route('/verify')
-def verify():
-    token = request.args.get('token')
-    if not token:
-        flash('Invalid verification link', 'error')
-        return redirect(url_for('portal.register'))
-    device = Device.query.filter_by(verification_token=token).first()
-    if not device:
-        flash('Invalid or expired verification token', 'error')
-        return redirect(url_for('portal.register'))
-    if device.verification_expires_at < datetime.now():
-        vlan_map = get_vlan_map()
-        device.registration_status = 'blocked'
-        device.current_vlan = vlan_map['restricted']
-        db.session.commit()
-        send_coa_change(device.mac_address, vlan_map['restricted'])
-        flash('Verification link has expired. Your device has been blocked.', 'error')
-        return redirect(url_for('portal.status'))
-    user = device.user
-    if user:
-        vlan_map = get_vlan_map()
-        allowed_vlans, _ = get_effective_vlans_for_user(user)
-        target_vlan = default_vlan_for_user(allowed_vlans, vlan_map) or device.current_vlan
-        device.registration_status = 'registered'
-        device.current_vlan = target_vlan
-        device.verification_token = None
-        device.verification_expires_at = None
-        db.session.commit()
-        success = send_coa_change(device.mac_address, target_vlan)
-        if success:
-            flash(
-                f'Email verified! You now have {label_for_vlan(target_vlan, vlan_map) or "network access"}.',
-                'success',
-            )
-        else:
-            flash('Verification successful, but there was an issue updating network access.', 'warning')
-        clear_unregistered_lease(device.mac_address)
-    return redirect(url_for('portal.status'))
+
 
 
 @portal_bp.route('/status')
@@ -1243,18 +1203,16 @@ def unregister(token):
             # 1. Unregister the MAC (affects lease assignment)
             if vlan_id:
                 kea.unregister_mac(mac=mac_address, vlan=vlan_id)
-
-            # 2. IMPORTANT: Delete the host reservation so findRegisteredHost()
-            #    no longer sees this device as registered.
-            kea.delete_host_reservation(mac_address)
-
+            
         except Exception as exc:
             logger.warning("Kea cleanup failed during unregistration of %s: %s",
                            mac_address, exc)
 
     if connection_type == 'wired':
-        vlan_map = get_vlan_map()
-        send_coa_change(mac_address, vlan_map['unregistered'])
+        import os
+        # Read directly from docker-compose.yml (WIRED_VLAN=250)
+        unregistered_vlan = int(os.getenv('WIRED_VLAN', 250))
+        send_coa_change(mac_address, unregistered_vlan)
 
     # === Portal-side cleanup ===
     close_ownership(mac_address, commit=False)

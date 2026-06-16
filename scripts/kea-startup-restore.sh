@@ -29,7 +29,7 @@ if [ ! -x "$DNS_SCRIPT" ]; then
 fi
 
 log "Restoring blocked-pool DNS hijack ranges..."
-if "$DNS_SCRIPT" hijack-blocked-pools 2>&1 | while IFS= read -r line; do log "  [hijack-blocked-pools] $line"; done; then
+if "$DNS_SCRIPT" refresh-blocked-pools 2>&1 | while IFS= read -r line; do log "  [refresh-blocked-pools] $line"; done; then
     log "Blocked-pool ranges restored OK"
 else
     log "WARNING: blocked-pool range restore exited non-zero (iptables may be unavailable yet)"
@@ -59,6 +59,7 @@ IPS=$(PGPASSWORD="$DB_PASSWORD" psql \
           AND l.ip_address IS NOT NULL
           AND l.ip_address <> ''
           AND l.from_blocked_pool = false
+          AND l.vlan_id != ${WIRED_VLAN:-250}
         ORDER BY l.ip_address
     " 2>/dev/null) || true
 

@@ -289,6 +289,29 @@ def vlan_config():
                         # Interface masks (only needed on prefix change)
                         if _prefix_changed:
                             reset_pi_network_masks(_changed_vlan_ids)
+                            try:
+                                script_path = os.getenv('DNS_SCRIPT', '/scripts/dns-hijack.sh')
+                                if os.path.isfile(script_path):
+                                    result = subprocess.run(
+                                        [script_path, "refresh-blocked-pools"],
+                                        capture_output=True, text=True, timeout=30
+                                    )
+
+                                    if result.returncode == 0:
+                                        if result.stdout.strip():
+                                            logger.info("DNS hijack refresh output:\n%s", result.stdout.strip())
+                                        logger.info("Blocked-pool DNS hijack rules refreshed after prefix change")
+                                    else:
+                                        logger.warning(
+                                            "Failed to refresh blocked-pool DNS hijack (exit=%s)\nSTDOUT:\n%s\nSTDERR:\n%s",
+                                            result.returncode,
+                                            result.stdout.strip() or '<empty>',
+                                            result.stderr.strip() or '<empty>'
+                                        )
+                                else:
+                                    logger.warning("DNS hijack script not found: %s", script_path)
+                            except Exception as exc:
+                                logger.warning("Error refreshing blocked-pool DNS hijack: %s", exc)
 
                         # Restart Kea
                         try:

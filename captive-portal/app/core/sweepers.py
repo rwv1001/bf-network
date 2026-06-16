@@ -429,3 +429,36 @@ def startup_write_prefix_map(app) -> None:
                     pass
 
     threading.Thread(target=_run, daemon=True).start()
+
+
+def startup_dns_hijack_blocked_pools(app) -> None:
+    """Ensure DNS hijacking for blocked pools is active after startup."""
+
+    def _run():
+        time.sleep(12)
+        try:
+            script_path = os.getenv('DNS_SCRIPT', '/scripts/dns-hijack.sh')
+            if not os.path.isfile(script_path):
+                logger.error("DNS hijack script not found: %s", script_path)
+                return
+
+            result = subprocess.run(
+                [script_path, "refresh-blocked-pools"],   # ← changed
+                capture_output=True, text=True, timeout=30
+            )
+
+            if result.returncode == 0:
+                if result.stdout.strip():
+                    logger.info("DNS hijack startup output:\n%s", result.stdout.strip())
+                logger.info("Startup DNS hijack for blocked pools applied successfully")
+            else:
+                logger.warning(
+                    "Startup DNS hijack failed (exit=%s)\nSTDOUT:\n%s\nSTDERR:\n%s",
+                    result.returncode,
+                    result.stdout.strip() or '<empty>',
+                    result.stderr.strip() or '<empty>'
+                )
+        except Exception as exc:
+            logger.warning("Failed to apply startup blocked-pool DNS hijack: %s", exc)   
+
+    threading.Thread(target=_run, daemon=True).start()    

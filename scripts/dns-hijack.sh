@@ -24,18 +24,18 @@ fi
 
 if [ -z "$ACTION" ]; then
     echo "Usage: $0 {hijack|unhijack|block|unblock} <ip_address>"
-    echo "       $0 {hijack-blocked-pools|unhijack-blocked-pools}"
+    echo "       $0 {hijack-blocked-pools|unhijack-blocked-pools|refresh-blocked-pools}"
     exit 1
 fi
 
 case "$ACTION" in
-    hijack-blocked-pools|unhijack-blocked-pools)
+    hijack-blocked-pools|unhijack-blocked-pools|refresh-blocked-pools)
         # No IP required for pool/VLAN-wide rules
         ;;
     *)
         if [ -z "$IP_ADDRESS" ]; then
             echo "Usage: $0 {hijack|unhijack|block|unblock} <ip_address>"
-            echo "       $0 {hijack-blocked-pools|unhijack-blocked-pools}"
+            echo "       $0 {hijack-blocked-pools|unhijack-blocked-pools|refresh-blocked-pools}"
             exit 1
         fi
         ;;
@@ -55,13 +55,15 @@ get_blocked_pool_ranges() {
         return 1
     fi
 
-    python3 - <<'PY' "$CONFIG_PATH" "$MANAGEMENT_VLAN"
+    python3 - <<'PY' "$CONFIG_PATH" "$MANAGEMENT_VLAN" "${WIRED_VLAN:-250}"
 import json
 import ipaddress
 import sys
 
 config_path = sys.argv[1]
 mgmt_vlan = int(sys.argv[2]) if len(sys.argv) > 2 else 99
+wired_vlan = int(sys.argv[3]) if len(sys.argv) > 3 else 250
+
 try:
     with open(config_path, 'r', encoding='utf-8') as handle:
         data = json.load(handle)
@@ -75,20 +77,30 @@ for subnet in data.get('Dhcp4', {}).get('subnet4', []):
         continue
     if vlan_id == mgmt_vlan:
         continue
+
+    network = ipaddress.ip_network(subnet.get('subnet'), strict=False)
+
+    # Special case: WIRED_VLAN should hijack the *entire* subnet
+    if vlan_id == wired_vlan:
+        blocked_pool = f"{network.network_address}-{network.broadcast_address}"
+        print(f"{vlan_id}|{blocked_pool}")
+        continue
+
     blocked_pool = None
     for pool in subnet.get('pools', []):
         classes = pool.get('client-classes') or []
         if 'BLOCKED' in classes:
             blocked_pool = pool.get('pool')
             break
+
     if not blocked_pool:
-        network = ipaddress.ip_network(subnet.get('subnet'), strict=False)
         block_size = 40 * (2 ** (24 - network.prefixlen))
         blocked_start = network.broadcast_address - (block_size - 1)
         blocked_pool = f"{blocked_start}-{network.broadcast_address}"
     else:
         start_str, end_str = [part.strip() for part in blocked_pool.split('-', 1)]
         blocked_pool = f"{start_str}-{end_str}"
+
     print(f"{vlan_id}|{blocked_pool}")
 PY
 }
@@ -172,6 +184,27 @@ remove_blocked_pool_rules() {
     done
 }
 
+refresh_blocked_pool_rules() {
+    echo "Refreshing blocked pool DNS hijack rules..." >&2
+
+    # Remove all existing rules that DNAT port 53 to HIJACK_DNS_IP
+    $SUDO iptables -t nat -S PREROUTING | \
+        grep -E -- "--to-destination $HIJACK_DNS_IP:53" | \
+        while read -r rule; do
+
+            # Convert the rule from -S format back to something we can delete
+            # This is more reliable than simple sed
+            del_rule=$(echo "$rule" | sed 's/^-A/-D/; s/ -m / /g')
+
+            if $SUDO iptables -t nat $del_rule 2>/dev/null; then
+                echo "Removed: $del_rule" >&2
+            fi
+        done
+
+    # Re-add the current correct rules
+    add_blocked_pool_rules
+}
+
 case "$ACTION" in
     hijack-blocked-pools)
         add_blocked_pool_rules
@@ -179,6 +212,10 @@ case "$ACTION" in
 
     unhijack-blocked-pools)
         remove_blocked_pool_rules
+        ;;
+
+    refresh-blocked-pools)
+        refresh_blocked_pool_rules
         ;;
 
     hijack)

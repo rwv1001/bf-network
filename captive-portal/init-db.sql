@@ -401,7 +401,7 @@ CREATE INDEX IF NOT EXISTS idx_pbq_domain      ON pihole_blocked_queries(domain)
 -- ── Table 9: DeviceOwnership history ────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS device_ownership (
     id             SERIAL PRIMARY KEY,
-    mac_address    VARCHAR(17)  NOT NULL,
+    mac_address    VARCHAR(17)  NOT NULL REFERENCES devices(mac_address) ON DELETE CASCADE,
     user_id        INTEGER      REFERENCES users(id) ON DELETE SET NULL,
     start_datetime TIMESTAMP    NOT NULL DEFAULT NOW(),
     end_datetime   TIMESTAMP
