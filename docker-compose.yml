@@ -40,6 +40,7 @@ services:
       PORTAL_URL: ${PORTAL_URL:-}
       HIJACK_DNS_IP: ${HIJACK_DNS_IP:?HIJACK_DNS_IP is required – set it in .env}
       UNREGISTERED_GW: ${UNREGISTERED_GW:?UNREGISTERED_GW is required – set it in .env}
+      ACL_DEDUP_WINDOW: ${ACL_DEDUP_WINDOW:-15}
       SWITCH_HOSTS: ${SWITCH_HOSTS:?SWITCH_HOSTS is required – set it in .env}
       NETWORK_WORD: ${NETWORK_WORD:?NETWORK_WORD is required – set it in .env}
       VLAN_PREFIX_MAP: ${VLAN_PREFIX_MAP:?VLAN_PREFIX_MAP is required – set it in .env}
@@ -245,6 +246,7 @@ services:
       PORTAL_IP: ${PORTAL_IP:?PORTAL_IP is required – set it in .env}
       PORTAL_IP_BYTE: ${PORTAL_IP_BYTE:-4}
       HIJACK_DNS_IP: ${HIJACK_DNS_IP:?HIJACK_DNS_IP is required – set it in .env}
+      ACL_DEDUP_WINDOW: ${ACL_DEDUP_WINDOW:-15}
       SWITCH_USER: ${SWITCH_USER:-robert}
       SWITCH_PASS: ${SWITCH_PASS}
       SWITCH_PORT_LOOKUP_ENABLED: ${SWITCH_PORT_LOOKUP_ENABLED:-1}

@@ -25,7 +25,7 @@ from sqlalchemy import text
 from extensions import db
 from models import ISPRouter, VlanMapping, Setting
 from core.auth import permission_required
-from core.network import reset_acl_baseline, reapply_all_ip_blocks, reset_vlan_interface_masks
+from core.network import reset_acl_baseline, reapply_all_ip_blocks
 from core.hp5130_policy import write_hp5130_policy_file
 from core.switch import (
     COMMON_PORT_UNDO_COMMANDS,
@@ -616,23 +616,7 @@ def push_pbr_nqa():
     return redirect(url_for('admin.isp_routers.admin_isp_routers'))
 
 
-@isp_routers_bp.route('/push-vlan-interfaces', methods=['POST'])
-@login_required
-@permission_required('manage_isp_routers')
-def push_vlan_interfaces():
-    all_vlan_ids = [m.vlan_id for m in VlanMapping.query.all() if m.vlan_id]
-    if not all_vlan_ids:
-        flash('No VLANs configured — nothing to push.', 'warning')
-        return redirect(url_for('admin.isp_routers.admin_isp_routers'))
-    ok = reset_vlan_interface_masks(all_vlan_ids)
-    if ok:
-        flash(
-            f'VLAN interface config pushed to all switches for {len(all_vlan_ids)} VLAN(s).',
-            'success',
-        )
-    else:
-        flash('VLAN interface push failed on one or more switches — check logs.', 'warning')
-    return redirect(url_for('admin.isp_routers.admin_isp_routers'))
+
 
 
 @isp_routers_bp.route('/reapply-acl-blocks', methods=['POST'])
@@ -658,69 +642,47 @@ def push_all_switch_config():
     import secrets as _secrets
     job_id = _secrets.token_hex(16)
 
-    all_vlan_ids = [m.vlan_id for m in VlanMapping.query.all() if m.vlan_id]
     _push_job_write(job_id, {'status': 'running', 'message': 'Starting…'})
 
     def _run():
         from app import app as _app
         with _app.app_context():
-            steps = []
             try:
-                _push_job_write(job_id, {'status': 'running', 'message': 'Writing HP5130 policy JSON…'})
-                try:
-                    policy_path = write_hp5130_policy_file()
-                    logger.info("HP5130 policy JSON updated before full switch push: %s", policy_path)
-                except Exception as exc:
-                    logger.exception("Failed to update HP5130 policy JSON before full switch push")
-                    steps.append(('HP5130 policy JSON', False))
-                    raise
-
-                _push_job_write(job_id, {'status': 'running', 'message': 'Pushing PBR/NQA…'})
-                pbr_ok = push_pbr_nqa_to_switches()
-                steps.append(('PBR/NQA', pbr_ok))
-
-                _push_job_write(job_id, {'status': 'running', 'message': 'Pushing ACL baseline…'})
+                _push_job_write(job_id, {'status': 'running', 'message': 'Running full ACL/PBR/NQA baseline…'})
                 baseline_ok = reset_acl_baseline()
-                steps.append(('ACL baseline', baseline_ok))
 
-                if all_vlan_ids:
-                    _push_job_write(job_id, {'status': 'running', 'message': 'Pushing VLAN interfaces…'})
-                    vlan_ok = reset_vlan_interface_masks(all_vlan_ids)
-                    steps.append(('VLAN interfaces', vlan_ok))
-
-                _push_job_write(job_id, {'status': 'running', 'message': 'Re-applying IP blocks…'})
+                _push_job_write(job_id, {'status': 'running', 'message': 'Re-applying per-device IP blocks…'})
                 pushed, failed = reapply_all_ip_blocks()
-                steps.append(('IP blocks', failed == 0))
 
-                all_ok = all(ok for _, ok in steps)
-                if all_ok:
+                if baseline_ok:
                     _push_job_write(job_id, {
-                        'status': 'done', 'ok': True,
+                        'status': 'done',
+                        'ok': True,
                         'message': (
-                            f'All switch config pushed successfully. '
-                            f'PBR/NQA ✓  ACL baseline ✓  VLAN interfaces ✓  '
-                            f'IP blocks: {pushed} re-applied.'
+                            f'Full switch config pushed successfully. '
+                            f'ACL/PBR/NQA baseline ✓  IP blocks: {pushed} re-applied.'
                         ),
                     })
                 else:
-                    bad = [name for name, ok in steps if not ok]
                     _push_job_write(job_id, {
-                        'status': 'done', 'ok': False,
+                        'status': 'done',
+                        'ok': False,
                         'message': (
-                            f'Push completed with errors in: {", ".join(bad)}. '
+                            f'ACL/PBR/NQA baseline failed. '
                             f'IP blocks: {pushed} pushed, {failed} failed. Check logs.'
                         ),
                     })
+
             except Exception as exc:
-                logger.exception("push_all_switch_config background job failed")
+                logger.exception("push_all_switch_config failed")
                 _push_job_write(job_id, {
-                    'status': 'done', 'ok': False,
+                    'status': 'done',
+                    'ok': False,
                     'message': f'Push failed with exception: {exc}',
                 })
 
     threading.Thread(target=_run, daemon=True).start()
     return jsonify({'job_id': job_id})
-
 
 @isp_routers_bp.route('/push-all-switch-config/status/<job_id>', methods=['GET'])
 @login_required

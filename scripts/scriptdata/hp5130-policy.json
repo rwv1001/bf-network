@@ -1,6 +1,6 @@
 {
   "default_router_id": 1,
-  "generated_at": "2026-06-15T19:32:09.161000+00:00",
+  "generated_at": "2026-06-16T10:48:12.637394+00:00",
   "local_network": "192.168.0.0/16",
   "network_word": "192.168",
   "policy_path": "/scripts/scriptdata/hp5130-policy.json",
@@ -50,23 +50,20 @@
       "status": "friars",
       "subnet": "192.168.10.0/24",
       "switch_ip": "192.168.10.2",
-      "visible_vlans": [
-        30,
-        40
-      ],
+      "visible_vlans": [],
       "vlan_id": 10,
       "wired_enabled": true
     },
     {
       "hostmask": "0.0.1.255",
       "isolation_acl": 3201,
-      "isp_router_id": 3,
+      "isp_router_id": null,
       "name": "Staffy",
       "netmask": "255.255.254.0",
       "network_address": "192.168.20.0",
       "prefix": 23,
       "require_password": true,
-      "resolved_isp_router_id": 3,
+      "resolved_isp_router_id": 1,
       "ssid": null,
       "status": "staffy",
       "subnet": "192.168.20.0/23",
@@ -78,7 +75,7 @@
     {
       "hostmask": "0.0.0.255",
       "isolation_acl": 3301,
-      "isp_router_id": 1,
+      "isp_router_id": null,
       "name": "Students",
       "netmask": "255.255.255.0",
       "network_address": "192.168.30.0",
@@ -89,9 +86,7 @@
       "status": "students",
       "subnet": "192.168.30.0/24",
       "switch_ip": "192.168.30.2",
-      "visible_vlans": [
-        10
-      ],
+      "visible_vlans": [],
       "vlan_id": 30,
       "wired_enabled": true
     },
@@ -109,9 +104,7 @@
       "status": "guests",
       "subnet": "192.168.40.0/23",
       "switch_ip": "192.168.40.2",
-      "visible_vlans": [
-        10
-      ],
+      "visible_vlans": [],
       "vlan_id": 40,
       "wired_enabled": true
     },

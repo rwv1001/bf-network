@@ -23,7 +23,7 @@ from models import ISPRouter, Setting, VlanMapping
 from core.auth import permission_required
 from core.network import (
     reset_acl_baseline, reset_acl_queue_files, reset_dns_hijack_rules,
-    reset_pi_network_masks, reset_vlan_interface_masks,
+    reset_pi_network_masks, 
 )
 from core.vlan_utils import (
     FIXED_VLAN_STATUSES, POOL_PREFIX_CHOICES, POOL_PREFIX_STATUSES,
@@ -207,6 +207,7 @@ def vlan_config():
 
         db.session.commit()
 
+
         _hp5130_policy_error = None
         try:
             _hp5130_policy_path = write_hp5130_policy_file()
@@ -239,9 +240,9 @@ def vlan_config():
         session['vlan_push_job_id'] = _push_job_id
 
         def _background_vlan_push():
-            from app import app as _app            
+            from app import app as _app
             _errors = []
-            rdb = _pihole_redis()            
+            rdb = _pihole_redis()
 
             try:
                 if rdb:
@@ -254,86 +255,55 @@ def vlan_config():
                     except Exception:
                         pass
 
-                with _app.app_context():                
+                with _app.app_context():
 
                     try:
                         if _hp5130_policy_write_error:
                             _errors.append(f'HP5130 policy JSON: {_hp5130_policy_write_error}')
 
-                        # 1. Push PBR/NQA so ISP router assignments are current
+                        # Run full ACL + PBR + NQA baseline when anything relevant changed
+                        if _pbr_changes or _prefix_changed or _visibility_changed:
+                            ok = reset_acl_baseline()
+                            if not ok:
+                                _errors.append('ACL/PBR/NQA baseline push failed')
+
+                        # 2. Re-apply per-device blocks AFTER the baseline
+                        #    (this is critical — baseline would have wiped them)
                         try:
-                            from blueprints.admin.isp_routers import push_pbr_nqa_to_switches
-                            push_pbr_nqa_to_switches()
+                            from core.network import reapply_all_ip_blocks
+                            pushed, failed = reapply_all_ip_blocks()
+                            if failed > 0:
+                                logger.warning("Re-applied IP blocks after baseline: %d pushed, %d failed", pushed, failed)
+                                _errors.append(f'IP block re-apply had {failed} failures')
                         except Exception as exc:
-                            logger.warning("BG VLAN push: PBR/NQA failed: %s", exc)
-                            _errors.append(f'PBR/NQA: {exc}')
+                            logger.exception("Failed to re-apply IP blocks in background: %s", exc)
+                            _errors.append(f'IP block re-apply failed: {exc}')                    
 
-                        # 2. Assign changed PBR policies to VLAN interfaces
-                        if _pbr_changes:
-                            from concurrent.futures import ThreadPoolExecutor, as_completed
-                            from core.switch import get_switch_hosts, run_switch_command
-                            switch_hosts = get_switch_hosts()
-                            pbr_tasks = []
-                            for (pbr_vlan_id, old_pbr, new_pbr) in _pbr_changes:
-                                for host in switch_hosts:
-                                    if new_pbr:
-                                        cmd = (
-                                            f"system-view\n"
-                                            f"interface Vlan-interface{pbr_vlan_id}\n"
-                                            f" undo ip policy-based-route\n"
-                                            f" ip policy-based-route {new_pbr}\n"
-                                            f"quit\nquit\nsave force"
-                                        )
-                                    elif old_pbr:
-                                        cmd = (
-                                            f"system-view\n"
-                                            f"interface Vlan-interface{pbr_vlan_id}\n"
-                                            f" undo ip policy-based-route {old_pbr}\n"
-                                            f"quit\nquit\nsave force"
-                                        )
-                                    else:
-                                        continue
-                                    pbr_tasks.append((host, cmd))
-                            if pbr_tasks:
-                                with ThreadPoolExecutor(max_workers=len(pbr_tasks)) as ex:
-                                    for f in as_completed(
-                                        [ex.submit(run_switch_command, h, c) for h, c in pbr_tasks]
-                                    ):
-                                        try:
-                                            f.result()
-                                        except Exception as exc:
-                                            logger.warning("BG PBR assign SSH error: %s", exc)
-                                            _errors.append(str(exc))
-
-                        # 3. Write new Kea config
+                        # Write new Kea config
                         try:
                             update_kea_config(_vlan_prefix_by_id)
                         except Exception as exc:
                             logger.warning("BG Kea config write failed: %s", exc)
                             _errors.append(f'Kea config: {exc}')
 
-                        # 4. ACL baseline + interface masks if prefix or visibility changed
-                        if _prefix_changed or _visibility_changed:
-                            ok = reset_acl_baseline()
-                            if not ok:
-                                _errors.append('ACL baseline push failed')
+                        # Interface masks (only needed on prefix change)
                         if _prefix_changed:
-                            reset_vlan_interface_masks(_changed_vlan_ids)
                             reset_pi_network_masks(_changed_vlan_ids)
 
-                        # 5. Restart Kea
+                        # Restart Kea
                         try:
                             restart_kea_container()
                         except Exception as exc:
                             logger.warning("BG Kea restart failed: %s", exc)
                             _errors.append(f'Kea restart: {exc}')
-                    
+
                     except Exception as exc:
                         logger.error("BG VLAN push raised: %s", exc)
                         _errors.append(str(exc))
+
             except Exception as exc:
                 logger.error("BG VLAN push raised: %s", exc)
-                _errors.append(str(exc))        
+                _errors.append(str(exc))
 
             finally:
                 if rdb:
@@ -435,56 +405,7 @@ def vlan_push_status():
         return jsonify({'state': 'error'})
 
 
-# ---------------------------------------------------------------------------
-# Push ACL baseline
-# ---------------------------------------------------------------------------
 
-@vlans_bp.route('/api/admin/push-acl-baseline', methods=['POST'])
-@login_required
-@permission_required('manage_vlans')
-def push_acl_baseline():
-    """Trigger a full ACL baseline + inter-VLAN isolation push in the background."""
-    job_id = secrets.token_hex(16)
-    session['vlan_push_job_id'] = job_id
-
-    def _run():
-        from app import app as _app
-        errors = []
-        rdb = _pihole_redis()
-        if rdb:
-            try:
-                rdb.set(f'vlan_push_job:{job_id}', json.dumps({'state': 'running'}), ex=300)
-            except Exception:
-                pass
-        try:
-            with _app.app_context():
-                try:
-                    policy_path = write_hp5130_policy_file()
-                    logger.info("HP5130 policy JSON updated before ACL baseline push: %s", policy_path)
-                except Exception as exc:
-                    logger.exception("Failed to update HP5130 policy JSON before ACL baseline push")
-                    errors.append(f'HP5130 policy JSON write failed: {exc}')
-                    return
-
-                ok = reset_acl_baseline()
-                if not ok:
-                    errors.append('ACL baseline push failed — check server logs')
-        except Exception as exc:
-            logger.exception('push_acl_baseline thread crashed: %s', exc)
-            errors.append(f'Unexpected error: {exc}')
-        finally:
-            if rdb:
-                try:
-                    rdb.set(
-                        f'vlan_push_job:{job_id}',
-                        json.dumps({'state': 'done', 'ok': not errors, 'errors': errors}),
-                        ex=300,
-                    )
-                except Exception:
-                    pass
-
-    threading.Thread(target=_run, daemon=True).start()
-    return jsonify({'ok': True, 'job_id': job_id})
 
 
 # ---------------------------------------------------------------------------

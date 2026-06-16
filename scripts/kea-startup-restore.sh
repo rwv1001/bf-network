@@ -107,7 +107,7 @@ fi
     n_acl_fail=0
     for ip in $IPS; do
         for sw in $SWITCH_HOSTS; do
-            if SWITCH_HOSTS="$sw" ACL_QUEUE_DISABLE=1 "$ACL_SCRIPT" block "$ip" 2>/dev/null; then
+            if SWITCH_HOSTS="$sw" "$ACL_SCRIPT" block "$ip" 2>/dev/null; then
                 log "  ACL block OK: $ip via $sw"
                 n_acl_ok=$((n_acl_ok + 1))
             else

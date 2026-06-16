@@ -1208,13 +1208,11 @@ def unregister(token):
     connection_type = device.connection_type
     vlan_id         = device.current_vlan
     user            = device.user
-    user_email      = user.email if user else 'Unknown'
 
     # === Get current active IP (best effort) ===
     lease = get_active_iplease(mac_address)
     current_ip = lease.ip_address if lease else device.ip_address
 
-    # Fallback to Kea if we still don't have an IP
     if not current_ip:
         kea = _get_kea()
         if kea:
@@ -1223,9 +1221,8 @@ def unregister(token):
             except Exception:
                 pass
 
-    # Decide whether we will block + hijack
-    will_block   = bool(current_ip and not is_blocked_pool_ip(current_ip))
-    will_hijack  = bool(current_ip and _should_hijack_vlan(vlan_id))
+    will_block  = bool(current_ip and not is_blocked_pool_ip(current_ip))
+    will_hijack = bool(current_ip and _should_hijack_vlan(vlan_id))
 
     # Apply ACL block + DNS hijack
     if will_block:
@@ -1238,21 +1235,28 @@ def unregister(token):
             lease.dns_hijacked = True
             db.session.add(lease)
 
-    # === Kea / CoA cleanup ===
+    # === Kea cleanup ===
     kea = _get_kea()
 
-    if connection_type == 'wifi':
-        if kea and vlan_id:
-            try:
+    if kea:
+        try:
+            # 1. Unregister the MAC (affects lease assignment)
+            if vlan_id:
                 kea.unregister_mac(mac=mac_address, vlan=vlan_id)
-            except Exception as exc:
-                logger.warning("Kea unregister_mac failed for %s: %s", mac_address, exc)
 
-    elif connection_type == 'wired':
+            # 2. IMPORTANT: Delete the host reservation so findRegisteredHost()
+            #    no longer sees this device as registered.
+            kea.delete_host_reservation(mac_address)
+
+        except Exception as exc:
+            logger.warning("Kea cleanup failed during unregistration of %s: %s",
+                           mac_address, exc)
+
+    if connection_type == 'wired':
         vlan_map = get_vlan_map()
         send_coa_change(mac_address, vlan_map['unregistered'])
 
-    # === Cleanup device state ===
+    # === Portal-side cleanup ===
     close_ownership(mac_address, commit=False)
 
     device.device_name               = None
@@ -1269,11 +1273,11 @@ def unregister(token):
     central_client.queue_device_unregistered(mac_address)
     db.session.commit()
 
-    # Log what actually happened
     logger.info(
-        "Unregister: mac=%s ip=%s vlan=%s → block=%s hijack=%s",
+        "Unregister: mac=%s ip=%s vlan=%s → block=%s hijack=%s (reservation deleted)",
         mac_address, current_ip, vlan_id, will_block, will_hijack
     )
+
     return render_template('unregister_confirmation.html', success=True)
 
 

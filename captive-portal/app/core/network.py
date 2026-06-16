@@ -11,7 +11,7 @@ Covers:
 - reapply_all_ip_blocks()
 - replug_switch_port_for_mac()
 - clear_mac_auth_sessions(), reset_user_ports()
-- reset_vlan_interface_masks(), reset_pi_network_masks()
+- reset_pi_network_masks()
 - reset_acl_queue_files()
 """
 
@@ -137,10 +137,12 @@ def manage_switch_acl(action: str, ip_address: str, vlan_id) -> bool:
     """
     Manage HP5130 ACL rules for blocking/unblocking specific IPs.
 
-    block:   targets only the ISP router's switch for the VLAN.
-    unblock: targets ALL switches to remove any stale rules.
+    block:   targets only the ISP router's switch + its uplink_acl for the VLAN.
+    unblock: targets ALL switches and ALL router uplink ACLs defined in the policy.
     """
     from core.switch import get_switch_hosts, get_switch_host_for_vlan, run_switch_command
+    import json
+    import os
 
     if not vlan_id and ip_address:
         try:
@@ -149,9 +151,80 @@ def manage_switch_acl(action: str, ip_address: str, vlan_id) -> bool:
             vlan_id = None
 
     if not vlan_id:
-        logger.error("Unable to determine VLAN ID for ACL update")
+        logger.error("manage_switch_acl: Unable to determine VLAN ID for %s", ip_address)
         return False
 
+    # Load policy
+    policy_path = os.getenv('HP5130_POLICY_PATH', '/scripts/scriptdata/hp5130-policy.json')
+    try:
+        with open(policy_path, "r", encoding="utf-8") as f:
+            policy = json.load(f)
+    except Exception as exc:
+        logger.error("manage_switch_acl: Failed to load HP5130 policy: %s", exc)
+        return False
+
+    routers = policy.get("routers", [])
+    vlans = policy.get("vlans", [])
+
+    logger.debug("manage_switch_acl: action=%s ip=%s vlan_id=%s | %d routers, %d vlans in policy",
+                 action, ip_address, vlan_id, len(routers), len(vlans))
+
+    # ------------------------------------------------------------------
+    # Build vlan_id -> uplink_acl mapping using the correct lookup path
+    # ------------------------------------------------------------------
+    vlan_to_acl = {}
+
+    for v in vlans:
+        try:
+            v_vlan_id = int(v.get("vlan_id"))
+        except (TypeError, ValueError):
+            continue
+
+        # Get isp_router_id with fallback
+        isp_router_id = v.get("isp_router_id")
+        if isp_router_id is None:
+            isp_router_id = v.get("resolved_isp_router_id") or 1
+
+        try:
+            isp_router_id = int(isp_router_id)
+        except (TypeError, ValueError):
+            continue
+
+        # Find the router by id and get its uplink_acl
+        for r in routers:
+            try:
+                if int(r.get("id")) == isp_router_id:
+                    acl = int(r.get("uplink_acl"))
+                    vlan_to_acl[v_vlan_id] = acl
+                    break
+            except (TypeError, ValueError):
+                continue
+
+    logger.debug("manage_switch_acl: vlan_to_acl mapping = %s", vlan_to_acl)
+
+    if action == 'block':
+        acl_num = vlan_to_acl.get(vlan_id)
+        if not acl_num:
+            logger.error(
+                "manage_switch_acl: No uplink_acl found for vlan_id=%s in policy. "
+                "vlan_to_acl=%s. Cannot block %s",
+                vlan_id, vlan_to_acl, ip_address
+            )
+            return False
+        target_acls = [acl_num]
+
+    else:  # unblock — clean up from every router ACL in the policy
+        all_router_acls = {
+            int(r.get("uplink_acl"))
+            for r in routers
+            if r.get("uplink_acl") is not None
+        }
+        if not all_router_acls:
+            logger.error("manage_switch_acl: No router uplink ACLs found in policy")
+            return False
+        target_acls = sorted(all_router_acls)
+
+    # Get switches
     all_switch_hosts = get_switch_hosts()
     if not all_switch_hosts:
         logger.error("manage_switch_acl: no switch hosts configured")
@@ -159,81 +232,73 @@ def manage_switch_acl(action: str, ip_address: str, vlan_id) -> bool:
 
     if action == 'block':
         isp_switch = get_switch_host_for_vlan(vlan_id)
-        if isp_switch:
-            switch_hosts = [isp_switch]
-        else:
-            switch_hosts = all_switch_hosts
-            logger.warning(
-                "manage_switch_acl block: ISP router switch not found for VLAN %s,"
-                " falling back to all switches", vlan_id,
-            )
+        switch_hosts = [isp_switch] if isp_switch else all_switch_hosts
     else:
         switch_hosts = all_switch_hosts
 
+    # Calculate rule number
     try:
         host_octet = int(ip_address.split('.')[3])
     except (IndexError, ValueError):
-        logger.error("Unable to determine host octet for ACL rule")
+        logger.error("manage_switch_acl: Unable to determine host octet for %s", ip_address)
         return False
 
     rule_num = vlan_id * 150 + host_octet
-
     acl_script = os.getenv('ACL_QUEUE_SCRIPT', '/scripts/hp5130-acl.sh')
     use_acl_script = os.getenv('USE_ACL_QUEUE', '1') != '0'
 
     all_ok = True
+
     for switch_host in switch_hosts:
-        if use_acl_script and os.path.isfile(acl_script):
-            try:
-                env = _make_script_env(switch_host)
-                result = subprocess.run(
-                    [acl_script, action, ip_address],
-                    capture_output=True, text=True, timeout=15, env=env,
-                )
-                if result.returncode == 0:
-                    logger.info("ACL %s queued for %s on %s via %s",
-                                action, ip_address, switch_host, acl_script)
-                    continue
-                logger.warning("ACL queue script failed for %s on %s: %s",
-                               ip_address, switch_host,
-                               (result.stderr or result.stdout).strip())
-            except Exception as exc:
-                logger.warning("ACL queue script error for %s on %s: %s",
-                               ip_address, switch_host, exc)
+        for acl_num in target_acls:
+            if use_acl_script and os.path.isfile(acl_script):
+                try:
+                    env = _make_script_env(switch_host)
+                    result = subprocess.run(
+                        [acl_script, action, ip_address],
+                        capture_output=True, text=True, timeout=15, env=env,
+                    )
+                    if result.returncode == 0:
+                        logger.info("ACL %s queued for %s on %s (acl=%s) via queue script",
+                                    action, ip_address, switch_host, acl_num)
+                        continue
+                    logger.warning("ACL queue script failed for %s on %s: %s",
+                                   ip_address, switch_host,
+                                   (result.stderr or result.stdout).strip())
+                except Exception as exc:
+                    logger.warning("ACL queue script error for %s on %s: %s",
+                                   ip_address, switch_host, exc)
 
-        # Fallback: apply directly via SSH
-        if action == 'block':
-            commands = [
-                "system-view",
-                "acl advanced 3951",
-                f"rule {rule_num} deny ip source {ip_address} 0",
-                "quit",
-                "acl advanced 3953",
-                f"rule {rule_num} deny ip source {ip_address} 0",
-                "quit", "quit", "save force",
-            ]
-        elif action == 'unblock':
-            commands = [
-                "system-view",
-                "acl advanced 3951",
-                f"undo rule {rule_num}",
-                "quit",
-                "acl advanced 3953",
-                f"undo rule {rule_num}",
-                "quit", "quit", "save force",
-            ]
-        else:
-            logger.error("Invalid action: %s", action)
-            return False
+            # Direct SSH fallback
+            if action == 'block':
+                commands = [
+                    "system-view",
+                    f"acl advanced {acl_num}",
+                    f"rule {rule_num} deny ip source {ip_address} 0",
+                    "quit",
+                    "quit",
+                    "save force",
+                ]
+            elif action == 'unblock':
+                commands = [
+                    "system-view",
+                    f"acl advanced {acl_num}",
+                    f"undo rule {rule_num}",
+                    "quit",
+                    "quit",
+                    "save force",
+                ]
+            else:
+                logger.error("manage_switch_acl: Invalid action: %s", action)
+                return False
 
-        output = run_switch_command(switch_host, '\n'.join(commands))
-        if output is None:
-            logger.error("Switch ACL %s failed for %s on %s: no response",
-                         action, ip_address, switch_host)
-            all_ok = False
+            output = run_switch_command(switch_host, '\n'.join(commands))
+            if output is None:
+                logger.error("manage_switch_acl: Switch ACL %s failed for %s on %s (acl=%s)",
+                             action, ip_address, switch_host, acl_num)
+                all_ok = False
 
     return all_ok
-
 
 def parse_switch_isp_routers(config_text: str) -> dict:
     """
@@ -910,24 +975,7 @@ def reset_user_ports() -> bool:
     return True
 
 
-def reset_vlan_interface_masks(vlan_ids: list) -> bool:
-    vlan_ids = [str(v) for v in vlan_ids if v]
-    if not vlan_ids:
-        return True
-    script_path = os.getenv('VLAN_INTERFACE_SCRIPT', '/scripts/hp5130-vlan-interface.sh')
-    if not os.path.isfile(script_path):
-        logger.error("VLAN interface script not found: %s", script_path)
-        return False
-    env = _make_script_env()
-    env["VLAN_LIST"] = " ".join(vlan_ids)
-    result = subprocess.run([script_path], capture_output=True, text=True, timeout=120, env=env)
-    if result.returncode != 0:
-        logger.error("VLAN interface update failed (exit=%s). stderr=%s stdout=%s",
-                     result.returncode,
-                     (result.stderr or '').strip() or '<empty>',
-                     (result.stdout or '').strip() or '<empty>')
-        return False
-    return True
+
 
 
 def reset_pi_network_masks(vlan_ids: list) -> bool:
