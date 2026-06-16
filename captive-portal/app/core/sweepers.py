@@ -312,11 +312,18 @@ def startup_switch_discovery(app) -> None:
     threading.Thread(target=_run, daemon=True).start()
     
 
-def startup_acl_baseline(app) -> None:
-    """Push ACL baseline to all switches shortly after startup."""
+def startup_network_enforcement_baseline(app) -> None:
+    """Push ACL/PBR baseline + re-apply all per-device blocks on startup.
+
+    This ensures that after a restart (or new Gunicorn worker), both the
+    structural ACLs (from hp5130-acl-baseline.sh) *and* all the per-IP
+    block rules are present.
+    """
 
     def _run():
         time.sleep(10 + (os.getpid() % 4))
+
+        # --- Advisory lock so only one worker does the startup push ---
         try:
             lock_acquired = False
             with app.app_context():
@@ -328,21 +335,45 @@ def startup_acl_baseline(app) -> None:
                     ).scalar()
                 finally:
                     db.session.remove()
+
             if not lock_acquired:
                 logger.info("ACL baseline lock held by another worker, skipping")
                 return
         except Exception as exc:
             logger.warning("ACL baseline startup: could not acquire lock: %s", exc)
             return
+
         try:
             logger.info("Startup ACL baseline push starting…")
+
             with app.app_context():
-                from core.network import reset_acl_baseline
+                from core.network import reset_acl_baseline, reapply_all_ip_blocks
+
+                # 1. Push structural ACL/PBR baseline
                 ok = reset_acl_baseline()
-            logger.info("Startup ACL baseline push %s", "succeeded" if ok else "failed")
+                if not ok:
+                    logger.warning("Startup ACL baseline push failed")
+
+                # 2. Re-apply all per-device blocks (critical — baseline wipes them)
+                try:
+                    pushed, failed = reapply_all_ip_blocks()
+                    if failed > 0:
+                        logger.warning(
+                            "Startup re-apply of per-device blocks: %d pushed, %d failed",
+                            pushed, failed
+                        )
+                    else:
+                        logger.info("Startup re-apply of per-device blocks completed (%d pushed)", pushed)
+                except Exception as exc:
+                    logger.exception("Failed to re-apply per-device blocks on startup: %s", exc)
+
+            logger.info("Startup ACL baseline + per-device blocks push finished")
+
         except Exception as exc:
             logger.warning("Startup ACL baseline push error: %s", exc)
+
         finally:
+            # Release advisory lock
             try:
                 with app.app_context():
                     from extensions import db

@@ -1,6 +1,6 @@
 {
   "default_router_id": 1,
-  "generated_at": "2026-06-16T10:48:12.637394+00:00",
+  "generated_at": "2026-06-16T14:00:25.533702+00:00",
   "local_network": "192.168.0.0/16",
   "network_word": "192.168",
   "policy_path": "/scripts/scriptdata/hp5130-policy.json",

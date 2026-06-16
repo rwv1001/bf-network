@@ -25,6 +25,9 @@ def _net_word() -> str:
     return os.getenv('NETWORK_WORD', '192.168')
 
 
+
+
+
 def _parse_vlan_prefix_map(raw: str) -> Dict[int, int]:
     mapping: Dict[int, int] = {}
     if not raw:
@@ -442,6 +445,44 @@ class KeaIntegration:
         except Exception as e:
             logger.error(f"Error getting all reservations for VLAN {vlan}: {e}")
             return []
+
+    def delete_host_reservation(self, mac_address: str) -> bool:
+        """
+        Delete a host reservation by MAC address.
+        Uses subnet-id=0 so it removes the reservation globally (all subnets).
+        """
+        if not mac_address:
+            return False
+
+        mac = mac_address.lower().strip()
+
+        cmd = {
+            "command": "reservation-del",
+            "arguments": {
+                "subnet-id": 0,                    # 0 = global + all subnets
+                "identifier-type": "hw-address",
+                "identifier": mac
+            }
+        }
+
+        try:
+            response = self._send_command(cmd)
+            result = response.get("result", -1)
+
+            if result == 0:
+                logger.info("Deleted Kea host reservation for MAC %s", mac)
+                return True
+            elif result == 3:
+                # Kea returns result=3 when the reservation does not exist
+                logger.debug("No host reservation found for MAC %s (already deleted)", mac)
+                return True
+            else:
+                logger.warning("Failed to delete host reservation for %s: %s", mac, response)
+                return False
+
+        except Exception as exc:
+            logger.warning("Exception while deleting host reservation for %s: %s", mac, exc)
+            return False
 
     def set_block_status(
         self,

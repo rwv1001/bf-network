@@ -122,6 +122,7 @@ undo dhcp snooping binding record
 undo mac-authentication guest-vlan
 undo port-security enable
 interface GigabitEthernet1/0/${IFACE_NUM}
+description wired port
 port link-type access
 port link-type hybrid
 undo port hybrid vlan 1

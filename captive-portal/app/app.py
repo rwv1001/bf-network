@@ -200,7 +200,7 @@ def create_app():
     from core.sweepers import (
         start_ip_lease_sweeper,
         start_wifi_confirmation_sweeper,
-        startup_acl_baseline,
+        startup_network_enforcement_baseline,
         startup_switch_discovery,
         startup_write_prefix_map,
     )
@@ -211,7 +211,7 @@ def create_app():
 
     # Run the potentially slow ACL baseline push in a background thread
     # so it doesn't block Gunicorn master/worker creation under --preload
-    threading.Thread(target=startup_acl_baseline, args=(app,), daemon=True).start()
+    threading.Thread(target=startup_network_enforcement_baseline, args=(app,), daemon=True).start()
 
     init_security(app)
 
