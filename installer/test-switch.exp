@@ -1,0 +1,331 @@
+#!/usr/bin/expect
+
+set timeout 25
+
+# Default values
+set port         ""
+set current_pass ""
+set new_password ""
+set mgmt_ip      ""
+set uplink_nn    ""
+set login_user   "admin"
+set username     ""   
+set pubkey   ""  
+set debug 0
+
+# Parse command line arguments
+for {set i 0} {$i < $argc} {incr i} {
+    set arg [lindex $argv $i]
+
+    switch -- $arg {
+        "-port" {
+            incr i
+            set port [lindex $argv $i]
+        }
+        "-login-user" {
+            incr i
+            set login_user [lindex $argv $i]
+        }
+        "-cp" {
+            incr i
+            set current_pass [lindex $argv $i]
+        }
+        "-np" {
+            incr i
+            set new_password [lindex $argv $i]
+        }
+        "-ip" {
+            incr i
+            set mgmt_ip [lindex $argv $i]
+        }
+        "-up" {
+            incr i
+            set uplink_nn [lindex $argv $i]
+        }
+        "-user" {
+            incr i
+            set username [lindex $argv $i]
+        }
+        "-pubkey" {
+            incr i
+            set pubkey [lindex $argv $i]
+        }
+        "-debug" {
+            set debug 1
+        }
+        default {
+            puts "Unknown option: $arg"
+            exit 1
+        }
+    }
+}
+
+# Validate required arguments
+if {$port eq ""} {
+    puts "Usage: $argv0 -port <serial_port> [-cp <current_password>] [-login-user <user>] [-user <newuser>] [-np <new_password>] [-ip <management_ip>] [-up <uplink_port>] [-debug]"
+    exit 1
+}
+
+set change_password   [expr {$new_password ne ""}]
+set set_ip            [expr {$mgmt_ip ne ""}]
+set configure_uplink  [expr {$uplink_nn ne ""}]
+
+set serial [open $port "r+"]
+fconfigure $serial -mode 9600,n,8,1 -buffering none
+spawn -open $serial
+
+send "\r\r"
+sleep 1
+
+# === LOGIN ===
+expect {
+    "Login:" {
+        send "admin\r"
+    }
+    timeout {
+        puts "ERROR: Did not see Login prompt"
+        exit 1
+    }
+}
+
+expect "Password:"
+
+# Send password (supports blank password)
+if {$current_pass eq ""} {
+    send "\r"
+} else {
+    send "$current_pass\r"
+}
+
+# Check login result
+expect {
+    "AAA authentication failed." {
+        puts "ERROR: Incorrect password"
+        exit 2
+    }
+    "<" {
+        # Login successful
+    }
+    timeout {
+        puts "ERROR: Login timed out"
+        exit 1
+    }
+}
+
+# === ENTER SYSTEM VIEW ===
+expect "<"
+send "system-view\r"
+
+# === CHANGE PASSWORD (only if -np was provided) ===
+if {$change_password} {
+
+    expect "]"
+    send "local-user admin\r"
+
+    expect "]"
+    send "password simple $new_password\r"
+
+    expect {
+        "Old password:" {
+            send "$current_pass\r"
+        }
+        "]" {
+            # Some versions don't ask for old password
+        }
+    }
+
+    expect "]"
+    send "authorization-attribute user-role network-admin\r"
+
+    expect "]"
+    send "service-type ssh https terminal\r"
+
+    expect "]"
+    send "quit\r"
+}
+
+# === ENABLE PASSWORD RECOVERY ===
+expect "]"
+send "password-recovery enable\r"
+
+# === CONFIGURE VLAN 1 + UPLINK ===
+if {$configure_uplink} {
+
+    expect "]"
+    send "vlan 1\r"
+
+    expect "]"
+    send "name UDM\r"
+
+    expect "]"
+    send "description UPLINK-TO-UDM\r"
+
+    expect "]"
+    send "dhcp snooping binding record\r"
+
+    expect "]"
+    send "quit\r"
+
+    expect "]"
+    send "interface GigabitEthernet1/0/$uplink_nn\r"
+
+    expect "]"
+    send "description UPLINK\r"
+
+    expect "]"
+    send "port link-type trunk\r"
+
+    expect "]"
+    send "port trunk permit vlan 1\r"
+
+    expect "]"
+    send "dhcp snooping trust\r"
+
+    expect "]"
+    send "quit\r"
+}
+
+# === SET MANAGEMENT IP ===
+if {$set_ip} {
+
+    expect "]"
+    send "interface Vlan-interface 1\r"
+
+    expect "]"
+    send "description UPLINK\r"
+
+    expect "]"
+    send "ip address $mgmt_ip 255.255.255.0\r"
+
+    expect "]"
+    send "quit\r"
+}
+
+if {$username ne "" && $pubkey ne ""} {
+
+    expect "]"
+    send "local-user $username class manage\r"
+
+    expect "]"
+    send "service-type ssh\r"
+
+    expect "]"
+    send "authorization-attribute user-role network-admin\r"
+
+    expect "]"
+    send "quit\r"
+
+    # Create public key
+    expect "]"
+    send "public-key peer ${username}_KEY\r"
+
+    expect "]"
+    send "public-key-code begin\r"
+
+    send "$pubkey\r"
+
+    expect "]"
+    send "public-key-code end\r"
+
+    expect "]"
+    send "peer-public-key end\r"
+
+    # Assign public key to the user
+    expect "]"
+    send "ssh user $username service-type stelnet authentication-type publickey assign publickey ${username}_KEY\r"
+
+    
+
+    # Enable SSH server
+    expect "]"
+    send "ssh server enable\r"
+
+    # Configure domain for local authentication
+    expect "]"
+    send "domain system\r"
+    expect "]"
+    send "authentication login local\r"
+    expect "]"
+    send "authorization login local\r"
+    expect "]"
+    send "quit\r"
+
+    # Properly configure vty lines for SSH
+    expect "]"
+    send "line vty 0 4\r"
+    expect "]"
+    send "authentication-mode scheme\r"
+    expect "]"
+    send "user-role network-admin\r"
+    expect "]"
+    send "user-role network-operator\r"
+    expect "]"
+    send "protocol inbound ssh\r"
+    expect "]"
+    send "idle-timeout 15 0\r"
+    expect "]"
+    send "quit\r"
+
+    expect "]"
+    send "line vty 5 63\r"
+    expect "]"
+    send "authentication-mode scheme\r"
+    expect "]"
+    send "user-role network-admin\r"
+    expect "]"
+    send "quit\r"
+}
+
+# Get and display the MAC address of the management interface
+expect "]"
+send "display interface Vlan-interface 1\r"
+
+expect {
+    -re {hardware address: ([0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4})} {
+        set mac_address $expect_out(1,string)
+        puts "\n=== Switch MAC Address ==="
+        puts "Management IP : $mgmt_ip"
+        puts "MAC Address   : $mac_address"
+        puts "==========================\n"
+    }
+    timeout {
+        puts "WARNING: Could not extract MAC address"
+    }
+}
+# === SAVE CONFIGURATION ===
+if {$change_password || $configure_uplink || $set_ip} {
+    expect "]"
+    send "save force\r"
+}
+
+
+
+
+# === CLEAN EXIT ===
+expect "]"
+send "quit\r"
+
+# === DEBUG: Show current configuration ===
+if {$debug} {
+    expect "<"
+    send "screen-length disable\r"
+    expect "<"
+    send "undo terminal monitor\r"
+    expect "<"    
+    send "display current-configuration\r"
+    
+    # Wait for the end of the configuration output
+    expect {
+        "<" {
+            # End of configuration output
+        }
+        timeout {
+            puts "Debug output may be truncated"
+        }
+    }
+}
+
+expect "<"
+send "quit\r"
+
+expect eof
