@@ -25,7 +25,7 @@
       "alerting": false
     },
     "freeradius": {
-      "restart_count": 0,
+      "restart_count": 1,
       "alerting": false
     },
     "pihole": {
@@ -46,8 +46,8 @@
     }
   },
   "health": {
-    "alerting": true,
-    "consecutive_failures": 1970
+    "alerting": false,
+    "consecutive_failures": 0
   },
   "disk": {
     "alerting": false,

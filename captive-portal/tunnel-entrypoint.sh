@@ -21,7 +21,6 @@ exec autossh -M 0 -N \
     -o ExitOnForwardFailure=yes \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
-    -i /keys/oracle_rsa \
-    -R 9443:127.0.0.1:443 \
-    -R 9080:127.0.0.1:80 \
+    -i ${ORACLE_VPS_SSH_KEY_PATH:-/keys/oracle_rsa} \
+    -R "127.0.0.1:${ORACLE_VPS_HTTPS_PORT}:127.0.0.1:443" \
     "${ORACLE_VPS_USER:-ubuntu}@${ORACLE_VPS_HOST}"

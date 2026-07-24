@@ -383,6 +383,8 @@ services:
       ORACLE_VPS_HOST: ${ORACLE_VPS_HOST:-}
       ORACLE_VPS_USER: ${ORACLE_VPS_USER:-ubuntu}
       ORACLE_VPS_ENABLED: ${ORACLE_VPS_ENABLED:-true}
+      ORACLE_VPS_HTTPS_PORT: ${ORACLE_VPS_HTTPS_PORT:-9443}
+      ORACLE_VPS_SSH_KEY_PATH: ${ORACLE_VPS_SSH_KEY_PATH:-/keys/oracle_rsa}
 
   # ── FreeRADIUS ────────────────────────────────────────────────────────────────
   freeradius:

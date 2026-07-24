@@ -50,6 +50,14 @@ for {set i 0} {$i < $argc} {incr i} {
             incr i
             set pubkey [lindex $argv $i]
         }
+        "-vlan-config" {
+            incr i
+            set vlan_config [lindex $argv $i]
+        }        
+        "-dynamic-config" {
+            incr i
+            set dynamic_config [lindex $argv $i]
+        }
         "-debug" {
             set debug 1
         }
@@ -78,37 +86,61 @@ send "\r\r"
 sleep 1
 
 # === LOGIN ===
-expect {
-    "Login:" {
-        send "$login_user\r"
-    }
-    timeout {
-        puts "ERROR: Did not see Login prompt"
-        exit 1
-    }
-}
+set max_attempts 3
+set attempt 1
+while {$attempt <= $max_attempts} {
 
-expect "Password:"
-
-# Send password (supports blank password)
-if {$current_pass eq ""} {
-    send "\r"
-} else {
-    send "$current_pass\r"
-}
-
-# Check login result
-expect {
-    "AAA authentication failed." {
-        puts "ERROR: Incorrect password"
-        exit 2
+    expect {
+        "Login:" {
+            send "$login_user\r"
+        }
+        timeout {
+            puts "ERROR: Did not see Login prompt"
+            exit 1
+        }
     }
-    "<" {
-        # Login successful
+
+    expect "Password:"
+
+    # Decide whether to use provided password or prompt
+    if { $attempt == 1} {
+        # First attempt and we have a password from -cp
+        send "$current_pass\r"
+    } else {
+        # this is a retry
+        
+        flush stdout
+        stty -echo
+        expect_user -re "(.*)\n" {
+            set current_pass $expect_out(1,string)
+        }
+        stty echo
+        puts ""
+        send "$current_pass\r"
     }
-    timeout {
-        puts "ERROR: Login timed out"
-        exit 1
+
+    # Check login result
+    expect {
+        "AAA authentication failed." {
+            puts "Incorrect password (attempt $attempt of $max_attempts)."
+            if {$attempt == $max_attempts} {
+                puts "ERROR: Too many failed login attempts."
+                exit 2
+            }
+            incr attempt
+            sleep 1
+            expect -timeout 2 -re {.*} {}
+            continue
+        }
+        "<" {
+            # Login successful
+            puts "Login successful."
+            break
+        }
+        timeout {
+            puts "ERROR: Login timed out"
+            exit 1
+        }
     }
 }
 
@@ -281,6 +313,13 @@ if {$set_ip} {
 
     expect "]"
     send "quit\r"
+}
+if {[info exists vlan_config] && $vlan_config ne ""} {
+    send "$vlan_config\r"
+}
+
+if {[info exists dynamic_config] && $dynamic_config ne ""} {
+    send "$dynamic_config\r"
 }
 
 if {$username ne "" && $pubkey ne ""} {
