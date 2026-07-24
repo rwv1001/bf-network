@@ -210,7 +210,7 @@ CREATE TABLE IF NOT EXISTS nat_sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_nat_sessions_src ON nat_sessions(src_ip, src_port, session_end DESC);
-CREATE INDEX IF NOT EXISTS idx_nat_sessions_active ON nat_sessions(src_ip, src_port, session_end) WHERE session_end > (CURRENT_TIMESTAMP - INTERVAL '2 minutes');
+CREATE INDEX IF NOT EXISTS idx_nat_sessions_active ON nat_sessions(src_ip, src_port, session_end);
 CREATE INDEX IF NOT EXISTS idx_nat_sessions_time ON nat_sessions(session_start DESC, session_end DESC);
 CREATE INDEX IF NOT EXISTS idx_nat_sessions_dst ON nat_sessions(dst_ip, dst_port);
 
@@ -229,7 +229,6 @@ SELECT
     src_port,
     dst_ip,
     dst_port,
-    protocol,
     session_start,
     session_end,
     packet_count,
