@@ -3739,7 +3739,7 @@ UPDATE schema_version
 
 -- -----------------------------------------------------------------------
 -- Extend the table holding DHCPv4 option definitions with a nullable
--- column matching option definitions with client classes.
+-- column matching option defintions with client classes.
 -- -----------------------------------------------------------------------
 ALTER TABLE dhcp4_option_def
     ADD COLUMN class_id BIGINT NULL DEFAULT NULL;
@@ -3753,7 +3753,7 @@ ALTER TABLE dhcp4_option_def
 
 -- -----------------------------------------------------------------------
 -- Extend the table holding DHCPv6 option definitions with a nullable
--- column matching option definitions with client classes.
+-- column matching option defintions with client classes.
 -- -----------------------------------------------------------------------
 ALTER TABLE dhcp6_option_def
     ADD COLUMN class_id BIGINT NULL DEFAULT NULL;
@@ -6710,34 +6710,6 @@ UPDATE schema_version
     SET version = '29', minor = '0';
 
 -- This line concludes the schema upgrade to version 29.0.
-
--- This line starts the schema upgrade to version 30.0.
-
-SELECT set_config('kea.disable_audit', 'true', false);
-UPDATE dhcp4_options SET client_classes = '[  ]' WHERE client_classes IS NULL;
-ALTER TABLE dhcp4_options ALTER COLUMN client_classes SET NOT NULL;
-UPDATE dhcp6_options SET client_classes = '[  ]' WHERE client_classes IS NULL;
-ALTER TABLE dhcp6_options ALTER COLUMN client_classes SET NOT NULL;
-ALTER TABLE dhcp6_options ADD COLUMN IF NOT EXISTS modification_ts TIMESTAMP
-    WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP;
-SELECT set_config('kea.disable_audit', 'false', false);
-
--- Update the schema version number.
-UPDATE schema_version
-    SET version = '30', minor = '0';
-
--- This line concludes the schema upgrade to version 30.0.
-
--- This line starts the schema upgrade to version 31.0.
-
--- Create index for searching leases by hwaddr.
-CREATE INDEX lease6_by_hwaddr ON lease6 (hwaddr);
-
--- Update the schema version number.
-UPDATE schema_version
-    SET version = '31', minor = '0';
-
--- This line concludes the schema upgrade to version 31.0.
 
 -- Commit the script transaction.
 COMMIT;
