@@ -85,7 +85,8 @@ CREATE TABLE IF NOT EXISTS devices (
     internet_accessible  BOOLEAN,
     internet_blocked     BOOLEAN,
     assigned_vlan        INTEGER,
-    ownership_validated  BOOLEAN
+    ownership_validated  BOOLEAN,
+    fixed_ip VARCHAR(45)
 );
 
 CREATE INDEX IF NOT EXISTS idx_devices_mac ON devices(mac_address);
@@ -135,6 +136,8 @@ CREATE TABLE IF NOT EXISTS isp_routers (
     vlan_id INTEGER NOT NULL,
     switch_port VARCHAR(100),
     dhcp_snooping_trust BOOLEAN DEFAULT TRUE NOT NULL,
+    switch_host VARCHAR(50),
+    nat_logger_type VARCHAR(20) NOT NULL DEFAULT 'none',
     created_at TIMESTAMP DEFAULT NOW()
 );
 
@@ -147,7 +150,8 @@ CREATE TABLE IF NOT EXISTS vlan_mappings (
     ssid TEXT,
     wired_enabled BOOLEAN DEFAULT FALSE NOT NULL,
     require_password BOOLEAN DEFAULT FALSE NOT NULL,
-    isp_router_id INTEGER REFERENCES isp_routers(id) ON DELETE SET NULL
+    isp_router_id INTEGER REFERENCES isp_routers(id) ON DELETE SET NULL,
+    visible_vlans TEXT
 );
 
 CREATE TABLE IF NOT EXISTS switch_ports (
