@@ -950,12 +950,23 @@ derive_pi_server_values() {
     DEFAULT_ISP_ROUTER_SUBNET="${ISP_NETWORK_PORTION[0]:-$(first_three_octets "$HOST_IP")}.0/24"
     UDM_HOST="${ISP_NETWORK_PORTION[0]:-$(first_three_octets "$HOST_IP")}.1"
 }
+sync_dns01_certificate_to_repo() {
+    local q_store q_repo
+    q_store="$(shell_quote "$CERT_STORE_DIR")"
+    q_repo="$(shell_quote "$CERT_REPO_DIR")"
+
+    pi_sudo "mkdir -p $q_repo"
+    pi_sudo "cp -f $q_store/fullchain.pem $q_repo/fullchain.pem"
+    pi_sudo "cp -f $q_store/privkey.pem $q_repo/privkey.pem"
+    pi_sudo "chmod 644 $q_repo/fullchain.pem"
+    pi_sudo "chmod 600 $q_repo/privkey.pem"
+}
 
 setup_dns01_certificate() {
     info "Issuing real Let's Encrypt certificate via DNS-01 (bunny.net)"
 
     local q_cert_dir q_domain q_email
-    CERT_DIR="${PI_REPO_DIR}/npm/letsencrypt/live/${MAIN_DOMAIN}"
+    CERT_DIR="$CERT_STORE_DIR"
     q_cert_dir="$(shell_quote "$CERT_DIR")"
     q_domain="$(shell_quote "$MAIN_DOMAIN")"
     q_email="$(shell_quote "$ADMIN_EMAIL")"
@@ -999,7 +1010,27 @@ setup_dns01_certificate() {
     echo "  Private key: $CERT_DIR/privkey.pem"
 }
 
+dns_cert_files_ok() {
+    pi_ssh "test -s $(shell_quote "$CERT_STORE_DIR/fullchain.pem") && test -s $(shell_quote "$CERT_STORE_DIR/privkey.pem")"
+}
 
+ensure_dns01_certificate_ready() {
+    if step_done "pi_dns_certificate" && ! dns_cert_files_ok; then
+        echo "DNS-01 certificate checkpoint was set, but files are missing. Regenerating."
+        unset 'COMPLETED_STEPS[pi_dns_certificate]'
+        state_save
+    fi
+
+    if ! step_done "pi_dns_certificate"; then
+        setup_dns01_certificate
+        sync_dns01_certificate_to_repo
+        complete_step "pi_dns_certificate"
+        unset 'COMPLETED_STEPS[pi_npm_certificate_attach]'
+        state_save
+    else
+        sync_dns01_certificate_to_repo
+    fi
+}
 
 write_pi_env_file() {
     ENV_TMP="$(mktemp)"
@@ -1039,6 +1070,11 @@ write_pi_env_file() {
         write_env_line NPM_CUSTOM_CERT_FULLCHAIN "/etc/letsencrypt/live/${MAIN_DOMAIN}/fullchain.pem"
         write_env_line NPM_CUSTOM_CERT_KEY "/etc/letsencrypt/live/${MAIN_DOMAIN}/privkey.pem"
         write_env_line PIHOLE_WEBPASSWORD "$PIHOLE_WEBPASSWORD"
+
+        write_env_line PORTAL_FORWARD_HOST "127.0.0.1"
+        write_env_line PORTAL_FORWARD_PORT "8080"
+        write_env_line CAPTIVE_CHECK_HOSTS "captive.apple.com,connectivitycheck.gstatic.com,clients3.google.com,msftconnecttest.com,www.msftconnecttest.com"
+        write_env_line CAPTIVE_PORTAL_IPS "$PORTAL_IP"
 
         write_env_line ORACLE_VPS_HOST "$ORACLE_VPS_HOST"
         write_env_line ORACLE_VPS_USER "$ORACLE_VPS_USER"
@@ -1335,435 +1371,26 @@ rm -f /tmp/fix-kea.sed"
 }
 
 install_fixed_npm_setup_py() {
-    info "Installing fixed npm/setup.py with DNS-01 certificate import support"
+    info "Using repository npm/setup.py"
 
-    local q_repo tmp_setup
+    local q_repo
     q_repo="$(shell_quote "$PI_REPO_DIR")"
-    tmp_setup="$(mktemp)"
 
-    cat > "$tmp_setup" <<'PYEOF'
-#!/usr/bin/env python3
-"""
-npm/setup.py - fully automatic Nginx Proxy Manager setup for bf-network.
-
-This script is intentionally installer-friendly:
-  - waits for the NPM API;
-  - creates the initial admin account in setup mode if necessary;
-  - creates or reuses the PORTAL_URL proxy host;
-  - optionally skips NPM's HTTP-01 flow;
-  - when DNS-01/acme.sh has already written a certificate, imports that
-    certificate into NPM as a custom certificate and attaches it to the host.
-
-Important for this deployment:
-  The public domain points at the Oracle VPS. The VPS reverse tunnel forwards
-  HTTPS to the Pi's local NPM port 443. Therefore NPM itself must have an SSL
-  certificate attached to the proxy host, even if the certificate was issued by
-  acme.sh/Bunny rather than by NPM's built-in HTTP-01 flow.
-"""
-
-import json
-import mimetypes
-import os
-import sys
-import time
-import urllib.error
-import urllib.request
-import uuid
-from pathlib import Path
-from urllib.parse import urlparse
-
-NPM_URL = os.environ.get("NPM_URL", "http://127.0.0.1:81").rstrip("/")
-NPM_EMAIL = os.environ.get("NPM_ADMIN_EMAIL", "")
-NPM_PASS = os.environ.get("NPM_ADMIN_PASSWORD", "")
-LE_EMAIL = os.environ.get("ADMIN_EMAIL", "")
-PORTAL_URL = os.environ.get("PORTAL_URL", "")
-FWD_HOST = os.environ.get("PORTAL_FORWARD_HOST") or os.environ.get("PORTAL_IP", "127.0.0.1")
-FWD_PORT = int(os.environ.get("PORTAL_FORWARD_PORT", "8080"))
-
-SKIP_SSL = os.environ.get("NPM_SETUP_SKIP_SSL", "false").strip().lower() in {
-    "1", "true", "yes", "y", "on"
-}
-FORCE_SSL = os.environ.get("NPM_SETUP_FORCE_SSL", "true").strip().lower() not in {
-    "0", "false", "no", "n", "off"
+    
+    pi_sudo "cd $q_repo && test -f npm/setup.py" \
+        || die "Repository npm/setup.py not found; clone the repo first."
+    
+    # Optional sanity check and permissions.
+    pi_sudo "cd $q_repo && python3 -m py_compile npm/setup.py"
+    
+    pi_sudo "cd $q_repo && chmod 755 npm/setup.py && chown $PI_USER:$PI_USER npm/setup.py"
+    
+    pi_sudo "cd $q_repo && docker compose run --rm npm-setup"
+    
+    pi_sudo "cd $q_repo && docker compose restart npm"
+    
 }
 
-
-def _api(method, path, data=None, token=None, timeout=60):
-    headers = {"Content-Type": "application/json"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    body = json.dumps(data).encode("utf-8") if data is not None else None
-    req = urllib.request.Request(
-        f"{NPM_URL}{path}", data=body, headers=headers, method=method
-    )
-
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            raw = response.read()
-            if not raw:
-                return {}
-            return json.loads(raw)
-    except urllib.error.HTTPError as error:
-        try:
-            detail = json.loads(error.read())
-        except Exception:
-            detail = error.reason
-        raise RuntimeError(f"{method} {path} -> HTTP {error.code}: {detail}") from None
-
-
-def _multipart_api(method, path, files, token=None, timeout=120):
-    boundary = f"----bfnetwork{uuid.uuid4().hex}"
-    chunks = []
-
-    for field_name, file_path in files.items():
-        file_path = Path(file_path)
-        content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
-        chunks.append(f"--{boundary}\r\n".encode("utf-8"))
-        chunks.append(
-            (
-                f'Content-Disposition: form-data; name="{field_name}"; '
-                f'filename="{file_path.name}"\r\n'
-                f"Content-Type: {content_type}\r\n\r\n"
-            ).encode("utf-8")
-        )
-        chunks.append(file_path.read_bytes())
-        chunks.append(b"\r\n")
-
-    chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
-    body = b"".join(chunks)
-
-    headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    req = urllib.request.Request(
-        f"{NPM_URL}{path}", data=body, headers=headers, method=method
-    )
-
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            raw = response.read()
-            if not raw:
-                return {}
-            return json.loads(raw)
-    except urllib.error.HTTPError as error:
-        try:
-            detail = json.loads(error.read())
-        except Exception:
-            detail = error.reason
-        raise RuntimeError(f"{method} {path} -> HTTP {error.code}: {detail}") from None
-
-
-def _wait_for_npm(max_wait=180):
-    print("npm-setup: waiting for NPM API...", flush=True)
-    deadline = time.time() + max_wait
-    while time.time() < deadline:
-        try:
-            urllib.request.urlopen(f"{NPM_URL}/api/", timeout=5)
-            print("npm-setup: NPM API is up.", flush=True)
-            return
-        except Exception:
-            time.sleep(5)
-    raise SystemExit(f"npm-setup: timed out after {max_wait}s waiting for NPM API")
-
-
-def _login(email, password):
-    return _api("POST", "/api/tokens", {"identity": email, "secret": password})["token"]
-
-
-def _create_initial_admin(domain):
-    payload = {
-        "email": NPM_EMAIL,
-        "name": "Admin",
-        "nickname": "admin",
-        "roles": ["admin"],
-        "is_disabled": False,
-        "auth": {
-            "type": "password",
-            "secret": NPM_PASS,
-        },
-    }
-
-    try:
-        _api("POST", "/api/users", payload)
-        print(f"npm-setup: created initial admin {NPM_EMAIL} in setup mode", flush=True)
-    except Exception as exc:
-        print(f"npm-setup: setup-mode admin creation failed/skipped: {exc}", flush=True)
-
-    return _login(NPM_EMAIL, NPM_PASS)
-
-
-def _ensure_admin_token(domain):
-    if not NPM_EMAIL or not NPM_PASS:
-        raise SystemExit(
-            "npm-setup: NPM_ADMIN_EMAIL or NPM_ADMIN_PASSWORD not set in .env."
-        )
-
-    try:
-        token = _login(NPM_EMAIL, NPM_PASS)
-        print("npm-setup: authenticated with configured admin credentials", flush=True)
-        return token
-    except Exception as first_exc:
-        print(
-            f"npm-setup: configured admin login failed; trying setup-mode admin creation: {first_exc}",
-            flush=True,
-        )
-
-    try:
-        return _create_initial_admin(domain)
-    except Exception as second_exc:
-        print(
-            f"npm-setup: setup-mode login failed; trying legacy bootstrap account: {second_exc}",
-            flush=True,
-        )
-
-    try:
-        token = _login("admin@example.com", "changeme")
-        print("npm-setup: authenticated with legacy bootstrap credentials", flush=True)
-        try:
-            _api(
-                "PUT",
-                "/api/users/me",
-                {
-                    "email": NPM_EMAIL,
-                    "name": "Admin",
-                    "nickname": "admin",
-                    "roles": ["admin"],
-                    "is_disabled": False,
-                },
-                token=token,
-            )
-            _api(
-                "PUT",
-                "/api/users/me/auth",
-                {
-                    "type": "password",
-                    "current": "changeme",
-                    "secret": NPM_PASS,
-                },
-                token=token,
-            )
-            token = _login(NPM_EMAIL, NPM_PASS)
-            print("npm-setup: converted bootstrap admin to configured credentials", flush=True)
-            return token
-        except Exception as update_exc:
-            raise RuntimeError(f"bootstrap login worked but admin update failed: {update_exc}") from update_exc
-    except Exception as third_exc:
-        raise SystemExit(
-            "npm-setup: could not authenticate or create the NPM admin account: "
-            f"{third_exc}"
-        )
-
-
-def _proxy_host_payload(domain, cert_id=0, ssl_forced=False):
-    advanced_config = """proxy_set_header Host $host;
-proxy_set_header X-Real-IP $remote_addr;
-proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-proxy_set_header X-Forwarded-Proto $scheme;
-"""
-    return {
-        "domain_names": [domain],
-        "forward_scheme": "http",
-        "forward_host": FWD_HOST,
-        "forward_port": FWD_PORT,
-        "access_list_id": 0,
-        "certificate_id": int(cert_id or 0),
-        "meta": {},
-        "advanced_config": advanced_config,
-        "locations": [],
-        "block_exploits": False,
-        "caching_enabled": False,
-        "allow_websocket_upgrade": True,
-        "http2_support": True if cert_id else False,
-        "hsts_enabled": False,
-        "hsts_subdomains": False,
-        "ssl_forced": bool(ssl_forced and cert_id),
-        "enabled": True,
-    }
-
-
-def _get_proxy_host(token, domain):
-    hosts = _api("GET", "/api/nginx/proxy-hosts", token=token)
-    for host in hosts:
-        if domain in host.get("domain_names", []):
-            return host
-    return None
-
-
-def _create_or_get_proxy_host(token, domain):
-    host = _get_proxy_host(token, domain)
-    if host:
-        print(
-            f"npm-setup: proxy host for {domain} already exists (id={host['id']}).",
-            flush=True,
-        )
-        return host
-
-    print(f"npm-setup: creating proxy host for {domain}...", flush=True)
-    host = _api("POST", "/api/nginx/proxy-hosts", _proxy_host_payload(domain), token=token)
-    print(f"npm-setup: proxy host created (id={host['id']}).", flush=True)
-    return host
-
-
-def _update_proxy_host_certificate(token, domain, host_id, cert_id):
-    payload = _proxy_host_payload(domain, cert_id=cert_id, ssl_forced=FORCE_SSL)
-    _api("PUT", f"/api/nginx/proxy-hosts/{host_id}", payload, token=token)
-    print(
-        f"npm-setup: attached certificate id={cert_id} to proxy host id={host_id}; "
-        f"ssl_forced={payload['ssl_forced']}.",
-        flush=True,
-    )
-
-
-def _custom_cert_paths(domain):
-    fullchain = os.environ.get("NPM_CUSTOM_CERT_FULLCHAIN") or f"/etc/letsencrypt/live/{domain}/fullchain.pem"
-    privkey = os.environ.get("NPM_CUSTOM_CERT_KEY") or f"/etc/letsencrypt/live/{domain}/privkey.pem"
-    return Path(fullchain), Path(privkey)
-
-
-def _find_existing_custom_certificate(token, domain):
-    certs = _api("GET", "/api/nginx/certificates", token=token)
-    for cert in certs:
-        if cert.get("provider") == "other" and domain in cert.get("domain_names", []):
-            return cert
-    return None
-
-
-def _import_custom_certificate(token, domain):
-    fullchain, privkey = _custom_cert_paths(domain)
-
-    if not fullchain.exists() or not privkey.exists():
-        print(
-            "npm-setup: custom certificate files are not present yet; "
-            f"looked for {fullchain} and {privkey}.",
-            flush=True,
-        )
-        return None
-
-    # Basic sanity check so bad paths fail before the API upload.
-    if "BEGIN CERTIFICATE" not in fullchain.read_text(errors="ignore"):
-        raise RuntimeError(f"{fullchain} does not look like a PEM certificate")
-    key_text = privkey.read_text(errors="ignore")
-    if "BEGIN" not in key_text or "PRIVATE KEY" not in key_text:
-        raise RuntimeError(f"{privkey} does not look like a PEM private key")
-
-    cert = _find_existing_custom_certificate(token, domain)
-    if cert:
-        cert_id = cert["id"]
-        print(f"npm-setup: reusing existing custom certificate id={cert_id}", flush=True)
-    else:
-        cert = _api(
-            "POST",
-            "/api/nginx/certificates",
-            {
-                "provider": "other",
-                "nice_name": domain,
-                "domain_names": [domain],
-                "meta": {},
-            },
-            token=token,
-        )
-        cert_id = cert["id"]
-        print(f"npm-setup: created custom certificate record id={cert_id}", flush=True)
-
-    _multipart_api(
-        "POST",
-        f"/api/nginx/certificates/{cert_id}/upload",
-        {
-            "certificate": str(fullchain),
-            "certificate_key": str(privkey),
-        },
-        token=token,
-    )
-    print(f"npm-setup: uploaded custom certificate files for {domain}", flush=True)
-    return cert_id
-
-
-def _request_http01_certificate(token, domain):
-    if not LE_EMAIL:
-        print("npm-setup: ADMIN_EMAIL not set, so built-in HTTP-01 is skipped.", flush=True)
-        return None
-
-    print(f"npm-setup: requesting built-in NPM HTTP-01 certificate for {domain}...", flush=True)
-    cert = _api(
-        "POST",
-        "/api/nginx/certificates",
-        {
-            "provider": "letsencrypt",
-            "domain_names": [domain],
-            "nice_name": domain,
-            "meta": {"dns_challenge": False},
-        },
-        token=token,
-        timeout=180,
-    )
-    cert_id = cert["id"]
-    print(f"npm-setup: built-in NPM certificate issued id={cert_id}", flush=True)
-    return cert_id
-
-
-def main():
-    if not PORTAL_URL:
-        print("npm-setup: PORTAL_URL not set - nothing to do.", flush=True)
-        return
-
-    domain = urlparse(PORTAL_URL).hostname
-    if not domain:
-        raise SystemExit(f"npm-setup: cannot parse domain from PORTAL_URL={PORTAL_URL!r}")
-
-    _wait_for_npm()
-    token = _ensure_admin_token(domain)
-    host = _create_or_get_proxy_host(token, domain)
-    host_id = host["id"]
-    existing_cert_id = int(host.get("certificate_id") or 0)
-
-    # Preferred bf-network path: use DNS-01/acme.sh cert if it exists.
-    custom_cert_id = _import_custom_certificate(token, domain)
-    if custom_cert_id:
-        if existing_cert_id != int(custom_cert_id):
-            _update_proxy_host_certificate(token, domain, host_id, custom_cert_id)
-        else:
-            print(
-                f"npm-setup: proxy host already uses custom certificate id={custom_cert_id}.",
-                flush=True,
-            )
-        return
-
-    if SKIP_SSL:
-        print(
-            "npm-setup: NPM_SETUP_SKIP_SSL is true and no custom cert is present yet; "
-            "leaving proxy host as HTTP for now. Run npm-setup again after DNS-01 "
-            "certificate issuance.",
-            flush=True,
-        )
-        return
-
-    # Fallback for deployments where the domain publicly reaches this NPM over port 80.
-    try:
-        cert_id = _request_http01_certificate(token, domain)
-        if cert_id:
-            _update_proxy_host_certificate(token, domain, host_id, cert_id)
-    except Exception as exc:
-        print(
-            f"npm-setup: HTTP-01 SSL cert request failed: {exc}\n"
-            "npm-setup: proxy host remains active on HTTP. In the bf-network "
-            "Oracle/Bunny deployment this is expected until the DNS-01 cert is "
-            "issued and npm-setup is rerun.",
-            flush=True,
-        )
-        return
-
-
-if __name__ == "__main__":
-    main()
-
-PYEOF
-
-    pi_scp_to "$tmp_setup" "/tmp/npm-setup.py"
-    rm -f "$tmp_setup"
-    pi_sudo "mkdir -p $q_repo/npm && mv /tmp/npm-setup.py $q_repo/npm/setup.py && chown $PI_USER:$PI_USER $q_repo/npm/setup.py && chmod 644 $q_repo/npm/setup.py"
-}
 
 configure_pi_backups() {
     if ! is_yes "$ENABLE_DB_BACKUPS"; then
@@ -1807,6 +1434,53 @@ EOF"
 # ---------------------------------------------------------------------------
 # Kea PostgreSQL schema (must match the Kea version in kea/Dockerfile)
 # ---------------------------------------------------------------------------
+reset_kea_schema() {
+    local q_repo
+    q_repo="$(shell_quote "$PI_REPO_DIR")"
+
+    info "Stopping services that may hold DB connections"
+    pi_sudo "cd $q_repo && docker compose stop npm web kea redis freeradius dns-parser dnsmasq-hijack nat-parser pihole tunnel rsyslog watchdog npm-setup || true"
+
+    info "Ensuring db is up for schema reset"
+    pi_sudo "cd $q_repo && docker compose up -d db"
+
+    info "Terminating any remaining captive_portal sessions"
+    pi_sudo "cd $q_repo && docker compose exec -T db psql -U portal_user -d captive_portal -v ON_ERROR_STOP=1 -c \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid();\""
+
+    info "Dropping and recreating public schema"
+    pi_sudo "cd $q_repo && docker compose exec -T db psql -U portal_user -d captive_portal -v ON_ERROR_STOP=1 -c \"DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO portal_user;\""
+}
+apply_portal_schema() {
+    local q_repo sql_rel
+    q_repo="$(shell_quote "$PI_REPO_DIR")"
+
+    info "Ensuring portal PostgreSQL schema is present"
+
+    sql_rel="$(pi_ssh "cd $q_repo && for f in \
+        init-db.sql \
+        web/init-db.sql \
+        captive-portal/init-db.sql \
+        app/init-db.sql \
+        db/init-db.sql; do
+            [ -f \"\$f\" ] && { printf '%s' \"\$f\"; break; }
+        done")"
+
+    if [ -z "$sql_rel" ]; then
+        die "Could not find a portal init-db.sql file in the repository."
+    fi
+
+    info "Applying portal schema from $sql_rel"
+
+    pi_sudo "cd $q_repo && docker cp $sql_rel captive-portal-db:/tmp/init-db.sql"
+
+    if ! pi_sudo "cd $q_repo && docker compose exec -T db psql -U portal_user -d captive_portal -v ON_ERROR_STOP=1 -f /tmp/init-db.sql"; then
+        pi_sudo "cd $q_repo && docker compose exec -T db rm -f /tmp/init-db.sql"
+        die "Portal schema apply failed."
+    fi
+
+    pi_sudo "cd $q_repo && docker compose exec -T db rm -f /tmp/init-db.sql"
+    echo "Portal schema applied successfully."
+}
 
 apply_kea_schema() {
     local q_repo="$1"
@@ -1832,34 +1506,18 @@ apply_kea_schema() {
     pi_sudo "cd $q_repo && docker compose stop kea >/dev/null 2>&1 || true"
 
     # Single-line DROP — avoids multi-line quoting failures
-    pi_sudo "cd $q_repo && docker compose exec -T db psql -U portal_user -d captive_portal -v ON_ERROR_STOP=0 -c \"
-DROP TABLE IF EXISTS schema_version CASCADE;
-DROP TABLE IF EXISTS lease4 CASCADE;
-DROP TABLE IF EXISTS lease4_stat CASCADE;
-DROP TABLE IF EXISTS lease4_stat_by_client_class CASCADE;
-DROP TABLE IF EXISTS lease6 CASCADE;
-DROP TABLE IF EXISTS lease6_stat CASCADE;
-DROP TABLE IF EXISTS lease6_stat_by_client_class CASCADE;
-DROP TABLE IF EXISTS lease6_relay_id CASCADE;
-DROP TABLE IF EXISTS lease6_remote_id CASCADE;
-DROP TABLE IF EXISTS hosts CASCADE;
-DROP TABLE IF EXISTS ipv6_reservations CASCADE;
-DROP TABLE IF EXISTS dhcp4_options CASCADE;
-DROP TABLE IF EXISTS dhcp6_options CASCADE;
-DROP TABLE IF EXISTS host_identifier_type CASCADE;
-DROP TABLE IF EXISTS lease_state CASCADE;
-DROP TABLE IF EXISTS dhcp_option_scope CASCADE;
-DROP TABLE IF EXISTS logs CASCADE;
-DROP TABLE IF EXISTS lease6_pool_stat CASCADE;
-DROP TABLE IF EXISTS lease4_pool_stat CASCADE;
-\""
+    reset_kea_schema
+    apply_portal_schema
 
     pi_sudo "cd $q_repo && docker cp kea/dhcpdb_create.pgsql captive-portal-db:/tmp/dhcpdb_create.pgsql"
 
+    
     if ! pi_sudo "cd $q_repo && docker compose exec -T db psql -U portal_user -d captive_portal -v ON_ERROR_STOP=1 -f /tmp/dhcpdb_create.pgsql"; then
         pi_sudo "cd $q_repo && docker compose exec -T db rm -f /tmp/dhcpdb_create.pgsql"
         die "Kea schema apply failed (psql returned an error)."
     fi
+
+    
 
     pi_sudo "cd $q_repo && docker compose exec -T db rm -f /tmp/dhcpdb_create.pgsql"
     echo "Kea schema applied successfully."
@@ -1872,14 +1530,6 @@ install_pi_server() {
     q_repo="$(shell_quote "$PI_REPO_DIR")"
     q_user="$(shell_quote "$PI_USER")"
 
-    unset 'COMPLETED_STEPS[pi_install_complete]'
-    state_save
-
-    if step_done "pi_install_complete"; then
-        echo "Pi installation is already marked complete; running validation only."
-        validate_pi_server
-        return 0
-    fi
 
     if ! step_done "pi_ssh_check"; then
         echo "Testing SSH access to Pi at $PI_WIFI_IP..."
@@ -1916,27 +1566,38 @@ install_pi_server() {
     # inside the repository tree. The original order deleted the certificate
     # when rm -rf was later used before git clone.
 
-    unset 'COMPLETED_STEPS[pi_repo_clone]'
-    state_save
+
     if ! step_done "pi_repo_clone"; then
+        
         info "Cloning bf-network repository on the Pi"
         pi_sudo "cd $q_repo && docker compose down --remove-orphans 2>/dev/null || true"
         pi_sudo "rm -rf $q_repo"
         pi_sudo "git clone --branch $(shell_quote "$BF_REPO_BRANCH") $(shell_quote "$BF_REPO_URL") $q_repo"
         pi_sudo "chown -R $q_user:$q_user $q_repo"
         complete_step "pi_repo_clone"
+        unset 'COMPLETED_STEPS[pi_repo_patch]'
+        unset 'COMPLETED_STEPS[pi_env_file]'    
+        unset 'COMPLETED_STEPS[pi_compose_up]'
+        state_save
     else
         echo "Skipping completed step: repository clone"
     fi
+
+    
     pi_sudo "mkdir -p $q_repo/freeradius/raddb/mods-config/files
-         # Make sure it is a file, not a directory
-         if [ -d $q_repo/freeradius/raddb/mods-config/files/authorize ]; then
-             rm -rf $q_repo/freeradius/raddb/mods-config/files/authorize
-         fi
-         printf \"%s\n\" \"# Authorize file – users are provided by the SQL module\" \
-             > $q_repo/freeradius/raddb/mods-config/files/authorize
-         chmod 644 $q_repo/freeradius/raddb/mods-config/files/authorize"
+        # Make sure it is a file, not a directory
+        if [ -d $q_repo/freeradius/raddb/mods-config/files/authorize ]; then
+            rm -rf $q_repo/freeradius/raddb/mods-config/files/authorize
+        fi
+        printf \"%s\n\" \"# Authorize file – users are provided by the SQL module\" \
+            > $q_repo/freeradius/raddb/mods-config/files/authorize
+        chmod 644 $q_repo/freeradius/raddb/mods-config/files/authorize"
+
+ 
+
+    
     # Build vlan-prefix-map.txt (all subnets /24)
+    info "Creating vlan-prefix-map.txt"
     map_entries=()
     for vlan in "${VLAN_LIST[@]}" "$MANAGEMENT_VLAN" "$WIRED_VLAN"; do
         # skip empty just in case
@@ -1946,11 +1607,10 @@ install_pi_server() {
 
     # Join with commas (no trailing comma)
     VLAN_PREFIX_MAP_CONTENT=$(IFS=,; echo "${map_entries[*]}")
-
     pi_sudo "mkdir -p $q_repo/kea/config
-            printf \"%s\n\" $(shell_quote "$VLAN_PREFIX_MAP_CONTENT") > $q_repo/kea/config/vlan-prefix-map.txt
-            chmod 644 $q_repo/kea/config/vlan-prefix-map.txt"
-
+    printf \"%s\n\" $(shell_quote "$VLAN_PREFIX_MAP_CONTENT") > $q_repo/kea/config/vlan-prefix-map.txt
+    chmod 644 $q_repo/kea/config/vlan-prefix-map.txt"       
+    
 
     if ! step_done "pi_oracle_key"; then
         info "Installing Oracle VPS private key on the Pi"
@@ -1964,8 +1624,6 @@ install_pi_server() {
         echo "Skipping completed step: Oracle VPS key copy"
     fi
 
-    unset 'COMPLETED_STEPS[pi_env_file]'
-    state_save
 
     if ! step_done "pi_env_file"; then
         info "Writing Pi .env file"
@@ -1973,13 +1631,13 @@ install_pi_server() {
         pi_scp_to "$ENV_TMP" "/tmp/bf-network.env"
         pi_sudo "mv /tmp/bf-network.env $q_repo/.env && chmod 600 $q_repo/.env && chown $q_user:$q_user $q_repo/.env"
         rm -f "$ENV_TMP"
+        unset 'COMPLETED_STEPS[pi_compose_up]'
         complete_step "pi_env_file"
     else
         echo "Skipping completed step: Pi .env file"
     fi
 
-    unset 'COMPLETED_STEPS[pi_switch_key]'
-    state_save
+
 
     if ! step_done "pi_switch_key"; then
         info "Installing HP 5130 SSH key on the Pi"
@@ -1992,11 +1650,11 @@ install_pi_server() {
         echo "Skipping completed step: HP 5130 SSH key copy"
     fi
 
-    unset 'COMPLETED_STEPS[pi_repo_patch]'
-    state_save
+
 
     if ! step_done "pi_repo_patch"; then
         patch_repo_for_install
+        unset 'COMPLETED_STEPS[pi_compose_up]'
         complete_step "pi_repo_patch"
     else
         echo "Skipping completed step: repository patch"
@@ -2004,15 +1662,12 @@ install_pi_server() {
 
     # Always refresh npm/setup.py during development because it is small,
     # idempotent, and fixes both first-run admin setup and DNS-01 cert import.
-    unset 'COMPLETED_STEPS[pi_npm_setup_script]'
-    state_save
-    if ! step_done "pi_npm_setup_script"; then
-        install_fixed_npm_setup_py
-        complete_step "pi_npm_setup_script"
-    fi
+
+
     
     if ! step_done "pi_networkd"; then
         configure_pi_networkd
+        unset 'COMPLETED_STEPS[pi_compose_up]'
         complete_step "pi_networkd"
     else
         echo "Skipping completed step: Pi network configuration"
@@ -2029,8 +1684,7 @@ install_pi_server() {
     fi
 
 
-    unset 'COMPLETED_STEPS[pi_compose_up]'
-    state_save
+
     
     if ! step_done "pi_compose_up"; then
         info "Starting PostgreSQL for bf-network"
@@ -2050,25 +1704,25 @@ install_pi_server() {
         info "Starting full bf-network Docker stack"
         pi_sudo "cd $q_repo && if docker compose version >/dev/null 2>&1; then docker compose up -d --build; else docker-compose up -d --build; fi"
         complete_step "pi_compose_up"
+        state_save
     else
         echo "Skipping completed step: Docker Compose startup"
     fi
 
+    if ! step_done "pi_npm_setup_script"; then
+        install_fixed_npm_setup_py
+        complete_step "pi_npm_setup_script"
+    fi
+
     
 
-    if ! step_done "pi_dns_certificate"; then
-        setup_dns01_certificate
-        complete_step "pi_dns_certificate"
-    else
-        echo "Skipping completed step: DNS-01 certificate"
-    fi
+    ensure_dns01_certificate_ready
 
     # After acme.sh/Bunny writes npm/letsencrypt/live/<domain>, rerun npm-setup.
     # The first npm-setup run during docker compose up creates the admin/proxy
     # host. This second run imports the DNS-01 certificate into NPM and attaches
     # it to the proxy host so local NPM port 443 has the expected SNI certificate.
-    unset 'COMPLETED_STEPS[pi_npm_certificate_attach]'
-    state_save
+    
     if ! step_done "pi_npm_certificate_attach"; then
         info "Importing DNS-01 certificate into NPM and attaching it to the proxy host"
         pi_sudo "cd $q_repo && docker compose run --rm npm-setup && docker compose restart npm"
@@ -2079,7 +1733,7 @@ install_pi_server() {
     state_save
 
     validate_pi_server
-    complete_step "pi_install_complete"
+    
 }
 
 validate_pi_server() {
@@ -2225,6 +1879,7 @@ if is_yes "$scan_network"; then
         done
     fi
 fi
+prompt_default ISP_GW "Enter the ISP gateway IP on VLAN 1" "192.168.1.1"
 
 declare -a NUMBER_OF_PORTS
 declare -a MAX_1GBS_PORT
@@ -2255,6 +1910,16 @@ done
 info "VLAN Setup"
 
 default_vlans="10 20 30"
+if ! answer_exists "vlan_input"; then
+    unset 'COMPLETED_STEPS[build_vlan_prefix_map]'    
+    unset 'COMPLETED_STEPS[pi_env_file]'
+    unset 'COMPLETED_STEPS[pi_networkd]'
+    for j in "${!IPS[@]}"; do
+        unset "COMPLETED_STEPS[switch_${j}_configured]"     
+    done
+    state_save
+fi
+
 prompt_line vlan_input "Enter user VLAN IDs (space separated) [$default_vlans]: " "vlan_input"
 
 if [ -z "$vlan_input" ]; then
@@ -2511,6 +2176,8 @@ echo
 
 prompt_default MAIN_DOMAIN "Main domain (e.g. bf-network.duckdns.org)" "bf-network.duckdns.org"
 PORTAL_URL="https://${MAIN_DOMAIN}"
+CERT_STORE_DIR="/var/lib/bf-network-installer/certs/${MAIN_DOMAIN}"
+CERT_REPO_DIR="${PI_REPO_DIR}/npm/letsencrypt/live/${MAIN_DOMAIN}"
 
 prompt_default ORACLE_VPS_HTTPS_PORT \
     "Local HTTPS tunnel port on VPS - must be unique for each domain" \
@@ -2872,8 +2539,43 @@ dhcp snooping trust
 #
 "
     fi
+    # VLAN-99 address for this switch (NAS-IP)
+    SWITCH_NAS_IP="${LOCAL_BASE}.${MANAGEMENT_VLAN}.${LAST_OCTET}"
 
-    DYNAMIC_CONFIG="$ISP_VLAN_CONFIG$VLAN_IFACE_CONFIG$UPLINK_CONFIG$INTERSWITCH_CONFIG$KEA_CONFIG"
+    RADIUS_CONFIG="
+radius scheme rad1
+primary authentication ${RADIUS_SERVER}
+primary accounting ${RADIUS_SERVER}
+key authentication simple ${RADIUS_SECRET}
+key accounting simple ${RADIUS_SECRET}
+user-name-format without-domain
+nas-ip ${SWITCH_NAS_IP}
+#
+radius dynamic-author server
+client ip ${RADIUS_SERVER} key simple ${RADIUS_SECRET}
+#
+domain macauth
+authentication lan-access radius-scheme rad1
+authorization lan-access radius-scheme rad1
+accounting lan-access radius-scheme rad1
+#
+mac-authentication
+mac-authentication domain macauth
+#
+vlan 1028
+name NATIVE-NULL
+#
+dhcp snooping enable
+"
+    DEFAULT_ROUTE_CONFIG=""
+    if [ "$j" -eq 0 ]; then
+        DEFAULT_ROUTE_CONFIG="
+ip route-static 0.0.0.0 0 ${ISP_GW}
+#
+"
+    fi
+
+    DYNAMIC_CONFIG="$RADIUS_CONFIG$DEFAULT_ROUTE_CONFIG$ISP_VLAN_CONFIG$VLAN_IFACE_CONFIG$UPLINK_CONFIG$INTERSWITCH_CONFIG$KEA_CONFIG"
 
     
 
@@ -2951,5 +2653,5 @@ done
 
 install_pi_server
 
-echo
+
 echo "All switches and the Pi server have been processed."
