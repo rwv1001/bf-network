@@ -212,7 +212,7 @@ def _ensure_admin_token(domain):
         )
 
 
-def _proxy_host_payload(domain, cert_id=0, ssl_forced=False):
+def _proxy_host_payload(domain, forward_host, forward_port, cert_id=0, ssl_forced=False):
     advanced_config = """proxy_set_header Host $host;
 proxy_set_header X-Real-IP $remote_addr;
 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -221,8 +221,8 @@ proxy_set_header X-Forwarded-Proto $scheme;
     return {
         "domain_names": [domain],
         "forward_scheme": "http",
-        "forward_host": FWD_HOST,
-        "forward_port": FWD_PORT,
+        "forward_host": forward_host,
+        "forward_port": forward_port,
         "access_list_id": 0,
         "certificate_id": int(cert_id or 0),
         "meta": {},
@@ -247,23 +247,30 @@ def _get_proxy_host(token, domain):
     return None
 
 
-def _create_or_get_proxy_host(token, domain):
+def _create_or_get_proxy_host(token, domain, forward_host, forward_port):
     host = _get_proxy_host(token, domain)
+    payload = _proxy_host_payload(domain, forward_host, forward_port)
+
     if host:
-        print(
-            f"npm-setup: proxy host for {domain} already exists (id={host['id']}).",
-            flush=True,
+        needs_update = (
+            host.get("forward_host") != forward_host
+            or int(host.get("forward_port") or 0) != int(forward_port)
         )
+        if needs_update:
+            _api("PUT", f"/api/nginx/proxy-hosts/{host['id']}", payload, token=token)
+            print(f"npm-setup: updated proxy host for {domain} (id={host['id']}).", flush=True)
+            return _get_proxy_host(token, domain)
+        print(f"npm-setup: proxy host for {domain} already exists (id={host['id']}).", flush=True)
         return host
 
     print(f"npm-setup: creating proxy host for {domain}...", flush=True)
-    host = _api("POST", "/api/nginx/proxy-hosts", _proxy_host_payload(domain), token=token)
+    host = _api("POST", "/api/nginx/proxy-hosts", payload, token=token)
     print(f"npm-setup: proxy host created (id={host['id']}).", flush=True)
     return host
 
 
-def _update_proxy_host_certificate(token, domain, host_id, cert_id):
-    payload = _proxy_host_payload(domain, cert_id=cert_id, ssl_forced=FORCE_SSL)
+def _update_proxy_host_certificate(token, domain, forward_host, forward_port, host_id, cert_id):
+    payload = _proxy_host_payload(domain, forward_host, forward_port, cert_id=cert_id, ssl_forced=FORCE_SSL)
     _api("PUT", f"/api/nginx/proxy-hosts/{host_id}", payload, token=token)
     print(
         f"npm-setup: attached certificate id={cert_id} to proxy host id={host_id}; "
@@ -358,11 +365,63 @@ def _request_http01_certificate(token, domain):
     print(f"npm-setup: built-in NPM certificate issued id={cert_id}", flush=True)
     return cert_id
 
+def csv_env(name: str, default: str = "") -> list[str]:
+    raw = os.environ.get(name, default)
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+def build_captive_hosts() -> list[dict]:
+    portal_domain = urlparse(PORTAL_URL).hostname
+    portal_backend_host = os.environ.get("PORTAL_FORWARD_HOST", "captive-portal-web")
+    portal_backend_port = int(os.environ.get("PORTAL_FORWARD_PORT", "8080"))
+
+    hosts: list[dict] = []
+
+    # Public portal host
+    if portal_domain:
+        hosts.append({
+            "domain": portal_domain,
+            "forward_host": portal_backend_host,
+            "forward_port": portal_backend_port,
+            "ssl": True,
+        })
+
+    # Portal IP / local landing host(s)
+    for ip in csv_env("CAPTIVE_PORTAL_IPS"):
+        hosts.append({
+            "domain": ip,
+            "forward_host": portal_backend_host,
+            "forward_port": portal_backend_port,
+            "ssl": False,
+        })
+
+    # Captive-check domains
+    for domain in csv_env("CAPTIVE_CHECK_HOSTS"):
+        hosts.append({
+            "domain": domain,
+            "forward_host": portal_backend_host,
+            "forward_port": portal_backend_port,
+            "ssl": False,
+        })
+
+    # De-duplicate by domain while preserving order
+    seen = set()
+    unique_hosts = []
+    for host in hosts:
+        domain = host["domain"]
+        if domain and domain not in seen:
+            seen.add(domain)
+            unique_hosts.append(host)
+
+    return unique_hosts
+
+
 
 def main():
     if not PORTAL_URL:
         print("npm-setup: PORTAL_URL not set - nothing to do.", flush=True)
         return
+
+    CAPTIVE_HOSTS = build_captive_hosts()
 
     domain = urlparse(PORTAL_URL).hostname
     if not domain:
@@ -370,21 +429,19 @@ def main():
 
     _wait_for_npm()
     token = _ensure_admin_token(domain)
-    host = _create_or_get_proxy_host(token, domain)
-    host_id = host["id"]
-    existing_cert_id = int(host.get("certificate_id") or 0)
+    for host_def in CAPTIVE_HOSTS:
+        domain = host_def["domain"]
+        host = _create_or_get_proxy_host(
+            token,
+            domain,
+            host_def["forward_host"],
+            host_def["forward_port"],
+        )
 
-    # Preferred bf-network path: use DNS-01/acme.sh cert if it exists.
-    custom_cert_id = _import_custom_certificate(token, domain)
-    if custom_cert_id:
-        if existing_cert_id != int(custom_cert_id):
-            _update_proxy_host_certificate(token, domain, host_id, custom_cert_id)
-        else:
-            print(
-                f"npm-setup: proxy host already uses custom certificate id={custom_cert_id}.",
-                flush=True,
-            )
-        return
+        if host_def["ssl"]:
+            cert_id = _import_custom_certificate(token, domain)
+            if cert_id:
+                _update_proxy_host_certificate(token, domain, host_def["forward_host"], host_def["forward_port"], host["id"], cert_id)
 
     if SKIP_SSL:
         print(
@@ -395,20 +452,7 @@ def main():
         )
         return
 
-    # Fallback for deployments where the domain publicly reaches this NPM over port 80.
-    try:
-        cert_id = _request_http01_certificate(token, domain)
-        if cert_id:
-            _update_proxy_host_certificate(token, domain, host_id, cert_id)
-    except Exception as exc:
-        print(
-            f"npm-setup: HTTP-01 SSL cert request failed: {exc}\n"
-            "npm-setup: proxy host remains active on HTTP. In the bf-network "
-            "Oracle/Bunny deployment this is expected until the DNS-01 cert is "
-            "issued and npm-setup is rerun.",
-            flush=True,
-        )
-        return
+    
 
 
 if __name__ == "__main__":
