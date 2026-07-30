@@ -84,6 +84,29 @@ def create_app():
             from core.vlan_utils import seed_vlan_mappings
             seed_vlan_mappings()
 
+        from models import Admin
+        
+
+        if Admin.query.count() == 0:
+            username = os.environ.get("PORTAL_ADMIN_USER", "admin")
+            password = os.environ.get("PORTAL_ADMIN_PASSWORD")
+            if password:
+                admin = Admin(
+                    username=username,
+                    email=os.environ.get("ADMIN_EMAIL"),
+                    can_manage_admins=True,
+                    can_manage_users=True,
+                    can_manage_vlans=True,
+                    can_view_traffic=True,
+                    can_manage_switch_ports=True,
+                    can_manage_isp_routers=True,
+                    can_manage_firmware=True,
+                    can_manage_pihole=True,
+                )
+                admin.set_password(password)
+                db.session.add(admin)
+                db.session.commit()        
+
     # ── Context processors ────────────────────────────────────────────────────
     @app.context_processor
     def inject_globals():

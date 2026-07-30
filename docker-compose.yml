@@ -280,6 +280,8 @@ services:
       HP5130_CURRENT_CONFIG_PATH: ${HP5130_CURRENT_CONFIG_PATH:-/scripts/scriptdata/hp5130-current-config.json}
       ACL_BASELINE_SCRIPT: ${ACL_BASELINE_SCRIPT:-/scripts/hp5130-acl-baseline.sh}
       DNS_SCRIPT: ${DNS_SCRIPT:-/scripts/dns-hijack.sh}
+      PORTAL_ADMIN_USER: ${PORTAL_ADMIN_USER:-admin}
+      PORTAL_ADMIN_PASSWORD: ${PORTAL_ADMIN_PASSWORD:?PORTAL_ADMIN_PASSWORD is required}
     volumes:
       - ./captive-portal/app:/app
       - ./shared/restart-queue:/restart-queue

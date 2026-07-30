@@ -256,7 +256,7 @@ def mfa_setup():
             qr.make(fit=True)
             img = qr.make_image(fill_color="black", back_color="white")
             buffer = io.BytesIO()
-            img.save(buffer, format='PNG')
+            img.save(buffer)
             buffer.seek(0)
             qr_code_base64 = base64.b64encode(buffer.getvalue()).decode()
             return render_template(
@@ -283,7 +283,7 @@ def mfa_setup():
             qr.make(fit=True)
             img = qr.make_image(fill_color="black", back_color="white")
             buffer = io.BytesIO()
-            img.save(buffer, format='PNG')
+            img.save(buffer)
             buffer.seek(0)
             qr_code_base64 = base64.b64encode(buffer.getvalue()).decode()
             return render_template(
@@ -335,7 +335,7 @@ def mfa_setup():
                 qr.make(fit=True)
                 img = qr.make_image(fill_color="black", back_color="white")
                 buffer = io.BytesIO()
-                img.save(buffer, format='PNG')
+                img.save(buffer)
                 buffer.seek(0)
                 qr_code_base64 = base64.b64encode(buffer.getvalue()).decode()
                 return render_template(
