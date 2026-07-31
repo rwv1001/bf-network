@@ -131,39 +131,52 @@ def _get_unregistered_gw(network_word: str) -> str:
 
 
 def infra_ghost_reservations(network_word: str, vlan: int, switch_hosts_raw: str) -> list:
-    """Build ghost host reservations for infrastructure IPs in this VLAN's /24 block.
+    """Reserve infra + every switch last-octet on this VLAN."""
+    host_octets = {1, 2, 3, 4, 5}
 
-    These prevent Kea's allocator from ever handing out:
-      .1  – default gateway
-      .2  – SW1
-      .3  – SW2
-      .4  – Pi / portal
-      .N  – any additional switch from SWITCH_HOSTS whose third octet == vlan
+    print(
+        f"DEBUG infra_ghost: vlan={vlan} network_word={network_word!r} "
+        f"switch_hosts_raw={switch_hosts_raw!r}",
+        file=sys.stderr,
+    )
 
-    Ghost MACs use the locally-administered prefix 02:00 so they can never
-    match a real NIC: 02:00:c0:a8:<vlan_byte>:<host_byte>
-    """
-    host_octets = {1, 2, 3, 4}
     for host_str in switch_hosts_raw.split():
         host_str = host_str.strip()
         if not host_str:
             continue
         try:
-            addr = ipaddress.IPv4Address(host_str)
-            parts = str(addr).split(".")
-            if int(parts[2]) == vlan:
-                host_octets.add(int(parts[3]))
-        except ValueError:
-            continue
+            parts = str(ipaddress.IPv4Address(host_str)).split(".")
+            octet = int(parts[3])
+            host_octets.add(octet)
+            print(
+                f"DEBUG infra_ghost: vlan={vlan} from host {host_str} → octet {octet}",
+                file=sys.stderr,
+            )
+        except ValueError as e:
+            print(
+                f"DEBUG infra_ghost: skip host {host_str!r}: {e}",
+                file=sys.stderr,
+            )
 
     reservations = []
     for octet in sorted(host_octets):
         ghost_mac = f"02:00:c0:a8:{vlan & 0xff:02x}:{octet:02x}"
+        ip = f"{network_word}.{vlan}.{octet}"
         reservations.append({
             "hw-address": ghost_mac,
-            "ip-address": f"{network_word}.{vlan}.{octet}",
+            "ip-address": ip,
             "user-context": {"infra-ghost": True},
         })
+        print(
+            f"DEBUG infra_ghost: vlan={vlan} reservation {ip} mac={ghost_mac}",
+            file=sys.stderr,
+        )
+
+    print(
+        f"DEBUG infra_ghost: vlan={vlan} total reservations={len(reservations)} "
+        f"octets={sorted(host_octets)}",
+        file=sys.stderr,
+    )
     return reservations
 
 
@@ -333,9 +346,9 @@ def main():
                 "max-reclaim-time": 250,
                 "unwarned-reclaim-cycles": 5,
             },
-            "renew-timer": 300,
-            "rebind-timer": 480,
-            "valid-lifetime": 600,
+            "renew-timer": int(os.environ.get("KEA_RENEW_TIMER", "300")),
+            "rebind-timer": int(os.environ.get("KEA_REBIND_TIMER", "480")),
+            "valid-lifetime": int(os.environ.get("KEA_VALID_LIFETIME", "600")),
             "option-data": [
                 {"name": "domain-name",        "data": "blackfriars.local"},
                 {"name": "domain-name-servers", "data": portal_ip},
