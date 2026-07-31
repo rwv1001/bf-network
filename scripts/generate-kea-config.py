@@ -180,18 +180,21 @@ def infra_ghost_reservations(network_word: str, vlan: int, switch_hosts_raw: str
     return reservations
 
 
-def make_vlan_subnet(network_word: str, vlan: int, prefix: int, switch_hosts_raw: str) -> dict:
+def make_vlan_subnet(
+    network_word: str,
+    vlan: int,
+    prefix: int,
+    switch_hosts_raw: str,
+    gateway_octet: int,
+) -> dict:
     network = ipaddress.IPv4Network(f"{network_word}.{vlan}.0/{prefix}", strict=False)
     bounds = pool_bounds(prefix)
+    router = f"{network_word}.{vlan}.{gateway_octet}"
     return {
         "subnet": str(network),
         "id": vlan,
         "pools": [
             {
-                # Blocked pool FIRST — Kea picks the first eligible pool.
-                # BLOCKED devices match this pool and stop here; registered
-                # and unclassed devices skip it (no BLOCKED class) and fall
-                # through to the regular pool below.
                 "pool": (
                     f"{ip_at_offset(network, bounds['blocked_start'])}"
                     f" - "
@@ -209,7 +212,7 @@ def make_vlan_subnet(network_word: str, vlan: int, prefix: int, switch_hosts_raw
         ],
         "interface": f"eth0.{vlan}",
         "option-data": [
-            {"name": "routers", "data": f"{network_word}.{vlan}.2"}
+            {"name": "routers", "data": router}
         ],
         "reservations": infra_ghost_reservations(network_word, vlan, switch_hosts_raw),
     }
@@ -255,6 +258,7 @@ def main():
         print("ERROR: no switch hosts configured "
               "(set SWITCH_HOSTS_BYTES or SWITCH_HOSTS)", file=sys.stderr)
         sys.exit(1)
+    gateway_octet = int(str(ipaddress.IPv4Address(switch_host_ips[0])).split(".")[3])    
     # First switch host is used as the management VLAN gateway
     mgmt_gateway = switch_host_ips[0]
 
@@ -264,7 +268,7 @@ def main():
     # blocks below with their own pool/DNS/gateway config — skip them here.
     SPECIAL_VLANS = {wired_vlan, management_vlan}
     subnet4 = [
-        make_vlan_subnet(network_word, vlan, prefix, switch_hosts_raw)
+        make_vlan_subnet(network_word, vlan, prefix, switch_hosts_raw, gateway_octet)
         for vlan, prefix in sorted(vlan_prefix_map.items())
         if vlan not in SPECIAL_VLANS
     ]

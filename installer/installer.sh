@@ -620,9 +620,9 @@ get_interface() {
     local max_1g_port="$2"
 
     if [ "$port" -le "$max_1g_port" ]; then
-        echo "GigabitEthernet1/0/$port"
+        echo "GE1/0/$port"
     else
-        echo "Ten-GigabitEthernet1/0/$port"
+        echo "XGE1/0/$port"
     fi
 }
 
@@ -1391,6 +1391,109 @@ install_fixed_npm_setup_py() {
     
 }
 
+seed_isp_routers() {
+    local q_repo="$1"
+
+    info "Seeding isp_routers and VLAN → ISP mappings"
+
+    # --- Rebuild ISP_SWITCH_* from state if this process did not run the switch loop ---
+    local i
+    for i in "${!ISP_NAMES[@]}"; do
+        if [ -z "${ISP_SWITCH_HOST[$i]:-}" ] && answer_exists "isp_${i}_switch_host"; then
+            ISP_SWITCH_HOST[$i]="${SAVED_ANSWERS[isp_${i}_switch_host]}"
+        fi
+        if [ -z "${ISP_SWITCH_PORT[$i]:-}" ] && answer_exists "isp_${i}_switch_port"; then
+            ISP_SWITCH_PORT[$i]="${SAVED_ANSWERS[isp_${i}_switch_port]}"
+        fi
+    done
+
+    # --- Rebuild VLAN → ISP index from vlan_${vlan}_isp answers ---
+    declare -A VLAN_ISP_INDEX=()
+    local vlan ans idx
+    for vlan in "${VLAN_LIST[@]}"; do
+        ans="${SAVED_ANSWERS[vlan_${vlan}_isp]:-}"
+        if ! [[ "$ans" =~ ^[0-9]+$ ]] || [ "$ans" -lt 1 ] || [ "$ans" -gt "${#ISP_NAMES[@]}" ]; then
+            die "Missing/invalid ISP choice for VLAN $vlan (expected key vlan_${vlan}_isp)"
+        fi
+        VLAN_ISP_INDEX[$vlan]=$((ans - 1))
+    done
+
+    local sql name subnet vlan_id switch_host switch_port isp_name
+    sql="$(mktemp)"
+    {
+        echo "BEGIN;"
+
+        for i in "${!ISP_NAMES[@]}"; do
+            name="${ISP_NAMES[$i]}"
+            subnet="${ISP_NETWORK_PORTION[$i]}.0/24"
+            vlan_id=$((i + 1))
+            switch_host="${ISP_SWITCH_HOST[$i]:-}"
+            switch_port="${ISP_SWITCH_PORT[$i]:-}"
+
+            # Upsert by unique name — no DELETE needed
+            printf "INSERT INTO isp_routers (
+  name, subnet, vlan_id, switch_port, switch_host,
+  dhcp_snooping_trust, nat_logger_type, created_at
+) VALUES (
+  %s, %s, %s, %s, %s,
+  TRUE, 'none', NOW()
+)
+ON CONFLICT (name) DO UPDATE SET
+  subnet              = EXCLUDED.subnet,
+  vlan_id             = EXCLUDED.vlan_id,
+  switch_port         = EXCLUDED.switch_port,
+  switch_host         = EXCLUDED.switch_host,
+  dhcp_snooping_trust = EXCLUDED.dhcp_snooping_trust,
+  nat_logger_type     = EXCLUDED.nat_logger_type;\n" \
+                "$(sql_quote "$name")" \
+                "$(sql_quote "$subnet")" \
+                "$vlan_id" \
+                "$(sql_quote_or_null "$switch_port")" \
+                "$(sql_quote_or_null "$switch_host")"
+        done
+
+        for vlan in "${VLAN_LIST[@]}"; do
+            idx="${VLAN_ISP_INDEX[$vlan]}"
+            isp_name="${ISP_NAMES[$idx]}"
+            # Only updates rows that already exist (created by init-db / app)
+            printf "UPDATE vlan_mappings
+SET isp_router_id = (SELECT id FROM isp_routers WHERE name = %s)
+WHERE vlan_id = %s;\n" \
+                "$(sql_quote "$isp_name")" \
+                "$vlan"
+        done
+
+        echo "COMMIT;"
+    } > "$sql"
+
+    # Debug (optional): show what will run
+    echo "--- seed_isp_routers.sql ---"
+    cat "$sql"
+    echo "----------------------------"
+
+    pi_scp_to "$sql" /tmp/seed_isp_routers.sql
+    pi_sudo "cd $q_repo && \
+      docker cp /tmp/seed_isp_routers.sql captive-portal-db:/tmp/seed_isp_routers.sql && \
+      docker compose exec -T db \
+        psql -U portal_user -d captive_portal -v ON_ERROR_STOP=1 -f /tmp/seed_isp_routers.sql && \
+      docker compose exec -T db rm -f /tmp/seed_isp_routers.sql && \
+      rm -f /tmp/seed_isp_routers.sql"
+
+    rm -f "$sql"
+}
+
+sql_quote() {
+    # single-quote for SQL literals
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"
+}
+
+sql_quote_or_null() {
+    if [ -z "${1:-}" ]; then
+        printf 'NULL'
+    else
+        sql_quote "$1"
+    fi
+}
 
 configure_pi_backups() {
     if ! is_yes "$ENABLE_DB_BACKUPS"; then
@@ -1707,6 +1810,11 @@ install_pi_server() {
         state_save
     else
         echo "Skipping completed step: Docker Compose startup"
+    fi
+
+    if ! step_done "seed_isp_routers"; then
+        seed_isp_routers "$q_repo"
+        complete_step "seed_isp_routers"
     fi
 
     if ! step_done "pi_npm_setup_script"; then
@@ -2059,6 +2167,31 @@ dhcp snooping binding record
 arp detection enable
 #
 "
+
+# ISP_NAMES[i], ISP_NETWORK_PORTION[i], uplink VLAN = i+1  (your existing model)
+
+declare -A VLAN_ISP_INDEX=()   # vlan_id -> index into ISP_NAMES
+
+info "VLAN → ISP routing"
+for vlan in "${VLAN_LIST[@]}"; do
+    echo
+    echo "User VLAN $vlan — which ISP should carry this VLAN’s traffic?"
+    for i in "${!ISP_NAMES[@]}"; do
+        echo "  $((i + 1))) ${ISP_NAMES[$i]}  (uplink VLAN $((i + 1)), net ${ISP_NETWORK_PORTION[$i]}.0/24)"
+    done
+    while true; do
+        prompt_line ans "Enter ISP number [1-${#ISP_NAMES[@]}]: " "vlan_${vlan}_isp"
+        if [[ "$ans" =~ ^[0-9]+$ ]] && [ "$ans" -ge 1 ] && [ "$ans" -le "${#ISP_NAMES[@]}" ]; then
+            VLAN_ISP_INDEX[$vlan]=$((ans - 1))
+            break
+        fi
+        echo "Invalid choice."
+        invalidate_answer "vlan_${vlan}_isp"
+    done
+done
+
+declare -a ISP_SWITCH_HOST=()
+declare -a ISP_SWITCH_PORT=()
 
 # =============================================================================
 # SSH key management for HP5130 and Pi containers
@@ -2430,6 +2563,19 @@ for j in "${!IPS[@]}"; do
 
         UPLINK_PORTS+=("$port")
         UPLINK_ISP_INDEXES+=("$m")
+
+        # ISP index m is attached on this switch, this port
+        LAST_OCTET="$(last_octet "$MGMT_IP")"
+        # Prefer mgmt VLAN IP; last octet is what ISPRouter.switch_host_ip() uses
+        ISP_SWITCH_HOST[$m]="${LOCAL_BASE}.${MANAGEMENT_VLAN}.${LAST_OCTET}"
+        # or, if you insist on the installer MGMT_IP:
+        # ISP_SWITCH_HOST[$m]="$MGMT_IP"
+
+        ISP_SWITCH_PORT[$m]="$(get_interface "$port" "${MAX_1GBS_PORT[$j]}")"
+        save_answer "isp_${m}_switch_host" "${ISP_SWITCH_HOST[$m]}"
+        save_answer "isp_${m}_switch_port" "${ISP_SWITCH_PORT[$m]}"
+
+        
         m=$((m + 1))
         uplink_prompt_index=$((uplink_prompt_index + 1))
     done
