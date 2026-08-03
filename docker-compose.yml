@@ -219,7 +219,6 @@ services:
       ADMIN_EMAIL: ${ADMIN_EMAIL}
       RADIUS_SECRET: ${RADIUS_SECRET:?RADIUS_SECRET is required – set it in .env}
       RADIUS_SERVER: ${RADIUS_SERVER:?RADIUS_SERVER is required – set it in .env}
-      RADIUS_NAS_IP: ${RADIUS_NAS_IP:?RADIUS_NAS_IP is required – set it in .env}
       PORTAL_URL: ${PORTAL_URL:?PORTAL_URL is required – set it in .env}
       PORTAL_POLL_URL: ${PORTAL_POLL_URL:-}
       INSTITUTION_URL: ${INSTITUTION_URL:-}

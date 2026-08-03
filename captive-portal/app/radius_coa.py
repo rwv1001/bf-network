@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 # RADIUS configuration
 RADIUS_SERVER = os.environ['RADIUS_SERVER']
 RADIUS_SECRET = os.environ['RADIUS_SECRET'].encode('utf-8')
-RADIUS_NAS_IP = os.environ['RADIUS_NAS_IP']
+
 COA_PORT = 3799
 
 # Create a minimal RADIUS dictionary
@@ -54,74 +54,117 @@ def get_radius_client():
         logger.error(f"Failed to create RADIUS client: {e}")
         return None
 
+def _lookup_switch_host_for_mac(mac_address: str) -> str | None:
+    """Return mac_port_cache.switch_host for this MAC, or None."""
+    mac = mac_address.strip().lower().replace('-', ':')
+    try:
+        from extensions import db
+        from sqlalchemy import text
+        row = db.session.execute(
+            text("""
+                SELECT switch_host
+                FROM mac_port_cache
+                WHERE mac_address = :mac
+                  AND switch_host IS NOT NULL
+                  AND switch_host <> ''
+                LIMIT 1
+            """),
+            {"mac": mac},
+        ).fetchone()
+        if row and row[0]:
+            return str(row[0]).strip()
+    except Exception as e:
+        logger.warning("mac_port_cache lookup failed for %s: %s", mac, e)
+    return None
+
 
 def send_coa_change(mac_address, vlan_id):
     """
-    Send CoA packet to change device VLAN
-    
-    Args:
-        mac_address: Device MAC address (format: xx:xx:xx:xx:xx:xx)
-        vlan_id: Target VLAN ID
-    
-    Returns:
-        bool: True if successful, False otherwise
+    Send CoA to the switch that currently has this MAC, to move it to vlan_id.
     """
     try:
-        client = get_radius_client()
-        if not client:
-            logger.error("Failed to create RADIUS client")
+        switch_host = _lookup_switch_host_for_mac(mac_address)
+        if not switch_host:
+            logger.error(
+                "No switch_host in mac_port_cache for %s — cannot send CoA "
+                "(port lookup may not have run yet)",
+                mac_address,
+            )
             return False
-        
-        # Create CoA request (support multiple pyrad versions)
+
+        # CoA destination = that switch (not a global NAS IP)
+        client = get_radius_client(server=switch_host)
+        if not client:
+            logger.error("Failed to create RADIUS client for switch %s", switch_host)
+            return False
+
         if hasattr(client, 'CreateCoARequest'):
             req = client.CreateCoARequest()
         elif hasattr(client, 'CreateCoAPacket'):
-            req = client.CreateCoAPacket(code=getattr(radius_packet, 'CoARequest', 43))
+            req = client.CreateCoAPacket(
+                code=getattr(radius_packet, 'CoARequest', 43)
+            )
         else:
             coa_code = getattr(radius_packet, 'CoARequest', 43)
             req = client.CreatePacket(code=coa_code)
-        
-        # Add attributes
+
+        # HP often expects hyphenated MAC in Calling-Station-Id
         req['Calling-Station-Id'] = mac_address.replace(':', '-').upper()
-        req['NAS-IP-Address'] = RADIUS_NAS_IP
+        req['NAS-IP-Address'] = switch_host  # this switch's management IP
         req['Tunnel-Type'] = 'VLAN'
         req['Tunnel-Medium-Type'] = 'IEEE-802'
         req['Tunnel-Private-Group-Id'] = str(vlan_id)
-        
-        logger.info(f"Sending CoA to change {mac_address} to VLAN {vlan_id}")
-        
-        # Send request
+
+        logger.info(
+            "Sending CoA to %s: %s -> VLAN %s",
+            switch_host, mac_address, vlan_id,
+        )
+
         reply = client.SendPacket(req)
-        
+
         if reply.code == getattr(radius_packet, 'CoAACK', 44):
-            logger.info(f"CoA successful: {mac_address} -> VLAN {vlan_id}")
+            logger.info(
+                "CoA successful via %s: %s -> VLAN %s",
+                switch_host, mac_address, vlan_id,
+            )
             return True
-        else:
-            logger.warning(f"CoA failed for {mac_address}: {reply.code}")
-            return False
-            
+
+        logger.warning(
+            "CoA failed via %s for %s: reply code %s",
+            switch_host, mac_address, reply.code,
+        )
+        return False
+
     except Exception as e:
-        logger.error(f"Error sending CoA for {mac_address}: {e}")
+        logger.error("Error sending CoA for %s: %s", mac_address, e)
         return False
 
 
 def send_coa_disconnect(mac_address):
     """
-    Send CoA packet to disconnect device
-    
+    Send Disconnect-Request to the switch that currently has this MAC.
+
     Args:
-        mac_address: Device MAC address (format: xx:xx:xx:xx:xx:xx)
-    
+        mac_address: Device MAC (xx:xx:xx:xx:xx:xx)
+
     Returns:
-        bool: True if successful, False otherwise
+        bool: True if ACK received, False otherwise
     """
     try:
-        client = get_radius_client()
-        if not client:
-            logger.error("Failed to create RADIUS client")
+        switch_host = _lookup_switch_host_for_mac(mac_address)
+        if not switch_host:
+            logger.error(
+                "No switch_host in mac_port_cache for %s — cannot send Disconnect "
+                "(port lookup may not have run yet)",
+                mac_address,
+            )
             return False
-        
-        # Create disconnect request
+
+        client = get_radius_client(server=switch_host)
+        if not client:
+            logger.error("Failed to create RADIUS client for switch %s", switch_host)
+            return False
+
         disconnect_code = getattr(radius_packet, 'DisconnectRequest', 40)
         if hasattr(client, 'CreateCoARequest'):
             req = client.CreateCoARequest()
@@ -130,26 +173,29 @@ def send_coa_disconnect(mac_address):
             req = client.CreateCoAPacket(code=disconnect_code)
         else:
             req = client.CreatePacket(code=disconnect_code)
-        
-        # Add attributes
+
         req['Calling-Station-Id'] = mac_address.replace(':', '-').upper()
-        req['NAS-IP-Address'] = RADIUS_NAS_IP
-        
-        logger.info(f"Sending CoA disconnect for {mac_address}")
-        
-        # Send request
+        req['NAS-IP-Address'] = switch_host
+
+        logger.info("Sending Disconnect to %s for %s", switch_host, mac_address)
+
         reply = client.SendPacket(req)
-        
+
         if reply.code in {
             getattr(radius_packet, 'DisconnectACK', 41),
             getattr(radius_packet, 'CoAACK', 44),
         }:
-            logger.info(f"CoA disconnect successful: {mac_address}")
+            logger.info(
+                "Disconnect successful via %s: %s", switch_host, mac_address
+            )
             return True
-        else:
-            logger.warning(f"CoA disconnect failed for {mac_address}: {reply.code}")
-            return False
-            
+
+        logger.warning(
+            "Disconnect failed via %s for %s: reply code %s",
+            switch_host, mac_address, reply.code,
+        )
+        return False
+
     except Exception as e:
-        logger.error(f"Error sending CoA disconnect for {mac_address}: {e}")
+        logger.error("Error sending Disconnect for %s: %s", mac_address, e)
         return False
