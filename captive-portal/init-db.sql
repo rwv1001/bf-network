@@ -137,6 +137,7 @@ CREATE TABLE IF NOT EXISTS isp_routers (
     switch_port VARCHAR(100),
     dhcp_snooping_trust BOOLEAN DEFAULT TRUE NOT NULL,
     switch_host VARCHAR(50),
+    gateway_ip VARCHAR(45),
     nat_logger_type VARCHAR(20) NOT NULL DEFAULT 'none',
     created_at TIMESTAMP DEFAULT NOW()
 );

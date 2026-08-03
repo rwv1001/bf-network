@@ -1429,27 +1429,28 @@ seed_isp_routers() {
             vlan_id=$((i + 1))
             switch_host="${ISP_SWITCH_HOST[$i]:-}"
             switch_port="${ISP_SWITCH_PORT[$i]:-}"
+            gateway_ip="${ISP_GW[$i]:-}"
 
             # Upsert by unique name — no DELETE needed
             printf "INSERT INTO isp_routers (
-  name, subnet, vlan_id, switch_port, switch_host,
+  name, subnet, vlan_id, gateway_ip, switch_port, switch_host,
   dhcp_snooping_trust, nat_logger_type, created_at
 ) VALUES (
-  %s, %s, %s, %s, %s,
+  %s, %s, %s, %s, %s, %s,
   TRUE, 'none', NOW()
 )
 ON CONFLICT (name) DO UPDATE SET
-  subnet              = EXCLUDED.subnet,
-  vlan_id             = EXCLUDED.vlan_id,
-  switch_port         = EXCLUDED.switch_port,
-  switch_host         = EXCLUDED.switch_host,
-  dhcp_snooping_trust = EXCLUDED.dhcp_snooping_trust,
-  nat_logger_type     = EXCLUDED.nat_logger_type;\n" \
-                "$(sql_quote "$name")" \
-                "$(sql_quote "$subnet")" \
-                "$vlan_id" \
-                "$(sql_quote_or_null "$switch_port")" \
-                "$(sql_quote_or_null "$switch_host")"
+  subnet      = EXCLUDED.subnet,
+  vlan_id     = EXCLUDED.vlan_id,
+  gateway_ip  = EXCLUDED.gateway_ip,
+  switch_port = EXCLUDED.switch_port,
+  switch_host = EXCLUDED.switch_host;\n" \
+    "$(sql_quote "$name")" \
+    "$(sql_quote "$subnet")" \
+    "$vlan_id" \
+    "$(sql_quote "$gateway_ip")" \
+    "$(sql_quote_or_null "$switch_port")" \
+    "$(sql_quote_or_null "$switch_host")"
         done
 
         for vlan in "${VLAN_LIST[@]}"; do
@@ -1987,7 +1988,8 @@ if is_yes "$scan_network"; then
         done
     fi
 fi
-prompt_default ISP_GW "Enter the ISP gateway IP on VLAN 1" "192.168.1.1"
+
+
 
 declare -a NUMBER_OF_PORTS
 declare -a MAX_1GBS_PORT
@@ -2112,6 +2114,7 @@ done
 
 declare -A ISP_NAMES
 declare -A ISP_NETWORK_PORTION
+
 ISP_VLAN_CONFIG=""
 
 for ((v=1; v<=NUM_ISPS; v++)); do
@@ -2188,6 +2191,16 @@ for vlan in "${VLAN_LIST[@]}"; do
         echo "Invalid choice."
         invalidate_answer "vlan_${vlan}_isp"
     done
+done
+
+declare -a ISP_GW=()
+for i in "${!ISP_NAMES[@]}"; do
+    default_gw="${ISP_NETWORK_PORTION[$i]}.1"
+    prompt_default gw \
+        "Gateway IP for ISP ${ISP_NAMES[$i]} (subnet ${ISP_NETWORK_PORTION[$i]}.0/24)" \
+        "$default_gw" \
+        "isp_${i}_gateway"
+    ISP_GW[$i]="$gw"
 done
 
 declare -a ISP_SWITCH_HOST=()
@@ -2716,7 +2729,7 @@ dhcp snooping enable
     DEFAULT_ROUTE_CONFIG=""
     if [ "$j" -eq 0 ]; then
         DEFAULT_ROUTE_CONFIG="
-ip route-static 0.0.0.0 0 ${ISP_GW}
+ip route-static 0.0.0.0 0 ${ISP_GW[0]}
 #
 "
     fi

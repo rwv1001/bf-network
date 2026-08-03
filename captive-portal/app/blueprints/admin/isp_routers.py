@@ -92,7 +92,10 @@ def _push_job_read(job_id: str):
 
 def _build_isp_router_switch_config(router: ISPRouter, switch_host: str) -> str:
     last_octet = switch_host.split('.')[-1]
-    host_ip    = f"{_net_word()}.{router.vlan_id}.{last_octet}"
+    # subnet is e.g. "192.168.1.0/24" → prefix "192.168.1"
+    subnet_ip = router.subnet.split('/')[0].strip()
+    subnet_prefix = subnet_ip.rsplit('.', 1)[0]
+    host_ip = f"{subnet_prefix}.{last_octet}"
     pbr_name   = router.pbr_name
     nqa_name   = pbr_name.lower().replace('-', '').replace(' ', '_')
     track_id   = router.id

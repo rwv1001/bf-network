@@ -250,6 +250,7 @@ class ISPRouter(db.Model):
     name = db.Column(db.String(100), unique=True, nullable=False)   # e.g. "UDM"
     subnet = db.Column(db.String(50), nullable=False)               # e.g. "192.168.1.0/24"
     vlan_id = db.Column(db.Integer, nullable=False)                 # uplink VLAN
+    gateway_ip = db.Column(db.String(45), nullable=False)
     switch_port = db.Column(db.String(100), nullable=True)          # e.g. "GigabitEthernet1/0/24"
     switch_host = db.Column(db.String(50), nullable=True)           # e.g. "192.168.99.2" — which HP5130 this router is on
     dhcp_snooping_trust = db.Column(db.Boolean, default=True, nullable=False)
@@ -264,15 +265,7 @@ class ISPRouter(db.Model):
         """PBR route-map name, e.g. PBR-UDM"""
         return f"PBR-{self.name.upper().replace(' ', '_')}"
 
-    @property
-    def gateway_ip(self):
-        """LAN IP of the router: <NETWORK_WORD>.<vlan_id>.1"""
-        return f"{_net_word()}.{self.vlan_id}.1"
-
-    def switch_host_ip(self, switch_host):
-        """Per-switch VLAN interface IP based on the last octet of switch_host."""
-        last_octet = switch_host.split('.')[-1]
-        return f"{_net_word()}.{self.vlan_id}.{last_octet}"
+    
 
     def __repr__(self):
         return f'<ISPRouter {self.name} vlan={self.vlan_id}>'
