@@ -484,41 +484,41 @@ class NATParser:
             logger.error(f"Error processing log file: {e}")
     
     def load_routers(self):
-    """Load ISP routers with nat_logger_type != 'none' from the database."""
-    try:
-        with self.db_conn.cursor() as cur:
-            cur.execute("""
-                SELECT id, name, nat_logger_type, subnet, gateway_ip
-                FROM isp_routers
-                WHERE nat_logger_type != 'none'
-                ORDER BY id
-            """)
-            rows = cur.fetchall()
-        routers = []
-        for row in rows:
-            router_id, name, logger_type, subnet, gateway_ip = row
-            if not gateway_ip:
-                logger.warning(
-                    "ISP router id=%s name=%r has empty gateway_ip; skipping",
-                    router_id, name,
-                )
-                continue
-            routers.append({
-                'id': router_id,
-                'name': name,
-                'nat_logger_type': logger_type,
-                'subnet': subnet,
-                'gateway_ip': gateway_ip,
-            })
-        self.cached_routers = routers
-        self.last_router_sync = datetime.now()
-        logger.info(
-            "Loaded %s NAT logger router(s): %s",
-            len(routers),
-            [r['name'] for r in routers],
-        )
-    except Exception as e:
-        logger.error("Failed to load routers from DB: %s", e)
+        """Load ISP routers with nat_logger_type != 'none' from the database."""
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, name, nat_logger_type, subnet, gateway_ip
+                    FROM isp_routers
+                    WHERE nat_logger_type != 'none'
+                    ORDER BY id
+                """)
+                rows = cur.fetchall()
+            routers = []
+            for row in rows:
+                router_id, name, logger_type, subnet, gateway_ip = row
+                if not gateway_ip:
+                    logger.warning(
+                        "ISP router id=%s name=%r has empty gateway_ip; skipping",
+                        router_id, name,
+                    )
+                    continue
+                routers.append({
+                    'id': router_id,
+                    'name': name,
+                    'nat_logger_type': logger_type,
+                    'subnet': subnet,
+                    'gateway_ip': gateway_ip,
+                })
+            self.cached_routers = routers
+            self.last_router_sync = datetime.now()
+            logger.info(
+                "Loaded %s NAT logger router(s): %s",
+                len(routers),
+                [r['name'] for r in routers],
+            )
+        except Exception as e:
+            logger.error("Failed to load routers from DB: %s", e)
 
     def check_all_routers(self):
         """Check all configured ISP routers and reinstall loggers as needed."""
