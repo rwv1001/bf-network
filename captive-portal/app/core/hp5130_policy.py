@@ -127,7 +127,6 @@ def _vlan_record(mapping: VlanMapping, router_ids: set[int], default_router_id: 
         "network_address": str(subnet.network_address),
         "netmask": str(subnet.netmask),
         "hostmask": str(subnet.hostmask),
-        "switch_ip": f"{network_word}.{vlan_id}.2",
         "isp_router_id": configured_router_id,
         "resolved_isp_router_id": resolved_router_id,
         "visible_vlans": _parse_visible_vlans(mapping.visible_vlans),
