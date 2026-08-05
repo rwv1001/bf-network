@@ -10,6 +10,7 @@ set mgmt_ip      ""
 set uplink_nn    ""
 set login_user   "admin"
 set username     ""   
+set name ""
 set pubkey   ""  
 set debug 0
 
@@ -46,6 +47,10 @@ for {set i 0} {$i < $argc} {incr i} {
             incr i
             set username [lindex $argv $i]
         }
+        "-name" {
+            incr i
+            set switch_name [lindex $argv $i]
+        }
         "-pubkey" {
             incr i
             set pubkey [lindex $argv $i]
@@ -79,36 +84,86 @@ set set_ip            [expr {$mgmt_ip ne ""}]
 set configure_uplink  [expr {$uplink_nn ne ""}]
 
 set serial [open $port "r+"]
-fconfigure $serial -mode 9600,n,8,1 -buffering none
-spawn -open $serial
 
-send "\r\r"
+fconfigure $serial \
+    -mode 9600,n,8,1 \
+    -handshake none \
+    -buffering none \
+    -blocking 1 \
+    -translation binary \
+    -eofchar {}
+
+spawn -open $serial
+log_user 1
+
+
+
+
+set timeout 180
+set max_wake 12
+set woke 0
 sleep 1
+send "\r"
+sleep 1
+
+for {set wake 1} {$wake <= $max_wake} {incr wake} {
+    send "\r"
+    expect {
+        -re {[Ll]ogin:|[Uu]sername:} {
+            set woke 1
+            # stay in expect buffer state; handle login below
+        }
+        -re {[Pp]assword:} {
+            set woke 2
+        }
+        -re {[<\[][^>\]]+[>\]]} {
+            set woke 3
+            puts "Already at CLI prompt."
+        }
+        -re {[Ll]ogin failed|[Aa]uthentication failed} {
+            puts "Saw login-failed banner; waiting before next Enter..."
+            sleep 2
+            continue
+        }
+        timeout {
+            puts "Wake attempt $wake/$max_wake: no prompt yet"
+            continue
+        }
+    }
+    if {$woke > 0} {
+        break
+    }
+}
+
+if {$woke == 0} {
+    puts "ERROR: Did not see Login/Password/CLI prompt after $max_wake tries"
+    exit 1
+}
 
 # === LOGIN ===
 set max_attempts 3
 set attempt 1
 while {$attempt <= $max_attempts} {
-
-    expect {
-        "Login:" {
-            send "$login_user\r"
-        }
-        timeout {
-            puts "ERROR: Did not see Login prompt"
-            exit 1
-        }
+    if {$woke == 3} {
+        # already logged in
+        break
     }
 
-    expect "Password:"
+    if {$woke == 1} {
+        send "$login_user\r"
+        expect {
+            -re {[Pp]assword:} {}
+            timeout {
+                puts "ERROR: No Password prompt after username"
+                exit 1
+            }
+        }
+    }
+    # woke == 2 → already at Password:
 
-    # Decide whether to use provided password or prompt
-    if { $attempt == 1} {
-        # First attempt and we have a password from -cp
+    if {$attempt == 1} {
         send "$current_pass\r"
     } else {
-        # this is a retry
-        
         flush stdout
         stty -echo
         expect_user -re "(.*)\n" {
@@ -119,34 +174,75 @@ while {$attempt <= $max_attempts} {
         send "$current_pass\r"
     }
 
-    # Check login result
     expect {
-        "AAA authentication failed." {
+        -re {AAA authentication failed\.|[Ii]ncorrect|[Ll]ogin failed} {
             puts "Incorrect password (attempt $attempt of $max_attempts)."
             if {$attempt == $max_attempts} {
                 puts "ERROR: Too many failed login attempts."
                 exit 2
             }
             incr attempt
+            set woke 0
             sleep 1
-            expect -timeout 2 -re {.*} {}
+            # re-sync to Login:
+            for {set wake 1} {$wake <= 6} {incr wake} {
+                send "\r"
+                expect {
+                    -re {[Ll]ogin:|[Uu]sername:} {
+                        set woke 1
+                        break
+                    }
+                    -re {[Pp]assword:} {
+                        set woke 2
+                        break
+                    }
+                    timeout continue
+                }
+            }
+            if {$woke == 0} {
+                puts "ERROR: Could not recover Login prompt after failed auth"
+                exit 1
+            }
             continue
         }
-        "<" {
-            # Login successful
-            puts "Login successful."
+        -re {<[^>\r\n]+>%[^\r\n]*[\r\n]*} {
+            puts "Login successful (prompt+log on same line)."
             break
         }
         timeout {
             puts "ERROR: Login timed out"
+            puts "Last buffer: $expect_out(buffer)"
             exit 1
         }
     }
 }
 
-# === ENTER SYSTEM VIEW ===
-expect "<"
+set timeout 30
+
+send "undo terminal monitor\r"
+expect { -re {%[^\r\n]*[\r\n]+} { exp_continue } -re {<[^>\r\n]+>} {} }
+
+
 send "system-view\r"
+
+
+# === ENTER SYSTEM VIEW ===
+
+expect {
+    -re {\[[^\]]+\]} { }
+    timeout {
+        puts "ERROR: no system-view prompt"
+        exit 1
+    }
+}
+
+# === SET SWITCH NAME ===
+if {[info exists switch_name] && $switch_name ne ""} {
+    expect "]"
+    send "sysname $switch_name\r"
+    expect "]"
+    puts "Switch name set to: $switch_name"
+}
 
 # === CHANGE PASSWORD (only if -np was provided) ===
 if {$change_password} {

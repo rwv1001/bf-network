@@ -755,28 +755,41 @@ oracle_vps_scp_to() {
 
 oracle_vps_used_ports() {
     oracle_vps_ssh_raw bash -s <<'EOF'
-set -euo pipefail
+set -uo pipefail
 {
-  nginx -T 2>/dev/null | sed -n 's/.*proxy_pass[[:space:]]\+https\?:\/\/127\.0\.0\.1:\([0-9][0-9]*\).*/\1/p'
+  # Full config (needs root)
+  sudo nginx -T 2>/dev/null \
+    | sed -n 's/.*proxy_pass[[:space:]]\+https\?:\/\/127\.0\.0\.1:\([0-9][0-9]*\).*/\1/p'
+
+  # Fallback: site files (no need for nginx -T)
+  grep -RhoE 'proxy_pass[[:space:]]+https?://127\.0\.0\.1:[0-9]+' \
+    /etc/nginx/sites-enabled /etc/nginx/sites-available 2>/dev/null \
+    | sed -n 's/.*:\([0-9][0-9]*\).*/\1/p'
+
+  # Listening sockets (sshd reverse tunnels, etc.)
   ss -ltnH 2>/dev/null | awk '
     $4 ~ /(^127\.0\.0\.1:|^\[::1\]:|^0\.0\.0\.0:|^\[::\]:)/ {
-        sub(/^.*:/, "", $4)
-        print $4
+      sub(/^.*:/, "", $4)
+      print $4
     }'
-} | sort -n -u
+} | grep -E '^[0-9]+$' | sort -n -u
 EOF
 }
 
 
 oracle_update_oracle_vps_nginx() {
-    local mode="$1"   # bootstrap or https
+    local domain="$1"
+    local mode="$2"    # bootstrap | https
+    local port="$3"
+    local cert_primary="${4:-$domain}"   # files under /etc/letsencrypt/live/<this>/
 
-    oracle_vps_ssh_raw python3 - "$MAIN_DOMAIN" "$mode" "$ORACLE_VPS_HTTPS_PORT" <<'PY'
+    oracle_vps_ssh_raw python3 - "$domain" "$mode" "$port" "$cert_primary" <<'PY'
 import pathlib, re, sys
 
 domain = sys.argv[1]
 mode = sys.argv[2]
 port = sys.argv[3]
+cert_primary = sys.argv[4]
 
 site_file = pathlib.Path("/etc/nginx/sites-available/bf-network")
 out = pathlib.Path("/tmp/bf-network-updated.conf")
@@ -812,24 +825,29 @@ def bootstrap_block(domain):
         f"# END bf-network installer {domain}\n"
     )
 
-def https_block(domain, port):
+def https_block(domain, port, cert_primary):
     return (
-        f"# BEGIN bf-network installer {domain}\n"        
+        f"# BEGIN bf-network installer {domain}\n"
         "server {\n"
         "    listen 443 ssl;\n"
         f"    server_name {domain};\n"
-        f"    ssl_certificate     /etc/letsencrypt/live/{domain}/fullchain.pem;\n"
-        f"    ssl_certificate_key /etc/letsencrypt/live/{domain}/privkey.pem;\n"
+        f"    ssl_certificate     /etc/letsencrypt/live/{cert_primary}/fullchain.pem;\n"
+        f"    ssl_certificate_key /etc/letsencrypt/live/{cert_primary}/privkey.pem;\n"
         "\n"
         "    location / {\n"
         f"        proxy_pass https://127.0.0.1:{port};\n"
         "        proxy_ssl_verify off;\n"
         "        proxy_ssl_server_name on;\n"
         "        proxy_ssl_name $host;\n"
+        "        proxy_http_version 1.1;\n"
         "        proxy_set_header Host $host;\n"
         "        proxy_set_header X-Real-IP $remote_addr;\n"
         "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
         "        proxy_set_header X-Forwarded-Proto $scheme;\n"
+        "        proxy_set_header Upgrade $http_upgrade;\n"
+        "        proxy_set_header Connection \"upgrade\";\n"
+        "        proxy_read_timeout 86400;\n"
+        "        proxy_buffering off;\n"
         "    }\n"
         "}\n"
         f"# END bf-network installer {domain}\n"
@@ -863,7 +881,7 @@ else:
         text = (text + "\n\n" if text else "") + shared_block([domain])
 
     # Add the HTTPS reverse-proxy block for this domain.
-    text = (text + "\n\n" if text else "") + https_block(domain, port)
+    text = (text + "\n\n" if text else "") + https_block(domain, port, cert_primary)
 
 out.write_text(text.rstrip() + "\n")
 PY
@@ -925,11 +943,11 @@ configure_oracle_vps() {
 
     tmp_config="$(mktemp)"
     if [ "$cert_exists" -eq 0 ]; then
-        oracle_update_oracle_vps_nginx "bootstrap"
+        oracle_update_oracle_vps_nginx "$MAIN_DOMAIN" "bootstrap" "$ORACLE_VPS_HTTPS_PORT" "$MAIN_DOMAIN"
         oracle_vps_sudo "certbot certonly --nginx -d $(shell_quote "$MAIN_DOMAIN") --non-interactive --agree-tos -m $(shell_quote "$ADMIN_EMAIL") --keep-until-expiring"
     fi
 
-    oracle_update_oracle_vps_nginx "https"
+    oracle_update_oracle_vps_nginx "$MAIN_DOMAIN" "https" "$ORACLE_VPS_HTTPS_PORT" "$MAIN_DOMAIN"
 
     oracle_vps_sudo "
         iptables -C INPUT -i lo -j ACCEPT >/dev/null 2>&1 || iptables -I INPUT 1 -i lo -j ACCEPT
@@ -1013,6 +1031,50 @@ free_serial_port() {
 
     echo "Serial port $port is now free."
 }
+
+# default_port, answer_key, prompt_text
+pick_free_vps_tunnel_port() {
+    local default_port="$1"
+    local answer_key="$2"
+    local prompt_text="$3"
+    local used_ports candidate
+
+    used_ports="$(oracle_vps_used_ports || true)"
+    echo "VPS ports already in use (nginx proxy_pass + listeners):"
+    if [ -n "$used_ports" ]; then
+        printf '%s\n' "$used_ports" | sed 's/^/  /'
+    else
+        echo "  (none detected)"
+    fi
+
+    if answer_exists "$answer_key"; then
+        candidate="${SAVED_ANSWERS[$answer_key]}"
+        if [[ "$candidate" =~ ^[0-9]+$ ]] && ! printf '%s\n' "$used_ports" | grep -qx "$candidate"; then
+            REPLY_PORT="$candidate"
+            echo "Using saved free tunnel port: $candidate ($answer_key)"
+            return 0
+        fi
+        echo "Saved port $candidate is no longer free; choosing again."
+        invalidate_answer "$answer_key"
+    fi
+
+    while true; do
+        read -r -p "${prompt_text} [${default_port}]: " candidate
+        candidate="${candidate:-$default_port}"
+        if ! [[ "$candidate" =~ ^[0-9]+$ ]] || [ "$candidate" -lt 1024 ] || [ "$candidate" -gt 65535 ]; then
+            echo "Enter a TCP port number between 1024 and 65535."
+            continue
+        fi
+        if printf '%s\n' "$used_ports" | grep -qx "$candidate"; then
+            echo "Port $candidate is already in use on the VPS."
+            continue
+        fi
+        save_answer "$answer_key" "$candidate"
+        REPLY_PORT="$candidate"
+        return 0
+    done
+}
+
 # =============================================================================
 # Pi value derivation and .env generation
 # =============================================================================
@@ -1088,11 +1150,21 @@ sync_dns01_certificate_to_repo() {
 setup_dns01_certificate() {
     info "Issuing real Let's Encrypt certificate via DNS-01 (bunny.net)"
 
-    local q_cert_dir q_domain q_email
+    local q_cert_dir  q_email q_domain_args=""
     CERT_DIR="$CERT_STORE_DIR"
-    q_cert_dir="$(shell_quote "$CERT_DIR")"
-    q_domain="$(shell_quote "$MAIN_DOMAIN")"
+    q_cert_dir="$(shell_quote "$CERT_DIR")"    
     q_email="$(shell_quote "$ADMIN_EMAIL")"
+
+    # Domains: primary first, then optional UniFi (and any future SANs)
+    local -a domains=("$MAIN_DOMAIN")
+    if is_yes "${INSTALL_UNIFI_CONTROLLER:-y}" && [ -n "${UNIFI_FQDN:-}" ]; then
+        domains+=("$UNIFI_FQDN")
+    fi
+
+    local d
+    for d in "${domains[@]}"; do
+        q_domain_args="$q_domain_args -d $(shell_quote "$d")"
+    done
 
     # Install acme.sh if needed
     pi_sudo "if [ ! -f /root/.acme.sh/acme.sh ]; then
@@ -1113,7 +1185,7 @@ setup_dns01_certificate() {
 
     pi_sudo "printf \"%s\n\" \"#!/bin/sh\" \"docker restart npm >/dev/null 2>&1 || docker restart nginx-proxy-manager >/dev/null 2>&1 || exit 0\" > /usr/local/sbin/bf-network-acme-reload && chmod 755 /usr/local/sbin/bf-network-acme-reload"
     info "4. Created reload command for acme.sh to restart NPM after renewal."
-    pi_sudo "export BUNNY_API_KEY=\$(cat /root/.bunny_api_key); /root/.acme.sh/acme.sh --issue --dns dns_bunny -d $q_domain --key-file $q_cert_dir/privkey.pem --fullchain-file $q_cert_dir/fullchain.pem --reloadcmd /usr/local/sbin/bf-network-acme-reload --force --debug 2 --log /tmp/acme-bunny.log || { cat /tmp/acme-bunny.log; exit 1; }"
+    pi_sudo "export BUNNY_API_KEY=\$(cat /root/.bunny_api_key); /root/.acme.sh/acme.sh --issue --dns dns_bunny $q_domain_args --key-file $q_cert_dir/privkey.pem --fullchain-file $q_cert_dir/fullchain.pem --reloadcmd /usr/local/sbin/bf-network-acme-reload --force --debug 2 --log /tmp/acme-bunny.log || { cat /tmp/acme-bunny.log; exit 1; }"
     info "5. Certificate issuance completed. Check /tmp/acme-bunny.log for details."
     
     # Permissions on the certificate files
@@ -1133,6 +1205,30 @@ setup_dns01_certificate() {
     echo "  Private key: $CERT_DIR/privkey.pem"
 }
 
+# Install DNS-01 material onto VPS under a stable path used by all installer domains
+install_vps_tls_from_pi_store() {
+    local live_dir="/etc/letsencrypt/live/${MAIN_DOMAIN}"
+    local q_live
+    q_live="$(shell_quote "$live_dir")"
+
+    local tmp_fc tmp_key
+    tmp_fc="$(mktemp)"
+    tmp_key="$(mktemp)"
+    # Pull from Pi store (files already on Pi after setup_dns01)
+    pi_ssh "cat $(shell_quote "$CERT_STORE_DIR/fullchain.pem")" > "$tmp_fc"
+    pi_ssh "cat $(shell_quote "$CERT_STORE_DIR/privkey.pem")" > "$tmp_key"
+
+    oracle_vps_scp_to "$tmp_fc" /tmp/bf-fullchain.pem
+    oracle_vps_scp_to "$tmp_key" /tmp/bf-privkey.pem
+    rm -f "$tmp_fc" "$tmp_key"
+
+    oracle_vps_sudo "
+      mkdir -p $q_live
+      install -m 644 /tmp/bf-fullchain.pem $q_live/fullchain.pem
+      install -m 600 /tmp/bf-privkey.pem $q_live/privkey.pem
+      rm -f /tmp/bf-fullchain.pem /tmp/bf-privkey.pem
+    "
+}
 dns_cert_files_ok() {
     pi_ssh "test -s $(shell_quote "$CERT_STORE_DIR/fullchain.pem") && test -s $(shell_quote "$CERT_STORE_DIR/privkey.pem")"
 }
@@ -1142,6 +1238,17 @@ ensure_dns01_certificate_ready() {
         echo "DNS-01 certificate checkpoint was set, but files are missing. Regenerating."
         unset 'COMPLETED_STEPS[pi_dns_certificate]'
         state_save
+    fi
+
+    if step_done "pi_dns_certificate" && dns_cert_files_ok; then
+        if is_yes "${INSTALL_UNIFI_CONTROLLER:-y}" && [ -n "${UNIFI_FQDN:-}" ]; then
+            if ! pi_ssh "openssl x509 -in $(shell_quote "$CERT_STORE_DIR/fullchain.pem") -noout -text" \
+                | grep -q "$UNIFI_FQDN"; then
+                echo "Existing cert missing SAN $UNIFI_FQDN — re-issuing."
+                unset 'COMPLETED_STEPS[pi_dns_certificate]'
+                state_save
+            fi
+        fi
     fi
 
     if ! step_done "pi_dns_certificate"; then
@@ -1785,6 +1892,23 @@ apply_kea_schema() {
     pi_sudo "cd $q_repo && docker compose exec -T db rm -f /tmp/dhcpdb_create.pgsql"
     echo "Kea schema applied successfully."
 }
+
+normalize_unifi_system_properties() {
+    # Prefer explicit path; fall back if caller left unifi_dir in the environment
+    local dir="${1:-${unifi_dir:-/home/${PI_USER}/unifi}}"
+    local q_dir q_user
+    q_dir="$(shell_quote "$dir")"
+    q_user="$(shell_quote "$PI_USER")"
+
+    # pi_sudo already runs: sudo bash -lc '<this string>'
+    pi_sudo "for f in $q_dir/data/system.properties $q_dir/data/data/system.properties; do
+  [ -f \"\$f\" ] || continue
+  sed -i -e '/^unifi\\.http\\.port=/d' -e '/^unifi\\.https\\.port=/d' \"\$f\"
+done
+chown -R $q_user:$q_user $q_dir
+[ -d $q_dir/data ] && chmod -R u+rwX $q_dir/data"
+}
+
 install_unifi_controller() {
     if ! is_yes "${INSTALL_UNIFI_CONTROLLER:-y}"; then
         echo "Skipping UniFi controller (INSTALL_UNIFI_CONTROLLER is not yes)."
@@ -1800,10 +1924,20 @@ install_unifi_controller() {
     q_unifi="$(shell_quote "$unifi_dir")"
     q_user="$(shell_quote "$PI_USER")"
 
+    info "Clean UniFi install under $unifi_dir (existing controller data will be removed)"
+
+    # Stop anything already running under this compose project
+    pi_sudo "if [ -f $q_unifi/docker-compose.yml ]; then cd $q_unifi && (docker compose down --remove-orphans 2>/dev/null || docker-compose down --remove-orphans 2>/dev/null || true); fi"
+    pi_sudo "docker rm -f unifi unifi-tunnel 2>/dev/null || true"
+    pi_sudo "rm -rf $q_unifi/data"
+    pi_sudo "mkdir -p $q_unifi/data && chown -R $q_user:$q_user $q_unifi && chmod 755 $q_unifi $q_unifi/data"
+
     info "Installing UniFi controller under $unifi_dir"
 
     # --- Pi: directory + compose (8081 inform, 8444 UI; avoids portal :8080) ---
     pi_sudo "mkdir -p $q_unifi/data && chown -R $q_user:$q_user $q_unifi"
+
+    
 
     local tmp_compose
     tmp_compose="$(mktemp)"
@@ -1889,17 +2023,26 @@ chown $q_user:$q_user $q_unifi/.env"
         pi_sudo "mv /tmp/oracle_rsa /home/${PI_USER}/.ssh/oracle_rsa && chmod 600 /home/${PI_USER}/.ssh/oracle_rsa && chown ${PI_USER}:${PI_USER} /home/${PI_USER}/.ssh/oracle_rsa"
     fi
 
-    # --- VPS: nginx site for UniFi FQDN ---
-    oracle_update_unifi_nginx
-
-    # --- VPS: certificate (HTTP-01 via nginx, same style as portal bootstrap) ---
-    oracle_vps_sudo "certbot certonly --nginx -d $(shell_quote "$UNIFI_FQDN") --non-interactive --agree-tos -m $(shell_quote "$ADMIN_EMAIL") --keep-until-expiring || certbot certonly --nginx -d $(shell_quote "$UNIFI_FQDN") --non-interactive --agree-tos -m $(shell_quote "$ADMIN_EMAIL")"
+    install_vps_tls_from_pi_store
 
     # Reload nginx with SSL server block
-    oracle_update_unifi_nginx_https
+    oracle_update_oracle_vps_nginx "$UNIFI_FQDN" "https" "$ORACLE_VPS_UNIFI_HTTPS_PORT" "$MAIN_DOMAIN"
 
+
+    normalize_unifi_system_properties "$unifi_dir"
     # --- Pi: start UniFi + tunnel ---
     pi_sudo "cd $q_unifi && if docker compose version >/dev/null 2>&1; then docker compose up -d; else docker-compose up -d; fi"
+
+    
+    info "Waiting for UniFi HTTPS on :8444"
+    if ! pi_sudo 'for i in $(seq 1 24); do code=$(curl -sk -o /dev/null -w "%{http_code}" https://127.0.0.1:8444/ 2>/dev/null || echo 000); if [ "$code" = "200" ] || [ "$code" = "302" ]; then echo "UniFi UI ready (HTTP $code)"; exit 0; fi; echo "  try $i: $code"; sleep 5; done; exit 1'; then
+        echo "UniFi not answering on :8444 — stripping host ports and restarting..."
+        normalize_unifi_system_properties "$unifi_dir"
+        pi_sudo "cd $q_unifi && docker compose restart unifi"
+        pi_sudo 'for i in $(seq 1 24); do code=$(curl -sk -o /dev/null -w "%{http_code}" https://127.0.0.1:8444/ 2>/dev/null || echo 000); if [ "$code" = "200" ] || [ "$code" = "302" ]; then echo "UniFi UI ready after repair (HTTP $code)"; exit 0; fi; sleep 5; done; echo "WARNING: UniFi still not ready on :8444" >&2; exit 0'
+    fi
+
+    
 
     echo
     echo "UniFi controller installed."
@@ -1909,72 +2052,7 @@ chown $q_user:$q_user $q_unifi/.env"
     echo "  (use set-inform on APs; do not rely on browsing /inform)"
 }
 
-oracle_update_unifi_nginx() {
-    oracle_vps_ssh_raw python3 - "$UNIFI_FQDN" <<'PY'
-import pathlib, re, sys
-domain = sys.argv[1]
-path = pathlib.Path("/tmp/bf-network-unifi.conf")
-begin, end = f"# BEGIN bf-network unifi {domain}", f"# END bf-network unifi {domain}"
-block = f"""{begin}
-server {{
-    listen 80;
-    server_name {domain};
-    location /.well-known/acme-challenge/ {{
-        root /var/www/html;
-    }}
-    location / {{
-        return 200 'unifi certificate bootstrap\\n';
-        add_header Content-Type text/plain;
-    }}
-}}
-{end}
-"""
-path.write_text(block)
-print(f"wrote {path}")
-PY
-    oracle_vps_sudo "install -m 644 /tmp/bf-network-unifi.conf /etc/nginx/sites-available/bf-network-unifi && \
-      ln -sf /etc/nginx/sites-available/bf-network-unifi /etc/nginx/sites-enabled/bf-network-unifi && \
-      nginx -t && systemctl reload nginx"
-}
 
-oracle_update_unifi_nginx_https() {
-    oracle_vps_ssh_raw python3 - "$UNIFI_FQDN" "$ORACLE_VPS_UNIFI_HTTPS_PORT" <<'PY'
-import pathlib, sys
-domain, port = sys.argv[1], sys.argv[2]
-path = pathlib.Path("/tmp/bf-network-unifi.conf")
-begin, end = f"# BEGIN bf-network unifi {domain}", f"# END bf-network unifi {domain}"
-path.write_text(f"""{begin}
-server {{
-    listen 80;
-    server_name {domain};
-    return 301 https://$host$request_uri;
-}}
-server {{
-    listen 443 ssl;
-    server_name {domain};
-    ssl_certificate     /etc/letsencrypt/live/{domain}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/{domain}/privkey.pem;
-    location / {{
-        proxy_pass https://127.0.0.1:{port};
-        proxy_ssl_verify off;
-        proxy_ssl_server_name on;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_read_timeout 86400;
-        proxy_buffering off;
-    }}
-}}
-{end}
-""")
-print(f"wrote {path}")
-PY
-    oracle_vps_sudo "install -m 644 /tmp/bf-network-unifi.conf /etc/nginx/sites-available/bf-network-unifi && \
-      nginx -t && systemctl reload nginx"
-}
 
 install_pi_server() {
     info "Installing bf-network on Pi server"
@@ -2827,6 +2905,8 @@ prompt_default SWITCH_REPLUG_DELAY_SEC "Switch replug delay seconds" "3"
 info "UniFi Network Controller (Docker)"
 prompt_default INSTALL_UNIFI_CONTROLLER "Install UniFi controller on the Pi?" "y" "install_unifi_controller"
 
+
+
 if is_yes "${INSTALL_UNIFI_CONTROLLER:-y}"; then
     # e.g. unifi → unifi.bf-network.duckdns.org  or  unifi.cambridge-network.english.op.org
     prompt_default UNIFI_SUBDOMAIN \
@@ -2834,11 +2914,7 @@ if is_yes "${INSTALL_UNIFI_CONTROLLER:-y}"; then
         "unifi" \
         "unifi_subdomain"
 
-    UNIFI_FQDN="${UNIFI_SUBDOMAIN}.${MAIN_DOMAIN}"
-    prompt_default ORACLE_VPS_UNIFI_HTTPS_PORT \
-        "Local HTTPS tunnel port on VPS for UniFi (unique, not the portal port)" \
-        "9446" \
-        "oracle_vps_unifi_https_port"
+    UNIFI_FQDN="${UNIFI_SUBDOMAIN}.${MAIN_DOMAIN}"    
 
     DNS_UNIFI_KEY="oracle_dns_unifi_$(echo "$UNIFI_FQDN" | tr '.-' '__' | tr -cd '[:alnum:]_')"
     if ! answer_exists "$DNS_UNIFI_KEY"; then
@@ -2850,7 +2926,31 @@ if is_yes "${INSTALL_UNIFI_CONTROLLER:-y}"; then
     else
         echo "Using saved acknowledgement: DNS for ${UNIFI_FQDN}"
     fi
+
+    pick_free_vps_tunnel_port "9446" "oracle_vps_unifi_https_port" \
+        "Local HTTPS tunnel port on VPS for UniFi"
+    ORACLE_VPS_UNIFI_HTTPS_PORT="$REPLY_PORT"
+
 fi
+
+# If UniFi is newly enabled (or subdomain changed), cert SANs are wrong
+if is_yes "${INSTALL_UNIFI_CONTROLLER:-y}"; then
+    if [ "${SAVED_ANSWERS[install_unifi_controller_applied]:-}" != "y:${UNIFI_FQDN:-}" ]; then
+        unset 'COMPLETED_STEPS[pi_dns_certificate]'
+        unset 'COMPLETED_STEPS[pi_unifi_controller]'
+        state_save
+        echo "Will re-issue DNS-01 cert to include ${UNIFI_FQDN:-UniFi}."
+    fi
+    save_answer "install_unifi_controller_applied" "y:${UNIFI_FQDN}"
+else
+    if [ "${SAVED_ANSWERS[install_unifi_controller_applied]:-}" != "n" ]; then
+        # Optional: re-issue without UniFi SAN, or leave old SANs (harmless)
+        unset 'COMPLETED_STEPS[pi_dns_certificate]'
+        state_save
+    fi
+    save_answer "install_unifi_controller_applied" "n"
+fi
+
 
 
 derive_pi_server_values
