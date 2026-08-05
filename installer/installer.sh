@@ -29,6 +29,9 @@ STATE_FILE="${BF_INSTALL_STATE_FILE:-/var/lib/bf-network-installer/state.gpg}"
 RESET_STATE=0
 FORGET_ANSWER_KEY=""
 FORGET_STEP_KEY=""
+FORGET_ALL_STEPS=0
+FORGET_SECRET_KEY=""
+FORGET_ALL_SECRETS=0
 SHOW_STATE_ONLY=0
 STATE_READY=0
 STATE_PASSPHRASE=""
@@ -74,6 +77,19 @@ parse_args() {
                 FORGET_STEP_KEY="$2"
                 shift 2
                 ;;
+            --forget-steps)
+                FORGET_ALL_STEPS=1
+                shift
+                ;;
+            --forget-secret)
+                [ "$#" -ge 2 ] || die "--forget-secret requires a secret name (e.g. DB_PASSWORD)."
+                FORGET_SECRET_KEY="$2"
+                shift 2
+                ;;
+            --forget-secrets)
+                FORGET_ALL_SECRETS=1
+                shift
+                ;;    
             --show-progress)
                 SHOW_STATE_ONLY=1
                 shift
@@ -87,6 +103,9 @@ Options:
   --reset-state           Delete the saved state and start from scratch.
   --forget-answer KEY     Forget one cached prompt answer, then continue.
   --forget-step KEY       Forget one completed checkpoint, then exit.
+  --forget-steps          Forget all completed checkpoints (keep answers/secrets), then exit.
+  --forget-secret NAME    Forget one generated secret (e.g. DB_PASSWORD), then exit.
+  --forget-secrets        Forget all generated secrets, then exit.
   --show-progress         Decrypt the state, display checkpoints, and exit.
   -h, --help              Show this help.
 
@@ -219,8 +238,8 @@ prompt_state_passphrase_new() {
             echo "Passphrases did not match."
             continue
         fi
-        if [ "${#first}" -lt 10 ]; then
-            echo "Use at least 10 characters."
+        if [ "${#first}" -lt 4 ]; then
+            echo "Use at least 4 characters."
             continue
         fi
         STATE_PASSPHRASE="$first"
@@ -321,6 +340,34 @@ state_init() {
         exit 0
     fi
 
+    if [ "$FORGET_ALL_STEPS" -eq 1 ]; then
+        COMPLETED_STEPS=()
+        state_save
+        echo "Forgot all completed checkpoints (answers and generated secrets kept)."
+        state_progress
+        exit 0
+    fi
+    
+    if [ "$FORGET_ALL_SECRETS" -eq 1 ]; then
+        GENERATED_SECRETS=()
+        state_save
+        echo "Forgot all generated secrets."
+        state_progress
+        exit 0
+    fi
+
+    if [ -n "$FORGET_SECRET_KEY" ]; then
+        if [[ -v "GENERATED_SECRETS[$FORGET_SECRET_KEY]" ]]; then
+            unset "GENERATED_SECRETS[$FORGET_SECRET_KEY]"
+            state_save
+            echo "Forgot generated secret: $FORGET_SECRET_KEY"
+        else
+            echo "No generated secret exists for key: $FORGET_SECRET_KEY"
+        fi
+        state_progress
+        exit 0
+    fi
+    
     state_progress
 
     if [ "$SHOW_STATE_ONLY" -eq 1 ]; then
@@ -497,7 +544,8 @@ remote_quote() {
 }
 
 generate_secret() {
-    openssl rand -base64 36 | tr -d '\n'
+    # URL- and sed-safe: no +, /, =, or whitespace
+    openssl rand -base64 48 | tr -d '\n+/=' | head -c 48
 }
 
 env_escape() {
@@ -890,6 +938,81 @@ configure_oracle_vps() {
 
 }
 
+
+free_serial_port() {
+    local port="$1"
+    local pids raw_fuser raw_lsof p
+
+    echo "DEBUG free_serial_port: port='$port'"
+
+    if [ -z "$port" ]; then
+        echo "DEBUG free_serial_port: empty port — nothing to do"
+        return 0
+    fi
+    if [ ! -e "$port" ]; then
+        echo "DEBUG free_serial_port: $port does not exist"
+        return 0
+    fi
+
+    echo "DEBUG free_serial_port: ls -l $(ls -l "$port" 2>&1)"
+
+    raw_fuser="$(fuser -v "$port" 2>&1 || true)"
+    echo "DEBUG free_serial_port: fuser -v raw:"
+    echo "$raw_fuser" | sed 's/^/  | /'
+
+    raw_lsof="$(lsof "$port" 2>&1 || true)"
+    echo "DEBUG free_serial_port: lsof raw:"
+    echo "$raw_lsof" | sed 's/^/  | /'
+
+    pids="$(fuser "$port" 2>/dev/null | tr -s '[:space:]' '\n' | grep -E '^[0-9]+$' | sort -u || true)"
+    if [ -z "$pids" ]; then
+        pids="$(lsof -t "$port" 2>/dev/null | sort -u || true)"
+    fi
+
+    echo "DEBUG free_serial_port: parsed PIDs: [${pids:-none}]"
+
+    if [ -z "$pids" ]; then
+        echo "Serial port $port is free."
+        return 0
+    fi
+
+    for p in $pids; do
+        echo "DEBUG free_serial_port: PID $p -> $(ps -o pid=,user=,args= -p "$p" 2>/dev/null || echo '(gone)')"
+    done
+
+    echo "Serial port $port is in use by PID(s): $pids — sending SIGTERM..."
+    # shellcheck disable=SC2086
+    kill $pids 2>/dev/null || true
+    sleep 1
+
+    pids="$(fuser "$port" 2>/dev/null | tr -s '[:space:]' '\n' | grep -E '^[0-9]+$' | sort -u || true)"
+    if [ -z "$pids" ]; then
+        pids="$(lsof -t "$port" 2>/dev/null | sort -u || true)"
+    fi
+    echo "DEBUG free_serial_port: PIDs after SIGTERM: [${pids:-none}]"
+
+    if [ -n "$pids" ]; then
+        echo "Still busy; sending SIGKILL to: $pids"
+        # shellcheck disable=SC2086
+        kill -9 $pids 2>/dev/null || true
+        sleep 0.5
+    fi
+
+    pids="$(fuser "$port" 2>/dev/null | tr -s '[:space:]' '\n' | grep -E '^[0-9]+$' | sort -u || true)"
+    if [ -z "$pids" ]; then
+        pids="$(lsof -t "$port" 2>/dev/null | sort -u || true)"
+    fi
+    echo "DEBUG free_serial_port: PIDs after SIGKILL: [${pids:-none}]"
+
+    if [ -n "$pids" ]; then
+        for p in $pids; do
+            echo "DEBUG free_serial_port: STILL HELD by PID $p -> $(ps -o pid=,user=,args= -p "$p" 2>/dev/null || echo '(gone)')"
+        done
+        die "Could not free serial port $port (still in use)."
+    fi
+
+    echo "Serial port $port is now free."
+}
 # =============================================================================
 # Pi value derivation and .env generation
 # =============================================================================
@@ -929,7 +1052,7 @@ derive_pi_server_values() {
     PORTAL_IP="${LOCAL_BASE}.${MANAGEMENT_VLAN}.${PORTAL_IP_BYTE}"
     HIJACK_DNS_IP="${LOCAL_BASE}.${MANAGEMENT_VLAN}.${HIJACK_DNS_IP_BYTE}"
     RADIUS_SERVER="$PORTAL_IP"
-    RADIUS_NAS_IP="${LOCAL_BASE}.${MANAGEMENT_VLAN}.1"
+    
     UNREGISTERED_GW_BYTE="$FIRST_SWITCH_OCTET"
     UNREGISTERED_GW="${LOCAL_BASE}.${WIRED_VLAN}.${UNREGISTERED_GW_BYTE}"
     MGMT_GATEWAY="${LOCAL_BASE}.${MANAGEMENT_VLAN}.${FIRST_SWITCH_OCTET}"
@@ -1054,7 +1177,7 @@ write_pi_env_file() {
 
         write_env_line RADIUS_SECRET "$RADIUS_SECRET"
         write_env_line RADIUS_SERVER "$RADIUS_SERVER"
-        write_env_line RADIUS_NAS_IP "$RADIUS_NAS_IP"
+        
 
         write_env_line PORTAL_URL "$PORTAL_URL"
         write_env_line PORTAL_POLL_URL "$PORTAL_POLL_URL"
@@ -1391,6 +1514,42 @@ install_fixed_npm_setup_py() {
     
 }
 
+wipe_pi_docker_data() {
+    local q_repo
+    q_repo="$(shell_quote "$PI_REPO_DIR")"
+
+    info "Wiping bf-network Docker containers and volumes on the Pi (clean DB)"
+
+    # Stop and remove containers, networks, and named volumes declared in compose
+    pi_sudo "cd $q_repo && if docker compose version >/dev/null 2>&1; then
+        docker compose down --remove-orphans -v || true
+      else
+        docker-compose down --remove-orphans -v || true
+      fi"
+
+    # Project-named volumes sometimes remain; remove any that still match the project
+    pi_sudo "cd $q_repo && project=\$(basename \"$PI_REPO_DIR\" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')
+      docker volume ls -q | while read -r vol; do
+        case \"\$vol\" in
+          \${project}_*|bf-network_*|*captive*|*postgres*|*pihole*)
+            echo \"Removing volume: \$vol\"
+            docker volume rm -f \"\$vol\" 2>/dev/null || true
+            ;;
+        esac
+      done"
+
+    # Bind-mounted state that can reintroduce old data (adjust paths if your compose differs)
+    pi_sudo "cd $q_repo && rm -rf \
+        kea/leases/* \
+        kea/sockets/* \
+        captive-portal/redis-data/* \
+        npm/data/* \
+        pihole/etc-pihole/* \
+        pihole/etc-dnsmasq.d/* \
+        2>/dev/null || true"
+
+    echo "Docker volumes and local bind-mount data cleared."
+}
 seed_isp_routers() {
     local q_repo="$1"
 
@@ -1626,6 +1785,196 @@ apply_kea_schema() {
     pi_sudo "cd $q_repo && docker compose exec -T db rm -f /tmp/dhcpdb_create.pgsql"
     echo "Kea schema applied successfully."
 }
+install_unifi_controller() {
+    if ! is_yes "${INSTALL_UNIFI_CONTROLLER:-y}"; then
+        echo "Skipping UniFi controller (INSTALL_UNIFI_CONTROLLER is not yes)."
+        return 0
+    fi
+
+    # Ensure FQDN / port are set (prompts already ran earlier)
+    UNIFI_FQDN="${UNIFI_FQDN:-${UNIFI_SUBDOMAIN}.${MAIN_DOMAIN}}"
+    ORACLE_VPS_UNIFI_HTTPS_PORT="${ORACLE_VPS_UNIFI_HTTPS_PORT:-9446}"
+
+    local unifi_dir="/home/${PI_USER}/unifi"
+    local q_unifi q_user
+    q_unifi="$(shell_quote "$unifi_dir")"
+    q_user="$(shell_quote "$PI_USER")"
+
+    info "Installing UniFi controller under $unifi_dir"
+
+    # --- Pi: directory + compose (8081 inform, 8444 UI; avoids portal :8080) ---
+    pi_sudo "mkdir -p $q_unifi/data && chown -R $q_user:$q_user $q_unifi"
+
+    local tmp_compose
+    tmp_compose="$(mktemp)"
+    cat > "$tmp_compose" <<'EOF'
+services:
+  unifi:
+    image: jacobalberty/unifi:latest
+    container_name: unifi
+    restart: unless-stopped
+    volumes:
+      - ./data:/unifi
+    environment:
+      TZ: Europe/London
+      LOTSOFDEVICES: "true"
+    ports:
+      - "8081:8080"
+      - "8444:8443"
+      - "3478:3478/udp"
+      - "10001:10001/udp"
+      - "8843:8843"
+      - "8880:8880"
+      - "6789:6789"
+
+  unifi-tunnel:
+    image: alpine:latest
+    container_name: unifi-tunnel
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      - unifi
+    environment:
+      ORACLE_VPS_HOST: ${ORACLE_VPS_HOST}
+      ORACLE_VPS_USER: ${ORACLE_VPS_USER:-ubuntu}
+      ORACLE_VPS_UNIFI_HTTPS_PORT: ${ORACLE_VPS_UNIFI_HTTPS_PORT:-9446}
+      ORACLE_VPS_SSH_KEY_PATH: ${ORACLE_VPS_SSH_KEY_PATH:-/keys/oracle_rsa}
+    volumes:
+      - /home/admin/.ssh:/keys:ro
+      - ./unifi-tunnel-entrypoint.sh:/tunnel-entrypoint.sh:ro
+      - /etc/localtime:/etc/localtime:ro
+    entrypoint: ["/tunnel-entrypoint.sh"]
+EOF
+    # Fix SSH key mount user path for this install
+    sed -i "s|/home/admin/.ssh|/home/${PI_USER}/.ssh|" "$tmp_compose"
+
+    pi_scp_to "$tmp_compose" "/tmp/unifi-docker-compose.yml"
+    rm -f "$tmp_compose"
+    pi_sudo "mv /tmp/unifi-docker-compose.yml $q_unifi/docker-compose.yml && chown $q_user:$q_user $q_unifi/docker-compose.yml"
+
+    # --- Pi: tunnel entrypoint (second reverse port → UniFi UI :8444) ---
+    local tmp_tun
+    tmp_tun="$(mktemp)"
+    cat > "$tmp_tun" <<'EOF'
+#!/bin/sh
+set -e
+apk add --no-cache openssh-client autossh >/dev/null
+exec autossh -M 0 -N \
+  -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 \
+  -o ExitOnForwardFailure=yes \
+  -o StrictHostKeyChecking=no \
+  -o UserKnownHostsFile=/dev/null \
+  -i "${ORACLE_VPS_SSH_KEY_PATH:-/keys/oracle_rsa}" \
+  -R "127.0.0.1:${ORACLE_VPS_UNIFI_HTTPS_PORT}:127.0.0.1:8444" \
+  "${ORACLE_VPS_USER:-ubuntu}@${ORACLE_VPS_HOST}"
+EOF
+    pi_scp_to "$tmp_tun" "/tmp/unifi-tunnel-entrypoint.sh"
+    rm -f "$tmp_tun"
+    pi_sudo "mv /tmp/unifi-tunnel-entrypoint.sh $q_unifi/unifi-tunnel-entrypoint.sh && chmod 755 $q_unifi/unifi-tunnel-entrypoint.sh && chown $q_user:$q_user $q_unifi/unifi-tunnel-entrypoint.sh"
+
+    # --- Pi: .env for compose ---
+    pi_sudo "cat > $q_unifi/.env <<EOF
+ORACLE_VPS_HOST=${ORACLE_VPS_HOST}
+ORACLE_VPS_USER=${ORACLE_VPS_USER}
+ORACLE_VPS_UNIFI_HTTPS_PORT=${ORACLE_VPS_UNIFI_HTTPS_PORT}
+ORACLE_VPS_SSH_KEY_PATH=/keys/oracle_rsa
+EOF
+chown $q_user:$q_user $q_unifi/.env"
+
+    # Copy oracle key into Pi user .ssh if missing (same key portal tunnel uses)
+    pi_sudo "mkdir -p /home/${PI_USER}/.ssh && chmod 700 /home/${PI_USER}/.ssh"
+    if [ -f "$ORACLE_KEY_PATH" ]; then
+        pi_scp_to "$ORACLE_KEY_PATH" "/tmp/oracle_rsa"
+        pi_sudo "mv /tmp/oracle_rsa /home/${PI_USER}/.ssh/oracle_rsa && chmod 600 /home/${PI_USER}/.ssh/oracle_rsa && chown ${PI_USER}:${PI_USER} /home/${PI_USER}/.ssh/oracle_rsa"
+    fi
+
+    # --- VPS: nginx site for UniFi FQDN ---
+    oracle_update_unifi_nginx
+
+    # --- VPS: certificate (HTTP-01 via nginx, same style as portal bootstrap) ---
+    oracle_vps_sudo "certbot certonly --nginx -d $(shell_quote "$UNIFI_FQDN") --non-interactive --agree-tos -m $(shell_quote "$ADMIN_EMAIL") --keep-until-expiring || certbot certonly --nginx -d $(shell_quote "$UNIFI_FQDN") --non-interactive --agree-tos -m $(shell_quote "$ADMIN_EMAIL")"
+
+    # Reload nginx with SSL server block
+    oracle_update_unifi_nginx_https
+
+    # --- Pi: start UniFi + tunnel ---
+    pi_sudo "cd $q_unifi && if docker compose version >/dev/null 2>&1; then docker compose up -d; else docker-compose up -d; fi"
+
+    echo
+    echo "UniFi controller installed."
+    echo "  UI (public):  https://${UNIFI_FQDN}"
+    echo "  UI (local):   https://${PI_WIFI_IP}:8444"
+    echo "  Device inform (LAN): http://${PORTAL_IP}:8081/inform"
+    echo "  (use set-inform on APs; do not rely on browsing /inform)"
+}
+
+oracle_update_unifi_nginx() {
+    oracle_vps_ssh_raw python3 - "$UNIFI_FQDN" <<'PY'
+import pathlib, re, sys
+domain = sys.argv[1]
+path = pathlib.Path("/tmp/bf-network-unifi.conf")
+begin, end = f"# BEGIN bf-network unifi {domain}", f"# END bf-network unifi {domain}"
+block = f"""{begin}
+server {{
+    listen 80;
+    server_name {domain};
+    location /.well-known/acme-challenge/ {{
+        root /var/www/html;
+    }}
+    location / {{
+        return 200 'unifi certificate bootstrap\\n';
+        add_header Content-Type text/plain;
+    }}
+}}
+{end}
+"""
+path.write_text(block)
+print(f"wrote {path}")
+PY
+    oracle_vps_sudo "install -m 644 /tmp/bf-network-unifi.conf /etc/nginx/sites-available/bf-network-unifi && \
+      ln -sf /etc/nginx/sites-available/bf-network-unifi /etc/nginx/sites-enabled/bf-network-unifi && \
+      nginx -t && systemctl reload nginx"
+}
+
+oracle_update_unifi_nginx_https() {
+    oracle_vps_ssh_raw python3 - "$UNIFI_FQDN" "$ORACLE_VPS_UNIFI_HTTPS_PORT" <<'PY'
+import pathlib, sys
+domain, port = sys.argv[1], sys.argv[2]
+path = pathlib.Path("/tmp/bf-network-unifi.conf")
+begin, end = f"# BEGIN bf-network unifi {domain}", f"# END bf-network unifi {domain}"
+path.write_text(f"""{begin}
+server {{
+    listen 80;
+    server_name {domain};
+    return 301 https://$host$request_uri;
+}}
+server {{
+    listen 443 ssl;
+    server_name {domain};
+    ssl_certificate     /etc/letsencrypt/live/{domain}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{domain}/privkey.pem;
+    location / {{
+        proxy_pass https://127.0.0.1:{port};
+        proxy_ssl_verify off;
+        proxy_ssl_server_name on;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 86400;
+        proxy_buffering off;
+    }}
+}}
+{end}
+""")
+print(f"wrote {path}")
+PY
+    oracle_vps_sudo "install -m 644 /tmp/bf-network-unifi.conf /etc/nginx/sites-available/bf-network-unifi && \
+      nginx -t && systemctl reload nginx"
+}
 
 install_pi_server() {
     info "Installing bf-network on Pi server"
@@ -1788,7 +2137,14 @@ install_pi_server() {
     fi
 
 
+    if ! step_done "pi_db_wipe"; then
+        wipe_pi_docker_data
+        complete_step "pi_db_wipe"
+    else
+        echo "Skipping completed step: Pi Docker DB wipe"
+    fi
 
+   
     
     if ! step_done "pi_compose_up"; then
         info "Starting PostgreSQL for bf-network"
@@ -1836,6 +2192,13 @@ install_pi_server() {
         info "Importing DNS-01 certificate into NPM and attaching it to the proxy host"
         pi_sudo "cd $q_repo && docker compose run --rm npm-setup && docker compose restart npm"
         complete_step "pi_npm_certificate_attach"
+    fi
+
+    if ! step_done "pi_unifi_controller"; then
+        install_unifi_controller
+        complete_step "pi_unifi_controller"
+    else
+        echo "Skipping completed step: UniFi controller"
     fi
 
     unset 'COMPLETED_STEPS[validate_pi_server]'
@@ -2090,8 +2453,8 @@ done
 
 echo "Using local network base: $LOCAL_BASE"
 
-prompt_required MANAGEMENT_VLAN "Enter Management VLAN ID (e.g. 99)"
-prompt_required WIRED_VLAN "Enter Wired Guest / unregistered VLAN ID (e.g. 250)"
+prompt_default MANAGEMENT_VLAN "Enter Management VLAN ID" "99"
+prompt_default WIRED_VLAN "Enter Wired Guest / unregistered VLAN ID" "250"
 
 for vlan in "${VLAN_LIST[@]}"; do
     if [ "$vlan" = "$MANAGEMENT_VLAN" ] || [ "$vlan" = "$WIRED_VLAN" ]; then
@@ -2179,7 +2542,7 @@ info "VLAN → ISP routing"
 for vlan in "${VLAN_LIST[@]}"; do
     echo
     echo "User VLAN $vlan — which ISP should carry this VLAN’s traffic?"
-    for i in "${!ISP_NAMES[@]}"; do
+    for i in $(printf '%s\n' "${!ISP_NAMES[@]}" | sort -n); do
         echo "  $((i + 1))) ${ISP_NAMES[$i]}  (uplink VLAN $((i + 1)), net ${ISP_NETWORK_PORTION[$i]}.0/24)"
     done
     while true; do
@@ -2194,7 +2557,7 @@ for vlan in "${VLAN_LIST[@]}"; do
 done
 
 declare -a ISP_GW=()
-for i in "${!ISP_NAMES[@]}"; do
+for i in $(printf '%s\n' "${!ISP_NAMES[@]}" | sort -n); do
     default_gw="${ISP_NETWORK_PORTION[$i]}.1"
     prompt_default gw \
         "Gateway IP for ISP ${ISP_NAMES[$i]} (subnet ${ISP_NETWORK_PORTION[$i]}.0/24)" \
@@ -2331,7 +2694,6 @@ prompt_default ORACLE_VPS_HTTPS_PORT \
     "oracle_vps_https_port"
 
 prompt_required ORACLE_VPS_HOST "Oracle VPS public IP or hostname"
-
 DNS_ACK_KEY="oracle_dns_record_created_$(echo "$MAIN_DOMAIN" | tr '.-' '__' | tr -cd '[:alnum:]_')"
 
 if ! answer_exists "$DNS_ACK_KEY"; then
@@ -2341,7 +2703,7 @@ else
     echo "Using saved acknowledgement: Oracle DNS A record created for this domain."
 fi
 
-prompt_required ORACLE_VPS_USER "Oracle VPS SSH username (usually ubuntu)"
+prompt_default ORACLE_VPS_USER "Oracle VPS SSH username (usually ubuntu)" "ubuntu"
 
 
 
@@ -2364,9 +2726,7 @@ if answer_exists "oracle_key_path"; then
 fi
 
 if ! answer_exists "oracle_key_path"; then
-    prompt_line has_oracle_key \
-        "Do you already have an SSH private key that works with the Oracle VPS for this domain? (y/n): " \
-        "has_oracle_key"
+    prompt_line has_oracle_key "Do you already have an SSH private key that works with the Oracle VPS for this domain? (y/n): " "has_oracle_key"
 
     if is_yes "$has_oracle_key"; then
         while true; do
@@ -2464,6 +2824,35 @@ prompt_default DNS_RETENTION_DAYS "DNS log retention days" "90"
 prompt_default SWITCH_REPLUG_ENABLED "Enable automatic switch replug after wired approval?" "true"
 prompt_default SWITCH_REPLUG_DELAY_SEC "Switch replug delay seconds" "3"
 
+info "UniFi Network Controller (Docker)"
+prompt_default INSTALL_UNIFI_CONTROLLER "Install UniFi controller on the Pi?" "y" "install_unifi_controller"
+
+if is_yes "${INSTALL_UNIFI_CONTROLLER:-y}"; then
+    # e.g. unifi → unifi.bf-network.duckdns.org  or  unifi.cambridge-network.english.op.org
+    prompt_default UNIFI_SUBDOMAIN \
+        "UniFi subdomain label (DNS name will be <label>.${MAIN_DOMAIN})" \
+        "unifi" \
+        "unifi_subdomain"
+
+    UNIFI_FQDN="${UNIFI_SUBDOMAIN}.${MAIN_DOMAIN}"
+    prompt_default ORACLE_VPS_UNIFI_HTTPS_PORT \
+        "Local HTTPS tunnel port on VPS for UniFi (unique, not the portal port)" \
+        "9446" \
+        "oracle_vps_unifi_https_port"
+
+    DNS_UNIFI_KEY="oracle_dns_unifi_$(echo "$UNIFI_FQDN" | tr '.-' '__' | tr -cd '[:alnum:]_')"
+    if ! answer_exists "$DNS_UNIFI_KEY"; then
+        echo "IMPORTANT: Create a DNS A (or CNAME) record:"
+        echo "  name:  ${UNIFI_FQDN}"
+        echo "  value: ${ORACLE_VPS_HOST}"
+        echo "  (same public IP as the portal VPS)"
+        prompt_ack "$DNS_UNIFI_KEY" "Press Enter after the DNS record exists..."
+    else
+        echo "Using saved acknowledgement: DNS for ${UNIFI_FQDN}"
+    fi
+fi
+
+
 derive_pi_server_values
 
 cat <<EOF
@@ -2483,7 +2872,7 @@ UNREGISTERED_GW=$UNREGISTERED_GW
 SWITCH_HOSTS=$SWITCH_HOSTS
 SWITCH_HOSTS_BYTES=$SWITCH_HOSTS_BYTES
 RADIUS_SERVER=$RADIUS_SERVER
-RADIUS_NAS_IP=$RADIUS_NAS_IP
+
 SWITCH_KEY_PATH=$DOCKER_SWITCH_KEY_PATH
 ==========================================
 EOF
@@ -2753,6 +3142,8 @@ ip route-static 0.0.0.0 0 ${ISP_GW[0]}
         echo "Failed to detect switch on serial port. Skipping switch #$SWITCH_NUM."
         continue
     fi
+
+    free_serial_port "$DETECTED_PORT"
 
     echo "Configuring switch $MGMT_IP via serial..."
 
