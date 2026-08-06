@@ -1302,7 +1302,8 @@ write_pi_env_file() {
         write_env_line PIHOLE_WEBPASSWORD "$PIHOLE_WEBPASSWORD"
 
         write_env_line PORTAL_FORWARD_HOST "127.0.0.1"
-        write_env_line PORTAL_FORWARD_PORT "8080"
+        write_env_line PORTAL_FORWARD_PORT "8081"
+        write_env_line UNIFI_FORWARD_PORT "8080"
         write_env_line CAPTIVE_CHECK_HOSTS "captive.apple.com,connectivitycheck.gstatic.com,clients3.google.com,msftconnecttest.com,www.msftconnecttest.com"
         write_env_line CAPTIVE_PORTAL_IPS "$PORTAL_IP"
 
@@ -1953,7 +1954,7 @@ services:
       TZ: Europe/London
       LOTSOFDEVICES: "true"
     ports:
-      - "8081:8080"
+      - "8080:8080"
       - "8444:8443"
       - "3478:3478/udp"
       - "10001:10001/udp"

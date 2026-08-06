@@ -106,6 +106,7 @@ def reset_dns_hijack_rules() -> bool:
 
     hijack_dns_ip = os.environ.get('HIJACK_DNS_IP', '')
     portal_ip = os.environ.get('PORTAL_IP', '')
+    PORTAL_FORWARD_PORT = os.getenv('PORTAL_FORWARD_PORT', '8080').strip()
 
     for line in result.stdout.splitlines():
         line = line.strip()
@@ -115,7 +116,7 @@ def reset_dns_hijack_rules() -> bool:
             continue
         if (
             f"--to-destination {hijack_dns_ip}:53" not in line
-            and f"--to-destination {portal_ip}:8080" not in line
+            and f"--to-destination {portal_ip}:{PORTAL_FORWARD_PORT}" not in line
         ):
             continue
         delete_parts = shlex.split(line)

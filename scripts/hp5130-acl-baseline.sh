@@ -16,7 +16,10 @@ DOH_DOT_IPS="${DOH_DOT_IPS:-1.1.1.1 1.0.0.1 8.8.8.8 8.8.4.4 9.9.9.9 149.112.112.
 KEA_CONFIG_PATH="${KEA_CONFIG_PATH:-/kea/config/dhcp4.json}"
 PYTHON_BIN="${PYTHON_BIN:-}"
 NET="${NETWORK_WORD:-192.168}"
-HIJACK_DNS_IP="${HIJACK_DNS_IP:-${NET}.99.5}"
+MANAGEMENT_VLAN="${MANAGEMENT_VLAN:-99}"
+HIJACK_DNS_IP="${HIJACK_DNS_IP:-${NET}.${MANAGEMENT_VLAN}.5}"
+PORTAL_FORWARD_PORT="${PORTAL_FORWARD_PORT:-8081}"
+UNIFI_FORWARD_PORT="${UNIFI_FORWARD_PORT:-8080}"
 
 HP5130_POLICY_PATH="${HP5130_POLICY_PATH:-${POLICY_JSON:-/scripts/scriptdata/hp5130-policy.json}}"
 HP5130_CURRENT_CONFIG_PATH="${HP5130_CURRENT_CONFIG_PATH:-/scripts/scriptdata/hp5130-current-config.json}"
@@ -40,14 +43,18 @@ fi
 
 SSH_OPTS="-i $SWITCH_KEY_PATH -p $SWITCH_SSH_PORT -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3"
 
-CMDS="$("$PYTHON_BIN" - "$HP5130_POLICY_PATH" "$KEA_CONFIG_PATH" "$DOH_DOT_IPS" "$PORTAL_IP" "$ORACLE_VPS_HOST" "$SWITCH_HOST" "$NET" "$HIJACK_DNS_IP" "$WIRED_VLAN" "$WIRED_INBOUND_ACL" "$WIRED_OUTBOUND_ACL" "$ROUTER_UPLINK_ACL_MIN" "$ROUTER_UPLINK_ACL_MAX" "$HP5130_CURRENT_CONFIG_PATH" <<'PY'
+CMDS="$("$PYTHON_BIN" - "$HP5130_POLICY_PATH" "$KEA_CONFIG_PATH" "$DOH_DOT_IPS" "$PORTAL_IP" "$ORACLE_VPS_HOST" "$SWITCH_HOST" "$NET" "$HIJACK_DNS_IP" "$WIRED_VLAN" "$WIRED_INBOUND_ACL" "$WIRED_OUTBOUND_ACL" "$ROUTER_UPLINK_ACL_MIN" "$ROUTER_UPLINK_ACL_MAX" "$HP5130_CURRENT_CONFIG_PATH" "$PORTAL_FORWARD_PORT" "$UNIFI_FORWARD_PORT" "$MANAGEMENT_VLAN" <<'PY'
 import ipaddress
 import json
 import os
 import re
 import sys
 
-policy_path, kea_path, doh_dot_ips, portal_ip, oracle_vps_host, switch_host, network_word, hijack_dns_ip, wired_vlan_id, wired_inbound_acl, wired_outbound_acl, router_uplink_acl_min, router_uplink_acl_max, current_config_path = sys.argv[1:15]
+policy_path, kea_path, doh_dot_ips, portal_ip, oracle_vps_host, switch_host, network_word, hijack_dns_ip, wired_vlan_id, wired_inbound_acl, wired_outbound_acl, router_uplink_acl_min, router_uplink_acl_max, current_config_path, portal_forward_port, unifi_forward_port, management_vlan = sys.argv[1:18]
+
+portal_forward_port = str(portal_forward_port or "8081").strip() or "8081"
+unifi_forward_port = str(unifi_forward_port or "8080").strip() or "8080"
+management_vlan = str(management_vlan or "99").strip() or "99"
 
 with open(policy_path, "r", encoding="utf-8") as fh:
     policy = json.load(fh)
@@ -437,7 +444,7 @@ for vlan in vlans:
 
 emit("undo acl advanced 3098")
 emit("undo acl number 3099")
-emit("acl number 3099 name VLAN99_EGRESS")
+emit(f"acl number 3099 name VLAN{management_vlan}_EGRESS")
 emit(f" rule 10 permit tcp source {network_word}.0.0 0.0.255.255 destination {portal_ip} 0 destination-port eq 22")
 emit(f" rule 11 permit tcp source {network_word}.0.0 0.0.255.255 destination {hijack_dns_ip} 0 destination-port eq 22")
 emit(f" rule 12 permit tcp source {network_word}.0.0 0.0.255.255 destination {portal_ip} 0 destination-port gt 1023")
@@ -447,15 +454,19 @@ emit(f" rule 22 permit udp source {network_word}.0.0 0.0.255.255 destination {hi
 emit(f" rule 23 permit tcp source {network_word}.0.0 0.0.255.255 destination {hijack_dns_ip} 0 destination-port eq dns")
 emit(f" rule 30 permit tcp source {network_word}.0.0 0.0.255.255 destination {portal_ip} 0 destination-port eq www")
 emit(f" rule 31 permit tcp source {network_word}.0.0 0.0.255.255 destination {portal_ip} 0 destination-port eq 443")
-emit(f" rule 32 permit tcp source {network_word}.0.0 0.0.255.255 destination {portal_ip} 0 destination-port eq 8080")
+emit(f" rule 32 permit tcp source {network_word}.0.0 0.0.255.255 destination {portal_ip} 0 destination-port eq {portal_forward_port}")
 emit(f" rule 33 permit tcp source {network_word}.0.0 0.0.255.255 destination {hijack_dns_ip} 0 destination-port eq www")
 emit(f" rule 34 permit tcp source {network_word}.0.0 0.0.255.255 destination {hijack_dns_ip} 0 destination-port eq 443")
-emit(f" rule 35 permit tcp source {network_word}.0.0 0.0.255.255 destination {hijack_dns_ip} 0 destination-port eq 8080")
+emit(f" rule 35 permit tcp source {network_word}.0.0 0.0.255.255 destination {hijack_dns_ip} 0 destination-port eq {portal_forward_port}")
 emit(f" rule 36 permit tcp source {network_word}.0.0 0.0.255.255 destination {portal_ip} 0 destination-port eq 81")
 emit(f" rule 40 permit udp source {network_word}.0.0 0.0.255.255 destination {portal_ip} 0 destination-port eq 1812")
 emit(f" rule 41 permit icmp source {network_word}.0.0 0.0.255.255 destination {hijack_dns_ip} 0")
 emit(f" rule 42 permit udp source {network_word}.0.0 0.0.255.255 destination {portal_ip} 0 destination-port eq 3799")
 emit(f" rule 43 permit udp source {network_word}.0.0 0.0.255.255 destination {portal_ip} 0 destination-port eq 1813")
+emit(f" rule 45 permit tcp source {network_word}.{management_vlan}.0 0.0.0.255 destination {portal_ip} 0 destination-port eq {unifi_forward_port}")
+emit(f" rule 46 permit tcp source {network_word}.{management_vlan}.0 0.0.0.255 destination {portal_ip} 0 destination-port eq 8444")
+emit(f" rule 47 permit udp source {network_word}.{management_vlan}.0 0.0.0.255 destination {portal_ip} 0 destination-port eq 3478")
+emit(f" rule 48 permit udp source {network_word}.{management_vlan}.0 0.0.0.255 destination {portal_ip} 0 destination-port eq 10001")
 emit(f" rule 50 permit icmp source {network_word}.0.0 0.0.255.255 destination {portal_ip} 0")
 emit(f" rule 51 permit udp source {network_word}.0.0 0.0.255.255 destination {hijack_dns_ip} 0 destination-port eq ntp")
 emit(f" rule 55 permit udp source {network_word}.0.0 0.0.255.255 destination {portal_ip} 0 destination-port eq ntp")
@@ -465,11 +476,14 @@ emit(f" rule 65 permit udp source {network_word}.1.1 0 destination {portal_ip} 0
 emit(f" rule 66 permit tcp source {network_word}.1.1 0 destination {portal_ip} 0 destination-port eq cmd")
 emit(f" rule 71 permit tcp source 8.8.8.8 0 destination {portal_ip} 0 source-port eq 443 established")
 emit(f" rule 74 permit tcp destination {portal_ip} 0 source-port eq www established")
-emit(f" rule 75 permit tcp destination {portal_ip} 0 source-port eq 8080 established")
+emit(f" rule 75 permit tcp destination {portal_ip} 0 source-port eq {portal_forward_port} established")
 emit(f" rule 76 permit tcp source {oracle_vps_host} 0")
 emit(f" rule 77 permit udp source {oracle_vps_host} 0")
 emit(f" rule 78 permit tcp destination {portal_ip} 0 source-port eq 443 established")
+emit(f" rule 79 permit tcp destination {portal_ip} 0 source-port eq {unifi_forward_port} established")
 emit(f" rule 80 permit tcp destination {portal_ip} 0 source-port eq 22 established")
+emit(f" rule 81 permit tcp destination {portal_ip} 0 source-port eq 8444 established")
+emit(f" rule 82 permit udp destination {network_word}.{management_vlan}.0 0.0.0.255 source-port eq 3478")
 emit(f" rule 83 permit udp source {portal_ip} 0 destination-port eq ntp")
 emit(f" rule 84 permit udp source {hijack_dns_ip} 0 destination-port eq dns")
 emit(f" rule 85 permit tcp source {hijack_dns_ip} 0 destination-port eq dns")
@@ -482,7 +496,7 @@ emit(f" rule 96 permit udp source 8.8.4.4 0 destination {portal_ip} 0 source-por
 emit(f" rule 97 permit tcp source 8.8.4.4 0 destination {portal_ip} 0 source-port eq dns established")
 emit(" rule 100 deny ip")
 emit("quit")
-emit("interface Vlan-interface99")
+emit(f"interface Vlan-interface{management_vlan}")
 emit(" undo packet-filter 3098 inbound")
 emit(" undo packet-filter 3099 inbound")
 emit(" undo packet-filter 3099 outbound")

@@ -274,7 +274,8 @@ def ensure_legacy_admin(username: str, password: str) -> Admin:
 # ---------------------------------------------------------------------------
 
 app = create_app()
+PORTAL_FORWARD_PORT = os.getenv('PORTAL_FORWARD_PORT', '8080').strip()
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080, debug=True)
+    app.run(host='0.0.0.0', port=int(PORTAL_FORWARD_PORT), debug=True)
 #test comment for firmware update test

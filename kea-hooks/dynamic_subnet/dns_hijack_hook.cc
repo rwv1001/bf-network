@@ -473,6 +473,21 @@ extern "C"
         return subnet_id != 0 && is_unregistered_vlan_subnet(subnet_id);
     }
 
+    bool is_management_vlan_ip(const std::string &ip_address)
+    {
+        // Match x.x.<MANAGEMENT_VLAN>.x  (third octet == MANAGEMENT_VLAN)
+        const char *mgmt_env = std::getenv("MANAGEMENT_VLAN");
+        int mgmt_vlan = (mgmt_env && *mgmt_env) ? std::atoi(mgmt_env) : 99;
+        if (mgmt_vlan <= 0 || mgmt_vlan > 4094)
+            return false;
+
+        unsigned a = 0, b = 0, c = 0, d = 0;
+        if (sscanf(ip_address.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4)
+            return false;
+
+        return static_cast<int>(c) == mgmt_vlan;
+    }
+
     bool is_protected_policy_target(const std::string &ip_address, uint32_t vlan_id = 0)
     {
         if (is_wired_vlan_subnet(vlan_id))
@@ -487,6 +502,12 @@ extern "C"
 
         if (is_blocked_pool_ip(ip_address))
         {
+            return true;
+        }
+        if (is_management_vlan_ip(ip_address))
+        {
+            std::cout << "DNS Hijack Hook: treating " << ip_address
+                      << " as protected management-VLAN IP" << std::endl;
             return true;
         }
 

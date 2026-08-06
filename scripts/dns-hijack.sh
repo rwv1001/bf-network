@@ -50,6 +50,13 @@ if [ -z "$CONFIG_PATH" ]; then
     fi
 fi
 
+mgmt="${MANAGEMENT_VLAN:-99}"
+third=$(echo "$IP_ADDRESS" | cut -d. -f3)
+if [ "$third" = "$mgmt" ]; then
+  echo "dns-hijack: refusing $ACTION for management VLAN IP $IP_ADDRESS" >&2
+  exit 0
+fi
+
 get_blocked_pool_ranges() {
     if ! command -v python3 >/dev/null 2>&1; then
         return 1

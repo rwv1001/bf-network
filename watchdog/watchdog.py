@@ -79,6 +79,7 @@ def _cfg(env: dict, key: str, default: str = '') -> str:
 def load_config() -> dict:
     env_path = Path(os.environ.get('BF_ENV_FILE', str(_DEFAULT_ENV)))
     env = _load_env(env_path)
+    portal_port = _cfg(env, 'PORTAL_FORWARD_PORT', '8081')
 
     cfg = {
         # Graph / email
@@ -93,7 +94,7 @@ def load_config() -> dict:
                                    _cfg(env, 'PORTAL_URL', 'bf-network').split('/')[-1]),
 
         # Health endpoint
-        'health_url':         _cfg(env, 'WATCHDOG_HEALTH_URL', 'http://127.0.0.1:8080/health'),
+        'health_url':         _cfg(env, 'WATCHDOG_HEALTH_URL', f'http://127.0.0.1:{portal_port}/health'),
         'health_enabled':     _cfg(env, 'WATCHDOG_HEALTH_ENABLED', 'true').lower() != 'false',
         'health_timeout':     int(_cfg(env, 'WATCHDOG_HEALTH_TIMEOUT_SEC', '10')),
         'health_fail_threshold': int(_cfg(env, 'WATCHDOG_HEALTH_FAIL_THRESHOLD', '3')),

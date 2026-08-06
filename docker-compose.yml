@@ -47,7 +47,7 @@ services:
       VALID_VLANS: ${VALID_VLANS:-10,20,30,40,50,60,70,80,90}
       SWITCH_USER: ${SWITCH_USER:-robert}
       SWITCH_SSH_PORT: ${SWITCH_SSH_PORT:-22}
-      SWITCH_KEY_PATH: /keys/id_rsa
+      SWITCH_KEY_PATH: ${SWITCH_KEY_PATH:-/keys/id_rsa}
       # Set to "1" to enable async switch port lookup on every DHCP lease/renew
       SWITCH_PORT_LOOKUP_ENABLED: ${SWITCH_PORT_LOOKUP_ENABLED:-1}
       # How long (seconds) a cached port entry is considered fresh (skip SSH re-query)
@@ -250,7 +250,7 @@ services:
       SWITCH_PASS: ${SWITCH_PASS}
       SWITCH_PORT_LOOKUP_ENABLED: ${SWITCH_PORT_LOOKUP_ENABLED:-1}
       SWITCH_NETCONF_PORT: ${SWITCH_NETCONF_PORT:-830}
-      SWITCH_KEY_PATH: /keys/id_rsa
+      SWITCH_KEY_PATH: ${SWITCH_KEY_PATH:-/keys/id_rsa}
       USER_DEVICE_INTERFACES: ${USER_DEVICE_INTERFACES:-15}
       SWITCH_REPLUG_ENABLED: ${SWITCH_REPLUG_ENABLED:-false}
       SWITCH_REPLUG_DELAY_SEC: ${SWITCH_REPLUG_DELAY_SEC:-3}
@@ -281,6 +281,8 @@ services:
       DNS_SCRIPT: ${DNS_SCRIPT:-/scripts/dns-hijack.sh}
       PORTAL_ADMIN_USER: ${PORTAL_ADMIN_USER:-admin}
       PORTAL_ADMIN_PASSWORD: ${PORTAL_ADMIN_PASSWORD:?PORTAL_ADMIN_PASSWORD is required}
+      PORTAL_FORWARD_PORT: ${PORTAL_FORWARD_PORT:-8081}
+      UNIFI_FORWARD_PORT: ${UNIFI_FORWARD_PORT:-8080}
     volumes:
       - ./captive-portal/app:/app
       - ./shared/restart-queue:/restart-queue
@@ -306,7 +308,7 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:$${PORTAL_FORWARD_PORTE:-8080}/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -493,6 +495,9 @@ services:
   # ── Nginx Proxy Manager ───────────────────────────────────────────────────────
   npm:
     image: jc21/nginx-proxy-manager:latest
+    environment:
+      INITIAL_ADMIN_EMAIL: ${NPM_ADMIN_EMAIL}
+      INITIAL_ADMIN_PASSWORD: ${NPM_ADMIN_PASSWORD}
     restart: unless-stopped
     network_mode: host
     volumes:
@@ -514,6 +519,7 @@ services:
       - ./.env
     volumes:
       - ./npm/setup.py:/setup.py:ro
+      - ./npm/letsencrypt:/etc/letsencrypt:ro
       - /etc/localtime:/etc/localtime:ro
     command: ["python", "/setup.py"]
     depends_on:
@@ -544,7 +550,7 @@ services:
       WATCHDOG_PEER_HOST: ${WATCHDOG_PEER_HOST:-}
       WATCHDOG_PEER_HEALTH_URL: ${WATCHDOG_PEER_HEALTH_URL:-}
       WATCHDOG_PEER_SSH_USER: ${WATCHDOG_PEER_SSH_USER:-admin}
-      WATCHDOG_PEER_SSH_KEY: /keys/id_rsa
+      WATCHDOG_PEER_SSH_KEY: ${SWITCH_KEY_PATH:-/keys/id_rsa}
       WATCHDOG_PEER_REBOOT_ENABLED: ${WATCHDOG_PEER_REBOOT_ENABLED:-false}
       # Syslog staleness check — alert if remote-syslog.log not updated within 10 minutes
       WATCHDOG_SYSLOG_LOG_PATH: /logs/remote-syslog.log
@@ -552,7 +558,7 @@ services:
       # HP5130 switch hardware health checks
       WATCHDOG_SWITCH_HOSTS: ${SWITCH_HOSTS:-}
       WATCHDOG_SWITCH_USER: ${SWITCH_USER:-robert}
-      WATCHDOG_SWITCH_KEY_PATH: /keys/id_rsa
+      WATCHDOG_SWITCH_KEY_PATH: ${SWITCH_KEY_PATH:-/keys/id_rsa}
       # Space-separated IPs of switches that have an RPS fitted.
       # Absent/Fault on a secondary PSU is only alerted for listed switches.
       WATCHDOG_SWITCH_RPS_HOSTS: ${SWITCH_RPS_HOSTS:-}

@@ -285,7 +285,7 @@ def main():
             {"name": "routers",             "data": unregistered_gw},
             {"name": "domain-name-servers", "data": hijack_dns_ip},
         ],
-        "reservations": [],
+        "reservations": infra_ghost_reservations(network_word, wired_vlan, switch_hosts_raw),
     })
 
     # Management VLAN — lower range reserved for static infra, public DNS
@@ -293,14 +293,14 @@ def main():
         "subnet": f"{network_word}.{management_vlan}.0/24",
         "id": management_vlan,
         "pools": [
-            {"pool": f"{network_word}.{management_vlan}.100 - {network_word}.{management_vlan}.254"}
+            {"pool": f"{network_word}.{management_vlan}.1 - {network_word}.{management_vlan}.254"}
         ],
         "interface": f"eth0.{management_vlan}",
         "option-data": [
             {"name": "routers",             "data": mgmt_gateway},
             {"name": "domain-name-servers", "data": "8.8.8.8, 8.8.4.4"},
         ],
-        "reservations": [],
+        "reservations": infra_ghost_reservations(network_word, management_vlan, switch_hosts_raw),
     })
 
     interfaces = (

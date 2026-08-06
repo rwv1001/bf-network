@@ -46,13 +46,15 @@ RUN set -eux; \
     # Sudo rights
     echo "portal ALL=(ALL) NOPASSWD: /usr/sbin/iptables, /usr/bin/docker, /usr/local/bin/python3, /usr/bin/python3, /sbin/ip, /usr/sbin/ip" >> /etc/sudoers
 
-
+# Default; override at runtime via Compose environment
+ENV PORTAL_FORWARD_PORT=8081
 # Expose port
-EXPOSE 8080
+EXPOSE 8081
 
 # Run the application
 # --preload: create_app() runs once in the master process before workers fork,
 # so db.init_app() and background sweeper threads are initialised exactly once.
 
 
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--timeout", "120", "--access-logfile", "-", "--access-logformat", "%(h)s %(l)s %(u)s %(t)s \"%(r)s\" %(s)s %(b)s %(D)s", "--preload", "app:app"]
+ENV PORTAL_FORWARD_PORT=8081
+CMD gunicorn --bind 0.0.0.0:${PORTAL_FORWARD_PORT:-8081} --workers 2 --timeout 120 --access-logfile - --access-logformat '%(h)s %(l)s %(u)s %(t)s "%(r)s" %(s)s %(b)s %(D)s' --preload app:app
