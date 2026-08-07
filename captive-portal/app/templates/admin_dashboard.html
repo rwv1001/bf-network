@@ -471,13 +471,20 @@ function searchTable(tableType, searchValue) {
             </div>
             
             <div style="margin-bottom: 15px;">
-                <label for="assignUserId" style="display: block; margin-bottom: 5px; font-weight: bold;">Select User: *</label>
-                <select name="user_id" id="assignUserId" required 
+                <label for="assignOwner" style="display: block; margin-bottom: 5px; font-weight: bold;">Select Owner: *</label>
+                <select name="owner" id="assignOwner" required 
                         style="width: 100%; padding: 8px; border: 1px solid #ddd;">
-                    <option value="">-- Select a user --</option>
-                    {% for user in users %}
-                    <option value="{{ user.id }}">{{ user.email }} ({{ user.first_name }} {{ user.last_name }})</option>
+                    <option value="">-- Select an owner --</option>
+                    <optgroup label="Users">
+                    {% for u in users %}
+                    <option value="user:{{ u.id }}">{{ u.email }} ({{ u.first_name }} {{ u.last_name }})</option>
                     {% endfor %}
+                    </optgroup>
+                    <optgroup label="Admins">
+                    {% for a in admins %}
+                    <option value="admin:{{ a.id }}">{{ a.username }}{% if a.email %} &lt;{{ a.email }}&gt;{% endif %}</option>
+                    {% endfor %}
+                    </optgroup>
                 </select>
             </div>
             
@@ -508,11 +515,11 @@ function searchTable(tableType, searchValue) {
 
 <script>
 function validateAssignForm() {
-    const userId = document.getElementById('assignUserId').value;
+    const ownerId = document.getElementById('assignOwner').value;
     const vlanId = document.getElementById('assignVlanId').value;
     const submitBtn = document.getElementById('assignDeviceBtn');
     
-    if (userId && vlanId) {
+    if (ownerId && vlanId) {
         submitBtn.disabled = false;
         submitBtn.style.cursor = 'pointer';
         submitBtn.style.opacity = '1';
@@ -526,7 +533,7 @@ function validateAssignForm() {
 function showAssignForm(mac, ip, connectionType) {
     document.getElementById('assignMacAddress').value = mac;
     document.getElementById('assignIpAddress').value = ip;
-    document.getElementById('assignUserId').value = '';
+    document.getElementById('assignOwner').value = '';
     document.getElementById('assignVlanId').value = '';
     document.getElementById('assignDeviceName').value = '';
 
@@ -553,7 +560,7 @@ function hideAssignForm() {
 }
 
 // Add event listeners for validation
-document.getElementById('assignUserId').addEventListener('change', validateAssignForm);
+document.getElementById('assignOwner').addEventListener('change', validateAssignForm);
 document.getElementById('assignVlanId').addEventListener('change', validateAssignForm);
 
 // Close modal when clicking outside
@@ -574,12 +581,19 @@ document.getElementById('assignDeviceModal').addEventListener('click', function(
                 <input type="text" id="reassignMacAddress" readonly style="width: 100%; padding: 8px; border: 1px solid #ddd; background: #f5f5f5; box-sizing: border-box;">
             </div>
             <div style="margin-bottom: 15px;">
-                <label for="reassignUserId" style="display: block; margin-bottom: 5px; font-weight: bold;">New Owner: *</label>
-                <select name="user_id" id="reassignUserId" required style="width: 100%; padding: 8px; border: 1px solid #ddd;">
-                    <option value="">-- Select a user --</option>
+                <label for="reassignOwner" style="display: block; margin-bottom: 5px; font-weight: bold;">New Owner: *</label>
+                <select name="owner" id="reassignOwner" required style="width: 100%; padding: 8px; border: 1px solid #ddd;">
+                    <option value="">-- Select an owner --</option>
+                    <optgroup label="Users">
                     {% for u in users %}
-                    <option value="{{ u.id }}">{{ u.email }}{% if u.full_name %} ({{ u.full_name }}){% endif %}</option>
+                    <option value="user:{{ u.id }}">{{ u.email }}{% if u.full_name %} ({{ u.full_name }}){% endif %}</option>
                     {% endfor %}
+                    </optgroup>
+                    <optgroup label="Admins">
+                    {% for a in admins %}
+                    <option value="admin:{{ a.id }}">{{ a.username }}{% if a.email %} &lt;{{ a.email }}&gt;{% endif %}</option>
+                    {% endfor %}
+                    </optgroup>
                 </select>
             </div>
             <div style="display: flex; gap: 10px; margin-top: 20px;">
@@ -593,7 +607,7 @@ document.getElementById('assignDeviceModal').addEventListener('click', function(
 function showReassignDeviceForm(deviceId, mac) {
     document.getElementById('reassignMacAddress').value = mac;
     document.getElementById('reassignDeviceForm').action = '/admin/device/' + deviceId + '/reassign';
-    document.getElementById('reassignUserId').value = '';
+    document.getElementById('reassignOwner').value = '';
     document.getElementById('reassignDeviceModal').style.display = 'block';
 }
 function hideReassignDeviceForm() {
@@ -904,7 +918,7 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
         </tr>
     </thead>
     <tbody>
-        {% for ownership, device, user in devices %}
+        {% for ownership, device, user, admin in devices %}
         <tr {% if device.registration_status == 'blocked' %}style="background: #ffebee;"{% endif %}>
             <td style="font-family: monospace; font-size: 12px;">{{ device.mac_address }}</td>
             <td style="font-family: monospace; font-size: 12px;">
@@ -916,14 +930,18 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
             </td>
             <td>{{ device.device_name or '-' }}</td>
             <td>
-                {% if user %}
+                {% if admin %}
+                    <span title="Admin">&#128274; {{ admin.username }}</span>
+                {% elif user %}
                     {{ user.first_name }} {{ user.last_name }}
                 {% else %}
                     <em style="color: #999;">Unknown</em>
                 {% endif %}
             </td>
             <td>
-                {% if user %}
+                {% if admin %}
+                    {{ admin.email or '-' }}
+                {% elif user %}
                     {{ user.email }}
                 {% else %}
                     <em style="color: #999;">-</em>
@@ -1011,7 +1029,7 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
                 <button onclick="showReassignDeviceForm({{ device.id }}, '{{ device.mac_address }}')" class="btn btn-small" style="background: #4a7c59; margin-left: 5px;">&#8599; Reassign</button>
                 {% endif %}
                 {% if device.registration_status == 'registered' %}
-                <button onclick="showFixedIpDialog({{ device.id }}, '{{ device.mac_address }}', '{{ device.fixed_ip or '' }}', {{ device.current_vlan or 0 }})"
+                <button onclick="showFixedIpDialog({{ device.id }}, '{{ device.mac_address }}', '{{ device.fixed_ip or '' }}', {{ device.current_vlan or 0 }}, '{{ device.ip_address or '' }}')"
                         class="btn btn-small" style="background: #1565c0; color:#fff; margin-left: 5px;" title="Set or clear a fixed IP reservation">&#x1F4CC; Fixed IP</button>
                 {% endif %}
             </td>
@@ -1194,12 +1212,13 @@ function saveDashboardPrefs() {
 
 <script>
 var _fixedIpDeviceId = null;
+var _fixedIpUrl = "{{ url_for('admin.devices.set_fixed_ip') }}";
 
-function showFixedIpDialog(deviceId, mac, currentFixed, vlan) {
+function showFixedIpDialog(deviceId, mac, currentFixed, vlan, currentIp) {
     _fixedIpDeviceId = deviceId;
     document.getElementById('fixedIpMac').textContent = mac;
     document.getElementById('fixedIpVlan').textContent = vlan;
-    document.getElementById('fixedIpInput').value = currentFixed || '';
+    document.getElementById('fixedIpInput').value = currentFixed || currentIp || '';
     document.getElementById('fixedIpError').style.display = 'none';
     document.getElementById('fixedIpError').textContent = '';
     document.getElementById('fixedIpClearBtn').style.display = currentFixed ? '' : 'none';
@@ -1239,7 +1258,7 @@ function _doFixedIpRequest(ip) {
     btn.textContent = 'Saving…';
     document.getElementById('fixedIpError').style.display = 'none';
 
-    fetch('/api/admin/set-fixed-ip', {
+    fetch(_fixedIpUrl, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({device_id: _fixedIpDeviceId, ip: ip})

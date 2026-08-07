@@ -227,9 +227,10 @@ def index():
 
     # ── Registered devices (Table 9 active rows) ──────────────────────────────
     devices_query = (
-        db.session.query(DeviceOwnership, Device, User)
+        db.session.query(DeviceOwnership, Device, User, Admin)
         .join(Device, DeviceOwnership.mac_address == Device.mac_address, isouter=True)
         .outerjoin(User, DeviceOwnership.user_id == User.id)
+        .outerjoin(Admin, DeviceOwnership.admin_id == Admin.id)
         .filter(DeviceOwnership.end_datetime.is_(None))
     )
 
@@ -243,6 +244,8 @@ def index():
                 User.email.ilike(f'%{devices_search}%'),
                 User.first_name.ilike(f'%{devices_search}%'),
                 User.last_name.ilike(f'%{devices_search}%'),
+                Admin.username.ilike(f'%{devices_search}%'),
+                Admin.email.ilike(f'%{devices_search}%'),
             )
         )
 
@@ -331,6 +334,7 @@ def index():
         users_page=users_page, users_per_page=users_per_page,
         users_pages=users_pages, users_total=users_total,
         users_search=users_search, users_sort=users_sort, users_order=users_order,
+        admins=Admin.query.order_by(Admin.username.asc()).all(),
         pending_requests=pending_requests,
         pending_page=pending_page, pending_per_page=pending_per_page,
         pending_pages=pending_pages, pending_total=pending_total,

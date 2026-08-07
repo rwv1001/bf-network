@@ -1,9 +1,8 @@
-"""
-Admin — Unregistered Devices section (Spec dashboard section A).
+"""Admin — Unregistered Devices section (Spec dashboard section A).
 
 Routes:
-  GET  /admin/unregistered     list of unregistered devices
-  POST /admin/assign-device    assign an unregistered device to a user + VLAN
+  GET  /admin/unregistered     redirects to main dashboard (unregistered tab)
+  POST /admin/assign-device    assign an unregistered device to a user/admin + VLAN
 """
 
 import logging
@@ -11,12 +10,12 @@ import os
 import secrets
 from datetime import datetime
 
-from flask import Blueprint, flash, redirect, render_template, request, url_for
+from flask import Blueprint, flash, redirect, request, url_for
 from flask_login import current_user, login_required
 
 from extensions import db
 from models import (
-    Device, DeviceOwnership, IPLease, RegistrationRequest,
+    Admin, Device, IPLease, RegistrationRequest,
     UnregisteredLease, User, VlanMapping,
 )
 from core.auth import permission_required
@@ -68,53 +67,7 @@ def _replug_switch_port_for_mac(mac_address):
 @login_required
 @permission_required('manage_users')
 def list_unregistered():
-    """
-    Spec dashboard section A: list all devices with no active ownership row.
-    Joins with ip_leases to show the most recent IP / lease times.
-    """
-    # Devices with no active DeviceOwnership (end_datetime IS NULL)
-    active_ownership_macs = (
-        db.session.query(DeviceOwnership.mac_address)
-        .filter(DeviceOwnership.end_datetime.is_(None))
-        .scalar_subquery()
-    )
-    unregistered_devices = (
-        db.session.query(Device)
-        .filter(~Device.mac_address.in_(active_ownership_macs))
-        .order_by(Device.last_seen.desc())
-        .all()
-    )
-
-    # Enrich each device with its most recent lease
-    enriched = []
-    for dev in unregistered_devices:
-        lease = (
-            IPLease.query
-            .filter_by(mac_address=dev.mac_address)
-            .order_by(IPLease.lease_start.desc())
-            .first()
-        )
-        enriched.append({
-            'device': dev,
-            'ip_address': lease.ip_address if lease else None,
-            'lease_start': lease.lease_start if lease else None,
-            'lease_expiry': lease.lease_expiry if lease else None,
-        })
-
-    vlan_map = get_vlan_map()
-    all_users = User.query.order_by(User.email.asc()).all()
-    assignable_entries = get_admin_assignable_entries()
-    wired_unregistered_vlan = get_wired_unregistered_vlan_id()
-
-    return render_template(
-        'admin_unregistered.html',
-        enriched_devices=enriched,
-        vlan_map=vlan_map,
-        all_users=all_users,
-        assignable_entries=assignable_entries,
-        wired_unregistered_vlan=wired_unregistered_vlan,
-        label_for_vlan=label_for_vlan,
-    )
+    return redirect(url_for('admin.dashboard.index'))
 
 
 @unregistered_bp.route('/assign-device', methods=['POST'])
@@ -128,24 +81,40 @@ def assign_device():
     removes the DNS hijack / ACL block and sets internet_accessible=True.
     """
     mac_address = (request.form.get('mac_address') or '').strip().lower()
-    user_id_raw = (request.form.get('user_id') or '').strip()
+    owner_raw = (request.form.get('owner') or '').strip()
     device_name = (request.form.get('device_name') or '').strip()
     vlan_id_raw = (request.form.get('vlan_id') or '').strip()
 
-    if not mac_address or not user_id_raw or not vlan_id_raw:
-        flash('MAC address, user, and VLAN are required.', 'error')
+    if not mac_address or not owner_raw or not vlan_id_raw:
+        flash('MAC address, owner, and VLAN are required.', 'error')
         return redirect(url_for('admin.unregistered.list_unregistered'))
 
+    if ':' not in owner_raw:
+        flash('Invalid owner selection.', 'error')
+        return redirect(url_for('admin.unregistered.list_unregistered'))
+
+    owner_type, owner_id_str = owner_raw.split(':', 1)
     try:
-        user_id = int(user_id_raw)
+        owner_id = int(owner_id_str)
         vlan_id = int(vlan_id_raw)
     except ValueError:
-        flash('Invalid user ID or VLAN ID.', 'error')
+        flash('Invalid owner ID or VLAN ID.', 'error')
         return redirect(url_for('admin.unregistered.list_unregistered'))
 
-    user = User.query.get(user_id)
-    if not user:
-        flash('User not found.', 'error')
+    user = None
+    admin_owner = None
+    if owner_type == 'user':
+        user = User.query.get(owner_id)
+        if not user:
+            flash('User not found.', 'error')
+            return redirect(url_for('admin.unregistered.list_unregistered'))
+    elif owner_type == 'admin':
+        admin_owner = Admin.query.get(owner_id)
+        if not admin_owner:
+            flash('Admin not found.', 'error')
+            return redirect(url_for('admin.unregistered.list_unregistered'))
+    else:
+        flash('Invalid owner type.', 'error')
         return redirect(url_for('admin.unregistered.list_unregistered'))
 
     # Validate VLAN is wired-enabled if device is wired
@@ -203,7 +172,8 @@ def assign_device():
 
     # Ensure DeviceOwnership is correct
     close_ownership(mac_address, commit=True)
-    open_ownership(mac_address, user.id, commit=True)
+    open_ownership(mac_address, user_id=user.id if user else None,
+                   admin_id=admin_owner.id if admin_owner else None, commit=True)
 
     # Spec A.a.ii / A.b: determine whether to unblock now
     same_vlan = (detected_vlan == vlan_id) if detected_vlan else False
@@ -247,8 +217,8 @@ def assign_device():
 
     clear_unregistered_lease(mac_address)
 
-    # Send email notification to user
-    if device.unregister_token:
+    # Send email notification to user (not for admin-owned devices)
+    if user and device.unregister_token:
         unregister_url = build_unregister_url(device.unregister_token)
         ssid_display = get_vlan_map().get(str(vlan_id), '') or f'VLAN {vlan_id}'
         send_wifi_registration_confirmation(
@@ -268,17 +238,19 @@ def assign_device():
             },
         )
 
-    central_client.queue_device_registered(device, user)
+    if user:
+        central_client.queue_device_registered(device, user)
 
+    owner_label = user.email if user else f'admin:{admin_owner.username}'
     flash(
-        f'Device {mac_address} assigned to {user.email} on VLAN {vlan_id}.',
+        f'Device {mac_address} assigned to {owner_label} on VLAN {vlan_id}.',
         'success',
     )
     logger.info(
-        "Admin %s assigned device %s to user %s (vlan=%s)",
+        "Admin %s assigned device %s to %s (vlan=%s)",
         getattr(current_user, 'username', 'unknown'),
         mac_address,
-        user.email,
+        owner_label,
         vlan_id,
     )
     return redirect(url_for('admin.unregistered.list_unregistered'))

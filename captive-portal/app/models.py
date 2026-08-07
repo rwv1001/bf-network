@@ -181,9 +181,16 @@ class Device(db.Model):
 
     @property
     def user(self):
-        """Current owner (User) via active DeviceOwnership."""
+        """Current owner (User) via active DeviceOwnership, or None if owned by an admin."""
         if self.active_ownership:
             return self.active_ownership.user
+        return None
+
+    @property
+    def admin(self):
+        """Current owner (Admin) via active DeviceOwnership, if owned by an admin."""
+        if self.active_ownership:
+            return self.active_ownership.admin
         return None
 
     @property
@@ -360,11 +367,13 @@ class DeviceOwnership(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     mac_address = db.Column(db.String(17), db.ForeignKey('devices.mac_address', ondelete='CASCADE'), nullable=False, index=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=False)  # ← changed
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    admin_id = db.Column(db.Integer, db.ForeignKey('admins.id', ondelete='SET NULL'), nullable=True)
     start_datetime = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     end_datetime = db.Column(db.DateTime, nullable=True)
 
     user = db.relationship('User', backref='device_ownerships', lazy='select')
+    admin = db.relationship('Admin', backref='device_ownerships', lazy='select')
 
     __table_args__ = (
         db.Index('ix_device_ownership_mac_active', 'mac_address', 'end_datetime'),
@@ -372,7 +381,8 @@ class DeviceOwnership(db.Model):
 
     def __repr__(self):
         status = "active" if self.end_datetime is None else "ended"
-        return f'<DeviceOwnership {self.mac_address} → user {self.user_id} ({status})>'
+        owner = f"admin {self.admin_id}" if self.admin_id else f"user {self.user_id}"
+        return f'<DeviceOwnership {self.mac_address} → {owner} ({status})>'
 
 
 class IPLease(db.Model):

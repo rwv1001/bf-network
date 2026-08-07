@@ -23,7 +23,7 @@ from flask import Blueprint, abort, flash, jsonify, redirect, request, url_for
 from flask_login import current_user, login_required
 
 from extensions import db
-from models import Device, DeviceOwnership, IPLease, RegistrationRequest, User
+from models import Device, DeviceOwnership, IPLease, RegistrationRequest, User, Admin
 from core.auth import permission_required
 from core.device_utils import (
     close_ownership, get_active_iplease, get_active_ownership,
@@ -262,30 +262,47 @@ def delete_device(device_id):
 @permission_required('manage_users')
 def reassign_device(device_id):
     device = Device.query.get_or_404(device_id)
-    user_id = request.form.get('user_id', '').strip()
-    if not user_id:
-        flash('A user must be selected.', 'error')
+    owner_raw = request.form.get('owner', '').strip()
+    if not owner_raw or ':' not in owner_raw:
+        flash('An owner must be selected.', 'error')
         return redirect(url_for('admin.dashboard.index'))
+
+    owner_type, owner_id_str = owner_raw.split(':', 1)
     try:
-        user_id = int(user_id)
+        owner_id = int(owner_id_str)
     except ValueError:
-        flash('Invalid user ID.', 'error')
+        flash('Invalid owner ID.', 'error')
         return redirect(url_for('admin.dashboard.index'))
 
-    new_user = User.query.get(user_id)
-    if not new_user:
-        flash('User not found.', 'error')
+    new_user = None
+    new_admin = None
+    if owner_type == 'user':
+        new_user = User.query.get(owner_id)
+        if not new_user:
+            flash('User not found.', 'error')
+            return redirect(url_for('admin.dashboard.index'))
+    elif owner_type == 'admin':
+        new_admin = Admin.query.get(owner_id)
+        if not new_admin:
+            flash('Admin not found.', 'error')
+            return redirect(url_for('admin.dashboard.index'))
+    else:
+        flash('Invalid owner type.', 'error')
         return redirect(url_for('admin.dashboard.index'))
 
-    old_email = device.user.email if device.user else 'unowned'
+    old_label = device.user.email if device.user else (
+        f'admin:{device.admin.username}' if device.admin else 'unowned')
     close_ownership(device.mac_address, commit=False)
-    open_ownership(device.mac_address, new_user.id, commit=False)
+    open_ownership(device.mac_address, user_id=new_user.id if new_user else None,
+                   admin_id=new_admin.id if new_admin else None, commit=False)
     db.session.commit()
 
-    central_client.queue_device_registered(device, new_user)
+    new_label = new_user.email if new_user else f'admin:{new_admin.username}'
+    if new_user:
+        central_client.queue_device_registered(device, new_user)
     logger.info("Admin reassigned device %s from %s to %s",
-                device.mac_address, old_email, new_user.email)
-    flash(f'Device {device.mac_address} reassigned to {new_user.email}.', 'success')
+                device.mac_address, old_label, new_label)
+    flash(f'Device {device.mac_address} reassigned to {new_label}.', 'success')
     return redirect(url_for('admin.dashboard.index'))
 
 

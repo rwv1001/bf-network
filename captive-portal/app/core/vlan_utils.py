@@ -63,7 +63,7 @@ def get_fixed_vlan_statuses() -> List[str]:
     """Return list of status names that should be protected (from VLAN_DEFAULTS)."""
     defaults = get_vlan_defaults()
     # You can customize this list if needed
-    protected = {'restricted', 'unregistered', 'wired_unregistered', 'management'}
+    protected = {'restricted', 'unregistered', 'wired_unregistered'}
     return [name for vid, name in defaults.items() if name not in protected]
 
 
@@ -80,50 +80,34 @@ def get_pool_prefix_statuses() -> List[str]:
 
 def seed_vlan_mappings() -> int:
     """
-    Seed vlan_mappings ONLY with entries from VLAN_POOL_STATUSES + wired_unregistered.
-    - Looks up vlan_id from VLAN_DEFAULTS.
+    Seed vlan_mappings from ALL entries in VLAN_DEFAULTS.
     - wired_unregistered always uses the WIRED_VLAN env var.
     - Only inserts rows that don't already exist.
     """
     from models import db, VlanMapping
 
-    defaults = get_vlan_defaults()                    # from VLAN_DEFAULTS
-    pool_statuses = set(get_pool_prefix_statuses())   # from VLAN_POOL_STATUSES
+    defaults = get_vlan_defaults()   # {vlan_id: status_name} from VLAN_DEFAULTS
 
-    if not defaults or not pool_statuses:
+    if not defaults:
         return 0
-
-    # Always include wired_unregistered for the admin table
-    pool_statuses.add('wired_unregistered')
 
     existing = {v.status for v in VlanMapping.query.all()}
     inserted = 0
 
-    wired_vlan_id = get_wired_vlan_id()   # from WIRED_VLAN env var
+    wired_vlan_id = get_wired_vlan_id()
 
-    for status in pool_statuses:
+    for vlan_id, status in sorted(defaults.items()):
         if status in existing:
             continue
 
-        # Get vlan_id from VLAN_DEFAULTS, with special handling for wired_unregistered
+        # wired_unregistered always takes its ID from WIRED_VLAN, not VLAN_DEFAULTS
         if status == 'wired_unregistered':
             vlan_id = wired_vlan_id
-        else:
-            # Find the vlan_id that corresponds to this status name
-            vlan_id = None
-            for vid, name in defaults.items():
-                if name == status:
-                    vlan_id = vid
-                    break
-
-            if vlan_id is None:
-                logger.warning("Could not find vlan_id for status '%s' in VLAN_DEFAULTS", status)
-                continue
 
         entry = VlanMapping(
             status=status,
             vlan_id=vlan_id,
-            display_name=status.title(),
+            display_name=status.replace('_', ' ').title(),
             wired_enabled=True,
             require_password=True,
             visible_vlans='',
@@ -133,7 +117,7 @@ def seed_vlan_mappings() -> int:
 
     if inserted:
         db.session.commit()
-        logger.info("Seeded %d VLAN mappings from VLAN_POOL_STATUSES + wired_unregistered", inserted)
+        logger.info("Seeded %d VLAN mappings from VLAN_DEFAULTS", inserted)
 
     return inserted
 
@@ -297,6 +281,10 @@ def label_for_vlan(vlan_id, vlan_map=None) -> str:
             return f"{display_name} (VLAN {vlan_id})"
         if status:
             return f"{status.title()} (VLAN {vlan_id})"
+    # Fall back to VLAN_DEFAULTS for VLANs not in the DB
+    name = get_vlan_defaults().get(vlan_id)
+    if name:
+        return f"{name.replace('_', ' ').title()} (VLAN {vlan_id})"
     return f"VLAN {vlan_id}"
 
 
@@ -334,13 +322,24 @@ def get_wired_assignable_vlan_ids() -> set:
 
 def get_admin_assignable_entries() -> list:
     """All VLANs admins can assign devices to (excludes restricted/unregistered)."""
+    from types import SimpleNamespace
+    excluded = {'restricted', 'unregistered', WIRED_UNREGISTERED_STATUS}
     entries = []
+    seen_vlan_ids = set()
     for entry in get_vlan_entries():
         if not entry.vlan_id:
             continue
-        if entry.status in {'restricted', 'unregistered', WIRED_UNREGISTERED_STATUS}:
+        if entry.status in excluded:
             continue
         entries.append(entry)
+        seen_vlan_ids.add(entry.vlan_id)
+    # Supplement with VLANs defined in VLAN_DEFAULTS but not yet in the DB
+    for vid, name in sorted(get_vlan_defaults().items()):
+        if name in excluded or vid in seen_vlan_ids:
+            continue
+        entries.append(SimpleNamespace(vlan_id=vid, wired_enabled=True, status=name,
+                                       display_name=name.replace('_', ' ').title()))
+    entries.sort(key=lambda e: e.vlan_id)
     return entries
 
 

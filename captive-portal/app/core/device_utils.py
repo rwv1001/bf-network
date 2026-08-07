@@ -36,11 +36,14 @@ def get_active_ownership(mac_address: str):
     ).first()
 
 
-def open_ownership(mac_address: str, user_id: int, commit: bool = True):
-    """Open a new DeviceOwnership row for mac_address/user_id."""
+def open_ownership(mac_address: str, user_id: int = None, admin_id: int = None, commit: bool = True):
+    """Open a new DeviceOwnership row; exactly one of user_id or admin_id must be supplied."""
+    if not user_id and not admin_id:
+        raise ValueError("open_ownership requires user_id or admin_id")
     o = DeviceOwnership(
         mac_address=mac_address,
         user_id=user_id,
+        admin_id=admin_id,
         start_datetime=datetime.utcnow(),
     )
     db.session.add(o)

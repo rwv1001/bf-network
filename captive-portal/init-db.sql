@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS devices (
     ssid VARCHAR(100),
     is_wired BOOLEAN DEFAULT FALSE NOT NULL,
     wired_target_vlan INTEGER,
+    admin_id INTEGER REFERENCES admins(id) ON DELETE SET NULL,
     unregister_token VARCHAR(255) UNIQUE,
     confirmation_token VARCHAR(255) UNIQUE,
     confirmation_deadline TIMESTAMP,
@@ -379,6 +380,7 @@ CREATE TABLE IF NOT EXISTS device_ownership (
     id             SERIAL PRIMARY KEY,
     mac_address    VARCHAR(17)  NOT NULL REFERENCES devices(mac_address) ON DELETE CASCADE,
     user_id        INTEGER      REFERENCES users(id) ON DELETE SET NULL,
+    admin_id       INTEGER      REFERENCES admins(id) ON DELETE SET NULL,
     start_datetime TIMESTAMP    NOT NULL DEFAULT NOW(),
     end_datetime   TIMESTAMP
 );
