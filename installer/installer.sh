@@ -1303,7 +1303,8 @@ write_pi_env_file() {
 
         write_env_line PORTAL_FORWARD_HOST "127.0.0.1"
         write_env_line PORTAL_FORWARD_PORT "8081"
-        write_env_line UNIFI_FORWARD_PORT "8080"
+        UNIFI_FORWARD_PORT=8080
+        write_env_line UNIFI_FORWARD_PORT "$UNIFI_FORWARD_PORT"
         write_env_line CAPTIVE_CHECK_HOSTS "captive.apple.com,connectivitycheck.gstatic.com,clients3.google.com,msftconnecttest.com,www.msftconnecttest.com"
         write_env_line CAPTIVE_PORTAL_IPS "$PORTAL_IP"
 
@@ -1917,6 +1918,7 @@ install_unifi_controller() {
     fi
 
     # Ensure FQDN / port are set (prompts already ran earlier)
+    UNIFI_FORWARD_PORT="${UNIFI_FORWARD_PORT:-8080}"
     UNIFI_FQDN="${UNIFI_FQDN:-${UNIFI_SUBDOMAIN}.${MAIN_DOMAIN}}"
     ORACLE_VPS_UNIFI_HTTPS_PORT="${ORACLE_VPS_UNIFI_HTTPS_PORT:-9446}"
 
@@ -1942,7 +1944,7 @@ install_unifi_controller() {
 
     local tmp_compose
     tmp_compose="$(mktemp)"
-    cat > "$tmp_compose" <<'EOF'
+    cat > "$tmp_compose" <<EOF
 services:
   unifi:
     image: jacobalberty/unifi:latest
@@ -1954,7 +1956,7 @@ services:
       TZ: Europe/London
       LOTSOFDEVICES: "true"
     ports:
-      - "8080:8080"
+      - "${UNIFI_FORWARD_PORT}:8080"
       - "8444:8443"
       - "3478:3478/udp"
       - "10001:10001/udp"
@@ -1975,7 +1977,7 @@ services:
       ORACLE_VPS_UNIFI_HTTPS_PORT: ${ORACLE_VPS_UNIFI_HTTPS_PORT:-9446}
       ORACLE_VPS_SSH_KEY_PATH: ${ORACLE_VPS_SSH_KEY_PATH:-/keys/oracle_rsa}
     volumes:
-      - /home/admin/.ssh:/keys:ro
+      - /home/${PI_USER}/.ssh:/keys:ro
       - ./unifi-tunnel-entrypoint.sh:/tunnel-entrypoint.sh:ro
       - /etc/localtime:/etc/localtime:ro
     entrypoint: ["/tunnel-entrypoint.sh"]
@@ -2042,7 +2044,44 @@ chown $q_user:$q_user $q_unifi/.env"
         pi_sudo "cd $q_unifi && docker compose restart unifi"
         pi_sudo 'for i in $(seq 1 24); do code=$(curl -sk -o /dev/null -w "%{http_code}" https://127.0.0.1:8444/ 2>/dev/null || echo 000); if [ "$code" = "200" ] || [ "$code" = "302" ]; then echo "UniFi UI ready after repair (HTTP $code)"; exit 0; fi; sleep 5; done; echo "WARNING: UniFi still not ready on :8444" >&2; exit 0'
     fi
+    local unifi_dir="/home/${PI_USER}/unifi"
+    local q_unifi system_ip
+    q_unifi="$(shell_quote "$unifi_dir")"
+    system_ip="${PORTAL_IP}"   # e.g. 10.6.99.4 — same as management / inform target
 
+    info "Setting UniFi system_ip=${system_ip} (device inform host override)"
+
+    
+
+    local unifi_dir="/home/${PI_USER}/unifi"
+    local q_unifi
+    q_unifi="$(shell_quote "$unifi_dir")"
+
+    # Container may own data/data — fix ownership first
+    pi_sudo "mkdir -p $q_unifi/data $q_unifi/data/data"
+    pi_sudo "chown -R $PI_USER:$PI_USER $q_unifi/data || true"
+
+    # Strip any old system_ip, then append (both property files UniFi may use)
+    pi_sudo "touch $q_unifi/data/system.properties"
+    pi_sudo "sed -i '/^system_ip=/d' $q_unifi/data/system.properties"
+    pi_sudo "printf 'system_ip=%s' $(shell_quote "$PORTAL_IP") >> $q_unifi/data/system.properties"
+
+    pi_sudo "touch $q_unifi/data/data/system.properties"
+    pi_sudo "sed -i '/^system_ip=/d' $q_unifi/data/data/system.properties"
+    pi_sudo "printf 'system_ip=%s' $(shell_quote "$PORTAL_IP") >> $q_unifi/data/data/system.properties"
+
+    pi_sudo "chown -R $PI_USER:$PI_USER $q_unifi/data"
+
+    pi_sudo "cd $q_unifi && if docker compose version >/dev/null 2>&1; then docker compose restart unifi; else docker-compose restart unifi; fi"
+
+    # Optional: brief wait so inform is ready again
+    pi_sudo 'for i in $(seq 1 12); do
+        code=$(curl -sk -o /dev/null -w "%{http_code}" https://127.0.0.1:8444/ 2>/dev/null || echo 000)
+        if [ "$code" = "200" ] || [ "$code" = "302" ]; then echo "UniFi UI ready after system_ip (HTTP $code)"; exit 0; fi
+        sleep 5
+    done; echo "WARNING: UniFi UI not ready after system_ip restart" >&2; exit 0'
+
+    echo "  Device inform (LAN): http://${PORTAL_IP}:${UNIFI_FORWARD_PORT:-8080}/inform"
     
 
     echo
