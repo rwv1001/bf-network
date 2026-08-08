@@ -18,7 +18,8 @@ RUN apk add --no-cache \
     postgresql-client \
     openssh-client \
     gettext \
-    python3
+    python3 \
+    py3-psycopg2
 
 # Copy from the named stage (not from ${KEA_VERSION} directly)
 COPY --from=kea-admin-src \
