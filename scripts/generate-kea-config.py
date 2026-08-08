@@ -217,6 +217,54 @@ def make_vlan_subnet(
         "reservations": infra_ghost_reservations(network_word, vlan, switch_hosts_raw),
     }
 
+def fetch_vlan_gateway_octets(
+    db_host, db_port, db_name, db_user, db_password, fallback_octet
+):
+    """
+    Build {vlan_id: gateway_octet} from vlan_mappings → isp_routers.switch_host.
+
+    gateway_octet = last octet of isp_routers.switch_host for that VLAN's
+    isp_router_id.  VLANs with no isp_router_id / empty switch_host are omitted
+    so the caller can fall back to fallback_octet.
+    """
+    mapping = {}
+    try:
+        import psycopg2
+        conn = psycopg2.connect(
+            host=db_host,
+            port=db_port,
+            dbname=db_name,
+            user=db_user,
+            password=db_password,
+        )
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT vm.vlan_id, ir.switch_host
+                      FROM vlan_mappings vm
+                      LEFT JOIN isp_routers ir ON ir.id = vm.isp_router_id
+                     WHERE vm.vlan_id IS NOT NULL
+                    """
+                )
+                for vlan_id, switch_host in cur.fetchall():
+                    if not switch_host:
+                        continue
+                    host = str(switch_host).strip()
+                    try:
+                        octet = int(host.rsplit(".", 1)[-1])
+                    except (ValueError, IndexError):
+                        continue
+                    mapping[int(vlan_id)] = octet
+        finally:
+            conn.close()
+    except Exception as e:
+        print(
+            f"WARNING: could not load vlan→ISP gateway map from DB ({e}); "
+            f"using fallback octet {fallback_octet} for all VLANs",
+            file=sys.stderr,
+        )
+    return mapping
 
 def main():
     network_word = require_env("NETWORK_WORD")
@@ -258,20 +306,33 @@ def main():
         print("ERROR: no switch hosts configured "
               "(set SWITCH_HOSTS_BYTES or SWITCH_HOSTS)", file=sys.stderr)
         sys.exit(1)
-    gateway_octet = int(str(ipaddress.IPv4Address(switch_host_ips[0])).split(".")[3])    
-    # First switch host is used as the management VLAN gateway
+    # Fallback only when a VLAN has no isp_router_id / switch_host
+    fallback_octet = int(
+        str(ipaddress.IPv4Address(switch_host_ips[0])).split(".")[3]
+    )
+    # Management VLAN gateway stays on the first switch SVI
     mgmt_gateway = switch_host_ips[0]
+
+    vlan_gw_octets = fetch_vlan_gateway_octets(
+        db_host, db_port, db_name, db_user, db_password, fallback_octet
+    )
 
     unregistered_gw = _get_unregistered_gw(network_word)
 
     # VLANs for wired-unregistered and management are handled by the explicit
     # blocks below with their own pool/DNS/gateway config — skip them here.
     SPECIAL_VLANS = {wired_vlan, management_vlan}
-    subnet4 = [
-        make_vlan_subnet(network_word, vlan, prefix, switch_hosts_raw, gateway_octet)
-        for vlan, prefix in sorted(vlan_prefix_map.items())
-        if vlan not in SPECIAL_VLANS
-    ]
+    subnet4 = []
+    for vlan, prefix in sorted(vlan_prefix_map.items()):
+        if vlan in SPECIAL_VLANS:
+            continue
+        # Prefer ISP-router switch_host last octet; else first switch
+        gateway_octet = vlan_gw_octets.get(vlan, fallback_octet)
+        subnet4.append(
+            make_vlan_subnet(
+                network_word, vlan, prefix, switch_hosts_raw, gateway_octet
+            )
+        )
 
     # Wired-unregistered clients — single pool, no blocked split, hijack DNS
     subnet4.append({
