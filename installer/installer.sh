@@ -1262,6 +1262,68 @@ ensure_dns01_certificate_ready() {
     fi
 }
 
+setup_pi_tftp_server() {
+    info "Installing TFTP server for switch config backups"
+
+    pi_sudo "DEBIAN_FRONTEND=noninteractive apt-get update -qq"
+    pi_sudo "DEBIAN_FRONTEND=noninteractive apt-get install -y tftpd-hpa"
+
+    local conf
+    conf="$(mktemp)"
+    cat > "$conf" <<'EOF'
+TFTP_USERNAME="tftp"
+TFTP_DIRECTORY="/var/lib/tftpboot/switch-backups"
+TFTP_ADDRESS="0.0.0.0:69"
+TFTP_OPTIONS="--secure --create"
+EOF
+
+    pi_scp_to "$conf" /tmp/tftpd-hpa.default
+    rm -f "$conf"
+
+    pi_sudo "mkdir -p /var/lib/tftpboot/switch-backups"
+    pi_sudo "chown tftp:tftp /var/lib/tftpboot/switch-backups"
+    pi_sudo "chmod 755 /var/lib/tftpboot/switch-backups"
+    pi_sudo "mv /tmp/tftpd-hpa.default /etc/default/tftpd-hpa"
+    pi_sudo "chown root:root /etc/default/tftpd-hpa"
+    pi_sudo "chmod 644 /etc/default/tftpd-hpa"
+    pi_sudo "systemctl enable tftpd-hpa"
+    pi_sudo "systemctl restart tftpd-hpa"
+}
+
+setup_pi_chrony() {
+    info "Installing chrony (NTP) for switches and LAN"
+
+    pi_sudo "DEBIAN_FRONTEND=noninteractive apt-get update -qq"
+    pi_sudo "DEBIAN_FRONTEND=noninteractive apt-get install -y chrony"
+
+    local remote_sh
+    remote_sh="$(mktemp)"
+
+    # Expand NETWORK_WORD here on the installer host
+    cat > "$remote_sh" <<EOF
+set -e
+CONF=/etc/chrony/chrony.conf
+if grep -q "bf-network chrony" "\$CONF" 2>/dev/null; then
+  echo "chrony already configured for bf-network"
+else
+  printf '%s\n' \\
+    "" \\
+    "# bf-network chrony" \\
+    "allow ${NETWORK_WORD}.0.0/16" \\
+    "local stratum 10" \\
+    >> "\$CONF"
+  echo "Appended bf-network chrony allow rules"
+fi
+systemctl enable chrony
+systemctl restart chrony
+EOF
+
+    pi_scp_to "$remote_sh" /tmp/bf-setup-chrony.sh
+    rm -f "$remote_sh"
+    pi_sudo "bash /tmp/bf-setup-chrony.sh"
+    pi_sudo "rm -f /tmp/bf-setup-chrony.sh"
+}
+
 write_pi_env_file() {
     ENV_TMP="$(mktemp)"
 
@@ -1664,7 +1726,6 @@ seed_isp_routers() {
 
     info "Seeding isp_routers and VLAN → ISP mappings"
 
-    # --- Rebuild ISP_SWITCH_* from state if this process did not run the switch loop ---
     local i
     for i in "${!ISP_NAMES[@]}"; do
         if [ -z "${ISP_SWITCH_HOST[$i]:-}" ] && answer_exists "isp_${i}_switch_host"; then
@@ -1675,7 +1736,6 @@ seed_isp_routers() {
         fi
     done
 
-    # --- Rebuild VLAN → ISP index from vlan_${vlan}_isp answers ---
     declare -A VLAN_ISP_INDEX=()
     local vlan ans idx
     for vlan in "${VLAN_LIST[@]}"; do
@@ -1686,7 +1746,7 @@ seed_isp_routers() {
         VLAN_ISP_INDEX[$vlan]=$((ans - 1))
     done
 
-    local sql name subnet vlan_id switch_host switch_port isp_name
+    local sql name subnet vlan_id switch_host switch_port gateway_ip isp_name display
     sql="$(mktemp)"
     {
         echo "BEGIN;"
@@ -1699,7 +1759,6 @@ seed_isp_routers() {
             switch_port="${ISP_SWITCH_PORT[$i]:-}"
             gateway_ip="${ISP_GW[$i]:-}"
 
-            # Upsert by unique name — no DELETE needed
             printf "INSERT INTO isp_routers (
   name, subnet, vlan_id, gateway_ip, switch_port, switch_host,
   dhcp_snooping_trust, nat_logger_type, created_at
@@ -1713,32 +1772,50 @@ ON CONFLICT (name) DO UPDATE SET
   gateway_ip  = EXCLUDED.gateway_ip,
   switch_port = EXCLUDED.switch_port,
   switch_host = EXCLUDED.switch_host;\n" \
-    "$(sql_quote "$name")" \
-    "$(sql_quote "$subnet")" \
-    "$vlan_id" \
-    "$(sql_quote "$gateway_ip")" \
-    "$(sql_quote_or_null "$switch_port")" \
-    "$(sql_quote_or_null "$switch_host")"
+                "$(sql_quote "$name")" \
+                "$(sql_quote "$subnet")" \
+                "$vlan_id" \
+                "$(sql_quote "$gateway_ip")" \
+                "$(sql_quote_or_null "$switch_port")" \
+                "$(sql_quote_or_null "$switch_host")"
         done
 
+        # Ensure user VLAN mapping rows exist, then set isp_router_id
         for vlan in "${VLAN_LIST[@]}"; do
             idx="${VLAN_ISP_INDEX[$vlan]}"
             isp_name="${ISP_NAMES[$idx]}"
-            # Only updates rows that already exist (created by init-db / app)
+            # display_name / status: best-effort from VLAN_DEFAULTS style names if you have them
+            display="VLAN${vlan}"
+
+            printf "INSERT INTO vlan_mappings (status, vlan_id, display_name, wired_enabled, require_password)
+SELECT %s, %s, %s, TRUE, TRUE
+WHERE NOT EXISTS (SELECT 1 FROM vlan_mappings WHERE vlan_id = %s);\n" \
+                "$(sql_quote "$display")" \
+                "$vlan" \
+                "$(sql_quote "$display")" \
+                "$vlan"
+
             printf "UPDATE vlan_mappings
 SET isp_router_id = (SELECT id FROM isp_routers WHERE name = %s)
-WHERE vlan_id = %s;\n" \
+WHERE vlan_id = %s
+  AND (SELECT id FROM isp_routers WHERE name = %s) IS NOT NULL;\n" \
                 "$(sql_quote "$isp_name")" \
-                "$vlan"
+                "$vlan" \
+                "$(sql_quote "$isp_name")"
         done
 
         echo "COMMIT;"
     } > "$sql"
 
-    # Debug (optional): show what will run
     echo "--- seed_isp_routers.sql ---"
     cat "$sql"
     echo "----------------------------"
+
+    # Wait until DB is accepting connections
+    pi_sudo "cd $q_repo && for i in \$(seq 1 30); do
+      docker compose exec -T db pg_isready -U portal_user -d captive_portal >/dev/null 2>&1 && exit 0
+      sleep 2
+    done; exit 1"
 
     pi_scp_to "$sql" /tmp/seed_isp_routers.sql
     pi_sudo "cd $q_repo && \
@@ -1747,6 +1824,15 @@ WHERE vlan_id = %s;\n" \
         psql -U portal_user -d captive_portal -v ON_ERROR_STOP=1 -f /tmp/seed_isp_routers.sql && \
       docker compose exec -T db rm -f /tmp/seed_isp_routers.sql && \
       rm -f /tmp/seed_isp_routers.sql"
+
+    # Fail the install if any user VLAN still has NULL isp_router_id
+    local nulls
+    nulls="$(pi_ssh "cd $q_repo && docker compose exec -T db psql -U portal_user -d captive_portal -tAc \
+      \"SELECT count(*) FROM vlan_mappings WHERE vlan_id IN ($(IFS=,; echo "${VLAN_LIST[*]}")) AND isp_router_id IS NULL\"")"
+    nulls="$(echo "$nulls" | tr -d '[:space:]')"
+    if [ "${nulls:-1}" != "0" ]; then
+        die "seed_isp_routers: ${nulls} vlan_mappings row(s) still have NULL isp_router_id"
+    fi
 
     rm -f "$sql"
 }
@@ -2242,6 +2328,20 @@ install_pi_server() {
         complete_step "pi_networkd"
     else
         echo "Skipping completed step: Pi network configuration"
+    fi
+
+    if ! step_done "setup_pi_chrony"; then
+        setup_pi_chrony        
+        complete_step "setup_pi_chrony"
+    else
+        echo "Skipping completed step: Pi chrony setup"
+    fi
+
+    if ! step_done "setup_pi_tftp_server"; then
+        setup_pi_tftp_server        
+        complete_step "setup_pi_tftp_server"
+    else
+        echo "Skipping completed step: Pi TFTP server setup"
     fi
 
     
@@ -3049,6 +3149,20 @@ for j in "${!IPS[@]}"; do
 
         # Ask for switch name
     prompt_required SWITCH_NAME "Enter a name for this switch (e.g. AccessSW-01, CoreSW-02)" "switch_${j}_name"
+    SAFE_SW_NAME="$(echo "$SWITCH_NAME" | tr -cd '[:alnum:]._-')"
+    [ -n "$SAFE_SW_NAME" ] || SAFE_SW_NAME="switch${SWITCH_NUM}"
+
+    SCHEDULER_CONFIG="
+scheduler job backup-config
+command 1 save force
+command 2 tftp ${PORTAL_IP} put flash:/startup.cfg 5130-startup-${SAFE_SW_NAME}.cfg
+#
+scheduler schedule nightly-backup
+user-role network-admin
+job backup-config
+time repeating at 03:15
+#
+"
     while true; do
         prompt_line KEA_PORT "Is a Kea Pi server being connected to this switch? Enter port number (1-${NUMBER_OF_PORTS[$j]}) or press Enter for none: " "switch_${j}_kea_port"
 
@@ -3205,7 +3319,7 @@ interface $iface
 description Inter-switch link
 port link-type trunk
 port trunk permit vlan 1 to $NUM_ISPS ${VLAN_LIST[*]} $MANAGEMENT_VLAN $WIRED_VLAN
-port trunk pvid vlan 1028
+port trunk pvid vlan 1
 arp detection trust
 dhcp snooping trust
 #
@@ -3221,7 +3335,7 @@ description TRUNK-TO-PI-Kea
 port link-type trunk
 undo port trunk permit vlan 1
 port trunk permit vlan ${VLAN_LIST[*]} $MANAGEMENT_VLAN $WIRED_VLAN
-port trunk pvid vlan 1028
+port trunk pvid vlan 1
 arp detection trust
 dhcp snooping trust
 #
@@ -3229,6 +3343,14 @@ dhcp snooping trust
     fi
     # VLAN-99 address for this switch (NAS-IP)
     SWITCH_NAS_IP="${LOCAL_BASE}.${MANAGEMENT_VLAN}.${LAST_OCTET}"
+
+    DHCP_SNOOP_VLANS="1"
+    if [ "$NUM_ISPS" -gt 1 ]; then
+        DHCP_SNOOP_VLANS="1 to $NUM_ISPS"
+    fi
+    for vlan in "${VLAN_LIST[@]}" "$WIRED_VLAN"; do
+        DHCP_SNOOP_VLANS="$DHCP_SNOOP_VLANS $vlan"
+    done
 
     RADIUS_CONFIG="
 radius scheme rad1
@@ -3250,10 +3372,9 @@ accounting lan-access radius-scheme rad1
 mac-authentication
 mac-authentication domain macauth
 #
-vlan 1028
-name NATIVE-NULL
-#
+
 dhcp snooping enable
+dhcp snooping enable vlan $DHCP_SNOOP_VLANS
 "
     DEFAULT_ROUTE_CONFIG=""
     if [ "$j" -eq 0 ]; then
@@ -3263,7 +3384,20 @@ ip route-static 0.0.0.0 0 ${ISP_GW[0]}
 "
     fi
 
-    DYNAMIC_CONFIG="$RADIUS_CONFIG$DEFAULT_ROUTE_CONFIG$ISP_VLAN_CONFIG$VLAN_IFACE_CONFIG$UPLINK_CONFIG$INTERSWITCH_CONFIG$KEA_CONFIG"
+    CLOCK_CONFIG="
+clock timezone GMT add 00:00:00
+clock summer-time BST 01:00:00 March last Sunday 02:00:00 October last Sunday 01:00:00
+#
+"
+    NTP_CONFIG="
+ntp-service enable
+ntp-service source Vlan-interface${MANAGEMENT_VLAN}
+ntp-service unicast-server ${PORTAL_IP}
+ntp-service unicast-server 162.159.200.1
+#
+"
+
+    DYNAMIC_CONFIG="$CLOCK_CONFIG$RADIUS_CONFIG$DEFAULT_ROUTE_CONFIG$ISP_VLAN_CONFIG$VLAN_IFACE_CONFIG$UPLINK_CONFIG$INTERSWITCH_CONFIG$KEA_CONFIG$NTP_CONFIG$SCHEDULER_CONFIG"
 
     
 
