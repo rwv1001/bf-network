@@ -298,10 +298,10 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
             f'interface {expanded}',
             'port link-type access',
             'port link-type trunk',
-            'undo port trunk permit vlan 1',
+            'port trunk permit vlan 1',
             f'port trunk permit vlan {vlans_list}',
             f'port trunk permit vlan {mgmt_vlan} {wired_vlan}',
-            'port trunk pvid vlan 1028',
+            'port trunk pvid vlan 1',
             'arp detection trust',
             'dhcp snooping trust',
         ])

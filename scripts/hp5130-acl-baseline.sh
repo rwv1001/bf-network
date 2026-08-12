@@ -467,6 +467,7 @@ emit(f" rule 45 permit tcp source {network_word}.{management_vlan}.0 0.0.0.255 d
 emit(f" rule 46 permit tcp source {network_word}.{management_vlan}.0 0.0.0.255 destination {portal_ip} 0 destination-port eq 8444")
 emit(f" rule 47 permit udp source {network_word}.{management_vlan}.0 0.0.0.255 destination {portal_ip} 0 destination-port eq 3478")
 emit(f" rule 48 permit udp source {network_word}.{management_vlan}.0 0.0.0.255 destination {portal_ip} 0 destination-port eq 10001")
+emit(f" rule 49 permit udp destination {portal_ip} 0 destination-port eq 69")
 emit(f" rule 50 permit icmp source {network_word}.0.0 0.0.255.255 destination {portal_ip} 0")
 emit(f" rule 51 permit udp source {network_word}.0.0 0.0.255.255 destination {hijack_dns_ip} 0 destination-port eq ntp")
 emit(f" rule 55 permit udp source {network_word}.0.0 0.0.255.255 destination {portal_ip} 0 destination-port eq ntp")
