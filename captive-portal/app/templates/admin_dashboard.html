@@ -968,8 +968,8 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
             <td>{{ device.ssid or '-' }}</td>
             <td style="font-family: monospace; font-size: 11px; white-space: nowrap;">
                 {% if device.switch_iface %}
-                    <span title="{% if device.switch_iface_seen_at %}Last seen: {{ device.switch_iface_seen_at.strftime('%Y-%m-%d %H:%M') }}{% else %}Switch port{% endif %}">
-                        {{ device.switch_iface }}
+                    <span title="{% if device.switch_host %}Switch: {{ device.switch_host }}{% endif %}{% if device.switch_iface_seen_at %} — Last seen: {{ device.switch_iface_seen_at.strftime('%Y-%m-%d %H:%M') }}{% endif %}">
+                        {% if device.switch_host %}<span style="color:#666;">{{ device.switch_host.split('.')[-1] }}:</span>{% endif %}{{ device.switch_iface }}
                     </span>
                 {% else %}
                     <em style="color: #999;">-</em>

@@ -36,6 +36,17 @@ if [ "${#MAC_HEX}" -ne 12 ]; then
 fi
 MAC_COLON="$(printf '%s' "$MAC_HEX" | sed 's/\(..\)/\1:/g; s/:$//')"
 
+# Near the top, after MAC_COLON is set
+LOG_FILE="${PORT_LOOKUP_LOG:-/kea/logs/hp5130-port-lookup.log}"
+log() {
+    # timestamp + message; ignore failures if log dir missing
+    printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >> "$LOG_FILE" 2>/dev/null || true
+    # optional: also stderr when not discarded
+    echo "$*" >&2
+}
+
+log "START mac=$MAC_COLON raw=$MAC_RAW"
+
 # HP5130 uses 4-char groups:  aabb-ccdd-eeff
 MAC_LOOKUP="$(printf '%s' "$MAC_HEX" | sed 's/\(....\)/\1-/g; s/-$//')"
 
@@ -61,6 +72,7 @@ CACHED="$(PGPASSWORD="$DB_PASSWORD" \
 if [ -n "$CACHED" ]; then
     # Cache hit – SSH query not needed, but still backfill devices.switch_iface
     # in case the device was registered after the initial lookup ran.
+    log "CACHE_HIT mac=$MAC_COLON iface=$CACHED"
     PGPASSWORD="$DB_PASSWORD" \
         psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
         -c "UPDATE devices
@@ -134,27 +146,35 @@ for _SW in $SWITCH_LIST; do
     query_switch "$_SW"
     if [ -z "$IFACE" ]; then
         # Not found on this switch – try the next one
-        echo "Port lookup: MAC $MAC_COLON not found on $_SW – trying next" >&2
+        log "MISS mac=$MAC_COLON switch=$_SW"
         continue
     fi
     FINAL_HOST="$_SW"
+    # Expand for DB lookup (short names like GE1/0/47 may be stored as GigabitEthernet1/0/47)
+    _IFACE_EXP="$IFACE"
     case "$IFACE" in
-        XGE*)
-            # Ten-GigabitEthernet uplink/trunk – device is downstream; try next switch
-            echo "Port lookup: MAC $MAC_COLON on $IFACE at $_SW – looking downstream" >&2
-            ;;
-        *)
-            # Concrete access port (GE or similar) – done
-            break
-            ;;
+        GE*)  _IFACE_EXP="GigabitEthernet${IFACE#GE}" ;;
+        XGE*) _IFACE_EXP="Ten-GigabitEthernet${IFACE#XGE}" ;;
     esac
+    _ROLE="$(PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" \
+        -U "$DB_USER" -d "$DB_NAME" -tAc \
+        "SELECT port_role FROM switch_ports WHERE switch_host = '${_SW}' \
+         AND port_name IN ('${IFACE}', '${_IFACE_EXP}') \
+         AND port_role = 'inter_switch' LIMIT 1" \
+        2>/dev/null | tr -d ' \n\r' || true)"
+    if [ "$_ROLE" = "inter_switch" ]; then
+        log "TRUNK mac=$MAC_COLON switch=$_SW iface=$IFACE – continue"
+    else
+        log "ACCESS mac=$MAC_COLON switch=$_SW iface=$IFACE – stop"
+        break
+    fi
 done
 
 if [ -z "$IFACE" ] || [ -z "$FINAL_HOST" ]; then
-    # MAC not found on any switch – nothing to store
+    log "NOT_FOUND mac=$MAC_COLON hosts=$SWITCH_LIST"# MAC not found on any switch – nothing to store
     exit 0
 fi
-
+log "FOUND mac=$MAC_COLON iface=$IFACE switch=$FINAL_HOST"
 # ---------------------------------------------------------------------------
 # Expand short abbreviations for DB storage
 # ---------------------------------------------------------------------------
@@ -175,8 +195,10 @@ PGPASSWORD="$DB_PASSWORD" \
             switch_host   = EXCLUDED.switch_host,
             last_seen     = NOW();" \
     -c "UPDATE devices
-        SET switch_iface = '${IFACE}', switch_iface_seen_at = NOW()
+        SET switch_iface = '${IFACE}',
+            switch_host = '${FINAL_HOST}',
+            switch_iface_seen_at = NOW()
         WHERE mac_address = '${MAC_COLON}';" \
     2>/dev/null || true
-
+log "DB_OK mac=$MAC_COLON iface=$IFACE switch=$FINAL_HOST"
 exit 0

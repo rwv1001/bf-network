@@ -87,7 +87,8 @@ CREATE TABLE IF NOT EXISTS devices (
     internet_blocked     BOOLEAN,
     assigned_vlan        INTEGER,
     ownership_validated  BOOLEAN,
-    fixed_ip VARCHAR(45)
+    fixed_ip VARCHAR(45),
+    stale BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE INDEX IF NOT EXISTS idx_devices_mac ON devices(mac_address);

@@ -129,6 +129,7 @@ def sync_registration_status(device: Device) -> None:
         device.registration_status = 'blocked'
     elif device.internet_accessible and device.assigned_vlan:
         device.registration_status = 'registered'
+        device.stale = False  # Re-registration clears the stale flag
     elif device.internet_accessible is False and device.assigned_vlan:
         device.registration_status = 'wrong_vlan'
     else:

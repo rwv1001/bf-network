@@ -223,6 +223,29 @@ def expand_switch_iface_name(iface: str) -> str:
     return iface
 
 
+def _is_uplink_port(iface: str, switch_host: str = None) -> bool:
+    """Return True if this port has port_role='inter_switch' in switch_ports, or is a Ten-Gig trunk."""
+    expanded = expand_switch_iface_name(iface)
+    if expanded.startswith('Ten-GigabitEthernet'):
+        return True
+    if switch_host:
+        try:
+            from extensions import db
+            row = db.session.execute(
+                text(
+                    "SELECT 1 FROM switch_ports "
+                    "WHERE switch_host = :host AND port_name IN (:iface, :expanded) "
+                    "AND port_role = 'inter_switch' LIMIT 1"
+                ),
+                {"host": switch_host, "iface": iface, "expanded": expanded},
+            ).fetchone()
+            if row is not None:
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def switch_port_allowed(iface: str) -> bool:
     """Return True if the interface name is permitted for replug / role changes."""
     deny_pattern = os.getenv('SWITCH_REPLUG_DENY_PATTERN', '').strip()
@@ -260,6 +283,7 @@ def find_switch_port_for_mac(mac_address: str):
     )
 
     for switch_host in switch_hosts:
+        found_iface = None
         for command in [
             f"display mac-address | include {normalized}",
             f"display mac-address dynamic | include {normalized}",
@@ -272,7 +296,14 @@ def find_switch_port_for_mac(mac_address: str):
                     continue
                 match = iface_pattern.search(line)
                 if match:
-                    return (switch_host, expand_switch_iface_name(match.group('iface')))
+                    iface = expand_switch_iface_name(match.group('iface'))
+                    if not _is_uplink_port(iface, switch_host):
+                        found_iface = iface
+                    break  # found the MAC on this switch; move on regardless
+            if found_iface:
+                break
+        if found_iface:
+            return (switch_host, found_iface)
 
     return None
 
@@ -304,10 +335,11 @@ def persist_switch_port(mac_address: str, iface: str, switch_host: str = None) -
             text("""
                 UPDATE devices
                 SET switch_iface = :iface,
-                    switch_iface_seen_at = NOW()
+                    switch_iface_seen_at = NOW(),
+                    switch_host = :host
                 WHERE mac_address = :mac
             """),
-            {"iface": iface, "mac": mac_address},
+            {"iface": iface, "host": switch_host, "mac": mac_address},
         )
         _db.session.commit()
         logger.info("Cached switch port %s for %s", iface, mac_address)

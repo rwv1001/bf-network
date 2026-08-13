@@ -278,6 +278,7 @@ def index():
     unregistered_devices = (
         db.session.query(Device)
         .filter(~Device.mac_address.in_(active_ownership_macs))
+        .filter(Device.stale == False)  # noqa: E712 — stale devices are soft-deleted
         .order_by(Device.last_seen.desc())
         .all()
     )

@@ -329,7 +329,7 @@ class KeaIntegration:
         """
         try:
             # Normalize MAC address
-            mac = mac_address.lower().replace('-', ':').replace('.', ':').strip()
+            mac = mac.lower().replace('-', ':').replace('.', ':').strip()
             
             subnet_id = self._resolve_subnet_id(vlan)
             
@@ -337,7 +337,7 @@ class KeaIntegration:
             command = {
                 "command": "reservation-del",                
                 "arguments": {
-                    "subnet-id": 0,
+                    "subnet-id": subnet_id,
                     "identifier-type": "hw-address",
                     "identifier": mac
                 }

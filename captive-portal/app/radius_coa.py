@@ -33,25 +33,39 @@ VALUE Tunnel-Medium-Type IEEE-802 6
 """
 
 
-def get_radius_client():
-    """Create and return a RADIUS client"""
+def get_radius_client(server: str | None = None):
+    """Create and return a RADIUS client.
+
+    Args:
+        server: CoA target (switch management IP). Defaults to RADIUS_SERVER
+                from the environment when omitted.
+    """
     try:
-        # Create dictionary from string
+        target = (server or RADIUS_SERVER).strip()
+        if not target:
+            logger.error("RADIUS CoA target server is empty")
+            return None
+
         dict_file = io.StringIO(DICT_CONTENT)
         dict_obj = Dictionary(dict_file)
-        
-        # Create client
+
         client = Client(
-            server=RADIUS_SERVER,
+            server=target,
             secret=RADIUS_SECRET,
             dict=dict_obj,
             authport=COA_PORT,
-            acctport=COA_PORT
+            acctport=COA_PORT,
         )
-        
+        # pyrad can be slow to give up; keep this modest for UI paths
+        try:
+            client.timeout = int(os.getenv("RADIUS_COA_TIMEOUT", "5"))
+        except Exception:
+            pass
+
+        logger.debug("RADIUS CoA client target=%s port=%s", target, COA_PORT)
         return client
     except Exception as e:
-        logger.error(f"Failed to create RADIUS client: {e}")
+        logger.error("Failed to create RADIUS client for %s: %s", server or RADIUS_SERVER, e)
         return None
 
 def _lookup_switch_host_for_mac(mac_address: str) -> str | None:

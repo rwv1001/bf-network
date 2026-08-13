@@ -91,6 +91,28 @@ expand_iface() {
   esac
 }
 
+# Returns 0 (true) if iface is an inter-switch port (should be skipped).
+# Args: <iface> <switch_host>
+is_uplink_port() {
+  _p="$1"
+  _pe="$(expand_iface "$_p")"
+  _sw_host="${2:-}"
+  [ -z "$_sw_host" ] && return 1
+  _role=""
+  # Prefer DATABASE_URL (available in web container); fall back to docker exec
+  if [ -n "${DATABASE_URL:-}" ] && command -v psql >/dev/null 2>&1; then
+    _role=$(psql "${DATABASE_URL}" -tAc \
+      "SELECT port_role FROM switch_ports WHERE switch_host = '${_sw_host}' AND port_name IN ('${_p}', '${_pe}') AND port_role = 'inter_switch' LIMIT 1" \
+      2>/dev/null | tr -d ' \r\n' || true)
+  elif command -v docker >/dev/null 2>&1; then
+    _role=$(docker exec "$REPLUG_DB_CONTAINER" psql -U "$REPLUG_DB_USER" -d "$REPLUG_DB_NAME" -tAc \
+      "SELECT port_role FROM switch_ports WHERE switch_host = '${_sw_host}' AND port_name IN ('${_p}', '${_pe}') AND port_role = 'inter_switch' LIMIT 1" \
+      2>/dev/null | tr -d ' \r\n' || true)
+  fi
+  [ "$_role" = "inter_switch" ] && return 0
+  return 1
+}
+
 run_ssh() {
   phase="$1"
   cmds="$2"
@@ -178,10 +200,16 @@ if command -v docker >/dev/null 2>&1; then
   CACHE_HOST=$(echo "$CACHE_ROW" | cut -d'|' -f2 | tr -d '\n')
   if [ -n "$CACHE_IFACE" ]; then
     IFACE="$(expand_iface "$CACHE_IFACE")"
-    if [ -n "$CACHE_HOST" ]; then
-      REPLUG_TARGET_HOST="$CACHE_HOST"
+    if is_uplink_port "$IFACE" "$CACHE_HOST"; then
+      log "LOOKUP_CACHE_UPLINK mac=$MAC_NORM iface=$IFACE – uplink port, invalidating cache"
+      IFACE=""
+      CACHE_IFACE=""
+    else
+      if [ -n "$CACHE_HOST" ]; then
+        REPLUG_TARGET_HOST="$CACHE_HOST"
+      fi
+      log "LOOKUP_IFACE_CACHED mac=$MAC_NORM iface=$IFACE target=$REPLUG_TARGET_HOST"
     fi
-    log "LOOKUP_IFACE_CACHED mac=$MAC_NORM iface=$IFACE target=$REPLUG_TARGET_HOST"
   fi
 fi
 # ---- end DB cache lookup --------------------------------------------------
@@ -228,18 +256,14 @@ if [ -z "$IFACE" ]; then
       continue
     fi
 
-    case "$RAW_IFACE" in
-      XGE*)
-        log "LOOKUP_TRUNK mac=$MAC_NORM switch=$_SW iface=$RAW_IFACE – looking downstream"
-        continue
-        ;;
-      *)
-        IFACE=$(expand_iface "$RAW_IFACE")
-        REPLUG_TARGET_HOST="$_SW"
-        log "LOOKUP_IFACE mac=$MAC_NORM switch=$_SW iface=$IFACE"
-        break
-        ;;
-    esac
+    if is_uplink_port "$RAW_IFACE" "$_SW"; then
+      log "LOOKUP_UPLINK mac=$MAC_NORM switch=$_SW iface=$RAW_IFACE – uplink port, looking downstream"
+      continue
+    fi
+    IFACE=$(expand_iface "$RAW_IFACE")
+    REPLUG_TARGET_HOST="$_SW"
+    log "LOOKUP_IFACE mac=$MAC_NORM switch=$_SW iface=$IFACE"
+    break
   done
 fi  # end SSH live lookup
 
@@ -255,7 +279,7 @@ if [ -z "$CACHE_IFACE" ] && command -v docker >/dev/null 2>&1; then
      VALUES ('${MAC_COLON}', '${IFACE}', '${REPLUG_TARGET_HOST}', NOW())
      ON CONFLICT (mac_address) DO UPDATE SET
        switch_iface = EXCLUDED.switch_iface, switch_host = EXCLUDED.switch_host, last_seen = EXCLUDED.last_seen;
-     UPDATE devices SET switch_iface = '${IFACE}', switch_iface_seen_at = NOW() WHERE mac_address = '${MAC_COLON}';" \
+     UPDATE devices SET switch_iface = '${IFACE}', switch_host = '${REPLUG_TARGET_HOST}', switch_iface_seen_at = NOW() WHERE mac_address = '${MAC_COLON}';" \
     2>/dev/null || true
   log "CACHE_UPDATED mac=$MAC_NORM iface=$IFACE host=$REPLUG_TARGET_HOST"
 fi

@@ -708,11 +708,14 @@ def _apply_inbound(event_type: str, data: dict) -> None:
         _close_ownership(mac, commit=False)
         device.device_name = None
         device.assigned_vlan = None
+        device.current_vlan = None
+        device.wired_target_vlan = None
         device.internet_accessible = None
         device.internet_blocked = None
         device.ownership_validated = None
         device.unregister_token = None
         device.profile_snapshot = None
+        device.stale = True
         _sync_registration_status(device)
         db.session.commit()
         logger.info("central: unregistered device %s via central push", mac)

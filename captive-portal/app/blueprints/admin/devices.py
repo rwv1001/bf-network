@@ -209,7 +209,7 @@ def delete_device(device_id):
     device = Device.query.get_or_404(device_id)
     mac_address = device.mac_address
     ip_address  = device.ip_address
-    vlan_id     = device.current_vlan
+    vlan_id     = device.assigned_vlan or device.current_vlan
 
     # Cut off internet access if device currently has it
     if device.internet_accessible and ip_address and not is_blocked_pool_ip(ip_address):
@@ -239,9 +239,12 @@ def delete_device(device_id):
 
     device.device_name         = None
     device.assigned_vlan       = None
+    device.current_vlan        = None
+    device.wired_target_vlan   = None
     device.internet_accessible = None
     device.internet_blocked    = None
     device.ownership_validated = None
+    device.stale               = True
     sync_registration_status(device)
 
     central_client.queue_device_unregistered(mac_address)
