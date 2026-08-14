@@ -278,7 +278,6 @@ def index():
     unregistered_devices = (
         db.session.query(Device)
         .filter(~Device.mac_address.in_(active_ownership_macs))
-        .filter(Device.stale == False)  # noqa: E712 — stale devices are soft-deleted
         .order_by(Device.last_seen.desc())
         .all()
     )
@@ -323,6 +322,14 @@ def index():
         except Exception:
             pass
     dashboard_hidden_sections = set(_dash_settings.get('dashboard_hidden_sections', []))
+    _base = [
+        {
+            'vlan_id': entry.vlan_id,
+            'label': label_for_vlan(entry.vlan_id, vlan_map),
+            'wired_enabled': bool(entry.wired_enabled),
+        }
+        for entry in get_admin_assignable_entries()
+    ]
 
     # ── AJAX partial rendering ────────────────────────────────────────────────
     is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
@@ -346,12 +353,11 @@ def index():
         wired_unregistered_vlan=get_wired_unregistered_vlan_id(),
         wired_vlan_choices=[
             {
-                'vlan_id':      entry.vlan_id,
-                'label':        label_for_vlan(entry.vlan_id, vlan_map),
-                'wired_enabled': bool(entry.wired_enabled),
-            }
-            for entry in get_admin_assignable_entries()
-        ],
+                'vlan_id': 1,
+                'label': 'Upstream Management (VLAN 1)',
+                'wired_enabled': True,
+            },
+        ] + [c for c in _base if c['vlan_id'] != 1],
         lease_stats=lease_stats,
         domain_policies=domain_policies,
         test_env=_is_test_env(),

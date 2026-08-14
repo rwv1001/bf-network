@@ -32,6 +32,7 @@ switch_ports_bp = Blueprint('switch_ports', __name__)
 
 PORT_ROLES = {
     'ap':           'AP Uplink',
+    'cheapap':      'Cheap AP',
     'wired':        'Wired Device',
     'pi':           'Pi / Kea',
     'inter_switch': 'Inter-Switch Link',
@@ -53,6 +54,8 @@ def _detect_port_role(port_name: str, description: str) -> str:
        desc.endswith(' ap') or ' ap ' in desc or \
        '-ap' in desc or desc.startswith('ap'):
         return 'ap'
+    if 'cheap' in desc and 'ap' in desc:
+        return 'cheapap'
     if 'pi' in desc or 'kea' in desc or 'portal' in desc:
         return 'pi'
     if 'inter-switch' in desc or 'inter switch' in desc or 'isl' in desc:
@@ -247,6 +250,7 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
 
     CANONICAL_DESC = {
         'ap':           'Uplink to UniFi AP',
+        'cheapap':      'Cheap AP',
         'wired':        'wired port',
         'pi':           'TRUNK-TO-PI-Kea',
         'inter_switch': 'Inter-switch link',
@@ -286,11 +290,36 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
             f'interface {expanded}',
             'port link-type access',
             'port link-type hybrid',
-            f'port hybrid vlan {vlans_list} {mgmt_vlan} tagged',
-            f'undo port hybrid vlan {wired_vlan}',
-            'port hybrid vlan 1 untagged',
+            f'port hybrid vlan {vlans_list} tagged',
+            f'port hybrid vlan 1 {mgmt_vlan} {wired_vlan} untagged',
+            'mac-vlan enable',
+            'ip verify source ip-address mac-address',
+            'mac-authentication',
+            'mac-authentication max-user 256',
+            'mac-authentication domain macauth',
+            f'mac-authentication guest-vlan {wired_vlan}',
+            'mac-authentication host-mode multi-vlan',
+            'dhcp snooping binding record',
             'dhcp snooping check mac-address',
-            'arp detection trust',
+            'poe enable',
+        ])
+
+    elif role == 'cheapap':
+        body.extend([
+            f'interface {expanded}',
+            'port link-type access',
+            'port link-type hybrid',            
+            f'port hybrid vlan 1 {vlans_list} {mgmt_vlan} {wired_vlan} untagged',
+            'mac-vlan enable',
+            'ip verify source ip-address mac-address',
+            'mac-authentication',
+            'mac-authentication max-user 256',
+            'mac-authentication domain macauth',
+            f'mac-authentication guest-vlan {wired_vlan}',
+            'mac-authentication host-mode multi-vlan',
+            'dhcp snooping binding record',
+            'dhcp snooping check mac-address',
+            'poe enable',
         ])
 
     elif role == 'pi':
@@ -421,6 +450,7 @@ def update():
 
     ROLE_DESC = {
         'ap':           'AP-UPLINK',
+        'cheapap':      'CHEAP-AP',
         'wired':        'WIRED-ACCESS',
         'pi':           'PI-TRUNK',
         'inter_switch': 'ISL',

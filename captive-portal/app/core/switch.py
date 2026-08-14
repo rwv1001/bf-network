@@ -48,6 +48,7 @@ COMMON_PORT_UNDO_COMMANDS = [
     ' undo dhcp snooping binding record',
     ' undo mac-authentication guest-vlan',
     ' undo port-security enable',
+    ' undo poe enable',
 ]
 
 
