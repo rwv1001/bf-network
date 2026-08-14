@@ -101,7 +101,10 @@ process_queue() {
       set -e
       log "RUN_DONE mac=$mac status=$status output=$(printf '%s' "$out" | tr '\n' ';')"
       if [ "$status" -ne 0 ]; then
-        fail=1
+        # status 2 = invalid MAC, status 3 = interface not found — permanent, don't retry
+        if [ "$status" -ne 2 ] && [ "$status" -ne 3 ]; then
+          fail=1
+        fi
       fi
     else
       log "ERROR reason=missing_script path=$REPLUG_SCRIPT"

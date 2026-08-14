@@ -74,6 +74,15 @@ def manage_dns_hijack(action: str, ip_address: str) -> bool:
     Manage DNS hijacking for a device IP.
     action: 'hijack' to enable DNS redirect, 'unhijack' to remove it.
     """
+    # Wired-unregistered VLAN is covered by a subnet-wide ACL deny rule — never add per-IP hijacks.
+    try:
+        from core.vlan_utils import get_wired_vlan_id
+        if int(ip_address.split('.')[2]) == get_wired_vlan_id():
+            logger.debug("manage_dns_hijack: skip %s for %s — wired unregistered VLAN uses subnet-wide block",
+                         action, ip_address)
+            return True
+    except Exception:
+        pass
     script_path = '/scripts/dns-hijack.sh'
     try:
         result = subprocess.run(
@@ -154,6 +163,13 @@ def manage_switch_acl(action: str, ip_address: str, vlan_id) -> bool:
     if not vlan_id:
         logger.error("manage_switch_acl: Unable to determine VLAN ID for %s", ip_address)
         return False
+
+    # Wired-unregistered VLAN is covered by a subnet-wide ACL deny rule — never add per-IP rules.
+    from core.vlan_utils import get_wired_vlan_id
+    if vlan_id == get_wired_vlan_id():
+        logger.debug("manage_switch_acl: skip %s for %s — wired unregistered VLAN %s uses subnet-wide block",
+                     action, ip_address, vlan_id)
+        return True
 
     # Load policy
     policy_path = os.getenv('HP5130_POLICY_PATH', '/scripts/scriptdata/hp5130-policy.json')

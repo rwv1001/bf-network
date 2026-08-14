@@ -108,16 +108,44 @@ extern "C"
     ConstHostPtr findRegisteredHost(const std::vector<uint8_t> &hwaddr)
     {
         const char *valid_vlans_env = std::getenv("VALID_VLANS");
+
         if (!valid_vlans_env || !*valid_vlans_env)
         {
             std::cout << "DNS Hijack Hook: [DEBUG] VALID_VLANS not set or empty" << std::endl;
             return ConstHostPtr();
         }
 
-        std::cout << "DNS Hijack Hook: [DEBUG] findRegisteredHost: searching VALID_VLANS="
-                  << valid_vlans_env << std::endl;
+        std::string search_list = valid_vlans_env;
+        const char *mgmt_env = std::getenv("MANAGEMENT_VLAN");
+        int mgmt_vlan = (mgmt_env && *mgmt_env) ? std::atoi(mgmt_env) : 99;
+        if (mgmt_vlan > 0 && mgmt_vlan <= 4094)
+        {
+            std::string mgmt_str = std::to_string(mgmt_vlan);
+            // crude but sufficient: avoid duplicate if already listed
+            bool already = false;
+            std::istringstream check(search_list);
+            std::string tok;
+            while (std::getline(check, tok, ','))
+            {
+                tok.erase(0, tok.find_first_not_of(" \t"));
+                tok.erase(tok.find_last_not_of(" \t") + 1);
+                if (tok == mgmt_str)
+                {
+                    already = true;
+                    break;
+                }
+            }
+            if (!already)
+            {
+                search_list += ",";
+                search_list += mgmt_str;
+            }
+        }
 
-        std::istringstream iss(valid_vlans_env);
+        std::cout << "DNS Hijack Hook: [DEBUG] findRegisteredHost: searching VALID_VLANS+MGMT="
+                  << search_list << std::endl;
+
+        std::istringstream iss(search_list);
         std::string token;
 
         while (std::getline(iss, token, ','))

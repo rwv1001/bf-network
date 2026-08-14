@@ -61,7 +61,6 @@ CREATE INDEX IF NOT EXISTS ix_users_network_password_set_token ON users(network_
 CREATE TABLE IF NOT EXISTS devices (
     id SERIAL PRIMARY KEY,
     mac_address VARCHAR(17) UNIQUE NOT NULL,
-    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
     device_name VARCHAR(100),
     current_vlan INTEGER,
     registration_status VARCHAR(50) DEFAULT 'pending',
@@ -75,7 +74,6 @@ CREATE TABLE IF NOT EXISTS devices (
     ssid VARCHAR(100),
     is_wired BOOLEAN DEFAULT FALSE NOT NULL,
     wired_target_vlan INTEGER,
-    admin_id INTEGER REFERENCES admins(id) ON DELETE SET NULL,
     unregister_token VARCHAR(255) UNIQUE,
     confirmation_token VARCHAR(255) UNIQUE,
     confirmation_deadline TIMESTAMP,

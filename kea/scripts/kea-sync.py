@@ -470,11 +470,11 @@ class KeaSync:
             """
             update_device = """
                 UPDATE devices
-                SET switch_iface = %s, switch_iface_seen_at = NOW()
+                SET switch_iface = %s, switch_host = %s, switch_iface_seen_at = NOW()
                 WHERE mac_address = %s
             """
             cache_rows  = [(e['mac_colon'], e['switch_iface'], SWITCH_HOST, e['vlan_id']) for e in entries]
-            device_rows = [(e['switch_iface'], e['mac_colon']) for e in entries]
+            device_rows = [(e['switch_iface'], SWITCH_HOST, e['mac_colon']) for e in entries]
             cur.executemany(upsert_cache, cache_rows)
             cur.executemany(update_device, device_rows)
             self.db_conn.commit()

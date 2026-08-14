@@ -90,6 +90,62 @@ expand_iface() {
     *) echo "$1" ;;
   esac
 }
+# Strip interface type prefix → "1/0/8" from GE1/0/8 or GigabitEthernet1/0/8
+port_suffix() {
+  printf '%s' "$1" | sed -E 's/.*(GigabitEthernet|Ten-GigabitEthernet|GE|XGE)//I'
+}
+
+# Returns 0 (true) if iface has port_role 'ap' (PoE cycle needed for VLAN reassignment).
+# Args: <iface> <switch_host>
+is_ap_port() {
+  _p="$1"
+  _pe="$(expand_iface "$_p")"
+  _sw_host="${2:-}"
+  if [ -z "$_sw_host" ]; then
+    log "is_ap_port: iface=$_p switch_host=<empty> → false"
+    return 1
+  fi
+
+  _suf="$(port_suffix "$_pe")"
+  # Also try suffix from raw name in case expand changed nothing useful
+  [ -z "$_suf" ] && _suf="$(port_suffix "$_p")"
+
+  _sql="SELECT port_role FROM switch_ports
+WHERE switch_host = '${_sw_host}'
+  AND port_role = 'ap'
+  AND (
+    port_name IN (
+      '${_p}',
+      '${_pe}',
+      'GE${_suf}',
+      'GigabitEthernet${_suf}',
+      'XGE${_suf}',
+      'Ten-GigabitEthernet${_suf}'
+    )
+    OR port_name LIKE '%${_suf}'
+  )
+LIMIT 1"
+
+  _role=""
+  if [ -n "${DATABASE_URL:-}" ] && command -v psql >/dev/null 2>&1; then
+    log "is_ap_port: via=psql iface=$_p expanded=$_pe suffix=$_suf host=$_sw_host"
+    log "is_ap_port: SQL=$(printf '%s' "$_sql" | tr '\n' ' ')"
+    _role=$(psql "${DATABASE_URL}" -tAc "$_sql" 2>/dev/null | tr -d ' \r\n' || true)
+  elif command -v docker >/dev/null 2>&1; then
+    log "is_ap_port: via=docker iface=$_p expanded=$_pe suffix=$_suf host=$_sw_host"
+    log "is_ap_port: SQL=$(printf '%s' "$_sql" | tr '\n' ' ')"
+    _role=$(docker exec "${REPLUG_DB_CONTAINER:-captive-portal-db}" \
+      psql -U "${REPLUG_DB_USER:-portal_user}" -d "${REPLUG_DB_NAME:-captive_portal}" \
+      -tAc "$_sql" 2>/dev/null | tr -d ' \r\n' || true)
+  else
+    log "is_ap_port: no DB client → false"
+    return 1
+  fi
+
+  log "is_ap_port: result role='${_role:-<empty>}'"
+  [ "$_role" = "ap" ] && return 0
+  return 1
+}
 
 # Returns 0 (true) if iface is an inter-switch port (should be skipped).
 # Args: <iface> <switch_host>
@@ -97,18 +153,47 @@ is_uplink_port() {
   _p="$1"
   _pe="$(expand_iface "$_p")"
   _sw_host="${2:-}"
-  [ -z "$_sw_host" ] && return 1
-  _role=""
-  # Prefer DATABASE_URL (available in web container); fall back to docker exec
-  if [ -n "${DATABASE_URL:-}" ] && command -v psql >/dev/null 2>&1; then
-    _role=$(psql "${DATABASE_URL}" -tAc \
-      "SELECT port_role FROM switch_ports WHERE switch_host = '${_sw_host}' AND port_name IN ('${_p}', '${_pe}') AND port_role = 'inter_switch' LIMIT 1" \
-      2>/dev/null | tr -d ' \r\n' || true)
-  elif command -v docker >/dev/null 2>&1; then
-    _role=$(docker exec "$REPLUG_DB_CONTAINER" psql -U "$REPLUG_DB_USER" -d "$REPLUG_DB_NAME" -tAc \
-      "SELECT port_role FROM switch_ports WHERE switch_host = '${_sw_host}' AND port_name IN ('${_p}', '${_pe}') AND port_role = 'inter_switch' LIMIT 1" \
-      2>/dev/null | tr -d ' \r\n' || true)
+  if [ -z "$_sw_host" ]; then
+    log "is_uplink_port: iface=$_p switch_host=<empty> → false"
+    return 1
   fi
+
+  _suf="$(port_suffix "$_pe")"
+  [ -z "$_suf" ] && _suf="$(port_suffix "$_p")"
+
+  _sql="SELECT port_role FROM switch_ports
+WHERE switch_host = '${_sw_host}'
+  AND port_role = 'inter_switch'
+  AND (
+    port_name IN (
+      '${_p}',
+      '${_pe}',
+      'GE${_suf}',
+      'GigabitEthernet${_suf}',
+      'XGE${_suf}',
+      'Ten-GigabitEthernet${_suf}'
+    )
+    OR port_name LIKE '%${_suf}'
+  )
+LIMIT 1"
+
+  _role=""
+  if [ -n "${DATABASE_URL:-}" ] && command -v psql >/dev/null 2>&1; then
+    log "is_uplink_port: via=psql iface=$_p expanded=$_pe suffix=$_suf host=$_sw_host"
+    log "is_uplink_port: SQL=$(printf '%s' "$_sql" | tr '\n' ' ')"
+    _role=$(psql "${DATABASE_URL}" -tAc "$_sql" 2>/dev/null | tr -d ' \r\n' || true)
+  elif command -v docker >/dev/null 2>&1; then
+    log "is_uplink_port: via=docker iface=$_p expanded=$_pe suffix=$_suf host=$_sw_host"
+    log "is_uplink_port: SQL=$(printf '%s' "$_sql" | tr '\n' ' ')"
+    _role=$(docker exec "${REPLUG_DB_CONTAINER:-captive-portal-db}" \
+      psql -U "${REPLUG_DB_USER:-portal_user}" -d "${REPLUG_DB_NAME:-captive_portal}" \
+      -tAc "$_sql" 2>/dev/null | tr -d ' \r\n' || true)
+  else
+    log "is_uplink_port: no DB client → false"
+    return 1
+  fi
+
+  log "is_uplink_port: result role='${_role:-<empty>}'"
   [ "$_role" = "inter_switch" ] && return 0
   return 1
 }
@@ -192,6 +277,7 @@ MAC_COLON="$(echo "$MAC_NORM" | tr 'A-F' 'a-f' | tr '-' ':')"
 IFACE=""
 CACHE_IFACE=""
 CACHE_HOST=""
+IS_AP_PORT=0
 if command -v docker >/dev/null 2>&1; then
   CACHE_ROW=$(docker exec "$REPLUG_DB_CONTAINER" psql -U "$REPLUG_DB_USER" -d "$REPLUG_DB_NAME" -tAc \
     "SELECT switch_iface, COALESCE(switch_host, '') FROM mac_port_cache WHERE mac_address = '${MAC_COLON}' AND last_seen > NOW() - INTERVAL '${REPLUG_DB_CACHE_TTL} seconds' LIMIT 1" \
@@ -201,9 +287,18 @@ if command -v docker >/dev/null 2>&1; then
   if [ -n "$CACHE_IFACE" ]; then
     IFACE="$(expand_iface "$CACHE_IFACE")"
     if is_uplink_port "$IFACE" "$CACHE_HOST"; then
-      log "LOOKUP_CACHE_UPLINK mac=$MAC_NORM iface=$IFACE – uplink port, invalidating cache"
-      IFACE=""
-      CACHE_IFACE=""
+      if is_ap_port "$IFACE" "$CACHE_HOST"; then
+        IS_AP_PORT=1
+        DELAY_SEC=5
+        if [ -n "$CACHE_HOST" ]; then
+          REPLUG_TARGET_HOST="$CACHE_HOST"
+        fi
+        log "LOOKUP_CACHE_AP_POE_CYCLE mac=$MAC_NORM iface=$IFACE target=$REPLUG_TARGET_HOST – UniFi AP PoE cycle"
+      else
+        log "LOOKUP_CACHE_UPLINK mac=$MAC_NORM iface=$IFACE – uplink port, invalidating cache"
+        IFACE=""
+        CACHE_IFACE=""
+      fi
     else
       if [ -n "$CACHE_HOST" ]; then
         REPLUG_TARGET_HOST="$CACHE_HOST"
@@ -257,6 +352,14 @@ if [ -z "$IFACE" ]; then
     fi
 
     if is_uplink_port "$RAW_IFACE" "$_SW"; then
+      if is_ap_port "$RAW_IFACE" "$_SW"; then
+        IFACE=$(expand_iface "$RAW_IFACE")
+        REPLUG_TARGET_HOST="$_SW"
+        IS_AP_PORT=1
+        DELAY_SEC=5
+        log "LOOKUP_AP_POE_CYCLE mac=$MAC_NORM switch=$_SW iface=$IFACE – UniFi AP PoE cycle"
+        break
+      fi
       log "LOOKUP_UPLINK mac=$MAC_NORM switch=$_SW iface=$RAW_IFACE – uplink port, looking downstream"
       continue
     fi
@@ -267,9 +370,60 @@ if [ -z "$IFACE" ]; then
   done
 fi  # end SSH live lookup
 
+# Fallback: device not in any live MAC table (e.g. AP powered off) — use last-known port from devices table.
+if [ -z "$IFACE" ]; then
+  DEV_ROW=""
+  if [ -n "${DATABASE_URL:-}" ] && command -v psql >/dev/null 2>&1; then
+    DEV_ROW=$(psql "${DATABASE_URL}" -tAc \
+      "SELECT switch_iface, COALESCE(switch_host, '') FROM devices WHERE mac_address = '${MAC_COLON}' AND switch_iface IS NOT NULL LIMIT 1" \
+      2>/dev/null | tr -d ' \r' || true)
+  elif command -v docker >/dev/null 2>&1; then
+    DEV_ROW=$(docker exec "$REPLUG_DB_CONTAINER" psql -U "$REPLUG_DB_USER" -d "$REPLUG_DB_NAME" -tAc \
+      "SELECT switch_iface, COALESCE(switch_host, '') FROM devices WHERE mac_address = '${MAC_COLON}' AND switch_iface IS NOT NULL LIMIT 1" \
+      2>/dev/null | tr -d ' \r' || true)
+  fi
+  DEV_IFACE=$(echo "$DEV_ROW" | cut -d'|' -f1 | tr -d '\n')
+  DEV_HOST=$(echo "$DEV_ROW" | cut -d'|' -f2 | tr -d '\n')
+  if [ -n "$DEV_IFACE" ]; then
+    IFACE="$(expand_iface "$DEV_IFACE")"
+    if [ -n "$DEV_HOST" ]; then
+      REPLUG_TARGET_HOST="$DEV_HOST"
+    fi
+    log "LOOKUP_DEVICES_FALLBACK mac=$MAC_NORM iface=$IFACE target=$REPLUG_TARGET_HOST – using last-known port (device may be powered off)"
+  fi
+fi
+
 if [ -z "$IFACE" ]; then
   echo "Unable to locate interface for $MAC_NORM" >&2
   exit 3
+fi
+
+# Final AP check — covers normal AP ports (port_role='ap') that aren't tagged as uplinks.
+if [ "${IS_AP_PORT}" != "1" ] && is_ap_port "$IFACE" "$REPLUG_TARGET_HOST"; then
+  IS_AP_PORT=1
+  DELAY_SEC=5
+  log "PORT_IS_AP iface=$IFACE target=$REPLUG_TARGET_HOST – PoE cycle will be used"
+fi
+
+# For AP ports: only cycle PoE if this MAC is the AP device itself (registered on the management VLAN).
+# A WiFi client MAC seen on an AP's uplink port must not trigger a PoE cycle — that would reboot the AP
+# and disconnect all its clients. Exit cleanly; the client's VLAN is managed by the AP/controller.
+if [ "${IS_AP_PORT}" = "1" ]; then
+  MANAGEMENT_VLAN="${MANAGEMENT_VLAN:-99}"
+  _ap_confirmed=""
+  if [ -n "${DATABASE_URL:-}" ] && command -v psql >/dev/null 2>&1; then
+    _ap_confirmed=$(psql "${DATABASE_URL}" -tAc \
+      "SELECT 1 FROM devices WHERE mac_address = '${MAC_COLON}' AND current_vlan = ${MANAGEMENT_VLAN} LIMIT 1" \
+      2>/dev/null | tr -d ' \r\n' || true)
+  elif command -v docker >/dev/null 2>&1; then
+    _ap_confirmed=$(docker exec "$REPLUG_DB_CONTAINER" psql -U "$REPLUG_DB_USER" -d "$REPLUG_DB_NAME" -tAc \
+      "SELECT 1 FROM devices WHERE mac_address = '${MAC_COLON}' AND current_vlan = ${MANAGEMENT_VLAN} LIMIT 1" \
+      2>/dev/null | tr -d ' \r\n' || true)
+  fi
+  if [ "${_ap_confirmed}" != "1" ]; then
+    log "AP_PORT_CLIENT_SKIP mac=$MAC_NORM iface=$IFACE – not on management VLAN ${MANAGEMENT_VLAN}, skipping PoE cycle (WiFi client passthrough)"
+    exit 0
+  fi
 fi
 
 # Persist live SSH result to DB cache so future lookups skip SSH
@@ -284,7 +438,28 @@ if [ -z "$CACHE_IFACE" ] && command -v docker >/dev/null 2>&1; then
   log "CACHE_UPDATED mac=$MAC_NORM iface=$IFACE host=$REPLUG_TARGET_HOST"
 fi
 
-CMDS_DOWN=$(cat <<EOF
+if [ "${IS_AP_PORT}" = "1" ]; then
+  log "AP_POE_CYCLE iface=$IFACE delay=${DELAY_SEC}s – PoE off then on; AP reboots independently"
+  CMDS_DOWN=$(cat <<EOF
+system-view
+interface $IFACE
+undo poe enable
+quit
+quit
+quit
+EOF
+)
+  CMDS_UP=$(cat <<EOF
+system-view
+interface $IFACE
+poe enable
+quit
+quit
+quit
+EOF
+)
+else
+  CMDS_DOWN=$(cat <<EOF
 system-view
 interface $IFACE
 shutdown
@@ -293,7 +468,7 @@ quit
 quit
 EOF
 )
-CMDS_UP=$(cat <<EOF
+  CMDS_UP=$(cat <<EOF
 system-view
 interface $IFACE
 undo shutdown
@@ -302,6 +477,7 @@ quit
 quit
 EOF
 )
+fi
 
 run_ssh "down" "$CMDS_DOWN"
 status=$?

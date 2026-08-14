@@ -59,29 +59,52 @@ DB_NAME="${DB_NAME:-captive_portal}"
 DB_USER="${DB_USER:-portal_user}"
 DB_PASSWORD="${DB_PASSWORD:-}"
 
+# Run SQL: logs statement + result. For -tAc (tuples only) prints one line.
+# Usage: run_sql_tAc "SELECT ..."
+# Sets RUN_SQL_RESULT
+run_sql_tAc() {
+    _sql="$1"
+    log "SQL: $_sql"
+    RUN_SQL_RESULT="$(PGPASSWORD="$DB_PASSWORD" \
+        psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -tAc \
+        "$_sql" 2>/dev/null | tr -d ' \n\r' || true)"
+    log "SQL_RESULT: '${RUN_SQL_RESULT:-<empty>}'"
+}
+
+# Usage: run_sql_c "UPDATE/INSERT ..."
+run_sql_c() {
+    _sql="$1"
+    log "SQL: $_sql"
+    set +e
+    _out="$(PGPASSWORD="$DB_PASSWORD" \
+        psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
+        -c "$_sql" 2>&1)"
+    _rc=$?
+    set -e
+    # collapse newlines for the log line
+    _out_one="$(printf '%s' "$_out" | tr '\n' ' ' | tr -s ' ')"
+    log "SQL_RC=$_rc SQL_OUT: ${_out_one:-<empty>}"
+    return 0
+}
+
 # ---------------------------------------------------------------------------
-# Fresh-cache check – skip SSH if we already have a recent entry
+# Fresh-cache check
 # ---------------------------------------------------------------------------
 FRESHNESS_TTL="${SWITCH_PORT_LOOKUP_CACHE_TTL:-120}"   # seconds
-CACHED="$(PGPASSWORD="$DB_PASSWORD" \
-    psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -tAc \
-    "SELECT switch_iface FROM mac_port_cache
-     WHERE mac_address = '${MAC_COLON}'
-       AND last_seen > NOW() - INTERVAL '${FRESHNESS_TTL} seconds'
-     LIMIT 1" 2>/dev/null | tr -d ' \n\r' || true)"
+run_sql_tAc "SELECT switch_iface FROM mac_port_cache
+ WHERE mac_address = '${MAC_COLON}'
+   AND last_seen > NOW() - INTERVAL '${FRESHNESS_TTL} seconds'
+ LIMIT 1"
+CACHED="$RUN_SQL_RESULT"
 if [ -n "$CACHED" ]; then
     # Cache hit – SSH query not needed, but still backfill devices.switch_iface
     # in case the device was registered after the initial lookup ran.
     log "CACHE_HIT mac=$MAC_COLON iface=$CACHED"
-    PGPASSWORD="$DB_PASSWORD" \
-        psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
-        -c "UPDATE devices
-            SET switch_iface = '${CACHED}', switch_iface_seen_at = NOW()
-            WHERE mac_address = '${MAC_COLON}'
-              AND (switch_iface IS NULL OR switch_iface != '${CACHED}');" \
-        2>/dev/null || true
+    run_sql_c "UPDATE devices
+ SET switch_iface = '${CACHED}', switch_iface_seen_at = NOW() WHERE mac_address = '${MAC_COLON}' AND (switch_iface IS NULL OR switch_iface != '${CACHED}');"
     exit 0
 fi
+log "CACHE_MISS mac=$MAC_COLON ttl=${FRESHNESS_TTL}s"
 
 # ---------------------------------------------------------------------------
 # SSH configuration
@@ -145,23 +168,29 @@ IFACE=""
 for _SW in $SWITCH_LIST; do
     query_switch "$_SW"
     if [ -z "$IFACE" ]; then
-        # Not found on this switch – try the next one
         log "MISS mac=$MAC_COLON switch=$_SW"
         continue
     fi
     FINAL_HOST="$_SW"
-    # Expand for DB lookup (short names like GE1/0/47 may be stored as GigabitEthernet1/0/47)
     _IFACE_EXP="$IFACE"
     case "$IFACE" in
         GE*)  _IFACE_EXP="GigabitEthernet${IFACE#GE}" ;;
         XGE*) _IFACE_EXP="Ten-GigabitEthernet${IFACE#XGE}" ;;
     esac
-    _ROLE="$(PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" \
-        -U "$DB_USER" -d "$DB_NAME" -tAc \
-        "SELECT port_role FROM switch_ports WHERE switch_host = '${_SW}' \
-         AND port_name IN ('${IFACE}', '${_IFACE_EXP}') \
-         AND port_role = 'inter_switch' LIMIT 1" \
-        2>/dev/null | tr -d ' \n\r' || true)"
+
+    # Flexible match: short name, long name, or suffix (1/0/47)
+    _SUF="$(printf '%s' "$_IFACE_EXP" | sed -E 's/.*(GigabitEthernet|Ten-GigabitEthernet|GE|XGE)//I')"
+    run_sql_tAc "SELECT port_role FROM switch_ports
+ WHERE switch_host = '${_SW}'
+   AND port_role = 'inter_switch'
+   AND (
+     port_name IN ('${IFACE}', '${_IFACE_EXP}', 'GE${_SUF}', 'GigabitEthernet${_SUF}',
+                   'XGE${_SUF}', 'Ten-GigabitEthernet${_SUF}')
+     OR port_name LIKE '%${_SUF}'
+   )
+ LIMIT 1"
+    _ROLE="$RUN_SQL_RESULT"
+
     if [ "$_ROLE" = "inter_switch" ]; then
         log "TRUNK mac=$MAC_COLON switch=$_SW iface=$IFACE – continue"
     else
@@ -171,34 +200,24 @@ for _SW in $SWITCH_LIST; do
 done
 
 if [ -z "$IFACE" ] || [ -z "$FINAL_HOST" ]; then
-    log "NOT_FOUND mac=$MAC_COLON hosts=$SWITCH_LIST"# MAC not found on any switch – nothing to store
+    log "NOT_FOUND mac=$MAC_COLON hosts=$SWITCH_LIST"
     exit 0
 fi
 log "FOUND mac=$MAC_COLON iface=$IFACE switch=$FINAL_HOST"
-# ---------------------------------------------------------------------------
-# Expand short abbreviations for DB storage
-# ---------------------------------------------------------------------------
+
 case "$IFACE" in
     GE*)  IFACE="GigabitEthernet${IFACE#GE}" ;;
     XGE*) IFACE="Ten-GigabitEthernet${IFACE#XGE}" ;;
 esac
 
-# ---------------------------------------------------------------------------
-# Persist to DB:  mac_port_cache  +  devices.switch_iface
-# ---------------------------------------------------------------------------
-PGPASSWORD="$DB_PASSWORD" \
-    psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
-    -c "INSERT INTO mac_port_cache (mac_address, switch_iface, switch_host, last_seen)
-        VALUES ('${MAC_COLON}', '${IFACE}', '${FINAL_HOST}', NOW())
-        ON CONFLICT (mac_address) DO UPDATE SET
-            switch_iface  = EXCLUDED.switch_iface,
-            switch_host   = EXCLUDED.switch_host,
-            last_seen     = NOW();" \
-    -c "UPDATE devices
-        SET switch_iface = '${IFACE}',
-            switch_host = '${FINAL_HOST}',
-            switch_iface_seen_at = NOW()
-        WHERE mac_address = '${MAC_COLON}';" \
-    2>/dev/null || true
+run_sql_c "INSERT INTO mac_port_cache (mac_address, switch_iface, switch_host, last_seen)
+ VALUES ('${MAC_COLON}', '${IFACE}', '${FINAL_HOST}', NOW())
+ ON CONFLICT (mac_address) DO UPDATE SET
+     switch_iface  = EXCLUDED.switch_iface,
+     switch_host   = EXCLUDED.switch_host,
+     last_seen     = NOW();"
+
+run_sql_c "UPDATE devices SET switch_iface = '${IFACE}', switch_host = '${FINAL_HOST}', switch_iface_seen_at = NOW() WHERE mac_address = '${MAC_COLON}';"
+
 log "DB_OK mac=$MAC_COLON iface=$IFACE switch=$FINAL_HOST"
 exit 0
