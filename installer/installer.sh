@@ -1784,21 +1784,33 @@ ON CONFLICT (name) DO UPDATE SET
         for vlan in "${VLAN_LIST[@]}"; do
             idx="${VLAN_ISP_INDEX[$vlan]}"
             isp_name="${ISP_NAMES[$idx]}"
-            # display_name / status: best-effort from VLAN_DEFAULTS style names if you have them
-            display="VLAN${vlan}"
 
-            printf "INSERT INTO vlan_mappings (status, vlan_id, display_name, wired_enabled, require_password)
-SELECT %s, %s, %s, TRUE, TRUE
+            # Prefer saved answers (works on re-run / seed-only path)
+            display="${SAVED_ANSWERS[vlan_${vlan}_name]:-VLAN${vlan}}"
+            status="$display"
+            ssid="${SAVED_ANSWERS[vlan_${vlan}_ssid]:-}"
+
+            printf "INSERT INTO vlan_mappings (
+  status, vlan_id, display_name, ssid, wired_enabled, require_password
+)
+SELECT %s, %s, %s, %s, TRUE, TRUE
 WHERE NOT EXISTS (SELECT 1 FROM vlan_mappings WHERE vlan_id = %s);\n" \
-                "$(sql_quote "$display")" \
+                "$(sql_quote "$status")" \
                 "$vlan" \
                 "$(sql_quote "$display")" \
+                "$(sql_quote_or_null "$ssid")" \
                 "$vlan"
 
-            printf "UPDATE vlan_mappings
-SET isp_router_id = (SELECT id FROM isp_routers WHERE name = %s)
+            printf "UPDATE vlan_mappings SET
+  status = %s,
+  display_name = %s,
+  ssid = %s,
+  isp_router_id = (SELECT id FROM isp_routers WHERE name = %s)
 WHERE vlan_id = %s
   AND (SELECT id FROM isp_routers WHERE name = %s) IS NOT NULL;\n" \
+                "$(sql_quote "$status")" \
+                "$(sql_quote "$display")" \
+                "$(sql_quote_or_null "$ssid")" \
                 "$(sql_quote "$isp_name")" \
                 "$vlan" \
                 "$(sql_quote "$isp_name")"
@@ -2653,10 +2665,20 @@ for ((i=0; i<${#VLAN_LIST[@]}-1; i++)); do
 done
 
 declare -A VLAN_NAMES
+declare -A VLAN_SSIDS
 for idx in "${!VLAN_LIST[@]}"; do
     vlan="${VLAN_LIST[$idx]}"
     prompt_required name "Enter name/status for VLAN $vlan" "vlan_${vlan}_name"
     VLAN_NAMES[$idx]="$name"
+
+    # Default SSID suggestion from the friendly name (spaces → nothing or hyphens)
+    default_ssid="$(printf '%s' "$name" | tr ' ' '-')"
+    prompt_default ssid \
+        "SSID for VLAN $vlan ($name) — leave empty if no Wi‑Fi SSID" \
+        "$default_ssid" \
+        "vlan_${vlan}_ssid"
+    # Allow blank SSID if this VLAN is wired-only
+    VLAN_SSIDS[$idx]="$ssid"
 done
 
 while true; do
@@ -2685,8 +2707,17 @@ done
 # =============================================================================
 
 while true; do
+    prev_num_isps="${SAVED_ANSWERS[num_isps]:-}"
+
     prompt_line NUM_ISPS "How many ISPs are there? (1-4): " "num_isps"
     if [[ "$NUM_ISPS" =~ ^[1-4]$ ]]; then
+        # Entering or changing multi-ISP: force the firmware warning again
+        if [ "$NUM_ISPS" -gt 1 ] && [ "${prev_num_isps:-1}" -eq 1 ]; then
+            if [ -z "$prev_num_isps" ] || [ "$prev_num_isps" != "$NUM_ISPS" ]; then
+                unset 'SAVED_ANSWERS[multi_isp_firmware_ack]'
+                state_save
+            fi
+        fi
         break
     fi
     echo "Please enter a number between 1 and 4."
@@ -3470,6 +3501,121 @@ ntp-service unicast-server 162.159.200.1
     
     complete_step "switch_${j}_configured"
 done
+
+# =============================================================================
+# Multi-ISP firmware requirement (after switch SSH is available)
+# =============================================================================
+
+if [ "${NUM_ISPS:-1}" -gt 1 ]; then
+    info "Multi-ISP firmware check (HP 5130)"
+
+    cat <<EOF
+
+---------------------------------------------------------------------------
+ Multiple ISPs selected (${NUM_ISPS}).
+
+ Policy-based routing (PBR) — sending different VLANs out different ISP
+ gateways — is unreliable on some older 5130 software builds (e.g. plain
+ Release 3507). In practice, traffic can ignore per-VLAN next-hops and
+ follow only the default route.
+
+ Recommended software for this design:
+   • System:  Release 3507P18  (or later in the R3507 line)
+   • Hotfix: HS01 for that release (if published for your image)
+
+ Without a current image + applicable hotpatch, multi-ISP PBR may not
+ behave as configured even when ACLs, tracks, and NQA look correct.
+---------------------------------------------------------------------------
+
+How to check the running version (on each switch):
+
+  <hostname>display version
+
+Look for lines like:
+  Comware Software, Version 7.1.070, Release 3507P18
+  and any listed hot patches / feature images.
+
+How to SSH in with the credentials this installer just configured:
+
+EOF
+
+    local sw_ip last_oct mgmt_vlan_ip
+    for sw_ip in "${IPS[@]}"; do
+        last_oct="$(last_octet "$sw_ip")"
+        mgmt_vlan_ip="${LOCAL_BASE}.${MANAGEMENT_VLAN}.${last_oct}"
+        cat <<EOF
+  # Installer management IP (often still reachable on VLAN 1 during setup):
+  ssh -i ${KEY_PATH} \\
+    -o HostKeyAlgorithms=+ssh-rsa \\
+    -o PubkeyAcceptedAlgorithms=+ssh-rsa \\
+    ${NEW_USERNAME}@${sw_ip}
+
+  # After management VLAN is up, prefer:
+  ssh -i ${KEY_PATH} \\
+    -o HostKeyAlgorithms=+ssh-rsa \\
+    -o PubkeyAcceptedAlgorithms=+ssh-rsa \\
+    ${NEW_USERNAME}@${mgmt_vlan_ip}
+
+EOF
+    done
+
+    cat <<EOF
+Upgrade outline (do this from a machine that can TFTP/SCP to the switch,
+or via serial if the network path is down):
+
+  1. Download the official HPE FlexNetwork 5130 EI image for your SKU:
+       5130ei-cmw710-*-r3507p18.bin   (boot + system as required)
+     and the matching hotpatch package if HPE lists one (e.g. HS01).
+
+  2. Copy images to flash: (example with TFTP)
+       tftp \${tftp-server} get 5130ei-cmw710-system-r3507p06.bin
+       # use the exact filenames from HPE Support Center
+
+  3. On the switch (names vary slightly by package):
+       boot-loader file flash:/5130ei-cmw710-boot-r3507p18.bin slot 1 main
+       boot-loader file flash:/5130ei-cmw710-system-r3507p18.bin slot 1 main
+       # install hotpatch per HPE release notes, then:
+       save force
+       reboot
+
+  4. After reload, confirm:
+       display version
+       display install
+     then re-check PBR / NQA / track as needed.
+
+Official images and release notes:
+  https://support.hpe.com  → search your 5130 model (e.g. JG937A) → Software
+
+You can quit now, upgrade firmware, then re-run this installer.
+Completed switch steps are saved; use --forget-step switch_N_configured
+only if you need to re-push serial config after the upgrade.
+---------------------------------------------------------------------------
+EOF
+
+    local fw_choice=""
+    while true; do
+        prompt_line fw_choice \
+            "Continue installation without upgrading now? (y = continue, n = quit to upgrade firmware): " \
+            "multi_isp_firmware_ack"
+        if is_yes "$fw_choice"; then
+            echo "Continuing. Ensure each 5130 is on R3507P18 (+ hotpatch) before relying on multi-ISP PBR."
+            break
+        fi
+        case "$fw_choice" in
+            n|N|no|NO|No)
+                echo
+                echo "Installer stopped so you can upgrade switch firmware."
+                echo "Re-run:  sudo ./installer.sh"
+                echo "State file kept: $STATE_FILE"
+                exit 0
+                ;;
+            *)
+                echo "Please answer y or n."
+                invalidate_answer "multi_isp_firmware_ack"
+                ;;
+        esac
+    done
+fi
 
 # =============================================================================
 # Pi server installation
