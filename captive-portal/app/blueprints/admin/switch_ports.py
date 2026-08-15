@@ -246,7 +246,10 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
     # VALID_VLANS env var: comma-separated VLAN IDs that may appear on the
     # hybrid or trunk ports (defaults cover all current / future usable VLANs).
     possible_vlans_raw = os.getenv('VALID_VLANS', '10,20,30,40,50,60,70,80,90')
-    vlans_list = ' '.join(possible_vlans_raw.split(','))
+    vlans_list = ' '.join(v for v in possible_vlans_raw.split(',') if v.strip())
+    # EXTERNAL_VLANS: upstream-DHCP VLANs carried on trunks / AP uplinks
+    external_vlans_raw = os.getenv('EXTERNAL_VLANS', '')
+    external_vlans_list = ' '.join(v for v in external_vlans_raw.split(',') if v.strip())
 
     CANONICAL_DESC = {
         'ap':           'Uplink to UniFi AP',
@@ -257,7 +260,9 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
         'uplink_udm':   'TRUNK-TO-UDM',
         'unknown':      '',
     }
-    desc = (description or '').strip() or CANONICAL_DESC.get(role, '')
+    # Role-specific canonical takes priority; only unknown falls back to existing desc.
+    canonical = CANONICAL_DESC.get(role, '')
+    desc = canonical if canonical else (description or '').strip()
 
     head = ['system-view', f'interface {expanded}']
 
@@ -286,11 +291,14 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
         ])
 
     elif role == 'ap':
+        ap_tagged = vlans_list
+        if external_vlans_list:
+            ap_tagged = f'{vlans_list} {external_vlans_list}'.strip()
         body.extend([
             f'interface {expanded}',
             'port link-type access',
             'port link-type hybrid',
-            f'port hybrid vlan {vlans_list} tagged',
+            f'port hybrid vlan {ap_tagged} tagged',
             f'port hybrid vlan 1 {mgmt_vlan} {wired_vlan} untagged',
             'mac-vlan enable',
             'ip verify source ip-address mac-address',
@@ -336,13 +344,16 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
         ])
 
     elif role == 'uplink_udm':
-        body.extend([
+        uplink_cmds = [
             f'interface {expanded}',
             'port link-type access',
             'port link-type trunk',
             'port trunk permit vlan 1',
-            'dhcp snooping trust',
-        ])
+        ]
+        if external_vlans_list:
+            uplink_cmds.append(f'port trunk permit vlan {external_vlans_list}')
+        uplink_cmds.append('dhcp snooping trust')
+        body.extend(uplink_cmds)
 
     elif role == 'inter_switch':
         try:
@@ -350,17 +361,22 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
         except Exception:
             isp_vlan_ids = ['1']
         isp_vlan_str = ' '.join(isp_vlan_ids) if isp_vlan_ids else '1'
-        body.extend([
+        inter_cmds = [
             f'interface {expanded}',
             'port link-type access',
             'port link-type trunk',
             f'port trunk permit vlan {vlans_list}',
             f'port trunk permit vlan {mgmt_vlan} {wired_vlan}',
             f'port trunk permit vlan {isp_vlan_str}',
+        ]
+        if external_vlans_list:
+            inter_cmds.append(f'port trunk permit vlan {external_vlans_list}')
+        inter_cmds.extend([
             'port trunk pvid vlan 1',
             'arp detection trust',
             'dhcp snooping trust',
         ])
+        body.extend(inter_cmds)
 
     if desc:
         body.append(f'description {desc}')
@@ -547,13 +563,20 @@ def update_single():
     if result is None:
         return jsonify({'success': False, 'error': f'SSH to {host} failed'})
 
+    _CANONICAL_DESC = {
+        'ap': 'Uplink to UniFi AP', 'cheapap': 'Cheap AP', 'wired': 'wired port',
+        'pi': 'TRUNK-TO-PI-Kea', 'inter_switch': 'Inter-switch link',
+        'uplink_udm': 'TRUNK-TO-UDM',
+    }
+    new_desc = _CANONICAL_DESC.get(role) or existing_desc or ''
+
     db.session.execute(
         text("""
             UPDATE switch_ports
-            SET port_role = :role, last_updated = NOW()
+            SET port_role = :role, port_description = :desc, last_updated = NOW()
             WHERE switch_host = :host AND port_name = :name
         """),
-        {'role': role, 'host': host, 'name': port_name}
+        {'role': role, 'desc': new_desc, 'host': host, 'name': port_name}
     )
     db.session.commit()
     logger.info("Admin set %s %s → %s", host, port_name, role)

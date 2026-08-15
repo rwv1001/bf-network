@@ -160,6 +160,8 @@ def _build_isp_router_switch_config(router: ISPRouter, switch_host: str) -> str:
 def _build_isp_router_port_config(port_name: str, router: ISPRouter) -> str:
     expanded   = expand_switch_iface_name(port_name)
     name_upper = router.name.upper().replace(' ', '_')
+    external_vlans_raw = os.getenv('EXTERNAL_VLANS', '')
+    external_vlans_list = ' '.join(v for v in external_vlans_raw.split(',') if v.strip())
 
     lines = [
         'system-view',
@@ -170,6 +172,10 @@ def _build_isp_router_port_config(port_name: str, router: ISPRouter) -> str:
         ' port link-type trunk',
         ' port trunk permit vlan 1',
         f' port trunk permit vlan {router.vlan_id}',
+    ]
+    if external_vlans_list:
+        lines.append(f' port trunk permit vlan {external_vlans_list}')
+    lines += [
         ' dhcp snooping trust',
         ' arp detection trust',
         'quit',
@@ -294,72 +300,24 @@ def _build_isl_trunk_remove_vlan(isl_port: str, vlan_id: int) -> str:
 # Internal action helpers
 # ---------------------------------------------------------------------------
 
-def _apply_isp_router_to_switches(router: ISPRouter) -> None:
-    switch_hosts = get_switch_hosts()
-    failed = []
-    for host in switch_hosts:
-        cfg = _build_isp_router_switch_config(router, host)
-        if run_switch_command(host, cfg) is None:
-            failed.append(host)
-    if failed:
-        flash(f'Switch config push failed for: {", ".join(failed)}', 'warning')
+def _combine_switch_cmds(*cfgs: str) -> str:
+    """Combine multiple HP5130 command blocks into one SSH session with a single save."""
+    parts = []
+    for cfg in cfgs:
+        lines = cfg.rstrip().splitlines()
+        while lines and lines[-1].strip() in ('save force', ''):
+            lines.pop()
+        if lines:
+            parts.append('\n'.join(lines))
+    return '\n'.join(parts) + '\nsave force'
 
 
-def _remove_isp_router_from_switches(router: ISPRouter) -> None:
-    for host in get_switch_hosts():
-        run_switch_command(host, _build_remove_isp_router_full(router))
-
-
-def _remove_isp_router_vlan_from_switches(old_vlan_id: int) -> None:
-    for host in get_switch_hosts():
-        run_switch_command(host, _build_remove_isp_router_vlan(old_vlan_id))
-
-
-def _remove_isp_router_pbr_from_switches(pbr_name: str) -> None:
-    for host in get_switch_hosts():
-        run_switch_command(host, _build_remove_isp_router_pbr(pbr_name))
-
-
-def _set_isp_router_port(port_name: str, router: ISPRouter) -> None:
-    host = get_switch_host_for_isp_router(router)
-    if not host:
-        return
-    db.session.execute(text("""
-        UPDATE switch_ports
-        SET port_role = 'uplink_udm', last_updated = NOW()
-        WHERE switch_host = :host AND port_name = :port
-    """), {'host': host, 'port': port_name})
-    run_switch_command(host, _build_isp_router_port_config(port_name, router))
-    db.session.commit()
-
-
-def _clear_isp_router_port(port_name: str, switch_host: str = None) -> None:
-    if not switch_host:
-        hosts = get_switch_hosts()
-        switch_host = hosts[0] if hosts else ''
-    if not switch_host:
-        return
-    db.session.execute(text("""
-        UPDATE switch_ports
-        SET port_role = 'unknown', last_updated = NOW()
-        WHERE switch_host = :host AND port_name = :port
-          AND port_role = 'uplink_udm'
-    """), {'host': switch_host, 'port': port_name})
-    run_switch_command(switch_host, _build_reset_port_config(port_name))
-    db.session.commit()
-
-
-def _update_isl_trunk_vlan(vlan_id: int, add: bool = True) -> None:
-    rows = db.session.execute(text("""
-        SELECT switch_host, port_name
-        FROM switch_ports
-        WHERE port_role = 'inter_switch'
-    """)).fetchall()
-    for switch_host, port_name in rows:
-        expanded = expand_switch_iface_name(port_name)
-        cfg = (_build_isl_trunk_add_vlan(expanded, vlan_id)
-               if add else _build_isl_trunk_remove_vlan(expanded, vlan_id))
-        run_switch_command(switch_host, cfg)
+def _parse_port_value(raw: str) -> tuple:
+    """Parse 'host|port' form value; falls back to switch_host_for_port for plain port names."""
+    if raw and '|' in raw:
+        host, _, port = raw.partition('|')
+        return host.strip(), port.strip()
+    return switch_host_for_port(raw), raw
 
 
 def _get_isp_router_locked_ports() -> dict:
@@ -448,7 +406,7 @@ def admin_isp_routers():
             name          = request.form.get('name', '').strip()
             vlan_id_raw   = request.form.get('vlan_id', '').strip()
             switch_port   = request.form.get('switch_port', '').strip() or None
-            switch_host_f = switch_host_for_port(switch_port) if switch_port else ''
+            switch_host_f, switch_port = _parse_port_value(switch_port) if switch_port else ('', None)
             if not name or not vlan_id_raw:
                 flash('Name and VLAN ID are required.', 'error')
                 return redirect(url_for('admin.isp_routers.admin_isp_routers'))
@@ -472,13 +430,46 @@ def admin_isp_routers():
             db.session.add(router)
             db.session.commit()
             policy_ok = _write_hp5130_policy_or_warn('adding ISP router')
-            _apply_isp_router_to_switches(router)
-            _update_isl_trunk_vlan(router.vlan_id, add=True)
-            if switch_port:
-                _set_isp_router_port(switch_port, router)
+
+            host_cmds = {}
+            for host in get_switch_hosts():
+                host_cmds.setdefault(host, []).append(_build_isp_router_switch_config(router, host))
+
+            isl_rows = db.session.execute(text(
+                "SELECT switch_host, port_name FROM switch_ports WHERE port_role = 'inter_switch'"
+            )).fetchall()
+            for isl_host, isl_port in isl_rows:
+                host_cmds.setdefault(isl_host, []).append(
+                    _build_isl_trunk_add_vlan(expand_switch_iface_name(isl_port), router.vlan_id)
+                )
+
+            if switch_port and switch_host_f:
+                db.session.execute(text("""
+                    UPDATE switch_ports SET port_role = 'uplink_udm', last_updated = NOW()
+                    WHERE switch_host = :host AND port_name = :port
+                """), {'host': switch_host_f, 'port': switch_port})
+                db.session.commit()
+                host_cmds.setdefault(switch_host_f, []).append(
+                    _build_isp_router_port_config(switch_port, router)
+                )
+
+            failed_hosts = []
+            for host, cfgs in host_cmds.items():
+                if run_switch_command(host, _combine_switch_cmds(*cfgs)) is None:
+                    failed_hosts.append(host)
+            if failed_hosts:
+                flash(f'Switch config push failed for: {", ".join(failed_hosts)}', 'warning')
+
             if policy_ok:
-                reset_acl_baseline()
-                reapply_all_ip_blocks()
+                def _bg_add():
+                    from app import app as _app
+                    with _app.app_context():
+                        try:
+                            reset_acl_baseline()
+                            reapply_all_ip_blocks()
+                        except Exception:
+                            logger.exception("Background ACL push failed after adding ISP router")
+                threading.Thread(target=_bg_add, daemon=True).start()
             else:
                 flash('ACL baseline was not pushed because the HP5130 policy JSON is stale.', 'warning')
             flash(
@@ -505,68 +496,129 @@ def admin_isp_routers():
                 except (ValueError, TypeError):
                     pass
             router.subnet      = f'{_net_word()}.{router.vlan_id}.0/24'
-            new_port           = request.form.get('switch_port', '').strip() or None
+            new_port_raw       = request.form.get('switch_port', '').strip() or None
+            new_switch_host_f, new_port = _parse_port_value(new_port_raw) if new_port_raw else ('', None)
             router.switch_port = new_port
-            router.switch_host = switch_host_for_port(new_port) if new_port else ''
+            router.switch_host = new_switch_host_f
             router.dhcp_snooping_trust = True
             new_nat = request.form.get('nat_logger_type', router.nat_logger_type).strip()
             if new_nat in ('none', 'udm', 'openwrt'):
                 router.nat_logger_type = new_nat
+            vlan_changed = old_vlan_id != router.vlan_id
+            port_changed = old_port != new_port
+            new_host     = get_switch_host_for_isp_router(router)
+
+            # DB: update switch_ports port roles before sending switch commands
+            if old_port and port_changed:
+                _old_host = old_switch_host or (get_switch_hosts()[0] if get_switch_hosts() else '')
+                if _old_host:
+                    db.session.execute(text("""
+                        UPDATE switch_ports SET port_role = 'unknown', last_updated = NOW()
+                        WHERE switch_host = :host AND port_name = :port AND port_role = 'uplink_udm'
+                    """), {'host': _old_host, 'port': old_port})
+            if new_port and new_host:
+                db.session.execute(text("""
+                    UPDATE switch_ports SET port_role = 'uplink_udm', last_updated = NOW()
+                    WHERE switch_host = :host AND port_name = :port
+                """), {'host': new_host, 'port': new_port})
             db.session.commit()
+
             policy_ok = _write_hp5130_policy_or_warn('updating ISP router')
 
+            # Collect commands per host, then send one SSH session per host
+            host_cmds = {}
+
             if old_pbr_name != router.pbr_name:
-                _remove_isp_router_pbr_from_switches(old_pbr_name)
-
-            vlan_changed = old_vlan_id != router.vlan_id
-            if vlan_changed:
-                old_gateway_ip = f'{_net_word()}.{old_vlan_id}.1'
                 for host in get_switch_hosts():
-                    run_switch_command(host, _build_pbr_undo_next_hop(router.pbr_name, old_gateway_ip))
-                _remove_isp_router_vlan_from_switches(old_vlan_id)
-
-            if old_port and old_port != new_port:
-                _clear_isp_router_port(old_port, old_switch_host)
-
-            _apply_isp_router_to_switches(router)
-
-            if new_port and new_port != old_port:
-                _set_isp_router_port(new_port, router)
-            elif new_port and new_port == old_port:
-                if vlan_changed:
-                    for host in get_switch_hosts():
-                        run_switch_command(host, _build_reset_port_config(new_port))
-                _set_isp_router_port(new_port, router)
+                    host_cmds.setdefault(host, []).append(_build_remove_isp_router_pbr(old_pbr_name))
 
             if vlan_changed:
-                _update_isl_trunk_vlan(old_vlan_id, add=False)
-            _update_isl_trunk_vlan(router.vlan_id, add=True)
+                old_gw = f'{_net_word()}.{old_vlan_id}.1'
+                for host in get_switch_hosts():
+                    host_cmds.setdefault(host, []).append(_build_pbr_undo_next_hop(router.pbr_name, old_gw))
+                    host_cmds.setdefault(host, []).append(_build_remove_isp_router_vlan(old_vlan_id))
+
+            if old_port and port_changed:
+                _old_host = old_switch_host or (get_switch_hosts()[0] if get_switch_hosts() else '')
+                if _old_host:
+                    host_cmds.setdefault(_old_host, []).append(_build_reset_port_config(old_port))
+
+            for host in get_switch_hosts():
+                host_cmds.setdefault(host, []).append(_build_isp_router_switch_config(router, host))
+
+            if new_port and new_host:
+                if vlan_changed and not port_changed:
+                    host_cmds.setdefault(new_host, []).append(_build_reset_port_config(new_port))
+                host_cmds.setdefault(new_host, []).append(_build_isp_router_port_config(new_port, router))
+
+            isl_rows = db.session.execute(text(
+                "SELECT switch_host, port_name FROM switch_ports WHERE port_role = 'inter_switch'"
+            )).fetchall()
+            for isl_host, isl_port in isl_rows:
+                expanded = expand_switch_iface_name(isl_port)
+                if vlan_changed:
+                    host_cmds.setdefault(isl_host, []).append(_build_isl_trunk_remove_vlan(expanded, old_vlan_id))
+                host_cmds.setdefault(isl_host, []).append(_build_isl_trunk_add_vlan(expanded, router.vlan_id))
+
+            failed_hosts = []
+            for host, cfgs in host_cmds.items():
+                if run_switch_command(host, _combine_switch_cmds(*cfgs)) is None:
+                    failed_hosts.append(host)
+            if failed_hosts:
+                flash(f'Switch config push failed for: {", ".join(failed_hosts)}', 'warning')
 
             if policy_ok:
-                baseline_ok = reset_acl_baseline()
-                pushed, blk_failed = reapply_all_ip_blocks()
+                def _bg_update():
+                    from app import app as _app
+                    with _app.app_context():
+                        try:
+                            reset_acl_baseline()
+                            reapply_all_ip_blocks()
+                        except Exception:
+                            logger.exception("Background ACL push failed after updating ISP router")
+                threading.Thread(target=_bg_update, daemon=True).start()
+                flash(f'ISP router "{router.name}" updated. Switch and ACL updates are being applied in the background.', 'success')
             else:
-                baseline_ok = False
-                pushed, blk_failed = 0, 1
-            msg = f'ISP router "{router.name}" updated.'
-            if baseline_ok and blk_failed == 0:
-                msg += f' ACL baseline pushed and {pushed} block(s) re-applied.'
-                flash(msg, 'success')
-            else:
-                msg += f' ACL baseline or block reapply had errors — check logs.'
-                flash(msg, 'warning')
+                flash(f'ISP router "{router.name}" updated. ACL baseline skipped — HP5130 policy JSON could not be written.', 'warning')
             return redirect(url_for('admin.isp_routers.admin_isp_routers'))
 
         elif action == 'delete':
             router = ISPRouter.query.get_or_404(request.form.get('router_id'))
             vlan_to_remove = router.vlan_id
+
+            host_cmds = {}
+
             if router.switch_port:
-                _clear_isp_router_port(router.switch_port, router.switch_host)
-            _remove_isp_router_from_switches(router)
-            _update_isl_trunk_vlan(vlan_to_remove, add=False)
+                port_host = router.switch_host or (get_switch_hosts()[0] if get_switch_hosts() else '')
+                if port_host:
+                    db.session.execute(text("""
+                        UPDATE switch_ports SET port_role = 'unknown', last_updated = NOW()
+                        WHERE switch_host = :host AND port_name = :port AND port_role = 'uplink_udm'
+                    """), {'host': port_host, 'port': router.switch_port})
+                    host_cmds.setdefault(port_host, []).append(_build_reset_port_config(router.switch_port))
+
+            for host in get_switch_hosts():
+                host_cmds.setdefault(host, []).append(_build_remove_isp_router_full(router))
+
+            isl_rows = db.session.execute(text(
+                "SELECT switch_host, port_name FROM switch_ports WHERE port_role = 'inter_switch'"
+            )).fetchall()
+            for isl_host, isl_port in isl_rows:
+                host_cmds.setdefault(isl_host, []).append(
+                    _build_isl_trunk_remove_vlan(expand_switch_iface_name(isl_port), vlan_to_remove)
+                )
+
             deleted_name = router.name
             db.session.delete(router)
             db.session.commit()
+
+            failed_hosts = []
+            for host, cfgs in host_cmds.items():
+                if run_switch_command(host, _combine_switch_cmds(*cfgs)) is None:
+                    failed_hosts.append(host)
+            if failed_hosts:
+                flash(f'Switch config push failed for: {", ".join(failed_hosts)}', 'warning')
+
             _write_hp5130_policy_or_warn('deleting ISP router')
             flash(f'ISP router "{deleted_name}" deleted.', 'success')
             return redirect(url_for('admin.isp_routers.admin_isp_routers'))

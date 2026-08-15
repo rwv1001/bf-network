@@ -246,7 +246,6 @@
                         <th>Subnet Size</th>
                         <th>ISP Router</th>
                         <th>Visible VLANs<br><span style="font-weight:400;font-size:11px;color:#888">empty&nbsp;=&nbsp;no&nbsp;inter&#8209;VLAN&nbsp;access</span></th>
-                        <th>Remove</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -259,16 +258,12 @@
                                    {% if entry.status in fixed_statuses %}readonly{% endif %}>
                         </td>                        
                         <td>
-                            <input type="text"
-                                   name="vlan_name"
-                                   value="{{ entry.display_name or entry.status|title }}">
+                            <input type="hidden" name="vlan_name" value="{{ entry.display_name or entry.status|title }}">
+                            <span>{{ entry.display_name or entry.status|title }}</span>
                         </td>
                         <td>
-                            <select name="vlan_id">
-                                {% for vlan_id in valid_vlan_ids %}
-                                <option value="{{ vlan_id }}" {% if entry.vlan_id == vlan_id %}selected{% endif %}>{{ vlan_id }}</option>
-                                {% endfor %}
-                            </select>
+                            <input type="hidden" name="vlan_id" value="{{ entry.vlan_id }}">
+                            <span>{{ entry.vlan_id }}</span>
                         </td>
                         <td>
                             <input type="text"
@@ -339,17 +334,11 @@
                                 {% endfor %}
                             </div>
                         </td>
-                        <td>
-                            <input type="checkbox"
-                                   name="vlan_remove"
-                                   value="{{ entry.status }}">
-                        </td>
                     </tr>
                     {% endfor %}
                 </tbody>
             </table>
         </div>
-        <button type="button" class="add-vlan-btn" id="add-vlan-row">+ Add VLAN</button>
     </div>
 
     <div class="button-group">             
@@ -500,64 +489,6 @@ function onVvChange(cb) {
     document.querySelectorAll('.vv-cb').forEach(function(cb) {
         cb.addEventListener('change', function() { onVvChange(this); });
     });
-
-    const addButton = document.getElementById('add-vlan-row');
-    if (addButton) {
-        var _newRowIdx = 10000;
-        addButton.addEventListener('click', () => {
-            _newRowIdx++;
-            const tableBody = document.querySelector('#vlan-table tbody');
-            if (!tableBody) return;
-            const row = document.createElement('tr');
-            const rowIdx = _newRowIdx;
-            row.innerHTML = `                
-                <td><input type="text" name="vlan_name" placeholder="Display name"></td>
-                <td>
-                    <select name="vlan_id">
-                        {% for vlan_id in valid_vlan_ids %}
-                        <option value="{{ vlan_id }}">{{ vlan_id }}</option>
-                        {% endfor %}
-                    </select>
-                </td>
-                <td><input type="text" name="vlan_ssid" placeholder="Optional SSID"></td>
-                <td>
-                    <label style="display: inline-flex; align-items: center; gap: 6px;">
-                        <input type="checkbox" name="vlan_wired" value="">
-                        Allow
-                    </label>
-                </td>
-                <td>
-                    <input type="checkbox" name="vlan_require_password" value="">
-                </td>
-                <td><span style="color: #777; font-size: 13px;">Not configurable</span></td>
-                <td>
-                    <select name="vlan_isp_router" style="font-size:13px; padding:4px 8px; border:1.5px solid #d4e0d4; border-radius:5px;">
-                        <option value="">— Default —</option>
-                        {% for r in isp_routers %}
-                        <option value="{{ r.id }}">{{ r.name }}</option>
-                        {% endfor %}
-                    </select>
-                </td>
-                <td>
-                    <input type="hidden" name="vlan_visible_vlans" id="vv_${rowIdx}" value="">
-                    <div class="vv-widget">
-                        {% for peer in vlan_entries %}
-                        <label class="vv-chip">
-                            <input type="checkbox" class="vv-cb"
-                                   data-row="${rowIdx}" data-vid="{{ peer.vlan_id }}">
-                            {{ peer.display_name or peer.status }} ({{ peer.vlan_id }})
-                        </label>
-                        {% endfor %}
-                    </div>
-                </td>
-                <td><input type="checkbox" name="vlan_remove" disabled></td>
-            `;
-            tableBody.appendChild(row);
-            row.querySelectorAll('.vv-cb').forEach(function(cb) {
-                cb.addEventListener('change', function() { onVvChange(this); });
-            });
-        });
-    }
 </script>
 
 <script>

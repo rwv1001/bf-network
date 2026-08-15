@@ -225,6 +225,9 @@ services:
       INSTITUTION_BUTTON_TEXT: ${INSTITUTION_BUTTON_TEXT:-}
       USAGE_POLICY_TEXT: ${USAGE_POLICY_TEXT:-}
       VALID_VLANS: ${VALID_VLANS:-10,20,30,40,50,60,70,80,90}
+      EXTERNAL_VLANS: ${EXTERNAL_VLANS:-}
+      EXTERNAL_VLAN_SUBNETS: ${EXTERNAL_VLAN_SUBNETS:-}
+      ADMIN_EXTRA_VLANS: ${ADMIN_EXTRA_VLANS:-1}
       VLAN_DEFAULTS: ${VLAN_DEFAULTS:-10:friars,20:staff,30:students,40:guests,50:contractors,60:iot,70:wifi-registered,80:kiosk,90:printers,99:management,250:wired_unregistered}
       VLAN_POOL_STATUSES: ${VLAN_POOL_STATUSES:-friars,staff,students,guests,contractors,volunteers,iot}
       VLAN_SUBNET_ID_MAP: ${VLAN_SUBNET_ID_MAP:-}

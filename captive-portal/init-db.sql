@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS devices (
     profile_snapshot TEXT,
     switch_iface VARCHAR(100),
     switch_iface_seen_at TIMESTAMP WITH TIME ZONE,
+    switch_host VARCHAR(50),
     internet_accessible  BOOLEAN,
     internet_blocked     BOOLEAN,
     assigned_vlan        INTEGER,
@@ -308,6 +309,16 @@ FROM dns_resolutions
 GROUP BY domain_name
 ORDER BY total_queries DESC;
 
+-- ── Table 9: DeviceOwnership history ────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS device_ownership (
+    id             SERIAL PRIMARY KEY,
+    mac_address    VARCHAR(17)  NOT NULL REFERENCES devices(mac_address) ON DELETE CASCADE,
+    user_id        INTEGER      REFERENCES users(id) ON DELETE SET NULL,
+    admin_id       INTEGER      REFERENCES admins(id) ON DELETE SET NULL,
+    start_datetime TIMESTAMP    NOT NULL DEFAULT NOW(),
+    end_datetime   TIMESTAMP
+);
+
 -- View: NAT sessions with DNS and user info (JOIN view)
 CREATE OR REPLACE VIEW nat_sessions_enriched AS
 SELECT
@@ -381,15 +392,7 @@ CREATE INDEX IF NOT EXISTS idx_pbq_client_ip   ON pihole_blocked_queries(client_
 CREATE INDEX IF NOT EXISTS idx_pbq_user_id     ON pihole_blocked_queries(user_id);
 CREATE INDEX IF NOT EXISTS idx_pbq_domain      ON pihole_blocked_queries(domain);
 
--- ── Table 9: DeviceOwnership history ────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS device_ownership (
-    id             SERIAL PRIMARY KEY,
-    mac_address    VARCHAR(17)  NOT NULL REFERENCES devices(mac_address) ON DELETE CASCADE,
-    user_id        INTEGER      REFERENCES users(id) ON DELETE SET NULL,
-    admin_id       INTEGER      REFERENCES admins(id) ON DELETE SET NULL,
-    start_datetime TIMESTAMP    NOT NULL DEFAULT NOW(),
-    end_datetime   TIMESTAMP
-);
+
 
 CREATE INDEX IF NOT EXISTS idx_do_mac        ON device_ownership(mac_address);
 CREATE INDEX IF NOT EXISTS idx_do_user_id    ON device_ownership(user_id);

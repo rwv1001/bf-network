@@ -9,6 +9,7 @@ Routes:
   GET      /api/admin/switch-current-config  return 'display current-configuration' output from all switches
 """
 
+import ipaddress
 import json
 import logging
 import os
@@ -27,7 +28,7 @@ from core.network import (
 )
 from core.vlan_utils import (
     FIXED_VLAN_STATUSES, POOL_PREFIX_CHOICES, POOL_PREFIX_STATUSES,
-    WIRED_UNREGISTERED_STATUS, get_vlan_entries, get_vlan_map,
+    WIRED_UNREGISTERED_STATUS, get_management_vlan_id, get_vlan_entries, get_vlan_map,
     get_vlan_prefix_map, parse_valid_vlan_ids, parse_visible_vlans,
     update_kea_config, restart_kea_container,
 )
@@ -59,6 +60,95 @@ def _get_vlan_prefix_by_id() -> dict:
         else:
             prefix_by_id[vlan_id] = 24
     return prefix_by_id
+
+
+def _parse_external_vlan_subnets() -> list:
+    """
+    Parse EXTERNAL_VLAN_SUBNETS env: '40:192.168.40.0/24,50:10.20.0.0/23'
+    Returns list of (vlan_id, IPv4Network).
+    """
+    raw = os.getenv('EXTERNAL_VLAN_SUBNETS', '') or ''
+    out = []
+    for entry in raw.split(','):
+        entry = entry.strip()
+        if not entry or ':' not in entry:
+            continue
+        vlan_str, cidr = entry.split(':', 1)
+        try:
+            vlan_id = int(vlan_str.strip())
+            net = ipaddress.ip_network(cidr.strip(), strict=False)
+        except (ValueError, TypeError):
+            continue
+        out.append((vlan_id, net))
+    return out
+
+
+def _collect_internal_networks(prefix_by_status: dict) -> list:
+    """
+    Build IPv4Network list for Kea-managed pools:
+    NETWORK_WORD.{vlan_id}.0/{prefix}
+    """
+    network_word = os.getenv('NETWORK_WORD', '192.168')
+    vlan_map = get_vlan_map()
+    nets = []
+    for status, vlan_id in vlan_map.items():
+        prefix = int(prefix_by_status.get(status, 24) or 24)
+        if prefix not in (24, 23, 22, 21):
+            prefix = 24
+        try:
+            nets.append(
+                ipaddress.ip_network(f'{network_word}.{int(vlan_id)}.0/{prefix}', strict=False)
+            )
+        except ValueError:
+            continue
+    # Management / wired defaults if present in env
+    for env_key, default_vid in (('MANAGEMENT_VLAN', 99), ('WIRED_VLAN', 250)):
+        try:
+            vid = int(os.getenv(env_key, str(default_vid)))
+        except ValueError:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(f'{network_word}.{vid}.0/24', strict=False))
+        except ValueError:
+            continue
+    return nets
+
+
+def _find_subnet_overlaps(networks: list) -> list:
+    """Return list of (net_a, net_b) pairs that overlap (skip identical duplicates)."""
+    overlaps = []
+    for i, a in enumerate(networks):
+        for b in networks[i + 1:]:
+            if a == b:
+                continue
+            if a.overlaps(b):
+                overlaps.append((str(a), str(b)))
+    return overlaps
+
+
+def _proposed_networks_for_overlap_check(prefix_by_status: dict) -> list:
+    """
+    Collect every subnet that must not overlap after a VLAN / prefix save:
+      - Kea-managed internal pools (NETWORK_WORD.{vlan}.0/{prefix})
+      - management + wired /24
+      - external upstream-DHCP subnets from EXTERNAL_VLAN_SUBNETS
+      - ISP router subnets from the DB (when available)
+    """
+    nets = list(_collect_internal_networks(prefix_by_status))
+    for _vid, ext_net in _parse_external_vlan_subnets():
+        nets.append(ext_net)
+    try:
+        for router in ISPRouter.query.all():
+            subnet = getattr(router, 'subnet', None)
+            if not subnet:
+                continue
+            try:
+                nets.append(ipaddress.ip_network(str(subnet).strip(), strict=False))
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    return nets
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +288,17 @@ def vlan_config():
                 changed_statuses.append(status)
             Setting.set_value(f'vlan_prefix_{status}', str(prefix))
             prefix_by_status[status] = prefix
+
+        # Reject saves that would make any managed subnet overlap another
+        # (internal pools vs each other, vs external upstream-DHCP VLANs, vs ISP subnets).
+        try:
+            for net_a, net_b in _find_subnet_overlaps(
+                _proposed_networks_for_overlap_check(prefix_by_status)
+            ):
+                errors.append(f'Subnet overlap: {net_a} overlaps {net_b}')
+        except Exception as exc:
+            logger.exception('Subnet overlap check failed')
+            errors.append(f'Subnet overlap check failed: {exc}')
 
         if errors:
             db.session.rollback()
@@ -357,7 +458,11 @@ def vlan_config():
     # GET
     vlan_map     = get_vlan_map()
     prefix_map   = get_vlan_prefix_map()
-    vlan_entries = [e for e in get_vlan_entries() if e.status != WIRED_UNREGISTERED_STATUS]
+    mgmt_vlan_id = get_management_vlan_id()
+    vlan_entries = [
+        e for e in get_vlan_entries()
+        if e.status != WIRED_UNREGISTERED_STATUS and e.vlan_id != mgmt_vlan_id
+    ]
     valid_vlan_ids = parse_valid_vlan_ids()
     isp_routers  = ISPRouter.query.order_by(ISPRouter.id).all()
 

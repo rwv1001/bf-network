@@ -345,7 +345,7 @@ function showPushBanner(msg, type) {
                             <select name="switch_port">
                                 <option value="">— Unassigned —</option>
                                 {% for h, p in switch_ports_by_host %}
-                                <option value="{{ p }}" {% if router.switch_port == p %}selected{% endif %}>{{ h }} — {{ p }}</option>
+                                <option value="{{ h }}|{{ p }}" {% if router.switch_port == p and router.switch_host == h %}selected{% endif %}>{{ h }} — {{ p }}</option>
                                 {% endfor %}
                             </select>
                             {% else %}
@@ -420,7 +420,7 @@ function showPushBanner(msg, type) {
                 <select name="switch_port">
                     <option value="">— Unassigned —</option>
                     {% for h, p in switch_ports_by_host %}
-                    <option value="{{ p }}">{{ h }} — {{ p }}</option>
+                    <option value="{{ h }}|{{ p }}">{{ h }} — {{ p }}</option>
                     {% endfor %}
                 </select>
                 {% else %}

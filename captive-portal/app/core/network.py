@@ -427,6 +427,10 @@ def reset_acl_baseline() -> bool:
             policy_path,
             exc,
         )
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
         return False
 
     if not os.path.isfile(policy_path):
@@ -859,6 +863,11 @@ def reapply_all_ip_blocks() -> tuple:
     Returns (pushed_count, failed_count).
     """
     from models import IPLease, Device
+    # Ensure the session is clean in case a prior call left it in a failed state.
+    try:
+        db.session.rollback()
+    except Exception:
+        pass
     now = datetime.utcnow()
     pushed = 0
     failed = 0
