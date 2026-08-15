@@ -327,24 +327,31 @@ SELECT
     dns.query_count AS dns_query_count,
     n.packet_count,
     EXTRACT(EPOCH FROM (n.session_end - n.session_start)) AS duration_seconds,
-    -- Prefer the port recorded at session time, fall back to device's last-known port
     COALESCE(n.switch_iface, d.switch_iface) AS switch_iface,
     n.switch_host
 FROM nat_sessions n
--- Join on MAC address: stable, unique, stored at session-capture time.
--- IP-based joins break when DHCP reassigns the address or the device is deleted.
 LEFT JOIN devices d ON n.src_mac = d.mac_address
-LEFT JOIN users u ON d.user_id = u.id
+LEFT JOIN LATERAL (
+    SELECT o.user_id
+    FROM device_ownership o
+    WHERE o.mac_address = n.src_mac
+      AND o.start_datetime < n.session_start
+      AND (o.end_datetime IS NULL OR n.session_end < o.end_datetime)
+    ORDER BY o.start_datetime DESC
+    LIMIT 1
+) own ON true
+LEFT JOIN users u ON u.id = own.user_id
 LEFT JOIN LATERAL (
     SELECT domain_name, resolved_ip, query_count
     FROM dns_resolutions
     WHERE resolved_ip = n.dst_ip
-    AND last_seen >= n.session_start - INTERVAL '12 hours'
-    AND last_seen <= n.session_start + INTERVAL '12 hours'
+      AND last_seen >= n.session_start - INTERVAL '12 hours'
+      AND last_seen <= n.session_start + INTERVAL '12 hours'
     ORDER BY ABS(EXTRACT(EPOCH FROM (last_seen - n.session_start)))
     LIMIT 1
 ) dns ON true
 ORDER BY n.session_start DESC;
+
 
 -- ============================================================
 -- Pi-Hole blocked queries log
