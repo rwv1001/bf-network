@@ -207,7 +207,8 @@ def make_vlan_subnet(
                     f"{ip_at_offset(network, bounds['registered_start'])}"
                     f" - "
                     f"{ip_at_offset(network, bounds['registered_end'])}"
-                )
+                ),
+                "client-classes": ["NOT_BLOCKED"]
             },
         ],
         "interface": f"eth0.{vlan}",
@@ -422,7 +423,8 @@ def main():
             # client-class assignment (e.g. BLOCKED class set by central_import.py).
             "reservations-global": True,
             "client-classes": [
-                {"name": "BLOCKED", "test": "0 == 1"}
+                {"name": "BLOCKED"},
+                {"name": "NOT_BLOCKED", "test": "not member('BLOCKED')"}
             ],
             "subnet4": subnet4,
             "loggers": [

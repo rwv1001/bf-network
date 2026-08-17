@@ -553,7 +553,7 @@ def _handle_registration_response(payload: dict, central_response: dict) -> None
 
     if central_response.get("device_blocked") and not device.internet_blocked:
         logger.info("central: device %s is blocked at another site — applying block locally", mac)
-        from app import apply_device_block
+        from core.network import apply_device_block
         apply_device_block(device, flash_messages=False)
         return
 
@@ -568,7 +568,7 @@ def _handle_registration_response(payload: dict, central_response: dict) -> None
                 o.mac_address for o in
                 DeviceOwnership.query.filter_by(user_id=user.id, end_datetime=None).all()
             ]
-            from app import apply_device_block
+            from core.network import apply_device_block
             for d in Device.query.filter(Device.mac_address.in_(active_macs)).all():
                 apply_device_block(d, flash_messages=False)
 
@@ -581,7 +581,7 @@ def _apply_inbound(event_type: str, data: dict) -> None:
     """
     from models import Device, User, DeviceOwnership
     from extensions import db
-    from app import apply_device_block, apply_device_unblock
+    from core.network import apply_device_block, apply_device_unblock
 
     logger.info("central inbound: %s %s", event_type, data)
 

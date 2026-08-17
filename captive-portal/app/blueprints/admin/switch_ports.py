@@ -139,8 +139,16 @@ def _discover_switch_ports(switch_host: str) -> list:
         section = state_sections[i]
         if '% ' in section or 'Wrong' in section or 'Error' in section:
             continue
-        m = re.search(r'Current state:\s*(\S+)', section, re.IGNORECASE)
-        link = m.group(1).upper() if m else 'UNKNOWN'
+        m = re.search(r'Current state:\s*(\S+(?:\s+\S+)?)', section, re.IGNORECASE)
+        raw = (m.group(1) if m else 'UNKNOWN').upper()
+        if 'ADMINISTRATIVELY' in raw:
+            link = 'ADMDOWN'
+        elif raw.startswith('UP'):
+            link = 'UP'
+        elif 'DOWN' in raw:
+            link = 'DOWN'
+        else:
+            link = raw[:10]
         existing[full_name] = link
 
     if not existing:

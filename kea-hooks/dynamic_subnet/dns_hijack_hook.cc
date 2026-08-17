@@ -1547,12 +1547,40 @@ extern "C"
     int lease4_select(CalloutHandle &handle)
 
     {
+
         try
         {
             bool fake_allocation = true;
             handle.getArgument("fake_allocation", fake_allocation);
             const bool force_nak =
                 get_bool_context(handle, "policy_force_nak");
+
+            Lease4Ptr debug_lease;
+            Pkt4Ptr debug_query;
+
+            handle.getArgument("lease4", debug_lease);
+            handle.getArgument("query4", debug_query);
+
+            std::cout << "DNS Hijack Hook: [DEBUG] lease4_select EARLY"
+                      << " fake_allocation=" << (fake_allocation ? "true" : "false")
+                      << " force_nak=" << (force_nak ? "true" : "false");
+
+            if (debug_lease)
+            {
+                const std::string candidate = debug_lease->addr_.toText();
+
+                std::cout << " candidate=" << candidate
+                          << " blocked_pool="
+                          << (is_blocked_pool_ip(candidate) ? "true" : "false");
+            }
+
+            if (debug_query)
+            {
+                std::cout << " packet_classes="
+                          << debug_query->getClasses().toText();
+            }
+
+            std::cout << std::endl;
 
             if (!fake_allocation && force_nak)
             {

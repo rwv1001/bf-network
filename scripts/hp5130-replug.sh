@@ -413,15 +413,15 @@ if [ "${IS_AP_PORT}" = "1" ]; then
   _ap_confirmed=""
   if [ -n "${DATABASE_URL:-}" ] && command -v psql >/dev/null 2>&1; then
     _ap_confirmed=$(psql "${DATABASE_URL}" -tAc \
-      "SELECT 1 FROM devices WHERE mac_address = '${MAC_COLON}' AND current_vlan = ${MANAGEMENT_VLAN} LIMIT 1" \
+      "SELECT 1 FROM devices WHERE mac_address = '${MAC_COLON}' AND assigned_vlan = ${MANAGEMENT_VLAN} LIMIT 1" \
       2>/dev/null | tr -d ' \r\n' || true)
   elif command -v docker >/dev/null 2>&1; then
     _ap_confirmed=$(docker exec "$REPLUG_DB_CONTAINER" psql -U "$REPLUG_DB_USER" -d "$REPLUG_DB_NAME" -tAc \
-      "SELECT 1 FROM devices WHERE mac_address = '${MAC_COLON}' AND current_vlan = ${MANAGEMENT_VLAN} LIMIT 1" \
+      "SELECT 1 FROM devices WHERE mac_address = '${MAC_COLON}' AND assigned_vlan = ${MANAGEMENT_VLAN} LIMIT 1" \
       2>/dev/null | tr -d ' \r\n' || true)
   fi
   if [ "${_ap_confirmed}" != "1" ]; then
-    log "AP_PORT_CLIENT_SKIP mac=$MAC_NORM iface=$IFACE – not on management VLAN ${MANAGEMENT_VLAN}, skipping PoE cycle (WiFi client passthrough)"
+    log "AP_PORT_CLIENT_SKIP mac=$MAC_NORM iface=$IFACE – not assigned to management VLAN ${MANAGEMENT_VLAN}, skipping PoE cycle (WiFi client passthrough)"
     exit 0
   fi
 fi
