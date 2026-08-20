@@ -23,6 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXPECT_SCRIPT="$SCRIPT_DIR/test-switch-temp.exp"
 BF_REPO_URL="https://github.com/rwv1001/bf-network.git"
 BF_REPO_BRANCH="main"
+KEA_LFC_FIX_REV="2026-08-21-v4"
 
 # Encrypted, resumable installer state. Override with --state-file PATH.
 STATE_FILE="${BF_INSTALL_STATE_FILE:-/var/lib/bf-network-installer/state.gpg}"
@@ -617,7 +618,10 @@ csv_append() {
 }
 
 shell_quote() {
-    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\''/g")"
+    # Bash's %q produces a shell-safe representation, including embedded
+    # quotes/newlines. The old sed-based quoting dropped the backslashes from
+    # embedded single quotes and could make remote bash -lc commands invalid.
+    printf '%q' "$1"
 }
 
 remote_quote() {
@@ -1855,7 +1859,123 @@ s/\"valid-lifetime\": 600,/\"valid-lifetime\": int(os.environ.get(\"KEA_VALID_LI
 SEOF
 sed -i -f /tmp/fix-kea.sed scripts/generate-kea-config.py
 rm -f /tmp/fix-kea.sed"
-    info "6"
+    
+    unset 'COMPLETED_STEPS[pi_compose_up]'
+
+
+}
+
+ensure_kea_lfc_path() {
+    # Keep the Kea cleanup command independent of the binary's absolute path.
+    # Older installer versions replaced /usr/sbin/kea-lfc with a nested
+    # "sh -c" wrapper containing $LFC. Because the whole Kea service already
+    # runs inside a single-quoted sh -c command, that nested wrapper can break
+    # the shell program and make the container restart continuously. Rewrite
+    # the complete cleanup stanza to one canonical, Compose-safe form instead.
+    local q_repo tmp_lfc_patch changed
+    q_repo="$(shell_quote "$PI_REPO_DIR")"
+
+    info "Normalizing Kea lease cleanup command"
+    echo "Kea LFC repair revision: $KEA_LFC_FIX_REV"
+
+    tmp_lfc_patch="$(mktemp)"
+    cat > "$tmp_lfc_patch" <<'PYEOF'
+#!/usr/bin/env python3
+import re
+from pathlib import Path
+
+path = Path("docker-compose.yml")
+text = path.read_text()
+
+# Match the whole cleanup stanza, not just the executable token. This repairs
+# both the original hard-coded path and the broken nested sh -c/$LFC wrapper
+# produced by older installer revisions.
+pattern = re.compile(
+    r'(?ms)^(?P<i>[ \t]*)echo "\$\(date -Iseconds\) kea-lfc: running lease file cleanup" >&2\n'
+    r'(?P<body>.*?)'
+    r'^(?P<s>[ \t]*)sleep \$\{LFC_INTERVAL:-300\}\n'
+)
+
+m = pattern.search(text)
+if not m:
+    raise SystemExit(
+        "kea-lfc patch: could not locate the lease cleanup stanza in docker-compose.yml"
+    )
+
+i = m.group("i")
+s = m.group("s")
+replacement = (
+    f'{i}echo "$(date -Iseconds) kea-lfc: running lease file cleanup" >&2\n'
+    f'{i}if command -v kea-lfc >/dev/null 2>&1; then\n'
+    f'{i}  kea-lfc -4 \\\n'
+    f'{i}    -c /kea/config/dhcp4.json \\\n'
+    f'{i}    -p /usr/local/var/run/kea/kea-lfc.pid \\\n'
+    f'{i}    -x /kea/leases/kea-leases4.csv.1 \\\n'
+    f'{i}    -i /kea/leases/kea-leases4.csv.2 \\\n'
+    f'{i}    -o /kea/leases/kea-leases4.csv.3 \\\n'
+    f'{i}    -f /kea/leases/kea-leases4.csv.4 || true\n'
+    f'{i}else\n'
+    f'{i}  echo "$(date -Iseconds) kea-lfc: binary not found in PATH; skipping cleanup" >&2\n'
+    f'{i}fi\n'
+    f'{s}fi\n'
+    f'{s}sleep ${{LFC_INTERVAL:-300}}\n'
+)
+
+new_text = text[:m.start()] + replacement + text[m.end():]
+
+# Validate the normalized text here, inside Python, rather than sending grep
+# expressions containing nested quotes through ssh -> sudo -> bash -lc.
+bad_markers = (
+    "/usr/sbin/kea-lfc",
+    'LFC="$$(command -v kea-lfc',
+    "$$LFC",
+)
+for marker in bad_markers:
+    if marker in new_text:
+        raise SystemExit(f"kea-lfc patch: stale broken marker remains: {marker}")
+
+required_markers = (
+    "if command -v kea-lfc >/dev/null 2>&1; then",
+    "kea-lfc -4 \\",
+    "-p /usr/local/var/run/kea/kea-lfc.pid \\",
+    "binary not found in PATH; skipping cleanup",
+)
+for marker in required_markers:
+    if marker not in new_text:
+        raise SystemExit(f"kea-lfc patch: required normalized marker missing: {marker}")
+
+changed = new_text != text
+if changed:
+    path.write_text(new_text)
+    print("CHANGED")
+else:
+    print("UNCHANGED")
+PYEOF
+
+    pi_scp_to "$tmp_lfc_patch" "/tmp/bf-normalize-kea-lfc.py"
+    rm -f "$tmp_lfc_patch"
+
+    changed="$(pi_sudo "cd $q_repo && python3 /tmp/bf-normalize-kea-lfc.py; rc=\$?; rm -f /tmp/bf-normalize-kea-lfc.py; exit \$rc")" \
+        || die "Failed to normalize the Kea lease cleanup command."
+
+    if printf '%s\n' "$changed" | grep -q '^CHANGED$'; then
+        echo "Kea lease cleanup command repaired."
+        unset 'COMPLETED_STEPS[pi_compose_up]'
+        state_save
+    else
+        echo "Kea lease cleanup command already normalized."
+    fi
+
+    # The normalizer validates the exact stale/required markers itself. Keeping
+    # that validation in Python avoids nested quote handling through SSH.
+
+    # Parse the final Compose file now, before starting/restarting Kea. This
+    # catches quoting/YAML mistakes in the repaired entrypoint immediately.
+    pi_sudo "cd $q_repo && if docker compose version >/dev/null 2>&1; then \
+        docker compose config >/dev/null; \
+      else \
+        docker-compose config >/dev/null; \
+      fi" || die "docker-compose.yml is invalid after the Kea LFC repair."
 }
 
 install_fixed_npm_setup_py() {
@@ -1940,10 +2060,26 @@ seed_isp_routers() {
         VLAN_ISP_INDEX[$vlan]=$((ans - 1))
     done
 
-    local sql name subnet vlan_id switch_host switch_port gateway_ip isp_name display
+        local sql name subnet vlan_id switch_host switch_port gateway_ip isp_name display
     sql="$(mktemp)"
+
+    echo
+    echo "========== seed_isp_routers DEBUG =========="
+    echo "VLAN_LIST=${VLAN_LIST[*]}"
+    echo "ISP_NAMES:"
+    for i in "${!ISP_NAMES[@]}"; do
+        echo "  [$i] name='${ISP_NAMES[$i]}' net='${ISP_NETWORK_PORTION[$i]:-}' gw='${ISP_GW[$i]:-}'"
+    done
+    echo "VLAN → ISP index:"
+    for vlan in "${VLAN_LIST[@]}"; do
+        echo "  vlan $vlan  ans='${SAVED_ANSWERS[vlan_${vlan}_isp]:-}'  idx='${VLAN_ISP_INDEX[$vlan]}'  isp='${ISP_NAMES[${VLAN_ISP_INDEX[$vlan]}]}'"
+    done
+    echo "==========================================="
+
     {
         echo "BEGIN;"
+        echo "SELECT 'before' AS stage, id, name, vlan_id FROM isp_routers;"
+        echo "SELECT 'before' AS stage, id, status, vlan_id, display_name, isp_router_id FROM vlan_mappings ORDER BY vlan_id;"
 
         for i in "${!ISP_NAMES[@]}"; do
             name="${ISP_NAMES[$i]}"
@@ -1974,50 +2110,59 @@ ON CONFLICT (name) DO UPDATE SET
                 "$(sql_quote_or_null "$switch_host")"
         done
 
-        # Ensure user VLAN mapping rows exist, then set isp_router_id
+        echo "SELECT 'after_isp_insert' AS stage, id, name, vlan_id FROM isp_routers;"
+
         for vlan in "${VLAN_LIST[@]}"; do
             idx="${VLAN_ISP_INDEX[$vlan]}"
             isp_name="${ISP_NAMES[$idx]}"
-
-            # Prefer saved answers (works on re-run / seed-only path)
             display="${SAVED_ANSWERS[vlan_${vlan}_name]:-VLAN${vlan}}"
             status="$display"
             ssid="${SAVED_ANSWERS[vlan_${vlan}_ssid]:-}"
 
+            echo "-- vlan $vlan → isp '$isp_name' (index $idx)"
+
             printf "INSERT INTO vlan_mappings (
-  status, vlan_id, display_name, ssid, wired_enabled, require_password
+  status, vlan_id, display_name, ssid, wired_enabled, require_password, isp_router_id
 )
-SELECT %s, %s, %s, %s, TRUE, TRUE
+SELECT %s, %s, %s, %s, TRUE, TRUE,
+       (SELECT id FROM isp_routers WHERE name = %s)
 WHERE NOT EXISTS (SELECT 1 FROM vlan_mappings WHERE vlan_id = %s);\n" \
                 "$(sql_quote "$status")" \
                 "$vlan" \
                 "$(sql_quote "$display")" \
                 "$(sql_quote_or_null "$ssid")" \
+                "$(sql_quote "$isp_name")" \
                 "$vlan"
 
-            printf "UPDATE vlan_mappings SET
-  status = %s,
-  display_name = %s,
-  ssid = %s,
-  isp_router_id = (SELECT id FROM isp_routers WHERE name = %s)
-WHERE vlan_id = %s
-  AND (SELECT id FROM isp_routers WHERE name = %s) IS NOT NULL;\n" \
+            printf "UPDATE vlan_mappings
+SET status = %s,
+    display_name = %s,
+    ssid = %s,
+    isp_router_id = (SELECT id FROM isp_routers WHERE name = %s)
+WHERE vlan_id = %s;\n" \
                 "$(sql_quote "$status")" \
                 "$(sql_quote "$display")" \
                 "$(sql_quote_or_null "$ssid")" \
                 "$(sql_quote "$isp_name")" \
+                "$vlan"
+
+            printf "SELECT 'vlan_%s' AS stage, id, vlan_id, status, isp_router_id,
+       (SELECT id FROM isp_routers WHERE name = %s) AS looked_up_isp_id
+FROM vlan_mappings WHERE vlan_id = %s;\n" \
                 "$vlan" \
-                "$(sql_quote "$isp_name")"
+                "$(sql_quote "$isp_name")" \
+                "$vlan"
         done
 
+        echo "SELECT 'after' AS stage, id, status, vlan_id, display_name, isp_router_id FROM vlan_mappings ORDER BY vlan_id;"
         echo "COMMIT;"
     } > "$sql"
 
-    echo "--- seed_isp_routers.sql ---"
-    cat "$sql"
-    echo "----------------------------"
+    echo
+    echo "========== GENERATED SQL ($sql) =========="
+    cat -n "$sql"
+    echo "=========================================="
 
-    # Wait until DB is accepting connections
     pi_sudo "cd $q_repo && for i in \$(seq 1 30); do
       docker compose exec -T db pg_isready -U portal_user -d captive_portal >/dev/null 2>&1 && exit 0
       sleep 2
@@ -2027,15 +2172,20 @@ WHERE vlan_id = %s
     pi_sudo "cd $q_repo && \
       docker cp /tmp/seed_isp_routers.sql captive-portal-db:/tmp/seed_isp_routers.sql && \
       docker compose exec -T db \
-        psql -U portal_user -d captive_portal -v ON_ERROR_STOP=1 -f /tmp/seed_isp_routers.sql && \
+        psql -U portal_user -d captive_portal -v ON_ERROR_STOP=1 -e -f /tmp/seed_isp_routers.sql && \
       docker compose exec -T db rm -f /tmp/seed_isp_routers.sql && \
       rm -f /tmp/seed_isp_routers.sql"
 
-    # Fail the install if any user VLAN still has NULL isp_router_id
+    echo
+    echo "========== TABLES AFTER SEED =========="
+    echo "See SELECT 'after' output above (dump skipped to avoid ssh quoting)."
+    echo "======================================="
+
     local nulls
     nulls="$(pi_ssh "cd $q_repo && docker compose exec -T db psql -U portal_user -d captive_portal -tAc \
       \"SELECT count(*) FROM vlan_mappings WHERE vlan_id IN ($(IFS=,; echo "${VLAN_LIST[*]}")) AND isp_router_id IS NULL\"")"
     nulls="$(echo "$nulls" | tr -d '[:space:]')"
+    echo "DEBUG seed_isp_routers: null isp_router_id count on user VLANs = '${nulls}'"
     if [ "${nulls:-1}" != "0" ]; then
         die "seed_isp_routers: ${nulls} vlan_mappings row(s) still have NULL isp_router_id"
     fi
@@ -2101,6 +2251,7 @@ EOF"
 reset_kea_schema() {
     local q_repo
     q_repo="$(shell_quote "$PI_REPO_DIR")"
+    unset 'COMPLETED_STEPS[seed_isp_routers]'
 
     info "Stopping services that may hold DB connections"
     pi_sudo "cd $q_repo && docker compose stop npm web kea redis freeradius dns-parser dnsmasq-hijack nat-parser pihole tunnel rsyslog watchdog npm-setup || true"
@@ -2577,6 +2728,11 @@ install_pi_server() {
         echo "Skipping completed step: repository patch"
     fi
 
+    # Always check this separately from pi_repo_patch. Existing saved installer
+    # state may mark the broader repository patch complete even though the
+    # cloned compose file still contains the obsolete /usr/sbin path.
+    ensure_kea_lfc_path
+
     # Always refresh npm/setup.py during development because it is small,
     # idempotent, and fixes both first-run admin setup and DNS-01 cert import.
 
@@ -2617,6 +2773,7 @@ install_pi_server() {
 
     if ! step_done "pi_db_wipe"; then
         wipe_pi_docker_data
+        unset 'COMPLETED_STEPS[seed_isp_routers]'
         complete_step "pi_db_wipe"
     else
         echo "Skipping completed step: Pi Docker DB wipe"
@@ -2639,18 +2796,52 @@ install_pi_server() {
 
         apply_kea_schema "$q_repo"
 
+        info "Building and verifying Kea image"
+        pi_sudo "cd $q_repo && if docker compose version >/dev/null 2>&1; then docker compose build kea; else docker-compose build kea; fi"
+        kea_lfc_binary="$(pi_sudo "cd $q_repo && if docker compose version >/dev/null 2>&1; then docker compose run --rm --no-deps --entrypoint sh kea -c 'command -v kea-lfc'; else docker-compose run --rm --no-deps --entrypoint sh kea -c 'command -v kea-lfc'; fi" 2>/dev/null | tail -n 1)"
+        [ -n "$kea_lfc_binary" ] || die "Kea image does not provide kea-lfc in PATH. Check kea/Dockerfile before starting the stack."
+        echo "Verified kea-lfc binary in image: $kea_lfc_binary"
+
         info "Starting full bf-network Docker stack"
         pi_sudo "cd $q_repo && if docker compose version >/dev/null 2>&1; then docker compose up -d --build; else docker-compose up -d --build; fi"
+
+        info "Verifying Kea container is running"
+        pi_sudo "cd $q_repo && for attempt in \$(seq 1 15); do
+            if docker inspect -f '{{.State.Running}}' kea 2>/dev/null | grep -qx true; then
+                exit 0
+            fi
+            sleep 1
+        done
+        docker compose logs --tail=80 kea >&2
+        exit 1" \
+            || die "Kea container did not stay running after startup."
+
+
         complete_step "pi_compose_up"
         state_save
     else
         echo "Skipping completed step: Docker Compose startup"
     fi
 
+    if step_done "seed_isp_routers"; then
+        nulls="$(pi_ssh "cd $q_repo && docker compose exec -T db psql -U portal_user -d captive_portal -tAc \
+          \"SELECT count(*) FROM vlan_mappings WHERE vlan_id IN ($(IFS=,; echo "${VLAN_LIST[*]}")) AND isp_router_id IS NULL\"")"
+        nulls="$(echo "$nulls" | tr -d '[:space:]')"
+        echo "DEBUG: existing seed checkpoint; NULL isp_router_id count=${nulls:-?}"
+        if [ "${nulls:-1}" != "0" ]; then
+            echo "vlan_mappings missing isp_router_id — re-running seed now"
+            unset 'COMPLETED_STEPS[seed_isp_routers]'
+            state_save
+        fi
+    fi
+
     if ! step_done "seed_isp_routers"; then
         seed_isp_routers "$q_repo"
         complete_step "seed_isp_routers"
+    else
+        echo "Skipping completed step: seed_isp_routers"
     fi
+
 
     if ! step_done "pi_npm_setup_script"; then
         install_fixed_npm_setup_py
