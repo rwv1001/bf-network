@@ -382,7 +382,17 @@ for vlan in vlans:
     emit(f"acl advanced {acl}")
     emit(f' description "VLAN{target_id} Outbound Isolation"')
 
+    # Portal must remain reachable across isolation:
+    # - on user/wired SVIs, allow packets sourced from the portal (replies, DNS)
+    # - on the management SVI, allow packets destined for the portal
+    if target_id == int(management_vlan):
+        emit(f" rule 24999 permit ip destination {portal_ip} 0")
+    else:
+        emit(f" rule 24999 permit ip source {portal_ip} 0")
+
     rule = 25000
+
+    
     for peer in vlans:
         peer_id = int(peer["vlan_id"])
         if peer_id == target_id:
