@@ -13,6 +13,7 @@ set username     ""
 set name ""
 set pubkey   ""  
 set debug 0
+set do_wipe 0
 
 # Parse command line arguments
 for {set i 0} {$i < $argc} {incr i} {
@@ -66,6 +67,9 @@ for {set i 0} {$i < $argc} {incr i} {
         "-debug" {
             set debug 1
         }
+        "-wipe" {
+            set do_wipe 1
+        }
         default {
             puts "Unknown option: $arg"
             exit 1
@@ -109,6 +113,13 @@ sleep 1
 for {set wake 1} {$wake <= $max_wake} {incr wake} {
     send "\r"
     expect {
+        -re {Automatic configuration is running} {
+            puts "Auto-config running — sending Ctrl-C"
+            send "\x03"
+            sleep 1
+            send "\r"
+            exp_continue
+        }
         -re {[Ll]ogin:|[Uu]sername:} {
             set woke 1
             # stay in expect buffer state; handle login below
@@ -139,7 +150,13 @@ if {$woke == 0} {
     puts "ERROR: Did not see Login/Password/CLI prompt after $max_wake tries"
     exit 1
 }
-
+proc debug_pw {label pw} {
+    set shown $pw
+    if {$shown eq ""} {
+        set shown "(empty)"
+    }
+    puts "DEBUG $label: len=[string length $pw] value=\[$shown\]"
+}
 # === LOGIN ===
 set max_attempts 3
 set attempt 1
@@ -162,6 +179,7 @@ while {$attempt <= $max_attempts} {
     # woke == 2 → already at Password:
 
     if {$attempt == 1} {
+        debug_pw "login attempt 1 using current_pass" $current_pass
         send "$current_pass\r"
     } else {
         flush stdout
@@ -171,6 +189,7 @@ while {$attempt <= $max_attempts} {
         }
         stty echo
         puts ""
+        debug_pw "login retry using current_pass" $current_pass
         send "$current_pass\r"
     }
 
@@ -222,6 +241,174 @@ set timeout 30
 send "undo terminal monitor\r"
 expect { -re {%[^\r\n]*[\r\n]+} { exp_continue } -re {<[^>\r\n]+>} {} }
 
+# === FACTORY RESET (optional) ===
+if {$do_wipe} {
+    puts "Wiping switch to factory defaults..."
+    send "restore factory-default\r"
+    expect {
+        -re {\[Y/N\]:} {
+            send "Y\r"
+        }
+        -re {[Cc]ontinue\?} {
+            expect -re {\[Y/N\]:}
+            send "Y\r"
+        }
+        timeout {
+            puts "ERROR: No confirmation after restore factory-default"
+            exit 1
+        }
+    }
+    expect {
+        -re {<[^>\r\n]+>} {}
+        timeout {
+            puts "WARNING: No user-view prompt after restore; continuing to reboot"
+        }
+    }
+
+    send "reboot\r"
+    expect {
+        -re {save current configuration\?} {
+            expect -re {\[Y/N\]:}
+            send "N\r"
+            exp_continue
+        }
+        -re {[Cc]urrent configuration may be lost} {
+            expect -re {\[Y/N\]:}
+            send "N\r"
+            exp_continue
+        }
+        -re {This command will reboot} {
+            expect -re {\[Y/N\]:}
+            send "Y\r"
+        }
+        -re {Are you sure\?} {
+            send "Y\r"
+        }
+        -re {Continue\?} {
+            expect -re {\[Y/N\]:}
+            send "Y\r"
+        }
+        timeout {
+            puts "ERROR: Did not see reboot confirmation"
+            exit 1
+        }
+    }
+
+    puts "Waiting for factory-reset reboot (this may take 2–4 minutes)..."
+    sleep 150
+    set timeout 15
+
+    set woke 0
+    for {set wake 1} {$wake <= 24} {incr wake} {
+        send "\r"
+        expect {
+            -re {Performing automatic configuration|Automatic configuration is running|CTRL_C or CTRL_D to break} {
+                puts "Auto-config after wipe — sending Ctrl-C"
+                send "\x03"
+                sleep 1
+                send "\r"
+                exp_continue
+            }
+            -re {Press ENTER|Press Enter} {
+                send "\r"
+                exp_continue
+            }
+            -re {[Ll]ogin:|[Uu]sername:} {
+                set woke 1
+            }
+            -re {[Pp]assword:} {
+                set woke 2
+            }
+            -re {<[^>\r\n]+>} {
+                set woke 3
+            }
+            timeout {
+                puts "Wipe reboot wake $wake/24: no prompt yet"
+            }
+        }
+        if {$woke > 0} {
+            break
+        }
+    }
+    if {$woke == 0} {
+        puts "ERROR: Switch did not return to a prompt after factory reset"
+        exit 1
+    }
+
+    set login_user "admin"
+    set current_pass ""
+
+    if {$woke != 3} {
+        if {$woke == 1} {
+            send "$login_user\r"
+            expect {
+                -re {[Pp]assword:} {}
+                timeout {
+                    puts "ERROR: No Password prompt after factory reset"
+                    exit 1
+                }
+            }
+        }
+        send "\r"
+        expect {
+            -re {AAA authentication failed\.|[Ii]ncorrect|[Ll]ogin failed} {
+                puts "ERROR: Factory-default admin login failed"
+                exit 2
+            }
+            -re {First login|password reset|Old password:} {
+                puts "First-login password change required after factory reset"
+                expect {
+                    -re {[Oo]ld password:} {}
+                    timeout {}
+                }
+                send "\r"
+                expect {
+                    -re {[Nn]ew password:} {}
+                    timeout {
+                        puts "ERROR: No New password prompt after factory reset"
+                        exit 1
+                    }
+                }
+                if {$new_password eq ""} {
+                    puts "ERROR: Factory reset requires setting admin password. Pass -np."
+                    exit 1
+                }
+                send "$new_password\r"
+                expect {
+                    -re {[Cc]onfirm|[Nn]ew password:} {}
+                    timeout {
+                        puts "ERROR: No confirm-password prompt after factory reset"
+                        exit 1
+                    }
+                }
+                send "$new_password\r"
+                expect {
+                    -re {not meet|invalid|too simple|Password is absent|Please retry} {
+                        puts "ERROR: New admin password rejected by switch complexity policy"
+                        exit 1
+                    }
+                    -re {<[^>\r\n]+>} {}
+                    timeout {
+                        puts "ERROR: Login timed out after first-login password change"
+                        exit 1
+                    }
+                }
+                set current_pass $new_password
+            }
+            -re {<[^>\r\n]+>} {}
+            timeout {
+                puts "ERROR: Login timed out after factory reset"
+                puts "Last buffer: $expect_out(buffer)"
+                exit 1
+            }
+        }
+    }
+
+    send "undo terminal monitor\r"
+    expect { -re {%[^\r\n]*[\r\n]+} { exp_continue } -re {<[^>\r\n]+>} {} }
+    puts "Factory reset complete; applying new configuration."
+    set timeout 30
+}
 
 send "system-view\r"
 
@@ -270,6 +457,7 @@ if {$change_password} {
 
     expect "]"
     send "quit\r"
+    set current_pass $new_password
 }
 
 # === ENABLE PASSWORD RECOVERY ===
@@ -327,6 +515,13 @@ expect {
             sleep 2
             send "\r\r"
             expect {
+                -re {Automatic configuration is running} {
+                    puts "Auto-config after reboot — sending Ctrl-C"
+                    send "\x03"
+                    sleep 1
+                    send "\r"
+                    exp_continue
+                }
                 "Login:" {
                     puts "Switch is back online. Re-logging in..."
                     send "$login_user\r"
@@ -338,10 +533,12 @@ expect {
             }
 
             expect "Password:"
-            if {$current_pass eq ""} {
-                send "\r"
-            } else {
+            if {$new_password ne ""} {
+                send "$new_password\r"
+            } elseif {$current_pass ne ""} {
                 send "$current_pass\r"
+            } else {
+                send "\r"
             }
 
             expect "<"
@@ -510,10 +707,8 @@ expect {
     }
 }
 # === SAVE CONFIGURATION ===
-if {$change_password || $configure_uplink || $set_ip} {
-    expect "]"
-    send "save force\r"
-}
+expect "]"
+send "save force\r"
 
 
 

@@ -36,6 +36,10 @@ SHOW_STATE_ONLY=0
 STATE_READY=0
 STATE_PASSPHRASE=""
 STATE_FORMAT_EXPECTED="bf-network-installer-state-v1"
+DISPLAY_ANSWERS=0
+DISPLAY_ANSWERS_CONFIG=""
+CONFIG_NAME=""
+
 
 declare -A SAVED_ANSWERS=()
 declare -A COMPLETED_STEPS=()
@@ -94,6 +98,20 @@ parse_args() {
                 SHOW_STATE_ONLY=1
                 shift
                 ;;
+            --config|--save-config)
+                [ "$#" -ge 2 ] || die "$1 requires a config name."
+                CONFIG_NAME="$2"
+                shift 2
+                ;;
+            --display-answers)
+                DISPLAY_ANSWERS=1
+                if [ "$#" -ge 2 ] && [[ "$2" != -* ]]; then
+                    DISPLAY_ANSWERS_CONFIG="$2"
+                    shift 2
+                else
+                    shift
+                fi
+                ;;    
             -h|--help)
                 cat <<'EOF'
 Usage: sudo ./installer.sh [options]
@@ -107,6 +125,8 @@ Options:
   --forget-secret NAME    Forget one generated secret (e.g. DB_PASSWORD), then exit.
   --forget-secrets        Forget all generated secrets, then exit.
   --show-progress         Decrypt the state, display checkpoints, and exit.
+  --config                Specifies a name for a set of entered values
+  --display-answers NAME  Displays previously entered answers for values for config NAME, or the values in the default config if NAME not given     
   -h, --help              Show this help.
 
 The default state file is /var/lib/bf-network-installer/state.gpg.
@@ -129,6 +149,7 @@ save_answer() {
     local key="$1"
     local value="$2"
     SAVED_ANSWERS["$key"]="$value"
+    unset 'COMPLETED_STEPS[pi_env_file]'
     state_save
 }
 
@@ -275,6 +296,13 @@ state_progress() {
 }
 
 state_init() {
+    if [ -n "$CONFIG_NAME" ]; then
+        # sanitize: only safe filename chars
+        safe="$(printf '%s' "$CONFIG_NAME" | tr -cd '[:alnum:]._-')"
+        [ -n "$safe" ] || die "Invalid config name: $CONFIG_NAME"
+        STATE_FILE="$(dirname "$STATE_FILE")/state-${safe}.gpg"
+        echo "Using config state file: $STATE_FILE"
+    fi
     local state_dir
     state_dir="$(dirname "$STATE_FILE")"
     mkdir -p "$state_dir"
@@ -367,12 +395,65 @@ state_init() {
         state_progress
         exit 0
     fi
-    
+    if [ "$DISPLAY_ANSWERS" -eq 1 ]; then
+        if [ -n "$DISPLAY_ANSWERS_CONFIG" ]; then
+            safe="$(printf '%s' "$DISPLAY_ANSWERS_CONFIG" | tr -cd '[:alnum:]._-')"
+            STATE_FILE="$(dirname "$STATE_FILE")/state-${safe}.gpg"
+            # Reload this specific file
+            STATE_READY=0
+            SAVED_ANSWERS=()
+            COMPLETED_STEPS=()
+            GENERATED_SECRETS=()
+            if [ ! -f "$STATE_FILE" ]; then
+                die "No state file: $STATE_FILE"
+            fi
+            prompt_state_passphrase_existing
+            state_load || die "Could not decrypt $STATE_FILE"
+            STATE_READY=1
+        fi
+        display_saved_answers
+        state_progress   # optional: also show checkpoints
+        exit 0
+    fi
+
     state_progress
 
     if [ "$SHOW_STATE_ONLY" -eq 1 ]; then
         exit 0
     fi
+}
+
+display_saved_answers() {
+    echo
+    echo "State file: $STATE_FILE"
+    echo "Saved answers (${#SAVED_ANSWERS[@]}):"
+    if [ "${#SAVED_ANSWERS[@]}" -eq 0 ]; then
+        echo "  (none)"
+    else
+        local key
+        while IFS= read -r key; do
+            # Optional: redact obvious secrets
+            case "${key,,}" in
+                *secret*|*api_key*|*token*)
+                    printf '  %s=%s\n' "$key" "(redacted)"
+                    ;;
+                *)
+                    printf '  %s=%s\n' "$key" "${SAVED_ANSWERS[$key]}"
+                    ;;
+            esac
+        done < <(printf '%s\n' "${!SAVED_ANSWERS[@]}" | sort)
+    fi
+    echo
+    echo "Generated secrets (${#GENERATED_SECRETS[@]}):"
+    if [ "${#GENERATED_SECRETS[@]}" -eq 0 ]; then
+        echo "  (none)"
+    else
+        local key
+        while IFS= read -r key; do
+            printf '  %s=(set, %d chars)\n' "$key" "${#GENERATED_SECRETS[$key]}"
+        done < <(printf '%s\n' "${!GENERATED_SECRETS[@]}" | sort)
+    fi
+    echo
 }
 
 state_save_on_exit() {
@@ -558,6 +639,46 @@ write_env_line() {
     printf "%s='%s'\n" "$key" "$(env_escape "$value")"
 }
 
+# CIDR helpers for external / internal subnet overlap checks
+prefix_to_netmask() {
+    local prefix="$1"
+    python3 -c "import ipaddress,sys; print(ipaddress.IPv4Network('0.0.0.0/%s'%sys.argv[1]).netmask)" "$prefix"
+}
+
+ip_in_cidr() {
+    local ip="$1"
+    local cidr="$2"
+    python3 -c "
+import ipaddress,sys
+sys.exit(0 if ipaddress.ip_address(sys.argv[1]) in ipaddress.ip_network(sys.argv[2], strict=False) else 1)
+" "$ip" "$cidr"
+}
+
+cidrs_overlap() {
+    local a="$1"
+    local b="$2"
+    python3 -c "
+import ipaddress,sys
+na=ipaddress.ip_network(sys.argv[1], strict=False)
+nb=ipaddress.ip_network(sys.argv[2], strict=False)
+sys.exit(0 if na.overlaps(nb) else 1)
+" "$a" "$b"
+}
+
+cidr_conflicts_with_any() {
+    local candidate="$1"
+    shift
+    local other
+    for other in "$@"; do
+        [ -n "$other" ] || continue
+        if cidrs_overlap "$candidate" "$other"; then
+            echo "$other"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # =============================================================================
 # Local dependency installation
 # =============================================================================
@@ -613,9 +734,9 @@ detect_switch_serial_port() {
 
         echo "Testing $port ..."
 
-        for attempt in 1 2 3; do
+        for attempt in 1 2 3 4; do
             if [ "$attempt" -gt 1 ]; then
-                echo "  Retrying $port (attempt $attempt/3)..."
+                echo "  Retrying $port (attempt $attempt/4)..."
                 sleep 5
             fi
 
@@ -626,10 +747,11 @@ detect_switch_serial_port() {
 
             response="$(timeout 6 cat < "$port" 2>/dev/null || true)"
 
-            if echo "$response" | grep -qiE 'Line aux|Automatic configuration|Login:|Password:|<|]'; then
+            if echo "$response" | grep -qiE 'Press|ENTER|Line|aux|Automatic|configuration|CTRL_C|CTRL_D|Login|Password|User|Access|Verification|Comware|H3C|^[[:space:]]*[<\[]|^[[:space:]]*<'; then
                 echo "  ? HP switch detected on $port"
+                DETECTED_PORT="$port"
                 detected_ports+=("$port")
-                break
+                break 2
             fi
         done
     done
@@ -704,7 +826,9 @@ validate_private_base() {
 # =============================================================================
 
 pi_ssh_raw() {
-    SSHPASS="$PI_PASSWORD" sshpass -e ssh \
+    ssh -i "$PI_KEY_PATH" \
+        -o BatchMode=yes \
+        -o IdentitiesOnly=yes \
         -o StrictHostKeyChecking=accept-new \
         -o UserKnownHostsFile="$REAL_HOME/.ssh/known_hosts" \
         "$PI_USER@$PI_WIFI_IP" "$@"
@@ -717,16 +841,12 @@ pi_ssh() {
 
 pi_sudo() {
     local cmd="$1"
-    printf '%s\n' "$PI_PASSWORD" | SSHPASS="$PI_PASSWORD" sshpass -e ssh \
-        -o StrictHostKeyChecking=accept-new \
-        -o UserKnownHostsFile="$REAL_HOME/.ssh/known_hosts" \
-        "$PI_USER@$PI_WIFI_IP" "sudo -S -p '' bash -lc $(remote_quote "$cmd")"
+    pi_ssh_raw "sudo -n bash -lc $(remote_quote "$cmd")"
 }
 
 pi_scp_to() {
-    local src="$1"
-    local dest="$2"
-    SSHPASS="$PI_PASSWORD" sshpass -e scp \
+    local src="$1" dest="$2"
+    scp -i "$PI_KEY_PATH" \
         -o StrictHostKeyChecking=accept-new \
         -o UserKnownHostsFile="$REAL_HOME/.ssh/known_hosts" \
         "$src" "$PI_USER@$PI_WIFI_IP:$dest"
@@ -776,6 +896,63 @@ set -uo pipefail
 EOF
 }
 
+# Choose /home/$PI_USER/.ssh/<name> that does not already exist.
+# Sets: ORACLE_KEY_DEST_NAME  (e.g. oracle_rsa or oracle_rsa_v02)
+#       ORACLE_VPS_SSH_KEY_PATH  (/keys/<name>)
+pick_oracle_key_dest_on_pi() {
+    local base="oracle_rsa"
+    local name="$base"
+    local n=2
+
+    while pi_ssh "test -e \$HOME/.ssh/$(remote_quote "$name")"; do
+        printf -v name '%s_v%02d' "$base" "$n"
+        n=$((n + 1))
+        [ "$n" -le 99 ] || die "Too many existing Oracle keys on the Pi."
+    done
+
+    ORACLE_KEY_DEST_NAME="$name"
+    ORACLE_VPS_SSH_KEY_PATH="/keys/${name}"
+    save_answer "oracle_key_dest_name" "$ORACLE_KEY_DEST_NAME"
+}
+
+install_oracle_key_on_pi() {
+    local dest_name="${1:?}"
+    local dest="/home/${PI_USER}/.ssh/${dest_name}"
+
+    [ -f "$ORACLE_KEY_PATH" ] || die "Oracle private key missing: $ORACLE_KEY_PATH"
+
+    pi_sudo "mkdir -p /home/${PI_USER}/.ssh && chmod 700 /home/${PI_USER}/.ssh && chown ${PI_USER}:${PI_USER} /home/${PI_USER}/.ssh"
+
+    pi_scp_to "$ORACLE_KEY_PATH" "/tmp/${dest_name}"
+    pi_sudo "mv /tmp/${dest_name} ${dest} && chmod 600 ${dest} && chown ${PI_USER}:${PI_USER} ${dest}"
+
+    # Always install a public key that matches this private key
+    local pub_tmp
+    pub_tmp="$(mktemp)"
+    if [ -f "${ORACLE_KEY_PATH}.pub" ]; then
+        cp "${ORACLE_KEY_PATH}.pub" "$pub_tmp"
+    else
+        ssh-keygen -y -f "$ORACLE_KEY_PATH" > "$pub_tmp"
+    fi
+    pi_scp_to "$pub_tmp" "/tmp/${dest_name}.pub"
+    rm -f "$pub_tmp"
+    pi_sudo "mv /tmp/${dest_name}.pub ${dest}.pub && chmod 644 ${dest}.pub && chown ${PI_USER}:${PI_USER} ${dest}.pub"
+
+    echo "Installed Pi key: ${dest}"
+    echo "ORACLE_VPS_SSH_KEY_PATH=${ORACLE_VPS_SSH_KEY_PATH}"
+    echo
+    echo "============================================================"
+    echo "  Install this public key on the Oracle VPS"
+    echo "============================================================"
+    echo
+    echo "On the VPS (as ${ORACLE_VPS_USER}), run:"
+    echo
+    echo "  mkdir -p ~/.ssh && chmod 700 ~/.ssh"
+    echo "  echo '$(cat "${dest}.pub" 2>/dev/null || cat "${ORACLE_KEY_PATH}.pub")' >> ~/.ssh/authorized_keys"
+    echo "  chmod 600 ~/.ssh/authorized_keys"
+    echo
+    echo "============================================================"
+}
 
 oracle_update_oracle_vps_nginx() {
     local domain="$1"
@@ -1134,6 +1311,10 @@ derive_pi_server_values() {
     DEFAULT_ISP_ROUTER_NAME="${ISP_NAMES[0]:-UDM}"
     DEFAULT_ISP_ROUTER_SUBNET="${ISP_NETWORK_PORTION[0]:-$(first_three_octets "$HOST_IP")}.0/24"
     UDM_HOST="${ISP_NETWORK_PORTION[0]:-$(first_three_octets "$HOST_IP")}.1"
+
+    # EXTERNAL_VLANS_CSV / EXTERNAL_VLAN_SUBNETS_CSV set during prompt section
+    EXTERNAL_VLANS="${EXTERNAL_VLANS_CSV:-}"
+    EXTERNAL_VLAN_SUBNETS="${EXTERNAL_VLAN_SUBNETS_CSV:-}"
 }
 sync_dns01_certificate_to_repo() {
     local q_store q_repo
@@ -1417,6 +1598,8 @@ write_pi_env_file() {
         write_env_line VLAN_POOL_STATUSES "$VLAN_POOL_STATUSES"
         write_env_line NETWORK_WORD "$NETWORK_WORD"
         write_env_line VLAN_PREFIX_MAP "$VLAN_PREFIX_MAP"
+        write_env_line EXTERNAL_VLANS "${EXTERNAL_VLANS:-}"
+        write_env_line EXTERNAL_VLAN_SUBNETS "${EXTERNAL_VLAN_SUBNETS:-}"
 
         write_env_line SWITCH_PASS ""
         write_env_line USER_DEVICE_INTERFACES ""
@@ -1460,6 +1643,11 @@ write_pi_env_file() {
         write_env_line BACKUP_RETENTION_DAYS "$BACKUP_RETENTION_DAYS"
         write_env_line PORTAL_ADMIN_USER "$PORTAL_ADMIN_USER"
         write_env_line PORTAL_ADMIN_PASSWORD "$PORTAL_ADMIN_PASSWORD"
+        
+        write_env_line CENTRAL_API_URL "$(normalize_central_api_url "${CENTRAL_API_URL:-}")"
+        write_env_line CENTRAL_API_KEY "${CENTRAL_API_KEY:-}"
+        write_env_line CENTRAL_SITE_ID "${CENTRAL_SITE_ID:-}"
+        write_env_line CENTRAL_PUSH_SECRET "${CENTRAL_PUSH_SECRET:-}"
     } > "$ENV_TMP"
 }
 
@@ -1629,14 +1817,20 @@ path = Path('docker-compose.yml')
 text = path.read_text()
 
 npm_marker = '  npm:\n    image: jc21/nginx-proxy-manager:latest\n'
-if npm_marker in text and 'INITIAL_ADMIN_EMAIL: ${NPM_ADMIN_EMAIL}' not in text:
-    text = text.replace(
-        npm_marker,
-        npm_marker + '    environment:\n'
-                     '      INITIAL_ADMIN_EMAIL: ${NPM_ADMIN_EMAIL}\n'
-                     '      INITIAL_ADMIN_PASSWORD: ${NPM_ADMIN_PASSWORD}\n',
-        1,
-    )
+import re
+
+# Do not pass INITIAL_ADMIN_* — current NPM :latest crashes:
+#   ReferenceError: email is not defined  (setup.js)
+text = re.sub(
+    r'\n[ \t]+INITIAL_ADMIN_EMAIL:.*',
+    '',
+    text,
+)
+text = re.sub(
+    r'\n[ \t]+INITIAL_ADMIN_PASSWORD:.*',
+    '',
+    text,
+)
 
 setup_volume = '      - ./npm/setup.py:/setup.py:ro\n'
 if setup_volume in text and '      - ./npm/letsencrypt:/etc/letsencrypt:ro\n' not in text:
@@ -1958,8 +2152,64 @@ apply_kea_schema() {
 
     info "Ensuring Kea PostgreSQL schema is present"
 
-    local found
-    found=$(pi_ssh "cd $q_repo && docker compose exec -T db psql -U portal_user -d captive_portal -tAc \"SELECT version || '.' || COALESCE(minor, 0) FROM schema_version LIMIT 1\" 2>/dev/null | tr -d '[:space:]'")
+    # Wait for the database (failure here is fatal on purpose)
+    pi_sudo "cd $q_repo && for i in \$(seq 1 30); do
+        docker compose exec -T db pg_isready -U portal_user -d captive_portal >/dev/null 2>&1 && exit 0
+        sleep 2
+    done
+    echo 'Database not ready' >&2
+    exit 1" || die "Database not ready for Kea schema check"
+
+    
+
+    # ------------------------------------------------------------------
+    # Safe probes – SQL lives on the Pi host, piped into the container
+    # ------------------------------------------------------------------
+    local tmp_sql
+
+    # 1. Does schema_version exist?
+    tmp_sql="$(mktemp)"
+    cat > "$tmp_sql" <<'SQL'
+SELECT EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = 'public' AND table_name = 'schema_version'
+);
+SQL
+
+    pi_scp_to "$tmp_sql" /tmp/check_schema_exists.sql
+    rm -f "$tmp_sql"
+
+    local table_exists
+    table_exists=$(
+        pi_ssh "cd $q_repo && cat /tmp/check_schema_exists.sql | \
+            docker compose exec -T db \
+            psql -U portal_user -d captive_portal -tA" \
+            2>/dev/null | tr -d '[:space:]' || true
+    )
+    pi_ssh "rm -f /tmp/check_schema_exists.sql" 2>/dev/null || true
+
+    # 2. Read the version (only if the table exists)
+    local found=""
+    if [ "$table_exists" = "t" ]; then
+        tmp_sql="$(mktemp)"
+        cat > "$tmp_sql" <<'SQL'
+SELECT version || '.' || COALESCE(minor, 0) FROM schema_version LIMIT 1;
+SQL
+        pi_scp_to "$tmp_sql" /tmp/check_schema_version.sql
+        rm -f "$tmp_sql"
+
+        found=$(
+            pi_ssh "cd $q_repo && cat /tmp/check_schema_version.sql | \
+                docker compose exec -T db \
+                psql -U portal_user -d captive_portal -tA" \
+                2>/dev/null | tr -d '[:space:]' || true
+        )
+        pi_ssh "rm -f /tmp/check_schema_version.sql" 2>/dev/null || true
+        
+    fi
+
+    echo "Kea schema_version table exists: ${table_exists:-no}"
+    echo "Kea schema version found: '${found:-<empty>}' (expected $expected_version)"
 
     if [ "$found" = "$expected_version" ]; then
         echo "Kea schema already at $expected_version — skipping."
@@ -1972,24 +2222,22 @@ apply_kea_schema() {
         echo "Kea schema missing or incomplete — creating."
     fi
 
-    # Kea must not be using the database while the schema is being recreated.
+    # Kea must not be using the database while the schema is being recreated
     pi_sudo "cd $q_repo && docker compose stop kea >/dev/null 2>&1 || true"
 
-    # Single-line DROP — avoids multi-line quoting failures
     reset_kea_schema
     apply_portal_schema
 
     pi_sudo "cd $q_repo && docker cp kea/dhcpdb_create.pgsql captive-portal-db:/tmp/dhcpdb_create.pgsql"
 
-    
-    if ! pi_sudo "cd $q_repo && docker compose exec -T db psql -U portal_user -d captive_portal -v ON_ERROR_STOP=1 -f /tmp/dhcpdb_create.pgsql"; then
-        pi_sudo "cd $q_repo && docker compose exec -T db rm -f /tmp/dhcpdb_create.pgsql"
+    if ! pi_sudo "cd $q_repo && docker compose exec -T db \
+            psql -U portal_user -d captive_portal -v ON_ERROR_STOP=1 \
+            -f /tmp/dhcpdb_create.pgsql"; then
+        pi_sudo "cd $q_repo && docker compose exec -T db rm -f /tmp/dhcpdb_create.pgsql" || true
         die "Kea schema apply failed (psql returned an error)."
     fi
 
-    
-
-    pi_sudo "cd $q_repo && docker compose exec -T db rm -f /tmp/dhcpdb_create.pgsql"
+    pi_sudo "cd $q_repo && docker compose exec -T db rm -f /tmp/dhcpdb_create.pgsql" || true
     echo "Kea schema applied successfully."
 }
 
@@ -2283,14 +2531,14 @@ install_pi_server() {
 
     if ! step_done "pi_oracle_key"; then
         info "Installing Oracle VPS private key on the Pi"
-        pi_sudo "mkdir -p /home/$PI_USER/.ssh"
-        pi_scp_to "$ORACLE_KEY_PATH" "/tmp/oracle_rsa"
-        pi_sudo "mv /tmp/oracle_rsa /home/$PI_USER/.ssh/oracle_rsa \
-                && chown $q_user:$q_user /home/$PI_USER/.ssh/oracle_rsa \
-                && chmod 600 /home/$PI_USER/.ssh/oracle_rsa"
+        pick_oracle_key_dest_on_pi
+        install_oracle_key_on_pi "$ORACLE_KEY_DEST_NAME"
+        unset 'COMPLETED_STEPS[pi_env_file]'
         complete_step "pi_oracle_key"
     else
         echo "Skipping completed step: Oracle VPS key copy"
+        ORACLE_KEY_DEST_NAME="${SAVED_ANSWERS[oracle_key_dest_name]:-oracle_rsa}"
+        ORACLE_VPS_SSH_KEY_PATH="/keys/${ORACLE_KEY_DEST_NAME}"
     fi
 
 
@@ -2539,47 +2787,53 @@ prompt_ack "physical_connection" "Press Enter when the switch is physically conn
 # =============================================================================
 # Phase 2: Management IPs
 # =============================================================================
-
 IPS=()
 
 echo
-info "Phase 2: Choose Management IP for the Switch"
+info "Phase 2: Choose Upstream IP for the Switch"
 prompt_required NUM_SWITCHES "How many HP5130 switches would you like to set up"
 
 if ! [[ "$NUM_SWITCHES" =~ ^[0-9]+$ ]] || [ "$NUM_SWITCHES" -lt 1 ]; then
     die "Number of switches must be a positive integer."
 fi
 
-prompt_line scan_network "Would you like to scan the network for used IPs? (y/n): " "scan_network"
+if ! step_done "chosen_upstream_ip"; then
 
-if is_yes "$scan_network"; then
-    if ! command -v nmap >/dev/null 2>&1; then
-        echo "nmap is not installed (recommended for finding free IPs)."
-        prompt_line install_nmap "Would you like to install nmap now? (y/n): " "install_nmap"
-        if is_yes "$install_nmap"; then
-            apt-get update -qq
-            apt-get install -y nmap
-        else
-            echo "Skipping network scan. You will need to choose IPs manually."
+
+
+
+    prompt_line scan_network "Would you like to scan the network for used IPs? (y/n): " "scan_network"
+
+    if is_yes "$scan_network"; then
+        if ! command -v nmap >/dev/null 2>&1; then
+            echo "nmap is not installed (recommended for finding free IPs)."
+            prompt_line install_nmap "Would you like to install nmap now? (y/n): " "install_nmap"
+            if is_yes "$install_nmap"; then
+                apt-get update -qq
+                apt-get install -y nmap
+            else
+                echo "Skipping network scan. You will need to choose IPs manually."
+            fi
+        fi
+
+        if command -v nmap >/dev/null 2>&1; then
+            echo "Scanning the network for used IPs..."
+            NETWORK="$(first_three_octets "$CURRENT_SUBNET").0/24"
+            USED_IPS="$(nmap -sn "$NETWORK" 2>/dev/null | grep "Nmap scan report for" | awk '{print $NF}' | tr -d '()' || true)"
+
+            echo "Currently used IPs on the network:"
+            echo "$USED_IPS" | sort -t . -k 4 -n || true
+            echo
+            echo "Suggested free IPs (avoiding .1, .254, and used ones):"
+            for candidate_octet in {10..50}; do
+                IP="$(first_three_octets "$CURRENT_SUBNET").$candidate_octet"
+                if ! echo "$USED_IPS" | grep -qx "$IP"; then
+                    echo "  $IP"
+                fi
+            done
         fi
     fi
-
-    if command -v nmap >/dev/null 2>&1; then
-        echo "Scanning the network for used IPs..."
-        NETWORK="$(first_three_octets "$CURRENT_SUBNET").0/24"
-        USED_IPS="$(nmap -sn "$NETWORK" 2>/dev/null | grep "Nmap scan report for" | awk '{print $NF}' | tr -d '()' || true)"
-
-        echo "Currently used IPs on the network:"
-        echo "$USED_IPS" | sort -t . -k 4 -n || true
-        echo
-        echo "Suggested free IPs (avoiding .1, .254, and used ones):"
-        for candidate_octet in {10..50}; do
-            IP="$(first_three_octets "$CURRENT_SUBNET").$candidate_octet"
-            if ! echo "$USED_IPS" | grep -qx "$IP"; then
-                echo "  $IP"
-            fi
-        done
-    fi
+    complete_step "chosen_upstream_ip"
 fi
 
 
@@ -2674,7 +2928,7 @@ for idx in "${!VLAN_LIST[@]}"; do
     # Default SSID suggestion from the friendly name (spaces → nothing or hyphens)
     default_ssid="$(printf '%s' "$name" | tr ' ' '-')"
     prompt_default ssid \
-        "SSID for VLAN $vlan ($name) — leave empty if no Wi‑Fi SSID" \
+        "SSID for VLAN $vlan ($name) — leave empty if no Wi-Fi SSID" \
         "$default_ssid" \
         "vlan_${vlan}_ssid"
     # Allow blank SSID if this VLAN is wired-only
@@ -2729,6 +2983,16 @@ declare -A ISP_NETWORK_PORTION
 
 ISP_VLAN_CONFIG=""
 
+normalize_isp_network_portion() {
+    local value="$1"
+    value="$(printf '%s' "$value" | tr -d '[:space:]')"
+    value="$(first_three_octets "$value")"
+    if ! [[ "$value" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        return 1
+    fi
+    printf '%s' "$value"
+}
+
 for ((v=1; v<=NUM_ISPS; v++)); do
     prompt_required isp_name "Enter name for ISP VLAN $v (router/ISP name)" "isp_$((v - 1))_name"
     ISP_NAMES[$((v - 1))]="$isp_name"
@@ -2737,13 +3001,27 @@ for ((v=1; v<=NUM_ISPS; v++)); do
         if answer_exists "isp_0_network_portion"; then
             CURRENT_THREE_OCTETS="${SAVED_ANSWERS[isp_0_network_portion]}"
         else
-            CURRENT_THREE_OCTETS="$(first_three_octets "$CURRENT_SUBNET")"
-            save_answer "isp_0_network_portion" "$CURRENT_THREE_OCTETS"
+            CURRENT_THREE_OCTETS="$(first_three_octets "$CURRENT_SUBNET")"            
         fi
+        CURRENT_THREE_OCTETS="$(normalize_isp_network_portion "$CURRENT_THREE_OCTETS")" \
+            || die "Could not derive a 3-octet ISP network portion from: ${SAVED_ANSWERS[isp_0_network_portion]:-$CURRENT_SUBNET}"
+        save_answer "isp_0_network_portion" "$CURRENT_THREE_OCTETS"
         echo "For ISP VLAN $v ($isp_name), using network portion: $CURRENT_THREE_OCTETS"
         ISP_NETWORK_PORTION[$((v - 1))]="$CURRENT_THREE_OCTETS"
     else
-        prompt_required isp_network_portion "Enter ISP VLAN network portion for VLAN $v (e.g. 10.5.2 or 192.168.2)" "isp_$((v - 1))_network_portion"
+        portion_key="isp_$((v - 1))_network_portion"
+        while true; do
+            prompt_required isp_network_portion \
+                "Enter ISP VLAN network portion for VLAN $v (e.g. 10.5.2 or 192.168.2)" \
+                "$portion_key"
+            if normalized="$(normalize_isp_network_portion "$isp_network_portion")"; then
+                isp_network_portion="$normalized"
+                save_answer "$portion_key" "$isp_network_portion"
+                break
+            fi
+            echo "Please enter at least three octets, e.g. 192.168.3 or 192.168.3.254."
+            invalidate_answer "$portion_key"
+        done
         ISP_NETWORK_PORTION[$((v - 1))]="$isp_network_portion"
     fi
 
@@ -2817,6 +3095,186 @@ done
 
 declare -a ISP_SWITCH_HOST=()
 declare -a ISP_SWITCH_PORT=()
+
+# =============================================================================
+# External VLANs (upstream DHCP — L2 transit + switch SVIs only)
+# =============================================================================
+
+info "External VLANs (managed by an upstream DHCP server)"
+
+EXTERNAL_VLAN_LIST=()
+declare -A EXTERNAL_VLAN_CIDR=()    # vlan_id -> e.g. 192.168.40.0/24
+declare -A EXTERNAL_VLAN_PREFIX=()  # vlan_id -> prefix length
+declare -A EXTERNAL_VLAN_IP=()      # "${vlan}_${switch_idx}" -> switch SVI IP
+
+# Baseline CIDRs that external subnets must not overlap
+KNOWN_CIDRS=()
+for vlan in "${VLAN_LIST[@]}" "$MANAGEMENT_VLAN" "$WIRED_VLAN"; do
+    KNOWN_CIDRS+=("${LOCAL_BASE}.${vlan}.0/24")
+done
+for ((v=0; v<NUM_ISPS; v++)); do
+    KNOWN_CIDRS+=("${ISP_NETWORK_PORTION[$v]}.0/24")
+done
+
+if ! answer_exists "num_external_vlans"; then
+    for j in "${!IPS[@]}"; do
+        unset "COMPLETED_STEPS[switch_${j}_configured]"
+    done
+    unset 'COMPLETED_STEPS[pi_env_file]'
+    state_save
+fi
+
+while true; do
+    prompt_line NUM_EXTERNAL_VLANS \
+        "How many external VLANs (upstream DHCP)? [0]: " \
+        "num_external_vlans"
+    if [ -z "$NUM_EXTERNAL_VLANS" ]; then
+        NUM_EXTERNAL_VLANS=0
+    fi
+    if [[ "$NUM_EXTERNAL_VLANS" =~ ^[0-9]+$ ]]; then
+        break
+    fi
+    echo "Please enter a non-negative integer."
+    invalidate_answer "num_external_vlans"
+done
+
+for ((e=0; e<NUM_EXTERNAL_VLANS; e++)); do
+    while true; do
+        prompt_line ext_vlan \
+            "External VLAN #$((e + 1)) — VLAN ID (2-4094): " \
+            "external_vlan_${e}_id"
+        if ! [[ "$ext_vlan" =~ ^[0-9]+$ ]] || [ "$ext_vlan" -lt 2 ] || [ "$ext_vlan" -gt 4094 ]; then
+            echo "Invalid VLAN ID."
+            invalidate_answer "external_vlan_${e}_id"
+            continue
+        fi
+        # Must not collide with user / mgmt / wired / ISP uplink VLANs
+        conflict=0
+        for vlan in "${VLAN_LIST[@]}" "$MANAGEMENT_VLAN" "$WIRED_VLAN"; do
+            if [ "$ext_vlan" = "$vlan" ]; then
+                echo "VLAN $ext_vlan is already used as an internal VLAN."
+                conflict=1
+                break
+            fi
+        done
+        if [ "$conflict" -eq 0 ]; then
+            for ((v=1; v<=NUM_ISPS; v++)); do
+                if [ "$ext_vlan" = "$v" ]; then
+                    echo "VLAN $ext_vlan is already used as an ISP uplink VLAN."
+                    conflict=1
+                    break
+                fi
+            done
+        fi
+        if [ "$conflict" -eq 0 ]; then
+            for prev in "${EXTERNAL_VLAN_LIST[@]}"; do
+                if [ "$ext_vlan" = "$prev" ]; then
+                    echo "VLAN $ext_vlan was already entered as an external VLAN."
+                    conflict=1
+                    break
+                fi
+            done
+        fi
+        if [ "$conflict" -eq 1 ]; then
+            invalidate_answer "external_vlan_${e}_id"
+            continue
+        fi
+        break
+    done
+
+    while true; do
+        prompt_line ext_net \
+            "External VLAN $ext_vlan — network address (e.g. 192.168.40.0): " \
+            "external_vlan_${e}_network"
+        if ! [[ "$ext_net" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Enter a dotted IPv4 network address (host bits should be 0)."
+            invalidate_answer "external_vlan_${e}_network"
+            continue
+        fi
+        break
+    done
+
+    while true; do
+        prompt_default ext_prefix \
+            "External VLAN $ext_vlan — subnet prefix size" \
+            "24" \
+            "external_vlan_${e}_prefix"
+        if ! [[ "$ext_prefix" =~ ^[0-9]+$ ]] || [ "$ext_prefix" -lt 8 ] || [ "$ext_prefix" -gt 30 ]; then
+            echo "Prefix must be an integer from 8 to 30."
+            invalidate_answer "external_vlan_${e}_prefix"
+            continue
+        fi
+        if ! python3 -c "
+import ipaddress,sys
+try:
+    ipaddress.ip_network(sys.argv[1]+'/'+sys.argv[2], strict=True)
+except Exception as e:
+    print(e)
+    raise SystemExit(1)
+" "$ext_net" "$ext_prefix" 2>/dev/null; then
+            echo "Invalid network/prefix combination (host bits set or bad prefix)."
+            invalidate_answer "external_vlan_${e}_network"
+            invalidate_answer "external_vlan_${e}_prefix"
+            continue
+        fi
+        ext_cidr="${ext_net}/${ext_prefix}"
+        if conflict_with="$(cidr_conflicts_with_any "$ext_cidr" "${KNOWN_CIDRS[@]}")"; then
+            echo "Subnet $ext_cidr overlaps existing subnet $conflict_with."
+            invalidate_answer "external_vlan_${e}_network"
+            invalidate_answer "external_vlan_${e}_prefix"
+            continue
+        fi
+        break
+    done
+
+    EXTERNAL_VLAN_LIST+=("$ext_vlan")
+    EXTERNAL_VLAN_CIDR[$ext_vlan]="$ext_cidr"
+    EXTERNAL_VLAN_PREFIX[$ext_vlan]="$ext_prefix"
+    KNOWN_CIDRS+=("$ext_cidr")
+
+    three="$(echo "$ext_net" | cut -d. -f1-3)"
+    for j in "${!IPS[@]}"; do
+        last="$(last_octet "${IPS[$j]}")"
+        default_ip="${three}.${last}"
+        while true; do
+            prompt_default sw_ip \
+                "Switch #$((j + 1)) (${IPS[$j]}) IP on external VLAN $ext_vlan" \
+                "$default_ip" \
+                "external_vlan_${e}_switch_${j}_ip"
+            if ! [[ "$sw_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                echo "Invalid IPv4 address."
+                invalidate_answer "external_vlan_${e}_switch_${j}_ip"
+                continue
+            fi
+            if ! ip_in_cidr "$sw_ip" "$ext_cidr"; then
+                echo "$sw_ip is not inside $ext_cidr."
+                invalidate_answer "external_vlan_${e}_switch_${j}_ip"
+                continue
+            fi
+            EXTERNAL_VLAN_IP["${ext_vlan}_${j}"]="$sw_ip"
+            break
+        done
+    done
+done
+
+EXTERNAL_VLANS_CSV="$(join_by_comma "${EXTERNAL_VLAN_LIST[@]}")"
+EXTERNAL_VLAN_SUBNETS_CSV=""
+for ext_vlan in "${EXTERNAL_VLAN_LIST[@]}"; do
+    EXTERNAL_VLAN_SUBNETS_CSV="$(csv_append "$EXTERNAL_VLAN_SUBNETS_CSV" "${ext_vlan}:${EXTERNAL_VLAN_CIDR[$ext_vlan]}")"
+done
+echo "External VLANs: ${EXTERNAL_VLANS_CSV:-none}"
+echo "External subnets: ${EXTERNAL_VLAN_SUBNETS_CSV:-none}"
+
+# Append external VLAN definitions to the switch VLAN config block
+for ext_vlan in "${EXTERNAL_VLAN_LIST[@]}"; do
+    VLAN_CONFIG+="
+vlan $ext_vlan
+name external_${ext_vlan}
+description EXTERNAL-DHCP-VLAN-${ext_vlan}
+dhcp snooping binding record
+#
+"
+done
 
 # =============================================================================
 # SSH key management for HP5130 and Pi containers
@@ -2913,14 +3371,90 @@ EOF
 
 info "Pi Server Setup"
 echo "Before continuing, install Raspberry Pi OS on the Pi and make sure SSH works over WiFi."
-echo "By entering the Pi password, you authorise this installer to use sudo on the Pi,"
+echo "By entering the Pi private key location and/or generating a new public/private key for the Pi Server, you authorise this installer to use sudo on the Pi,"
 echo "install Docker/Docker Compose, replace the bf-network repository directory,"
 echo "configure /etc/systemd/network for eth0 VLANs, and reboot the Pi if required."
 echo
 
 prompt_required PI_WIFI_IP "Enter the Pi WiFi IP address"
 prompt_default PI_USER "Enter the Pi SSH username" "admin"
-prompt_secret_required PI_PASSWORD "Enter the Pi SSH password"
+
+info "Pi SSH key"
+
+SAFE_PI="$(echo "$PI_WIFI_IP" | tr '.' '_' | tr -cd '[:alnum:]_')"
+DEFAULT_PI_KEY_PATH="$SSH_DIR/pi_${SAFE_PI}"
+
+if answer_exists "pi_key_path"; then
+    PI_KEY_PATH="${SAVED_ANSWERS[pi_key_path]}"
+    if [ ! -f "$PI_KEY_PATH" ]; then
+        echo "Saved Pi key missing: $PI_KEY_PATH"
+        unset 'SAVED_ANSWERS[pi_key_path]'
+        state_save
+    fi
+fi
+
+if ! answer_exists "pi_key_path"; then
+    prompt_line has_pi_key \
+        "Do you already have an SSH private key for the Pi? (y/n): " \
+        "has_pi_key"
+
+    if is_yes "$has_pi_key"; then
+        while true; do
+            prompt_required PI_KEY_PATH \
+                "Enter full path to the private key" \
+                "pi_existing_key_path"
+            [ -f "$PI_KEY_PATH" ] && break
+            echo "File not found: $PI_KEY_PATH"
+            invalidate_answer "pi_existing_key_path"
+        done
+        save_answer "pi_key_path" "$PI_KEY_PATH"
+    else
+        PI_KEY_PATH="$DEFAULT_PI_KEY_PATH"
+        save_answer "pi_key_path" "$PI_KEY_PATH"
+
+        if [ ! -f "$PI_KEY_PATH" ]; then
+            echo "Generating new SSH key pair for the Pi: $PI_KEY_PATH"
+            ssh-keygen -t ed25519 -f "$PI_KEY_PATH" -N "" -C "bf-network-pi-${SAFE_PI}"
+            # fallback if ed25519 not wanted:
+            # ssh-keygen -t rsa -b 4096 -f "$PI_KEY_PATH" -N "" -C "..."
+            chown "$REAL_USER":"$REAL_USER" "$PI_KEY_PATH" "$PI_KEY_PATH.pub"
+        fi
+
+        if ! answer_exists "pi_public_key_installed"; then
+            echo
+            echo "============================================================"
+            echo "  Install this public key on the Pi"
+            echo "============================================================"
+            echo
+            echo "On the Pi (as ${PI_USER}), run:"
+            echo
+            echo "  mkdir -p ~/.ssh && chmod 700 ~/.ssh"
+            echo "  echo '$(cat "${PI_KEY_PATH}.pub")' >> ~/.ssh/authorized_keys"
+            echo "  chmod 600 ~/.ssh/authorized_keys"
+            echo
+            echo "Or from this machine (if password SSH still works once):"
+            echo "  ssh-copy-id -i ${PI_KEY_PATH}.pub ${PI_USER}@${PI_WIFI_IP}"
+            echo
+            echo "Also enable passwordless sudo (required for key-only installs):"
+            echo
+            echo "  echo '${PI_USER} ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/bf-network"
+            echo "  sudo chmod 440 /etc/sudoers.d/bf-network"
+            echo
+            echo "============================================================"
+            prompt_ack "pi_public_key_installed" \
+                "Press Enter after the public key and sudoers entry are installed on the Pi..."
+        fi 
+    fi
+fi
+
+[ -f "$PI_KEY_PATH" ] || die "Pi private key missing: $PI_KEY_PATH"
+
+
+if ! pi_ssh_raw "echo pi SSH OK" >/dev/null 2>&1; then
+    die "Cannot SSH to ${PI_USER}@${PI_WIFI_IP} with key $PI_KEY_PATH.
+Install the public key on the Pi first."
+fi
+
 prompt_default PI_REPO_DIR "Enter bf-network install directory" "/home/$PI_USER/bf-network"
 prompt_default PORTAL_IP_BYTE "Enter Pi server last octet" "4"
 prompt_default HIJACK_DNS_IP_BYTE "Enter hijack DNS last octet" "5"
@@ -2993,32 +3527,33 @@ if ! answer_exists "oracle_key_path"; then
         ORACLE_KEY_PATH="$DEFAULT_ORACLE_KEY_PATH"
         save_answer "oracle_key_path" "$ORACLE_KEY_PATH"
 
-        if [ ! -f "$ORACLE_KEY_PATH" ]; then
+                if [ ! -f "$ORACLE_KEY_PATH" ]; then
             rm -f "$ORACLE_KEY_PATH.pub"
             echo "Generating a new SSH key pair for domain: $MAIN_DOMAIN"
             echo "Key will be saved as: $ORACLE_KEY_PATH"
-            ssh-keygen -t rsa -b 4096 -f "$ORACLE_KEY_PATH" -N "" -C "oracle-${SAFE_DOMAIN}"
+            ssh-keygen -t ed25519 -f "$ORACLE_KEY_PATH" -N "" -C "oracle-${SAFE_DOMAIN}"
             chown "$REAL_USER":"$REAL_USER" "$ORACLE_KEY_PATH" "$ORACLE_KEY_PATH.pub"
         fi
 
         if ! answer_exists "oracle_public_key_installed"; then
             echo
             echo "============================================================"
-            echo "  You must install the public key on the Oracle VPS"
+            echo "  Install this public key on the Oracle VPS"
             echo "============================================================"
             echo
-            echo "Run this command:"
+            echo "On the VPS (as ${ORACLE_VPS_USER}), run:"
             echo
+            echo "  mkdir -p ~/.ssh && chmod 700 ~/.ssh"
+            echo "  echo '$(cat "${ORACLE_KEY_PATH}.pub")' >> ~/.ssh/authorized_keys"
+            echo "  chmod 600 ~/.ssh/authorized_keys"
+            echo
+            echo "Or from this machine (if password SSH still works once):"
             echo "  ssh-copy-id -i ${ORACLE_KEY_PATH}.pub ${ORACLE_VPS_USER}@${ORACLE_VPS_HOST}"
-            echo
-            echo "Or manually add this public key to ~/.ssh/authorized_keys on the VPS:"
-            echo
-            cat "${ORACLE_KEY_PATH}.pub"
             echo
             echo "============================================================"
             prompt_ack \
                 "oracle_public_key_installed" \
-                "Press Enter after you have installed the public key on the Oracle VPS..."
+                "Press Enter after the public key is in authorized_keys on the Oracle VPS..."
         fi
     fi
 fi
@@ -3048,6 +3583,41 @@ prompt_default VERIFICATION_TIMEOUT_MINUTES "Verification timeout minutes" "15"
 prompt_default WIFI_CONFIRM_TIMEOUT_SEC "WiFi confirmation timeout seconds" "120"
 
 info "Microsoft Graph Email"
+echo
+echo "Used to send portal / admin emails via Microsoft 365 (Graph API)."
+echo
+echo "How to obtain these values (Entra admin center):"
+echo
+echo "  1. Sign in as a tenant admin at https://entra.microsoft.com"
+echo
+echo "  2. Tenant ID"
+echo "       Left menu: Entra ID → Overview → copy Tenant ID"
+echo "       (Or open the app Overview: Directory (tenant) ID)"
+echo
+echo "  3. Register an application"
+echo "       Entra ID → App registrations → New registration"
+echo "       Name: e.g. London Network Admin"
+echo "       Supported accounts: Single tenant only"
+echo "       Redirect URI: leave blank (no platform)"
+echo "       Click Register"
+echo
+echo "  4. Client ID"
+echo "       On the app Overview page, copy Application (client) ID"
+echo
+echo "  5. Client secret"
+echo "       Certificates & secrets → Client secrets → New client secret"
+echo "       Add it, then copy the Value immediately (shown only once)"
+echo
+echo "  6. API permission"
+echo "       API permissions → Add a permission → Microsoft Graph"
+echo "       Choose Application permissions (not Delegated)"
+echo "       Add Mail.Send → Add permissions"
+echo "       Click Grant admin consent for your organisation"
+echo
+echo "  7. From email"
+echo "       A mailbox in this tenant the app may send as"
+echo "       (user or shared mailbox, e.g. noreply@english.op.org)"
+echo
 prompt_required GRAPH_TENANT_ID "Graph tenant ID"
 prompt_required GRAPH_CLIENT_ID "Graph client ID"
 prompt_secret_required GRAPH_CLIENT_SECRET "Graph client secret"
@@ -3135,6 +3705,8 @@ NETWORK_WORD=$NETWORK_WORD
 VALID_VLANS=$VALID_VLANS
 VLAN_DEFAULTS=$VLAN_DEFAULTS
 VLAN_PREFIX_MAP=$VLAN_PREFIX_MAP
+EXTERNAL_VLANS=${EXTERNAL_VLANS:-}
+EXTERNAL_VLAN_SUBNETS=${EXTERNAL_VLAN_SUBNETS:-}
 MANAGEMENT_VLAN=$MANAGEMENT_VLAN
 WIRED_VLAN=$WIRED_VLAN
 PORTAL_IP=$PORTAL_IP
@@ -3325,6 +3897,20 @@ ip address ${LOCAL_BASE}.${WIRED_VLAN}.${LAST_OCTET} 255.255.255.0
 #
 "
 
+    for ext_vlan in "${EXTERNAL_VLAN_LIST[@]}"; do
+        ext_ip="${EXTERNAL_VLAN_IP[${ext_vlan}_${j}]:-}"
+        ext_prefix="${EXTERNAL_VLAN_PREFIX[$ext_vlan]:-24}"
+        ext_mask="$(prefix_to_netmask "$ext_prefix")"
+        if [ -n "$ext_ip" ]; then
+            VLAN_IFACE_CONFIG+="
+interface Vlan-interface$ext_vlan
+description GW_EXTERNAL_VLAN$ext_vlan
+ip address ${ext_ip} ${ext_mask}
+#
+"
+        fi
+    done
+
     UPLINK_CONFIG=""
     for idx in "${!UPLINK_PORTS[@]}"; do
         port="${UPLINK_PORTS[$idx]}"
@@ -3342,6 +3928,11 @@ dhcp snooping trust
 "
     done
 
+    EXT_VLAN_SPACE=""
+    if [ "${#EXTERNAL_VLAN_LIST[@]}" -gt 0 ]; then
+        EXT_VLAN_SPACE="${EXTERNAL_VLAN_LIST[*]}"
+    fi
+
     INTERSWITCH_CONFIG=""
     for port in "${INTERSWITCH_PORTS[@]}"; do
         iface="$(get_interface "$port" "${MAX_1GBS_PORT[$j]}")"
@@ -3349,7 +3940,7 @@ dhcp snooping trust
 interface $iface
 description Inter-switch link
 port link-type trunk
-port trunk permit vlan 1 to $NUM_ISPS ${VLAN_LIST[*]} $MANAGEMENT_VLAN $WIRED_VLAN
+port trunk permit vlan 1 to $NUM_ISPS ${VLAN_LIST[*]} $MANAGEMENT_VLAN $WIRED_VLAN $EXT_VLAN_SPACE
 port trunk pvid vlan 1
 arp detection trust
 dhcp snooping trust
@@ -3452,13 +4043,19 @@ ntp-service unicast-server 162.159.200.1
 
     echo "Configuring switch $MGMT_IP via serial..."
 
+    prompt_line wipe_switch  "Wipe switch #$SWITCH_NUM ($MGMT_IP) to factory defaults before applying new config? (y/n): "  "switch_${j}_wipe"
+
     NP_ARG=()
     if [ -n "$NEW_ADMIN_PASSWORD" ]; then
         NP_ARG=(-np "$NEW_ADMIN_PASSWORD")
+    elif is_yes "$wipe_switch"; then
+        NP_ARG=(-np "$CURRENT_PASSWORD")
     fi
 
-    # Build command as an array (safer)
     cmd=("$EXPECT_SCRIPT")
+    if is_yes "$wipe_switch"; then
+        cmd+=(-wipe)
+    fi
     cmd+=(-port "$DETECTED_PORT")
     cmd+=(-cp "$CURRENT_PASSWORD")
     cmd+=("${NP_ARG[@]}")
@@ -3498,6 +4095,13 @@ ntp-service unicast-server 162.159.200.1
     "${cmd[@]}"
 
     echo "Switch $MGMT_IP has been configured. j=$j."
+
+    if [ -n "$NEW_ADMIN_PASSWORD" ]; then
+        CURRENT_PASSWORD="$NEW_ADMIN_PASSWORD"
+        save_answer "switch_${j}_current_password" "$CURRENT_PASSWORD"
+        save_answer "switch_${j}_new_admin_password" ""
+        echo "Saved new switch password as the current password for later runs."
+    fi
     
     complete_step "switch_${j}_configured"
 done
@@ -3539,7 +4143,7 @@ How to SSH in with the credentials this installer just configured:
 
 EOF
 
-    local sw_ip last_oct mgmt_vlan_ip
+    sw_ip="" last_oct="" mgmt_vlan_ip=""
     for sw_ip in "${IPS[@]}"; do
         last_oct="$(last_octet "$sw_ip")"
         mgmt_vlan_ip="${LOCAL_BASE}.${MANAGEMENT_VLAN}.${last_oct}"
@@ -3567,20 +4171,25 @@ or via serial if the network path is down):
        5130ei-cmw710-*-r3507p18.bin   (boot + system as required)
      and the matching hotpatch package if HPE lists one (e.g. HS01).
 
-  2. Copy images to flash: (example with TFTP)
-       tftp \${tftp-server} get 5130ei-cmw710-system-r3507p06.bin
+  2. Copy images to flash: (e.g. with TFTP - you can install Tftpd64 by Ph. Jounin on Windows for example)
+       tftp \${tftp-server} get 5130EI-CMW710-R3507P18.ipe
+       tftp \${tftp-server} get 5130ei-cmw710-system-patch-r3507p18hs01.bin
        # use the exact filenames from HPE Support Center
 
-  3. On the switch (names vary slightly by package):
-       boot-loader file flash:/5130ei-cmw710-boot-r3507p18.bin slot 1 main
-       boot-loader file flash:/5130ei-cmw710-system-r3507p18.bin slot 1 main
-       # install hotpatch per HPE release notes, then:
+  3. On the switch (names vary slightly by package):       
+       boot-loader file flash:/5130EI-CMW710-R3507P18.ipe slot 1 main         
        save force
+       quit
+       display boot-loader
        reboot
 
-  4. After reload, confirm:
+  4. On the switch, install the patch:
+       install activate patch flash:/5130ei-cmw710-system-patch-r3507p18hs01.bin slot 1
+       install commit
+
+  5. After reload, confirm:
        display version
-       display install
+       display install active
      then re-check PBR / NQA / track as needed.
 
 Official images and release notes:
@@ -3592,7 +4201,7 @@ only if you need to re-push serial config after the upgrade.
 ---------------------------------------------------------------------------
 EOF
 
-    local fw_choice=""
+    fw_choice=""
     while true; do
         prompt_line fw_choice \
             "Continue installation without upgrading now? (y = continue, n = quit to upgrade firmware): " \
@@ -3618,10 +4227,440 @@ EOF
 fi
 
 # =============================================================================
+# Central API / bf-central integration
+# =============================================================================
+
+info "Central API (bf-central)"
+
+
+
+prompt_default CENTRAL_HOST \
+    "bf-central SSH hostname or IP" \
+    "bf-central.duckdns.org" \
+    "central_ssh_host"
+
+prompt_default CENTRAL_SSH_USER \
+    "SSH username on bf-central" \
+    "ubuntu" \
+    "central_ssh_user"
+
+if answer_exists "central_ssh_key"; then
+    CENTRAL_SSH_KEY="${SAVED_ANSWERS[central_ssh_key]}"
+    if [ ! -f "$CENTRAL_SSH_KEY" ]; then
+        echo "Saved bf-central key missing: $CENTRAL_SSH_KEY"
+        unset 'SAVED_ANSWERS[central_ssh_key]'
+        state_save
+    fi
+fi
+DEFAULT_CENTRAL_KEY="$REAL_HOME/.ssh/bf-central"
+
+if ! answer_exists "central_ssh_key"; then
+    prompt_line has_central_key \
+        "Do you already have an SSH private key for bf-central? (y/n): " \
+        "has_central_key"
+
+    if is_yes "$has_central_key"; then
+        while true; do
+            prompt_required CENTRAL_SSH_KEY \
+                "Enter full path to the private key" \
+                "central_existing_key_path"
+            [ -f "$CENTRAL_SSH_KEY" ] && break
+            echo "File not found: $CENTRAL_SSH_KEY"
+            invalidate_answer "central_existing_key_path"
+        done
+        save_answer "central_ssh_key" "$CENTRAL_SSH_KEY"
+    else
+        CENTRAL_SSH_KEY="$DEFAULT_CENTRAL_KEY"
+        save_answer "central_ssh_key" "$CENTRAL_SSH_KEY"
+
+        if [ ! -f "$CENTRAL_SSH_KEY" ]; then
+            echo "Generating new SSH key pair for bf-central: $CENTRAL_SSH_KEY"
+            ssh-keygen -t ed25519 -f "$CENTRAL_SSH_KEY" -N "" -C "bf-central-${SAFE_CENTRAL}"
+            chown "$REAL_USER":"$REAL_USER" "$CENTRAL_SSH_KEY" "$CENTRAL_SSH_KEY.pub"
+        fi
+
+        if ! answer_exists "central_public_key_installed"; then
+            echo
+            echo "============================================================"
+            echo "  Install this public key on the bf-central server"
+            echo "============================================================"
+            echo
+            echo "On the central server (as ${CENTRAL_SSH_USER}), run:"
+            echo
+            echo "  mkdir -p ~/.ssh && chmod 700 ~/.ssh"
+            echo "  echo '$(cat "${CENTRAL_SSH_KEY}.pub")' >> ~/.ssh/authorized_keys"
+            echo "  chmod 600 ~/.ssh/authorized_keys"
+            echo
+            echo "Or from this machine (if password SSH still works once):"
+            echo "  ssh-copy-id -i ${CENTRAL_SSH_KEY}.pub ${CENTRAL_SSH_USER}@${CENTRAL_HOST}"
+            echo
+            echo "============================================================"
+            prompt_ack "central_public_key_installed" \
+                "Press Enter after the public key is in authorized_keys on bf-central..."
+        fi
+    fi
+fi
+
+[ -f "$CENTRAL_SSH_KEY" ] || die "bf-central private key missing: $CENTRAL_SSH_KEY"
+
+
+
+
+_central_domain_from_remote() {
+    local extract_tmp domain
+    extract_tmp="$(mktemp)"
+    cat > "$extract_tmp" <<'EOF'
+#!/bin/bash
+if [ -f "$HOME/bf-central/.env" ]; then
+    grep -E '^CENTRAL_DOMAIN=' "$HOME/bf-central/.env" | head -1 | cut -d= -f2- | tr -d "'\""
+fi
+EOF
+    central_scp_to "$extract_tmp" "/tmp/extract-central-domain.sh"
+    rm -f "$extract_tmp"
+    domain="$(central_ssh "bash /tmp/extract-central-domain.sh && rm -f /tmp/extract-central-domain.sh" | tr -d '\r\n')"
+    printf '%s' "$domain"
+}
+
+normalize_central_api_url() {
+    local url="${1:-}"
+    url="$(printf '%s' "$url" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    case "$url" in
+        CENTRAL_API_URL=*) url="${url#CENTRAL_API_URL=}" ;;
+    esac
+    url="$(printf '%s' "$url" | tr -d "'\"")"
+    [ -n "$url" ] || { printf '%s' ""; return 0; }
+    case "$url" in
+        http://*|https://*) printf '%s' "$url" ;;
+        *) printf 'http://%s' "$url" ;;
+    esac
+}
+# ---------------------------------------------------------------------------
+# SSH helpers for the central server
+# ---------------------------------------------------------------------------
+central_ssh_raw() {
+    ssh -i "$CENTRAL_SSH_KEY" \
+        -o BatchMode=yes \
+        -o StrictHostKeyChecking=accept-new \
+        -o UserKnownHostsFile="$REAL_HOME/.ssh/known_hosts" \
+        "${CENTRAL_SSH_USER}@${CENTRAL_HOST}" "$@"
+}
+
+central_ssh() {
+    local cmd="$1"
+    central_ssh_raw "bash -lc $(remote_quote "$cmd")"
+}
+
+central_sudo() {
+    central_ssh_raw sudo -n bash -lc "$(remote_quote "$1")"
+}
+
+central_scp_to() {
+    local src="$1" dest="$2"
+    scp -i "$CENTRAL_SSH_KEY" \
+        -o StrictHostKeyChecking=accept-new \
+        -o UserKnownHostsFile="$REAL_HOME/.ssh/known_hosts" \
+        "$src" "${CENTRAL_SSH_USER}@${CENTRAL_HOST}:${dest}"
+}
+# After SSH test succeeds:
+if central_ssh "test -d \$HOME/bf-central"; then
+    CENTRAL_DOMAIN_CLEAN="$(_central_domain_from_remote)"
+    if [ -n "$CENTRAL_DOMAIN_CLEAN" ]; then
+        case "$CENTRAL_DOMAIN_CLEAN" in
+            http://*|https://*) CENTRAL_API_URL="$CENTRAL_DOMAIN_CLEAN" ;;
+            *)                  CENTRAL_API_URL="http://${CENTRAL_DOMAIN_CLEAN}" ;;
+        esac
+        CENTRAL_API_URL="$(normalize_central_api_url "${CENTRAL_API_URL:-}")"
+        save_answer "central_api_url" "$CENTRAL_API_URL"
+        echo "Using CENTRAL_DOMAIN from remote .env: $CENTRAL_API_URL"
+    else
+        prompt_default CENTRAL_API_URL \
+            "Central API URL (not set in remote .env)" \
+            "http://${CENTRAL_HOST}" \
+            "central_api_url"
+    fi
+else
+    prompt_default CENTRAL_API_URL \
+        "Central API URL" \
+        "http://${CENTRAL_HOST}" \
+        "central_api_url"
+    CENTRAL_DOMAIN_CLEAN="$(printf '%s' "$CENTRAL_API_URL" | sed -E 's|^https?://||; s|/.*||')"
+fi
+
+# Host part only (strip scheme and any path)
+CENTRAL_HOST="$(printf '%s' "$CENTRAL_API_URL" | sed -E 's|^https?://||; s|/.*||')"
+
+prompt_default CENTRAL_SSH_USER \
+    "SSH username on bf-central" \
+    "ubuntu" \
+    "central_ssh_user"
+
+info "bf-central SSH key"
+
+SAFE_CENTRAL="$(printf '%s' "$CENTRAL_HOST" | tr '.' '_' | tr -cd '[:alnum:]_')"
+
+# or: DEFAULT_CENTRAL_KEY="$SSH_DIR/bf-central_${SAFE_CENTRAL}"
+
+
+# Site ID derived from first switch name (letters only, lower-cased)
+_switch0_name="${SAVED_ANSWERS[switch_0_name]:-network}"
+_safe_site="$(printf '%s' "$_switch0_name" \
+    | tr '[:upper:]' '[:lower:]' \
+    | tr -cd '[:alpha:]' \
+    | head -c 24)"
+_default_site_id="bf-${_safe_site}-network"
+
+prompt_default CENTRAL_SITE_ID \
+    "Central site ID" \
+    "$_default_site_id" \
+    "central_site_id"
+
+
+
+
+
+# ---------------------------------------------------------------------------
+# Install / register this site with bf-central
+# Sets: CENTRAL_API_KEY, CENTRAL_PUSH_SECRET, ADMIN_KEY
+# ---------------------------------------------------------------------------
+setup_bf_central() {
+    CENTRAL_API_KEY=""
+    CENTRAL_PUSH_SECRET=""
+    ADMIN_KEY=""
+
+    if step_done "central_site_registered"; then
+        echo "Skipping completed step: central site registration"
+        CENTRAL_API_KEY="${SAVED_ANSWERS[central_api_key]:-}"
+        CENTRAL_PUSH_SECRET="${SAVED_ANSWERS[central_push_secret]:-}"
+        return 0
+    fi
+    unset 'COMPLETED_STEPS[central_site_env_update]'
+
+
+    echo "Testing SSH access to ${CENTRAL_SSH_USER}@${CENTRAL_HOST} ..."
+    if ! central_ssh_raw "echo central SSH OK" >/dev/null 2>&1; then
+        die "Cannot SSH to ${CENTRAL_SSH_USER}@${CENTRAL_HOST} with key $CENTRAL_SSH_KEY.
+Install the public key first, e.g.:
+  ssh-copy-id -i ${CENTRAL_SSH_KEY}.pub ${CENTRAL_SSH_USER}@${CENTRAL_HOST}"
+    fi
+
+    if ! central_ssh "test -d \$HOME/bf-central"; then
+        echo
+        echo "bf-central is not present in the home directory of ${CENTRAL_SSH_USER}@${CENTRAL_HOST}."
+        prompt_line install_central \
+            "Would you like to install bf-central now? (y/n): " \
+            "install_bf_central"
+
+        if ! is_yes "$install_central"; then
+            echo "Skipping bf-central integration. CENTRAL_API_KEY and CENTRAL_PUSH_SECRET will be left empty."
+        else
+            _install_bf_central_stack
+        fi
+    else
+        echo "Found existing ~/bf-central on ${CENTRAL_HOST}."
+        _recover_central_admin_key
+    fi
+
+    if [ -n "$ADMIN_KEY" ]; then
+        _register_central_site
+    fi
+
+    complete_step "central_site_registered"
+
+    if [ -n "$CENTRAL_API_KEY" ]; then
+        save_answer "central_api_key" "$CENTRAL_API_KEY"
+    fi
+    if [ -n "$CENTRAL_PUSH_SECRET" ]; then
+        save_answer "central_push_secret" "$CENTRAL_PUSH_SECRET"
+    fi
+}
+
+_install_bf_central_stack() {
+    info "Installing bf-central on ${CENTRAL_HOST}"
+    echo "Checking / installing prerequisites on ${CENTRAL_HOST}..."
+
+    local bootstrap_tmp
+    bootstrap_tmp="$(mktemp)"
+    cat > "$bootstrap_tmp" <<'REMOTE_EOF'
+#!/bin/bash
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+if command -v apt-get >/dev/null 2>&1; then
+    sudo apt-get update -qq
+    command -v git >/dev/null 2>&1 || sudo apt-get install -y git
+    command -v curl >/dev/null 2>&1 || sudo apt-get install -y curl
+else
+    echo "WARNING: apt-get not found – please ensure git is installed manually."
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+    echo "Docker not found – installing..."
+    curl -fsSL https://get.docker.com | sudo sh
+    sudo usermod -aG docker "$(whoami)" || true
+fi
+
+if ! docker info >/dev/null 2>&1; then
+    echo "Docker is installed but the current user may not yet have permission."
+    echo "You may need to log out/in or run: newgrp docker"
+fi
+
+echo "Prerequisites ready."
+REMOTE_EOF
+
+    central_scp_to "$bootstrap_tmp" "/tmp/bf-central-bootstrap.sh"
+    rm -f "$bootstrap_tmp"
+    central_ssh "bash /tmp/bf-central-bootstrap.sh && rm -f /tmp/bf-central-bootstrap.sh"
+
+    central_ssh "git clone --branch main https://github.com/rwv1001/bf-central.git \$HOME/bf-central"
+
+    CENTRAL_DB_PASSWORD="$(generate_secret)"
+    ADMIN_KEY="$(generate_secret)"
+    CENTRAL_DOMAIN_CLEAN="$(printf '%s' "$CENTRAL_API_URL" | sed -E 's|^https?://||; s|/.*||')"
+
+    prompt_default GUNICORN_WORKERS \
+        "Gunicorn workers for bf-central" \
+        "2" \
+        "central_gunicorn_workers"
+
+    local central_env_tmp
+    central_env_tmp="$(mktemp)"
+    {
+        write_env_line DB_PASSWORD "$CENTRAL_DB_PASSWORD"
+        write_env_line ADMIN_KEY "$ADMIN_KEY"
+        write_env_line GUNICORN_WORKERS "$GUNICORN_WORKERS"
+        write_env_line CENTRAL_DOMAIN "$CENTRAL_DOMAIN_CLEAN"
+    } > "$central_env_tmp"
+
+    central_scp_to "$central_env_tmp" "/tmp/bf-central.env"
+    rm -f "$central_env_tmp"
+    central_ssh "mv /tmp/bf-central.env \$HOME/bf-central/.env && chmod 600 \$HOME/bf-central/.env"
+    central_ssh "cd \$HOME/bf-central && (docker compose up -d --build || docker-compose up -d --build)"
+
+    echo "Waiting for bf-central API to become ready..."
+    sleep 12
+}
+
+_recover_central_admin_key() {
+    local extract_tmp
+    extract_tmp="$(mktemp)"
+    cat > "$extract_tmp" <<'EOF'
+#!/bin/bash
+if [ -f "$HOME/bf-central/.env" ]; then
+    grep -E '^ADMIN_KEY=' "$HOME/bf-central/.env" | head -1 | cut -d= -f2- | tr -d "'\""
+fi
+EOF
+    central_scp_to "$extract_tmp" "/tmp/extract-admin-key.sh"
+    rm -f "$extract_tmp"
+
+    ADMIN_KEY="$(central_ssh "bash /tmp/extract-admin-key.sh && rm -f /tmp/extract-admin-key.sh" | tr -d '\r\n')"
+
+    if [ -z "$ADMIN_KEY" ]; then
+        prompt_secret_required ADMIN_KEY \
+            "Could not read ADMIN_KEY from remote .env – please enter it" \
+            "central_admin_key"
+    else
+        echo "Recovered ADMIN_KEY from remote .env: $ADMIN_KEY"
+    fi
+}
+
+_register_central_site() {
+    local _display_raw _display_name register_response update_tmp
+
+    _display_raw="$(printf '%s' "$CENTRAL_SITE_ID" | tr -c '[:alpha:]' ' ' | tr -s ' ' | sed 's/^ *//;s/ *$//')"
+    _display_name="$(printf '%s' "$_display_raw" | awk '{
+  for (i = 1; i <= NF; i++) {
+    $i = toupper(substr($i, 1, 1)) substr($i, 2)
+  }
+  print
+}')"
+
+    echo "Registering site ${CENTRAL_SITE_ID} with bf-central..."
+    register_response="$(curl -s -X POST "${CENTRAL_API_URL}/api/v1/admin/site" \
+        -H "X-Admin-Key: ${ADMIN_KEY}" \
+        -H "Content-Type: application/json" \
+        -d "$(printf '{"site_id":"%s","display_name":"%s","api_url":"%s"}' \
+                "$CENTRAL_SITE_ID" "$_display_name" "$PORTAL_POLL_URL")")"
+
+    CENTRAL_API_KEY="$(printf '%s' "$register_response" | python3 -c "
+import sys, json
+try:
+    print(json.load(sys.stdin).get('api_key',''))
+except Exception:
+    sys.exit(1)
+" 2>/dev/null || true)"
+
+    if [ -z "$CENTRAL_API_KEY" ]; then
+        echo "WARNING: Failed to obtain api_key from bf-central."
+        echo "Response was: $register_response"
+        echo "CENTRAL_API_KEY will be left empty."
+        return 0
+    fi
+
+    echo "Received CENTRAL_API_KEY from bf-central."
+    CENTRAL_PUSH_SECRET="$(generate_secret)"
+
+    update_tmp="$(mktemp)"
+    cat > "$update_tmp" <<EOF
+#!/bin/bash
+set -euo pipefail
+cd "\$HOME/bf-central"
+
+DB_USER=\$(grep -E '^POSTGRES_USER=' .env 2>/dev/null | cut -d= -f2- | tr -d "'\"" || echo "central_user")
+DB_NAME=\$(grep -E '^POSTGRES_DB=' .env 2>/dev/null | cut -d= -f2- | tr -d "'\"" || echo "bf_central")
+DB_USER=\${DB_USER:-central_user}
+DB_NAME=\${DB_NAME:-bf_central}
+
+docker compose exec -T db \
+  psql -U "\$DB_USER" -d "\$DB_NAME" -v ON_ERROR_STOP=1 \
+  -c "UPDATE sites SET push_secret = '$CENTRAL_PUSH_SECRET' WHERE site_id = '$CENTRAL_SITE_ID';"
+EOF
+
+    central_scp_to "$update_tmp" "/tmp/update-push-secret.sh"
+    rm -f "$update_tmp"
+    central_ssh "bash /tmp/update-push-secret.sh && rm -f /tmp/update-push-secret.sh"
+
+    unset 'COMPLETED_STEPS[pi_env_file]'
+    state_save
+}
+
+apply_central_secrets_to_pi() {
+
+    if step_done "central_site_env_update"; then
+        echo "Central secrets already applied to Pi; skipping."
+        return 0
+    fi
+    if [ -z "${CENTRAL_API_KEY:-}" ] && [ -z "${CENTRAL_PUSH_SECRET:-}" ]; then
+        echo "No central secrets to apply on the Pi."
+        return 0
+    fi
+
+    local q_repo
+    q_repo="$(shell_quote "$PI_REPO_DIR")"
+
+    info "Writing central secrets into Pi .env and restarting web"
+
+    write_pi_env_file
+    pi_scp_to "$ENV_TMP" "/tmp/bf-network.env"
+    pi_sudo "mv /tmp/bf-network.env $q_repo/.env && chmod 600 $q_repo/.env && chown $PI_USER:$PI_USER $q_repo/.env"
+    rm -f "$ENV_TMP"
+
+    pi_sudo "cd $q_repo && docker compose up -d web --force-recreate"
+    echo "Restarted captive-portal web with CENTRAL_API_KEY / CENTRAL_PUSH_SECRET."
+}
+
+
+
+
+
+# =============================================================================
 # Pi server installation
 # =============================================================================
 
 install_pi_server
-
+# ---------------------------------------------------------------------------
+# Decide whether to install / use bf-central
+# ---------------------------------------------------------------------------
+setup_bf_central
+apply_central_secrets_to_pi
 
 echo "All switches and the Pi server have been processed."
