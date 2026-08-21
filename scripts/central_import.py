@@ -165,6 +165,18 @@ _dbg(f"parsed user fields: network_password_hash={'SET' if network_password_hash
 _dbg(f"parsed: email={email!r} device_blocked={device_blocked} assigned_vlan={assigned_vlan} "
      f"is_wired={is_wired} connection_type={connection_type!r} ssid={ssid!r} device_name={device_name!r}")
 
+# ── guard: don't re-import if admin deliberately unregistered the device ──────
+# If the device was deleted locally (stale=true) it must be re-registered
+# through the portal, not silently re-imported from central on reconnect.
+_local_stale = psql(
+    f"SELECT stale FROM devices WHERE mac_address = '{q(MAC)}' AND stale = true LIMIT 1;"
+)
+_dbg(f"local stale check for {MAC!r}: {_local_stale!r}")
+if _local_stale:
+    _dbg("RESULT: not_found (device locally unregistered/stale — refusing central re-import)")
+    print("not_found")
+    sys.exit(0)
+
 # ── write to portal DB ────────────────────────────────────────────────────────
 
 now   = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")

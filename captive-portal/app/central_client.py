@@ -691,21 +691,30 @@ def _apply_inbound(event_type: str, data: dict) -> None:
         )
 
     elif event_type == "unregister_device":
-        from app import _close_ownership, _sync_registration_status, get_kea
+        from core.device_utils import close_ownership, sync_registration_status
+        from core.vlan_utils import parse_valid_vlan_ids
+        from kea_integration import get_kea_client
         mac = data.get("mac_address", "").lower()
         device = Device.query.filter_by(mac_address=mac).first()
         if not device:
             logger.info("central unregister_device: MAC %s not found locally — skipping", mac)
             return
-        # Remove Kea reservation so the device loses its VLAN at next renewal
-        vlan_id = device.current_vlan
-        if device.connection_type == 'wifi' and device.internet_accessible and vlan_id:
-            kea = get_kea()
-            if kea:
-                if not kea.unregister_mac(mac=mac, vlan=vlan_id):
-                    logger.warning("central unregister_device: Kea unregister failed for %s", mac)
-        # Close ownership and reset all registration fields
-        _close_ownership(mac, commit=False)
+
+        vlan_id = device.assigned_vlan or device.current_vlan
+        kea_socket = os.getenv('KEA_CONTROL_SOCKET', '/kea/leases/kea4-ctrl-socket')
+        kea = get_kea_client(control_socket=kea_socket)
+        if kea:
+            if vlan_id:
+                kea.unregister_mac(mac=mac, vlan=vlan_id)
+            else:
+                for vid in parse_valid_vlan_ids():
+                    kea.unregister_mac(mac=mac, vlan=vid)
+
+        if device.connection_type == 'wired':
+            from radius_coa import send_coa_disconnect
+            send_coa_disconnect(mac)
+
+        close_ownership(mac, commit=False)
         device.device_name = None
         device.assigned_vlan = None
         device.current_vlan = None
@@ -716,7 +725,7 @@ def _apply_inbound(event_type: str, data: dict) -> None:
         device.unregister_token = None
         device.profile_snapshot = None
         device.stale = True
-        _sync_registration_status(device)
+        sync_registration_status(device)
         db.session.commit()
         logger.info("central: unregistered device %s via central push", mac)
 

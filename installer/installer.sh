@@ -1638,10 +1638,6 @@ write_pi_env_file() {
         write_env_line TEL_HOST "${LOCAL_BASE}.2.1"
         write_env_line TEL_SSH_USER "root"
 
-        write_env_line CENTRAL_API_URL ""
-        write_env_line CENTRAL_API_KEY ""
-        write_env_line CENTRAL_SITE_ID ""
-        write_env_line CENTRAL_PUSH_SECRET ""
 
         write_env_line ENABLE_DB_BACKUPS "$ENABLE_DB_BACKUPS"
         write_env_line BACKUP_RETENTION_DAYS "$BACKUP_RETENTION_DAYS"

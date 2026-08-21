@@ -77,6 +77,9 @@ services:
       HP5130_POLICY_PATH: ${HP5130_POLICY_PATH:-/scripts/scriptdata/hp5130-policy.json}
       HP5130_CURRENT_CONFIG_PATH: ${HP5130_CURRENT_CONFIG_PATH:-/scripts/scriptdata/hp5130-current-config.json}
       ACL_BASELINE_SCRIPT: ${ACL_BASELINE_SCRIPT:-/scripts/hp5130-acl-baseline.sh}
+      KEA_VALID_LIFETIME: ${KEA_VALID_LIFETIME:-3600}
+      KEA_RENEW_TIMER: ${KEA_RENEW_TIMER:-600}
+      KEA_REBIND_TIMER: ${KEA_REBIND_TIMER:-1200}
     entrypoint: |
       sh -c '
       # Abort early if any required variable is missing
@@ -132,13 +135,17 @@ services:
         while true; do
           if [ -f /kea/leases/kea-leases4.csv ]; then
             echo "$(date -Iseconds) kea-lfc: running lease file cleanup" >&2
-            /usr/sbin/kea-lfc -4 \
-              -c /kea/config/dhcp4.json \
-              -p /usr/local/var/run/kea/kea-lfc.pid \
-              -x /kea/leases/kea-leases4.csv.1 \
-              -i /kea/leases/kea-leases4.csv.2 \
-              -o /kea/leases/kea-leases4.csv.3 \
-              -f /kea/leases/kea-leases4.csv.4 || true
+            if command -v kea-lfc >/dev/null 2>&1; then
+              kea-lfc -4 \
+                -c /kea/config/dhcp4.json \
+                -p /usr/local/var/run/kea/kea-lfc.pid \
+                -x /kea/leases/kea-leases4.csv.1 \
+                -i /kea/leases/kea-leases4.csv.2 \
+                -o /kea/leases/kea-leases4.csv.3 \
+                -f /kea/leases/kea-leases4.csv.4 || true
+            else
+              echo "$(date -Iseconds) kea-lfc: binary not found in PATH; skipping cleanup" >&2
+            fi
           fi
           sleep ${LFC_INTERVAL:-300}
         done

@@ -228,7 +228,13 @@ def delete_device(device_id):
     kea = _get_kea()
     if kea:
         try:
-            kea.unregister_mac(mac_address, vlan_id)
+            if vlan_id:
+                kea.unregister_mac(mac_address, vlan_id)
+            else:
+                # vlan_id unknown — sweep every valid VLAN so no stale reservation is left
+                from core.vlan_utils import parse_valid_vlan_ids
+                for vid in parse_valid_vlan_ids():
+                    kea.unregister_mac(mac_address, vid)
         except Exception as exc:
             logger.warning("Kea unregister failed for %s: %s", mac_address, exc)
 
