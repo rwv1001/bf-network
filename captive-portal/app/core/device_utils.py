@@ -352,6 +352,17 @@ def reset_test_data() -> None:
                 logger.warning("Kea unregister failed for %s vlan %s: %s",
                                device.mac_address, vlan_id, exc)
 
+    # Tell central about every deletion so it can clean up site_device_registrations
+    # and central_devices. Must happen before the local Device rows are deleted.
+    from central_client import queue_device_unregistered, _central_enabled
+    if _central_enabled():
+        for device in devices:
+            try:
+                queue_device_unregistered(device.mac_address)
+            except Exception as exc:
+                logger.warning("Failed to queue device_unregistered for %s: %s",
+                               device.mac_address, exc)
+
     db.session.query(RegistrationRequest).delete(synchronize_session=False)
     db.session.query(DeviceOwnership).delete(synchronize_session=False)
     db.session.query(IPLease).delete(synchronize_session=False)
@@ -365,7 +376,8 @@ def reset_test_data() -> None:
     db.session.execute(text("DELETE FROM nat_sessions"))
     db.session.execute(text("DELETE FROM dns_resolutions"))
     db.session.execute(text("DELETE FROM mac_port_cache"))
-    db.session.execute(text("DELETE FROM central_outbound_events"))
+    # central_outbound_events is intentionally NOT cleared here — the
+    # device_unregistered events queued above must reach central.
     db.session.commit()
 
     lease_file = '/kea/leases/kea-leases4.csv'

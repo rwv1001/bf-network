@@ -2335,25 +2335,148 @@ extern "C"
 
             {
 
+                // No local reservation — query central before treating as unregistered.
+
+                std::string central_status = query_central_for_mac(mac_clean, lease->subnet_id_);
+
                 std::cout << "DNS Hijack Hook: Device " << mac_address
 
-                          << " is UNREGISTERED - enabling DNS hijack" << std::endl;
+                          << " not in local DB - central query returned: "
+
+                          << central_status << std::endl;
 
                 std::cout.flush();
 
-                manage_dns_hijack("hijack", ip_address, lease->subnet_id_);
-
-                if (!ip_is_blocked_pool)
+                if (central_status == "registered")
 
                 {
 
-                    manage_acl("block", ip_address, lease->subnet_id_);
+                    manage_unregistered_lease("remove", mac_address, ip_address, 0);
+
+                    // If the device is still holding an unregistered-pool IP, NAK so it
+                    // re-DISCOVERs and Kea allocates from the correct registered pool.
+
+                    if (is_unregistered_pool_ip(ip_address))
+
+                    {
+
+                        std::cout << "DNS Hijack Hook: Device " << mac_address
+
+                                  << " imported from central (registered) but has unregistered-pool IP "
+
+                                  << ip_address << " - sending NAK to force re-DISCOVER" << std::endl;
+
+                        std::cout.flush();
+
+                        try
+                        {
+                            LeaseMgrFactory::instance().deleteLease(lease);
+                        }
+                        catch (...)
+                        {
+                        }
+
+                        handle.setContext("policy_force_nak", true);
+
+                        handle.setStatus(CalloutHandle::NEXT_STEP_SKIP);
+
+                        return 0;
+                    }
+
+                    else if (is_assigned_vlan_mismatch(mac_clean, lease->subnet_id_))
+
+                    {
+
+                        std::cout << "DNS Hijack Hook: Device " << mac_address
+
+                                  << " imported from central (registered) but on wrong VLAN (subnet "
+
+                                  << lease->subnet_id_ << ") - restricting access" << std::endl;
+
+                        std::cout.flush();
+
+                        manage_dns_hijack("hijack", ip_address, lease->subnet_id_);
+
+                        manage_acl("block", ip_address, lease->subnet_id_);
+
+                        do_hijack = true;
+                    }
+
+                    else
+
+                    {
+
+                        std::cout << "DNS Hijack Hook: Device " << mac_address
+
+                                  << " imported from central (registered) - granting access" << std::endl;
+
+                        std::cout.flush();
+
+                        manage_dns_hijack("unhijack", ip_address, lease->subnet_id_);
+
+                        manage_acl("unblock", ip_address, lease->subnet_id_);
+
+                        do_hijack = false;
+                    }
                 }
 
-                manage_unregistered_lease("upsert", mac_address, ip_address, lease_seconds);
+                else if (central_status == "blocked")
 
-                do_hijack = true;
-            }
+                {
+
+                    std::cout << "DNS Hijack Hook: Device " << mac_address
+
+                              << " imported from central (blocked) - forcing NAK for re-DISCOVER"
+
+                              << std::endl;
+
+                    std::cout.flush();
+
+                    manage_unregistered_lease("remove", mac_address, ip_address, 0);
+
+                    try
+                    {
+                        LeaseMgrFactory::instance().deleteLease(lease);
+                    }
+                    catch (...)
+                    {
+                    }
+
+                    handle.setContext("policy_force_nak", true);
+
+                    handle.setStatus(CalloutHandle::NEXT_STEP_SKIP);
+
+                    return 0;
+                }
+
+                else
+
+                {
+
+                    // not_found / disabled / error → fail-open: treat as unregistered
+
+                    std::cout << "DNS Hijack Hook: Device " << mac_address
+
+                              << " is UNREGISTERED - enabling DNS hijack" << std::endl;
+
+                    std::cout.flush();
+
+                    manage_dns_hijack("hijack", ip_address, lease->subnet_id_);
+
+                    if (!ip_is_blocked_pool)
+
+                    {
+
+                        manage_acl("block", ip_address, lease->subnet_id_);
+                    }
+
+                    manage_unregistered_lease("upsert", mac_address, ip_address, lease_seconds);
+
+                    do_hijack = true;
+
+                } // end not_found/error
+
+            } // end no local reservation
 
             // Table 6 + Table 7: update the portal DB with renewal info (async).
 

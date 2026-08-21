@@ -96,6 +96,7 @@ def q(s: str) -> str:
 # ── query central ─────────────────────────────────────────────────────────────
 
 data = None
+data_from_central = False
 try:
     req = urllib.request.Request(
         f"{API_URL}/api/v1/device/{MAC}",
@@ -104,6 +105,7 @@ try:
     _dbg(f"querying central: GET {API_URL}/api/v1/device/{MAC}")
     with urllib.request.urlopen(req, timeout=3) as r:
         data = json.loads(r.read().decode())
+    data_from_central = True
     _dbg(f"central response (200): {json.dumps(data)}")
 except urllib.error.HTTPError as e:
     if e.code == 404:
@@ -114,11 +116,17 @@ except urllib.error.HTTPError as e:
         # Check the local outbound queue for a recent device_registered payload
         # so we can honour the registration without waiting for central to catch up.
         row = psql(
-            f"SELECT payload FROM central_outbound_events"
-            f" WHERE event_type = 'device_registered'"
-            f"   AND payload->>'mac_address' = '{q(MAC)}'"
-            f"   AND created_at > NOW() - INTERVAL '24 hours'"
-            f" ORDER BY created_at DESC LIMIT 1;"
+            f"SELECT r.payload FROM central_outbound_events r"
+            f" WHERE r.event_type = 'device_registered'"
+            f"   AND r.payload->>'mac_address' = '{q(MAC)}'"
+            f"   AND r.created_at > NOW() - INTERVAL '24 hours'"
+            f"   AND NOT EXISTS ("
+            f"       SELECT 1 FROM central_outbound_events u"
+            f"        WHERE u.event_type = 'device_unregistered'"
+            f"          AND u.payload->>'mac_address' = '{q(MAC)}'"
+            f"          AND u.created_at > r.created_at"
+            f"   )"
+            f" ORDER BY r.created_at DESC LIMIT 1;"
         )
         _dbg(f"local outbound queue result: {row!r}")
         if row:
@@ -166,16 +174,21 @@ _dbg(f"parsed: email={email!r} device_blocked={device_blocked} assigned_vlan={as
      f"is_wired={is_wired} connection_type={connection_type!r} ssid={ssid!r} device_name={device_name!r}")
 
 # ── guard: don't re-import if admin deliberately unregistered the device ──────
-# If the device was deleted locally (stale=true) it must be re-registered
-# through the portal, not silently re-imported from central on reconnect.
+# Only apply when data came from the local queue (central returned 404).
+# If central returned 200 the device was re-registered at another site and
+# the stale flag here is outdated — clear it and allow the import.
 _local_stale = psql(
     f"SELECT stale FROM devices WHERE mac_address = '{q(MAC)}' AND stale = true LIMIT 1;"
 )
-_dbg(f"local stale check for {MAC!r}: {_local_stale!r}")
+_dbg(f"local stale check for {MAC!r}: {_local_stale!r} (data_from_central={data_from_central})")
 if _local_stale:
-    _dbg("RESULT: not_found (device locally unregistered/stale — refusing central re-import)")
-    print("not_found")
-    sys.exit(0)
+    if not data_from_central:
+        _dbg("RESULT: not_found (device locally unregistered/stale — refusing central re-import)")
+        print("not_found")
+        sys.exit(0)
+    # Device re-registered at another site — clear stale so this import proceeds.
+    psql(f"UPDATE devices SET stale = false WHERE mac_address = '{q(MAC)}'")
+    _dbg(f"stale flag cleared for {MAC!r} — device re-registered at another site")
 
 # ── write to portal DB ────────────────────────────────────────────────────────
 

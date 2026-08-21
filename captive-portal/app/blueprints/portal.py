@@ -1226,6 +1226,7 @@ def unregister(token):
     device.profile_snapshot          = None
     device.confirmation_confirmed_at = None
     device.confirmation_deadline     = None
+    device.stale                     = True
 
     sync_registration_status(device)
     central_client.queue_device_unregistered(mac_address)
@@ -1419,17 +1420,27 @@ def user_home():
                             lease.dns_hijacked = True
                         if dev_to_abandon.current_vlan:
                             manage_switch_acl('block', lease.ip_address, dev_to_abandon.current_vlan)
+                    abandon_vlan = dev_to_abandon.current_vlan
                     dev_to_abandon.assigned_vlan      = None
+                    dev_to_abandon.current_vlan       = None
                     dev_to_abandon.ownership_validated = None
                     dev_to_abandon.device_name        = None
                     dev_to_abandon.first_seen         = datetime.utcnow()
+                    dev_to_abandon.stale              = True
+                    dev_to_abandon.unregister_token   = None
                     set_internet_accessible(dev_to_abandon, None, commit=False)
                     set_internet_blocked(dev_to_abandon, None, commit=False)
+                    central_client.queue_device_unregistered(mac_to_abandon)
                     db.session.commit()
                 close_ownership(mac_to_abandon, commit=True)
                 kea = _get_kea()
-                if kea and dev_to_abandon and dev_to_abandon.current_vlan:
-                    kea.unregister_mac(mac_to_abandon, dev_to_abandon.current_vlan)
+                if kea and dev_to_abandon:
+                    if abandon_vlan:
+                        kea.unregister_mac(mac_to_abandon, abandon_vlan)
+                    else:
+                        from core.vlan_utils import parse_valid_vlan_ids
+                        for vid in parse_valid_vlan_ids():
+                            kea.unregister_mac(mac_to_abandon, vid)
                 flash(f'Device {mac_to_abandon} abandoned.', 'success')
 
         elif action == 'adopt_request':

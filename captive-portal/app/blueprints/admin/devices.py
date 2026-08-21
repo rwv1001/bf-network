@@ -299,7 +299,8 @@ def reassign_device(device_id):
         flash('Invalid owner type.', 'error')
         return redirect(url_for('admin.dashboard.index'))
 
-    old_label = device.user.email if device.user else (
+    old_user  = device.user
+    old_label = old_user.email if old_user else (
         f'admin:{device.admin.username}' if device.admin else 'unowned')
     close_ownership(device.mac_address, commit=False)
     open_ownership(device.mac_address, user_id=new_user.id if new_user else None,
@@ -308,7 +309,7 @@ def reassign_device(device_id):
 
     new_label = new_user.email if new_user else f'admin:{new_admin.username}'
     if new_user:
-        central_client.queue_device_registered(device, new_user)
+        central_client.queue_device_reassigned(device, old_user, new_user)
     logger.info("Admin reassigned device %s from %s to %s",
                 device.mac_address, old_label, new_label)
     flash(f'Device {device.mac_address} reassigned to {new_label}.', 'success')

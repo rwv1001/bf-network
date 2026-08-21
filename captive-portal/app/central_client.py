@@ -101,6 +101,7 @@ def queue_device_registered(device, user) -> None:
         "first_name": user.first_name,
         "last_name": user.last_name,
         "phone_number": user.phone_number,
+        "network_password_hash": user.network_password_hash or "",
         "assigned_vlan": device.assigned_vlan,
         "device_name": device.device_name,
         "is_wired": bool(device.is_wired),
@@ -144,6 +145,21 @@ def queue_device_unregistered(mac_address: str) -> None:
     if not _central_enabled():
         return
     _enqueue("device_unregistered", {"mac_address": mac_address})
+
+
+def queue_device_reassigned(device, old_user, new_user) -> None:
+    """Queue a device_reassigned event after an admin transfers a device to a new owner."""
+    if not _central_enabled():
+        return
+    _enqueue("device_reassigned", {
+        "mac_address": device.mac_address,
+        "old_email":   old_user.email if old_user else None,
+        "email":       new_user.email,
+        "first_name":  new_user.first_name or "",
+        "last_name":   new_user.last_name  or "",
+        "phone_number": new_user.phone_number or "",
+        "network_password_hash": new_user.network_password_hash or "",
+    })
 
 
 def queue_device_vlan_changed(device) -> None:
@@ -519,6 +535,15 @@ def _outbound_worker() -> None:
                                 _handle_registration_response(item.payload, result)
                     if pending:
                         db.session.commit()
+                    # Prune sent events older than 48 h — central_import.py's
+                    # fallback only looks back 24 h, so these are never needed again.
+                    from sqlalchemy import text as _text
+                    db.session.execute(_text(
+                        "DELETE FROM central_outbound_events"
+                        " WHERE status = 'sent'"
+                        "   AND created_at < NOW() - INTERVAL '48 hours'"
+                    ))
+                    db.session.commit()
                 except Exception as exc:
                     db.session.rollback()
                     logger.error("outbound worker error: %s", exc)
@@ -689,6 +714,34 @@ def _apply_inbound(event_type: str, data: dict) -> None:
             "central: updated wired device %s VLAN %s → %s, port bounce queued",
             mac, old_vlan, new_vlan,
         )
+
+    elif event_type == "reassign_device":
+        mac       = data.get("mac_address", "").lower()
+        new_email = (data.get("email") or "").lower().strip()
+        if not new_email:
+            logger.warning("central reassign_device: no email in payload for %s", mac)
+            return
+        device = Device.query.filter_by(mac_address=mac).first()
+        if not device:
+            logger.info("central reassign_device: MAC %s not found locally — skipping", mac)
+            return
+        user = User.query.filter_by(email=new_email).first()
+        if not user:
+            import datetime as _dt
+            user = User(
+                email=new_email,
+                first_name=data.get("first_name") or "",
+                last_name=data.get("last_name")  or "",
+                phone_number=data.get("phone_number") or "",
+                begin_date=_dt.date.today(),
+            )
+            db.session.add(user)
+            db.session.flush()
+        from core.device_utils import close_ownership, open_ownership
+        close_ownership(mac, commit=False)
+        open_ownership(mac, user_id=user.id, commit=False)
+        db.session.commit()
+        logger.info("central: reassigned device %s to %s via central push", mac, new_email)
 
     elif event_type == "unregister_device":
         from core.device_utils import close_ownership, sync_registration_status
