@@ -2,7 +2,7 @@
 Admin — Traffic Viewer (spec section 12 / CODEBASE section 10).
 
 Routes:
-  GET /admin/traffic    traffic viewer with NAT sessions enriched data
+  GET /admin/traffic    DNS lookup traffic enriched with user and NAT port data
 """
 
 import json
@@ -22,29 +22,23 @@ logger = logging.getLogger(__name__)
 traffic_bp = Blueprint('traffic', __name__)
 
 ALL_COLUMNS = [
-    ('session_id',         'Session ID'),
-    ('session_start',      'Start Time'),
-    ('session_end',        'End Time'),
-    ('src_ip',             'Source IP'),
-    ('src_port',           'Source Port'),
-    ('user_email',         'User Email'),
-    ('user_first_name',    'First Name'),
-    ('user_last_name',     'Last Name'),
-    ('registration_status','Status'),
-    ('dst_ip',             'Destination IP'),
-    ('dst_port',           'Dest Port'),
-    ('domain_name',        'Domain'),
-    ('dns_query_count',    'DNS Queries'),
-    ('packet_count',       'Packets'),
-    ('duration_seconds',   'Duration (s)'),
-    ('switch_iface',       'Switch Port'),
-    ('src_mac',            'MAC Address'),
-    ('switch_host',        'Switch IP'),
+    ('lookup_id',        'ID'),
+    ('lookup_timestamp', 'Time'),
+    ('client_ip',        'Client IP'),
+    ('lan_src_port',     'LAN Port'),
+    ('domain_name',      'Domain'),
+    ('domain_ip',        'Domain IP'),
+    ('src_mac',          'MAC Address'),
+    ('user_email',       'User Email'),
+    ('user_first_name',  'First Name'),
+    ('user_last_name',   'Last Name'),
+    ('wan_src_port',     'WAN Port'),
+    ('dst_port',         'Dest Port'),
 ]
 
 _DEFAULT_COLUMNS = [
-    'session_start', 'src_ip', 'user_email', 'user_first_name',
-    'dst_ip', 'domain_name', 'packet_count', 'duration_seconds',
+    'lookup_timestamp', 'client_ip', 'domain_name', 'domain_ip',
+    'user_email', 'user_first_name', 'dst_port',
 ]
 
 
@@ -213,8 +207,44 @@ def traffic():
     # ================================================================
 
     from sqlalchemy import text as _text
+
+    # Primary source: dns_traffic_view (dns_lookups enriched with user + NAT port info).
+    # Fallback to pihole blocked queries if dns_lookups is still empty.
+    dns_count = db.session.execute(_text("SELECT COUNT(*) FROM dns_lookups")).scalar()
+    using_dns_fallback = (dns_count == 0)
+    source_view = "pihole_blocked_enriched" if using_dns_fallback else "dns_traffic_view"
+
+    # pihole_blocked_enriched has the same column names for shared columns, but
+    # not lookup_id/lan_src_port/domain_ip/wan_src_port; map these for that view.
+    if using_dns_fallback:
+        # remap pihole columns into the new naming scheme
+        select_cols_sql = """
+            session_id   AS lookup_id,
+            session_start AS lookup_timestamp,
+            src_ip       AS client_ip,
+            NULL::INTEGER AS lan_src_port,
+            domain_name,
+            NULL::TEXT   AS domain_ip,
+            src_mac,
+            user_email,
+            user_first_name,
+            user_last_name,
+            NULL::INTEGER AS wan_src_port,
+            dst_port
+        """
+        valid_sort = {
+            'lookup_id': 'session_id', 'lookup_timestamp': 'session_start',
+            'client_ip': 'src_ip', 'domain_name': 'domain_name',
+            'user_email': 'user_email', 'user_first_name': 'user_first_name',
+            'user_last_name': 'user_last_name', 'src_mac': 'src_mac',
+        }
+        effective_sort = valid_sort.get(sort_col, 'session_start')
+    else:
+        select_cols_sql = ', '.join(c for c, _ in ALL_COLUMNS)
+        effective_sort = sort_col if sort_col in {c for c, _ in ALL_COLUMNS} else 'lookup_timestamp'
+
     total = db.session.execute(
-        _text(f"SELECT COUNT(*) FROM nat_sessions_enriched WHERE {where_clause}"),
+        _text(f"SELECT COUNT(*) FROM {source_view} WHERE {where_clause}"),
         params,
     ).scalar()
 
@@ -222,10 +252,10 @@ def traffic():
     order_clause = f"{sort_col} {sort_order.upper()}"
 
     main_sql = f"""
-        SELECT {select_clause}
-        FROM nat_sessions_enriched
+        SELECT {select_cols_sql}
+        FROM {source_view}
         WHERE {where_clause}
-        ORDER BY {order_clause}
+        ORDER BY {effective_sort} {sort_order.upper()}
         LIMIT :limit OFFSET :offset
     """
 
@@ -255,4 +285,5 @@ def traffic():
         total_pages=total_pages,
         sort_col=sort_col,
         sort_order=sort_order,
+        using_dns_fallback=using_dns_fallback,
     )

@@ -374,6 +374,12 @@
 {% endblock %}
 
 {% block content %}
+{% if using_dns_fallback %}
+<div style="background:#fff3cd;border:1px solid #ffc107;border-radius:6px;padding:12px 16px;margin-bottom:16px;color:#856404;">
+  <strong>&#9888; DNS lookup data not yet available</strong> — showing Pi-hole blocked queries as a temporary fallback.
+  DNS lookup data will appear once the dns-parser has processed at least one dnsmasq log line with client IP information.
+</div>
+{% endif %}
 <div class="filter-section">
     <h3>Column Selection & Filters</h3>
 

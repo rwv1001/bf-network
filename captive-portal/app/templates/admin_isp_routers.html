@@ -296,6 +296,8 @@ function showPushBanner(msg, type) {
                         <span class="badge-trust">UDM</span>
                     {% elif router.nat_logger_type == 'openwrt' %}
                         <span class="badge-trust">OpenWRT</span>
+                    {% elif router.nat_logger_type == 'opnsense' %}
+                        <span class="badge-trust">OPNsense</span>
                     {% else %}
                         <span style="color:#999">—</span>
                     {% endif %}
@@ -363,11 +365,15 @@ function showPushBanner(msg, type) {
                                 <option value="none" {% if router.nat_logger_type == 'none' %}selected{% endif %}>None (no traffic monitoring)</option>
                                 <option value="udm"  {% if router.nat_logger_type == 'udm'  %}selected{% endif %}>UDM (UniFi Dream Machine)</option>
                                 <option value="openwrt" {% if router.nat_logger_type == 'openwrt' %}selected{% endif %}>OpenWRT / Teltonika</option>
+                                <option value="opnsense" {% if router.nat_logger_type == 'opnsense' %}selected{% endif %}>OPNsense</option>
                             </select>
                         </div>
-                        <div class="router-hint" id="nat-hint-edit-{{ router.id }}" style="display:{% if router.nat_logger_type == 'openwrt' %}block{% else %}none{% endif %}">
-                            ߔ <strong>Copy the shared SSH key to this router (run on the Pi):</strong><br>
+                        <div class="router-hint" id="nat-hint-edit-{{ router.id }}" style="display:{% if router.nat_logger_type in ('openwrt', 'opnsense') %}block{% else %}none{% endif %}">
+                            <strong>Copy the shared SSH key to this router (run on the Pi):</strong><br>
                             <code>ssh-copy-id -i /home/admin/.ssh/tel_key.pub root@{{ router.gateway_ip }}</code>
+                            <div style="margin-top:6px">
+                                OPNsense: System → Settings → Administration → enable Secure Shell (root).
+                            </div>
                         </div>
                         <div class="router-hint" id="hint-edit-{{ router.id }}">
                             ⚠️ <strong>Router configuration required:</strong>
@@ -432,7 +438,8 @@ function showPushBanner(msg, type) {
                 <select name="nat_logger_type" id="add-nat-type" onchange="updateNatHint('add')">
                     <option value="none" selected>None (no traffic monitoring)</option>
                     <option value="udm">UDM (UniFi Dream Machine)</option>
-                    <option value="openwrt">OpenWRT / Teltonika</option>
+                    <option value="openwrt">OpenWRT / Teltonika
+                    <option value="opnsense">OPNsense</option>
                 </select>
             </div>
             <div class="router-hint" id="nat-hint-add" style="display:none">
@@ -493,7 +500,7 @@ function updateNatHint(key) {
         hintBox = document.getElementById('nat-hint-' + key);
     }
     if (!selType || !hintBox) return;
-    hintBox.style.display = (selType.value === 'openwrt') ? 'block' : 'none';
+    hintBox.style.display = (selType.value === 'openwrt' || selType.value === 'opnsense') ? 'block' : 'none';
 }
 
 function toggleEdit(id) {

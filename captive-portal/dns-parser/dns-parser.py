@@ -47,7 +47,7 @@ class DNSParser:
         self.db_conn = None
         self.last_position = 0
         self.last_cleanup = None
-        # CNAME chain tracking: pid -> (original_domain, timestamp)
+        # CNAME chain tracking: query_id -> (original_domain, timestamp)
         self.cname_pending = {}
         # Pi-Hole blocked query polling state
         self._pihole_sid = None
@@ -67,32 +67,64 @@ class DNSParser:
     
     def parse_dns_line(self, line: str) -> Optional[Tuple]:
         """
-        Parse dnsmasq query log line
-        Expected formats:
-        - Query: dnsmasq[123]: query[A] example.com from 192.168.10.5
-        - Reply: dnsmasq[123]: reply example.com is 93.184.216.34
-        
-        Returns: ('resolve', pid, domain, ip), ('forward', pid, domain), or None
+        Parse dnsmasq/pihole-FTL query log line.
+
+        Full pihole format (preferred — has client info):
+          Aug 27 19:28:52 dnsmasq[564]: 7807288 192.168.1.54/41715 cached www.google.com is 142.251.154.119.
+
+        Returns one of:
+          ('lookup', query_id, client_ip, client_port, domain, ip, timestamp)
+          ('resolve', query_id, domain, ip)   — reply line without client
+          ('forward', query_id, domain)        — forwarded query (tracks CNAME chain)
+          None
         """
-        # Extract dnsmasq process ID — same PID = same DNS query
         pid_match = re.search(r'(?:dnsmasq|pihole-FTL)\[(\d+)\]:', line)
         pid = pid_match.group(1) if pid_match else None
 
-        # Match reply lines: "reply domain is IP" (IPv4 only)
-        reply_match = re.search(r'reply\s+(\S+)\s+is\s+(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?:\s|$)', line)
+        # Parse syslog timestamp: "Aug 27 19:28:52"
+        ts = None
+        ts_match = re.match(r'(\w{3})\s+(\d+)\s+(\d+:\d+:\d+)', line)
+        if ts_match:
+            try:
+                year = datetime.now().year
+                ts = datetime.strptime(
+                    f"{year} {ts_match.group(1)} {ts_match.group(2):>2} {ts_match.group(3)}",
+                    "%Y %b %d %H:%M:%S"
+                )
+                # Clamp to the past if we rolled over a year boundary
+                if ts > datetime.now() + timedelta(hours=1):
+                    ts = ts.replace(year=year - 1)
+            except ValueError:
+                ts = None
+
+        # Full pihole format: <query_id> <client_ip>/<client_port> (cached|reply) <domain> is <ip>
+        full_match = re.search(
+            r'(\d+)\s+(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/(\d+)\s+'
+            r'(?:cached|reply)\s+(\S+)\s+is\s+(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'
+            , line
+        )
+        if full_match:
+            query_id  = full_match.group(1)
+            client_ip = full_match.group(2)
+            client_port = int(full_match.group(3))
+            domain    = full_match.group(4)
+            ip        = full_match.group(5)
+            if not (domain.startswith('.') or domain == '<Root>'
+                    or ip.startswith('127.') or ip.startswith('0.')):
+                return ('lookup', query_id, client_ip, client_port, domain, ip, ts)
+
+        # Fallback reply line (no client): "reply domain is IP"
+        reply_match = re.search(
+            r'reply\s+(\S+)\s+is\s+(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?:\s|$)', line
+        )
         if reply_match:
             domain = reply_match.group(1)
-            ip = reply_match.group(2)
-            
-            # Filter out special domains and invalid IPs
-            if domain.startswith('.') or domain == '<Root>':
-                return None
-            if ip.startswith('127.') or ip.startswith('0.'):
-                return None
-                
-            return ('resolve', pid, domain, ip)
+            ip     = reply_match.group(2)
+            if not (domain.startswith('.') or domain == '<Root>'
+                    or ip.startswith('127.') or ip.startswith('0.')):
+                return ('resolve', pid, domain, ip)
 
-        # Match forwarded lines — this is the original (pre-CNAME) query domain
+        # Forwarded query — track for CNAME resolution
         forward_match = re.search(r'forwarded\s+(\S+)\s+to\s+', line)
         if forward_match and pid:
             domain = forward_match.group(1)
@@ -101,6 +133,27 @@ class DNSParser:
 
         return None
     
+    def store_dns_lookup(self, client_ip: str, client_port: int,
+                          domain: str, ip: str, ts):
+        """Insert one row into dns_lookups (no deduplication)."""
+        if ts is None:
+            ts = datetime.now()
+        try:
+            with self.db_conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO dns_lookups
+                    (lookup_timestamp, client_ip, client_port, domain_name, resolved_ip)
+                VALUES (%s, %s::inet, %s, %s, %s::inet)
+                ON CONFLICT DO NOTHING
+                """, (ts, client_ip, client_port, domain, ip))
+            self.db_conn.commit()
+        except Exception as e:
+            logger.error("Failed to store dns_lookup %s/%s -> %s: %s", client_ip, domain, ip, e)
+            try:
+                self.db_conn.rollback()
+            except Exception:
+                pass
+
     def store_dns_resolution(self, domain: str, ip: str):
         """
         Store or update DNS resolution with 12-hour deduplication
@@ -175,14 +228,23 @@ class DNSParser:
                     result = self.parse_dns_line(line)
                     if result:
                         if result[0] == 'forward':
-                            _, pid, domain = result
-                            # Remember original query domain for this PID
-                            self.cname_pending[pid] = (domain, datetime.now())
+                            _, query_id, domain = result
+                            self.cname_pending[query_id] = (domain, datetime.now())
+                        elif result[0] == 'lookup':
+                            # Full pihole format with client IP
+                            _, query_id, client_ip, client_port, domain, ip, ts = result
+                            self.store_dns_lookup(client_ip, client_port, domain, ip, ts)
+                            self.store_dns_resolution(domain, ip)
+                            # Also resolve the pre-CNAME domain if tracked
+                            if query_id in self.cname_pending:
+                                orig_domain, _ = self.cname_pending.pop(query_id)
+                                if orig_domain != domain:
+                                    self.store_dns_lookup(client_ip, client_port, orig_domain, ip, ts)
+                                    self.store_dns_resolution(orig_domain, ip)
                         elif result[0] == 'resolve':
+                            # Reply line without client info
                             _, pid, domain, ip = result
                             self.store_dns_resolution(domain, ip)
-                            # If we tracked a forwarded query for this PID,
-                            # also record the original (pre-CNAME) domain → same IP
                             if pid and pid in self.cname_pending:
                                 orig_domain, _ = self.cname_pending.pop(pid)
                                 if orig_domain != domain:
@@ -202,38 +264,28 @@ class DNSParser:
             logger.error(f"Error processing log file: {e}")
     
     def cleanup_old_resolutions(self):
-        """Delete DNS resolutions older than RETENTION_DAYS"""
-        # Only run cleanup once per day
+        """Delete DNS resolutions and lookups older than RETENTION_DAYS"""
         if self.last_cleanup:
-            time_since_cleanup = (datetime.now() - self.last_cleanup).total_seconds()
-            if time_since_cleanup < 86400:  # 24 hours
+            if (datetime.now() - self.last_cleanup).total_seconds() < 86400:
                 return
         
         try:
             cutoff_date = datetime.now() - timedelta(days=RETENTION_DAYS)
-            
             with self.db_conn.cursor() as cur:
-                cur.execute("""
-                    DELETE FROM dns_resolutions 
-                    WHERE last_seen < %s
-                """, (cutoff_date,))
-                
-                deleted_count = cur.rowcount
-            
+                cur.execute("DELETE FROM dns_resolutions WHERE last_seen < %s", (cutoff_date,))
+                deleted_res = cur.rowcount
+                cur.execute("DELETE FROM dns_lookups WHERE lookup_timestamp < %s", (cutoff_date,))
+                deleted_lkp = cur.rowcount
             self.db_conn.commit()
-            
-            if deleted_count > 0:
-                logger.info(f"Cleaned up {deleted_count} DNS resolutions older than {RETENTION_DAYS} days")
-            else:
-                logger.debug(f"No DNS resolutions older than {RETENTION_DAYS} days to clean up")
-            
+            if deleted_res or deleted_lkp:
+                logger.info("Cleanup: removed %d resolutions, %d lookups older than %d days",
+                            deleted_res, deleted_lkp, RETENTION_DAYS)
             self.last_cleanup = datetime.now()
-            
         except Exception as e:
-            logger.error(f"Failed to cleanup old resolutions: {e}")
+            logger.error("Failed to cleanup old records: %s", e)
             try:
                 self.db_conn.rollback()
-            except:
+            except Exception:
                 pass
 
     # ------------------------------------------------------------------ #

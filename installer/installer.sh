@@ -2031,6 +2031,8 @@ wipe_pi_docker_data() {
 
     echo "Docker volumes and local bind-mount data cleared."
 }
+
+
 seed_isp_routers() {
     local q_repo="$1"
 
@@ -2838,6 +2840,10 @@ install_pi_server() {
         echo "Skipping completed step: seed_isp_routers"
     fi
 
+    if ! step_done "nat_logger_setup"; then
+        setup_nat_logger_keys "$q_repo"
+        complete_step "nat_logger_setup"
+    fi
 
     if ! step_done "pi_npm_setup_script"; then
         install_fixed_npm_setup_py
@@ -3463,6 +3469,85 @@ dhcp snooping binding record
 "
 done
 
+# =============================================================================
+# NAT logger SSH key setup (runs as a named step during the deploy phase)
+# =============================================================================
+setup_nat_logger_keys() {
+    local q_repo="$1"
+    local ssh_dir="$REAL_HOME/.ssh"
+    mkdir -p "$ssh_dir" && chmod 700 "$ssh_dir"
+
+    # Keys live on the machine running the installer and are copied to the Pi
+    # so nat-parser (/home/<pi-user>/.ssh → /config) can use them later.
+    # nat_logger_type stays 'none' until set on the ISP Routers page.
+    local udm_key="$ssh_dir/udm_key"
+    local tel_key="$ssh_dir/tel_key"
+    local pi_ssh_dir="/home/${PI_USER}/.ssh"
+
+    echo
+    echo "================================================================="
+    echo "  NAT logger SSH keys"
+    echo "================================================================="
+    echo "ISP routers are seeded as nat_logger_type=none."
+    echo "After install, set the type on Admin → ISP Routers."
+    echo "nat-parser will then install the logger over SSH."
+    echo
+
+    if [ ! -f "$udm_key" ]; then
+        echo "Generating UDM key: $udm_key"
+        ssh-keygen -t ed25519 -f "$udm_key" -N "" -C "bf-network-udm-$(hostname)"
+        chown "$REAL_USER":"$REAL_USER" "$udm_key" "$udm_key.pub"
+    else
+        echo "Using existing UDM key: $udm_key"
+    fi
+
+    if [ ! -f "$tel_key" ]; then
+        echo "Generating OpenWRT/Teltonika key: $tel_key"
+        ssh-keygen -t ed25519 -f "$tel_key" -N "" -C "bf-network-openwrt-$(hostname)"
+        chown "$REAL_USER":"$REAL_USER" "$tel_key" "$tel_key.pub"
+    else
+        echo "Using existing OpenWRT key: $tel_key"
+    fi
+
+    pi_sudo "mkdir -p $(shell_quote "$pi_ssh_dir") && chmod 700 $(shell_quote "$pi_ssh_dir") && chown $PI_USER:$PI_USER $(shell_quote "$pi_ssh_dir")"
+    pi_scp_to "$udm_key"     "/tmp/udm_key"
+    pi_scp_to "$udm_key.pub" "/tmp/udm_key.pub"
+    pi_scp_to "$tel_key"     "/tmp/tel_key"
+    pi_scp_to "$tel_key.pub" "/tmp/tel_key.pub"
+    pi_sudo "mv /tmp/udm_key /tmp/udm_key.pub /tmp/tel_key /tmp/tel_key.pub $(shell_quote "$pi_ssh_dir")/ && \
+        chown $PI_USER:$PI_USER \
+          $(shell_quote "$pi_ssh_dir")/udm_key \
+          $(shell_quote "$pi_ssh_dir")/udm_key.pub \
+          $(shell_quote "$pi_ssh_dir")/tel_key \
+          $(shell_quote "$pi_ssh_dir")/tel_key.pub && \
+        chmod 600 \
+          $(shell_quote "$pi_ssh_dir")/udm_key \
+          $(shell_quote "$pi_ssh_dir")/tel_key && \
+        chmod 644 \
+          $(shell_quote "$pi_ssh_dir")/udm_key.pub \
+          $(shell_quote "$pi_ssh_dir")/tel_key.pub"
+
+    echo
+    echo "Install the matching public key on a router before setting its type:"
+    echo
+    echo "  UDM:"
+    echo "    ssh-copy-id -i ${udm_key}.pub root@<UDM-IP>"
+    echo "    # or on the UDM:"
+    echo "    mkdir -p ~/.ssh && chmod 700 ~/.ssh"
+    echo "    echo '$(cat "${udm_key}.pub")' >> ~/.ssh/authorized_keys"
+    echo
+    echo "  OpenWRT / Teltonika:"
+    echo "    ssh-copy-id -i ${tel_key}.pub root@<ROUTER-IP>"
+    echo 
+    echo "  OPNsense (same key):"
+    echo "    System > Settings > Administration → enable Secure Shell"
+    echo "    ssh-copy-id -i ${tel_key}.pub root@<OPNSENSE-IP>"
+    echo
+    if ! answer_exists "nat_logger_keys_ready"; then
+        prompt_ack "nat_logger_keys_ready" \
+            "Press Enter after you have copied the public key to any router you will enable later (or Enter to do that afterwards)..."
+    fi
+}
 # =============================================================================
 # SSH key management for HP5130 and Pi containers
 # =============================================================================

@@ -27,6 +27,7 @@ UDM_SSH_KEY = os.getenv("UDM_SSH_KEY", "/config/udm_key")
 UDM_INSTALL_SCRIPT = os.getenv("UDM_INSTALL_SCRIPT", "/scripts/udm-nat-logger-persist.sh")
 ROUTER_SSH_KEY = os.getenv("ROUTER_SSH_KEY", os.getenv("TEL_SSH_KEY", "/config/tel_key"))  # Shared key for all non-UDM routers
 ROUTER_INSTALL_SCRIPT = os.getenv("ROUTER_INSTALL_SCRIPT", "/scripts/tel-nat-logger-install.sh")
+OPNSENSE_INSTALL_SCRIPT = os.getenv("OPNSENSE_INSTALL_SCRIPT", "/scripts/opnsense-nat-logger-install.sh")
 PORTAL_IP = os.getenv("PORTAL_IP", "")
 USER_VLAN_MIN = os.getenv("USER_VLAN_MIN", "")
 USER_VLAN_MAX = os.getenv("USER_VLAN_MAX", "")
@@ -536,6 +537,8 @@ class NATParser:
                 self._check_udm_router(router)
             elif router['nat_logger_type'] == 'openwrt':
                 self._check_openwrt_router(router)
+            elif router['nat_logger_type'] == 'opnsense':
+                self._check_opnsense_router(router)
             self.router_last_check[rid] = datetime.now()
 
     def _check_udm_router(self, router: dict):
@@ -675,6 +678,75 @@ class NATParser:
             logger.error(f"{name} connection timed out during reinstall")
         except Exception as e:
             logger.error(f"{name} reinstall failed: {e}")
+    
+    def _check_opnsense_router(self, router: dict):
+        host = router['gateway_ip']
+        name = router['name']
+        if not os.path.exists(ROUTER_SSH_KEY):
+            logger.warning("Router SSH key not found: %s - skipping %s", ROUTER_SSH_KEY, name)
+            return
+        try:
+            logger.info("Checking NAT logger on %s (%s)...", name, host)
+            result = subprocess.run([
+                "ssh", "-i", ROUTER_SSH_KEY,
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "ConnectTimeout=10",
+                f"root@{host}", "pgrep -f nat_logger.sh",
+            ], capture_output=True, timeout=10)
+            if result.returncode == 0:
+                pids = result.stdout.decode().strip().split('\n')
+                logger.info("NAT logger running on %s (PIDs: %s)", name, ", ".join(pids))
+            else:
+                logger.warning("NAT logger NOT running on %s - attempting reinstall...", name)
+                self._reinstall_opnsense_router(router)
+        except subprocess.TimeoutExpired:
+            logger.error("%s connection timed out", name)
+        except Exception as e:
+            logger.error("Failed to check %s logger status: %s", name, e)
+
+    def _reinstall_opnsense_router(self, router: dict):
+        rid = router['id']
+        host = router['gateway_ip']
+        name = router['name']
+        last = self.router_last_reinstall.get(rid)
+        if last and (datetime.now() - last).total_seconds() < REINSTALL_COOLDOWN_SECONDS:
+            remaining = REINSTALL_COOLDOWN_SECONDS - (datetime.now() - last).total_seconds()
+            logger.info("%s reinstall cooldown active (%.0fs remaining)", name, remaining)
+            return
+        self.router_last_reinstall[rid] = datetime.now()
+        if not os.path.exists(ROUTER_SSH_KEY) or not os.path.exists(OPNSENSE_INSTALL_SCRIPT):
+            logger.warning("Missing SSH key or OPNsense install script for %s", name)
+            return
+        try:
+            logger.info("Copying install script to %s (%s)...", name, host)
+            result = subprocess.run([
+                "scp", "-i", ROUTER_SSH_KEY,
+                "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+                OPNSENSE_INSTALL_SCRIPT, f"root@{host}:/tmp/opnsense-nat-logger-install.sh",
+            ], capture_output=True, timeout=30)
+            if result.returncode != 0:
+                logger.error("SCP to %s failed: %s", name, result.stderr.decode())
+                return
+            env_prefix = (
+                f"PORTAL_IP='{PORTAL_IP}' "
+                f"USER_VLAN_MIN='{USER_VLAN_MIN}' "
+                f"USER_VLAN_MAX='{USER_VLAN_MAX}'"
+            )
+            result = subprocess.run([
+                "ssh", "-i", ROUTER_SSH_KEY,
+                "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+                f"root@{host}",
+                f"{env_prefix} sh /tmp/opnsense-nat-logger-install.sh",
+            ], capture_output=True, timeout=60)
+            if result.returncode == 0:
+                logger.info("Successfully reinstalled NAT logger on %s", name)
+                logger.debug(result.stdout.decode())
+            else:
+                logger.error("%s install script failed: %s", name, result.stderr.decode())
+        except subprocess.TimeoutExpired:
+            logger.error("%s connection timed out during reinstall", name)
+        except Exception as e:
+            logger.error("%s reinstall failed: %s", name, e)
 
     def check_log_freshness(self):
         """Check if logs are stale and attempt reinstall if needed"""

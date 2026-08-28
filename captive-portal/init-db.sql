@@ -365,7 +365,85 @@ ORDER BY n.session_start DESC;
 
 
 -- ============================================================
--- Pi-Hole blocked queries log
+-- DNS Lookups: one row per resolved lookup, with client identity.
+-- No deduplication — the traffic viewer shows every request.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS dns_lookups (
+    id               SERIAL PRIMARY KEY,
+    lookup_timestamp TIMESTAMP NOT NULL,
+    client_ip        INET      NOT NULL,
+    client_port      INTEGER,
+    domain_name      VARCHAR(255) NOT NULL,
+    resolved_ip      INET      NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_dl_timestamp  ON dns_lookups(lookup_timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_dl_client_ip  ON dns_lookups(client_ip, lookup_timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_dl_domain     ON dns_lookups(domain_name);
+CREATE INDEX IF NOT EXISTS idx_dl_resolved   ON dns_lookups(resolved_ip);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_dl_dedup ON dns_lookups (lookup_timestamp, client_ip, client_port, domain_name, resolved_ip);    
+
+-- View: DNS lookups enriched with lease→device→user info and optional NAT port data.
+-- Join path: dns_lookups → ip_leases (by IP + time) → device_ownership (by MAC + time) → users.
+-- NAT session is joined on matching src_ip + dst_ip within ±30 min to surface WAN/dst ports.
+CREATE OR REPLACE VIEW dns_traffic_view AS
+SELECT DISTINCT ON (
+    l.lookup_timestamp,
+    host(l.client_ip),
+    l.client_port,
+    l.domain_name
+)
+    l.id                          AS lookup_id,
+    l.lookup_timestamp,
+    host(l.client_ip)             AS client_ip,
+    l.client_port                 AS lan_src_port,
+    l.domain_name,
+    host(l.resolved_ip)           AS domain_ip,
+    lse.mac_address               AS src_mac,
+    u.email                       AS user_email,
+    u.first_name                  AS user_first_name,
+    u.last_name                   AS user_last_name,
+    n.src_port                    AS wan_src_port,
+    n.dst_port
+FROM dns_lookups l
+LEFT JOIN LATERAL (
+    SELECT mac_address
+    FROM ip_leases
+    WHERE host(ip_address::inet) = host(l.client_ip)
+      AND lease_start  <= l.lookup_timestamp
+      AND lease_expiry  >  l.lookup_timestamp
+    ORDER BY lease_start DESC
+    LIMIT 1
+) lse ON true
+LEFT JOIN LATERAL (
+    SELECT o.user_id
+    FROM device_ownership o
+    WHERE o.mac_address = lse.mac_address
+      AND o.start_datetime <= l.lookup_timestamp
+      AND (o.end_datetime IS NULL OR o.end_datetime > l.lookup_timestamp)
+    ORDER BY o.start_datetime DESC
+    LIMIT 1
+) own ON lse.mac_address IS NOT NULL
+LEFT JOIN users u ON u.id = own.user_id
+LEFT JOIN LATERAL (
+    SELECT n2.src_port, n2.dst_port
+    FROM nat_sessions n2
+    WHERE n2.src_ip = l.client_ip
+      AND n2.dst_ip = l.resolved_ip
+      AND n2.session_start >= l.lookup_timestamp - INTERVAL '5 minutes'
+      AND n2.session_start <= l.lookup_timestamp + INTERVAL '30 minutes'
+    ORDER BY n2.session_start
+    LIMIT 1
+) n ON true
+ORDER BY
+    l.lookup_timestamp,
+    host(l.client_ip),
+    l.client_port,
+    l.domain_name,
+    l.id;
+
+
+
 -- Populated by dns-parser polling the Pi-Hole v6 API.
 -- client_ip joins to devices.ip_address → users for attribution.
 -- ============================================================
@@ -391,6 +469,33 @@ CREATE INDEX IF NOT EXISTS idx_pbq_blocked_at  ON pihole_blocked_queries(blocked
 CREATE INDEX IF NOT EXISTS idx_pbq_client_ip   ON pihole_blocked_queries(client_ip);
 CREATE INDEX IF NOT EXISTS idx_pbq_user_id     ON pihole_blocked_queries(user_id);
 CREATE INDEX IF NOT EXISTS idx_pbq_domain      ON pihole_blocked_queries(domain);
+
+-- View: Pi-Hole blocked queries shaped like nat_sessions_enriched for the traffic viewer.
+-- Used as a fallback when nat_sessions has no data (NAT logger not yet installed).
+CREATE OR REPLACE VIEW pihole_blocked_enriched AS
+SELECT
+    p.id            AS session_id,
+    p.blocked_at    AS session_start,
+    NULL::TIMESTAMP AS session_end,
+    CAST(p.client_ip AS TEXT) AS src_ip,
+    NULL::INTEGER   AS src_port,
+    p.mac_address   AS src_mac,
+    u.email         AS user_email,
+    u.first_name    AS user_first_name,
+    u.last_name     AS user_last_name,
+    d.registration_status,
+    NULL::TEXT      AS dst_ip,
+    NULL::INTEGER   AS dst_port,
+    p.domain        AS domain_name,
+    1               AS dns_query_count,
+    NULL::INTEGER   AS packet_count,
+    NULL::FLOAT     AS duration_seconds,
+    d.switch_iface,
+    NULL::TEXT      AS switch_host
+FROM pihole_blocked_queries p
+LEFT JOIN users   u ON u.id = p.user_id
+LEFT JOIN devices d ON d.mac_address = p.mac_address
+ORDER BY p.blocked_at DESC;
 
 
 
