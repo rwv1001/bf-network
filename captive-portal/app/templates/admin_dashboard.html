@@ -273,6 +273,7 @@ function searchTable(tableType, searchValue) {
     <button onclick="toggleSection('unregistered-table-section','unregistered',this)" class="toggle-btn{% if 'unregistered' not in dashboard_hidden_sections %} active{% endif %}">&#128721; Unregistered Devices</button>
     <button onclick="toggleSection('users-table-section','users',this)" class="toggle-btn{% if 'users' not in dashboard_hidden_sections %} active{% endif %}">&#128101; Users</button>
     <button onclick="toggleSection('devices-table-section','devices',this)" class="toggle-btn{% if 'devices' not in dashboard_hidden_sections %} active{% endif %}">&#128241; All Devices</button>
+    <button onclick="toggleSection('fixed-ip-section','fixed_ip',this)" class="toggle-btn{% if 'fixed_ip' not in dashboard_hidden_sections %} active{% endif %}">&#128204; Fixed IPs</button>
     <button onclick="toggleSection('domain-policies-section','domain_policies',this)" class="toggle-btn{% if 'domain_policies' not in dashboard_hidden_sections %} active{% endif %}">&#128231; Domain Policies</button>
 </div>
 
@@ -1055,6 +1056,78 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
     <a href="#" onclick="return changeTablePage('devices', {{ devices_pages }});" class="btn btn-small">Last »</a>
     {% endif %}
 </div>
+{% endif %}
+</div>
+</div>
+
+<div id="fixed-ip-section" class="section-pane" {% if 'fixed_ip' in dashboard_hidden_sections %}style="display:none"{% endif %}>
+<div class="section-pane-header">
+    <h2>&#128204; Fixed IP reservations ({{ fixed_ip_reservations|length }})</h2>
+</div>
+<div class="section-pane-body">
+<div class="info-box" style="margin-bottom:16px;">
+    Use this when a device sets its own static IP. Kea will not offer that address to anyone else.
+    The device does not need to use DHCP.
+</div>
+
+<form method="POST" action="{{ url_for('admin.dashboard.fixed_ip_reservations') }}"
+      style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-bottom:18px;">
+    <input type="hidden" name="action" value="add">
+    <div>
+        <label style="font-size:12px;font-weight:600;display:block;">MAC *</label>
+        <input type="text" name="mac_address" required placeholder="aa:bb:cc:dd:ee:ff"
+               style="padding:8px;border:1px solid #ddd;border-radius:4px;min-width:180px;">
+    </div>
+    <div>
+        <label style="font-size:12px;font-weight:600;display:block;">IP *</label>
+        <input type="text" name="ip" required placeholder="10.7.40.10"
+               style="padding:8px;border:1px solid #ddd;border-radius:4px;min-width:140px;">
+    </div>
+    <div>
+        <label style="font-size:12px;font-weight:600;display:block;">VLAN</label>
+        <input type="number" name="vlan_id" min="1" max="4094" placeholder="from IP if blank"
+               style="padding:8px;border:1px solid #ddd;border-radius:4px;width:110px;">
+    </div>
+    <button type="submit" class="btn btn-small">Reserve</button>
+</form>
+
+{% if fixed_ip_reservations %}
+<div class="table-responsive">
+<table>
+    <thead>
+        <tr>
+            <th>MAC</th>
+            <th>Reserved IP</th>
+            <th>VLAN</th>
+            <th>Name</th>
+            <th>Current DHCP IP</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for d in fixed_ip_reservations %}
+        <tr>
+            <td style="font-family:monospace;font-size:12px;">{{ d.mac_address }}</td>
+            <td style="font-family:monospace;">{{ d.fixed_ip }}</td>
+            <td>{{ d.current_vlan or '—' }}</td>
+            <td>{{ d.device_name or '—' }}</td>
+            <td style="font-family:monospace;font-size:12px;">{{ d.ip_address or '—' }}</td>
+            <td>
+                <form method="POST" action="{{ url_for('admin.dashboard.fixed_ip_reservations') }}" style="display:inline;"
+                      onsubmit="return confirm('Remove reservation for {{ d.mac_address }}?');">
+                    <input type="hidden" name="action" value="delete">
+                    <input type="hidden" name="mac_address" value="{{ d.mac_address }}">
+                    <input type="hidden" name="ip" value="{{ d.fixed_ip }}">
+                    <button type="submit" class="btn btn-small" style="background:#999;">Clear</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+</div>
+{% else %}
+<div style="color:#666;">No fixed IP reservations.</div>
 {% endif %}
 </div>
 </div>

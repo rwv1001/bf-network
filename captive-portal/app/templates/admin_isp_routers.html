@@ -325,6 +325,18 @@ function showPushBanner(msg, type) {
                             <input type="text" name="name" value="{{ router.name }}" required>
                         </div>
                         <div class="form-group">
+                            <label>Gateway IP *</label>
+                            <input type="text" name="gateway_ip" id="add-gateway-ip"
+                                placeholder="192.168.4.254" required
+                                oninput="updateHint('add')">
+                        </div>
+                        <div class="form-group">
+                            <label>Prefix length *</label>
+                            <input type="number" name="prefix_len" id="add-prefix-len"
+                                min="8" max="30" value="24" required
+                                oninput="updateHint('add')">
+                        </div>
+                        <div class="form-group">
                             <label>VLAN ID</label>
                             {% if router.vlan_id == 1 %}
                             <input type="number" name="vlan_id" value="1" readonly
@@ -438,7 +450,7 @@ function showPushBanner(msg, type) {
                 <select name="nat_logger_type" id="add-nat-type" onchange="updateNatHint('add')">
                     <option value="none" selected>None (no traffic monitoring)</option>
                     <option value="udm">UDM (UniFi Dream Machine)</option>
-                    <option value="openwrt">OpenWRT / Teltonika
+                    <option value="openwrt">OpenWRT / Teltonika</option>
                     <option value="opnsense">OPNsense</option>
                 </select>
             </div>
@@ -462,31 +474,32 @@ function showPushBanner(msg, type) {
 </div>
 
 <script>
+function prefixFromGateway(gw, pfx) {
+    const parts = (gw || '').split('.');
+    if (parts.length < 3) return '';
+    return parts[0] + '.' + parts[1] + '.' + parts[2];
+}
+
 function updateHint(key) {
-    let vlanId;
-    if (key === 'add') {
-        const sel = document.getElementById('add-vlan-id');
-        vlanId = sel ? parseInt(sel.value) : null;
-    } else {
-        const id = key.replace('edit-', '');
-        const sel = document.getElementById('edit-vlan-id-' + id);
-        vlanId = sel ? parseInt(sel.value) : null;
-    }
     const hintBox = document.getElementById('hint-' + key);
     if (!hintBox) return;
-    if (!vlanId || isNaN(vlanId)) {
-        hintBox.style.display = 'none';
-        return;
+    let gwInput, pfxInput;
+    if (key === 'add') {
+        gwInput = document.getElementById('add-gateway-ip');
+        pfxInput = document.getElementById('add-prefix-len');
+    } else {
+        const form = document.querySelector('#edit-row-' + key.replace('edit-', '') + ' form');
+        gwInput = form ? form.querySelector('[name=gateway_ip]') : null;
+        pfxInput = form ? form.querySelector('[name=prefix_len]') : null;
     }
-    const gw  = '{{ network_word }}.' + vlanId + '.1';
-    const sw  = '{{ network_word }}.' + vlanId + '.2';
+    const gw = gwInput ? gwInput.value.trim() : '';
+    if (!gw) { hintBox.style.display = 'none'; return; }
+    const pref = prefixFromGateway(gw);
     const gwEl = document.getElementById('hint-' + key + '-gw');
     const swEl = document.getElementById('hint-' + key + '-sw');
     if (gwEl) gwEl.textContent = gw;
-    if (swEl) swEl.textContent = sw;
+    if (swEl) swEl.textContent = pref ? pref + '.2' : '—';
     hintBox.style.display = 'block';
-    const natGwEl = document.getElementById('nat-hint-add-gw');
-    if (natGwEl && key === 'add') natGwEl.textContent = gw;
 }
 
 function updateNatHint(key) {

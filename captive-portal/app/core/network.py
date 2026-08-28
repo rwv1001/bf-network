@@ -1022,6 +1022,8 @@ def reset_pi_network_masks(vlan_ids: list) -> bool:
     env["VLAN_LIST"] = " ".join(vlan_ids)
     if env.get("PI_NETWORK_DIR"):
         env["NETWORK_DIR"] = env["PI_NETWORK_DIR"]
+    env.setdefault("WAN_IFACE", os.getenv("WAN_IFACE", "eth0"))
+    env.setdefault("KEA_CONFIG_PATH", "/kea/config/dhcp4.json")
     result = subprocess.run([script_path], capture_output=True, text=True, timeout=120, env=env)
     if result.returncode != 0:
         logger.error("Pi network update failed (exit=%s). stderr=%s stdout=%s",

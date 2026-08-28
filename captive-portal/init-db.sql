@@ -383,65 +383,6 @@ CREATE INDEX IF NOT EXISTS idx_dl_domain     ON dns_lookups(domain_name);
 CREATE INDEX IF NOT EXISTS idx_dl_resolved   ON dns_lookups(resolved_ip);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_dl_dedup ON dns_lookups (lookup_timestamp, client_ip, client_port, domain_name, resolved_ip);    
 
--- View: DNS lookups enriched with lease→device→user info and optional NAT port data.
--- Join path: dns_lookups → ip_leases (by IP + time) → device_ownership (by MAC + time) → users.
--- NAT session is joined on matching src_ip + dst_ip within ±30 min to surface WAN/dst ports.
-CREATE OR REPLACE VIEW dns_traffic_view AS
-SELECT DISTINCT ON (
-    l.lookup_timestamp,
-    host(l.client_ip),
-    l.client_port,
-    l.domain_name
-)
-    l.id                          AS lookup_id,
-    l.lookup_timestamp,
-    host(l.client_ip)             AS client_ip,
-    l.client_port                 AS lan_src_port,
-    l.domain_name,
-    host(l.resolved_ip)           AS domain_ip,
-    lse.mac_address               AS src_mac,
-    u.email                       AS user_email,
-    u.first_name                  AS user_first_name,
-    u.last_name                   AS user_last_name,
-    n.src_port                    AS wan_src_port,
-    n.dst_port
-FROM dns_lookups l
-LEFT JOIN LATERAL (
-    SELECT mac_address
-    FROM ip_leases
-    WHERE host(ip_address::inet) = host(l.client_ip)
-      AND lease_start  <= l.lookup_timestamp
-      AND lease_expiry  >  l.lookup_timestamp
-    ORDER BY lease_start DESC
-    LIMIT 1
-) lse ON true
-LEFT JOIN LATERAL (
-    SELECT o.user_id
-    FROM device_ownership o
-    WHERE o.mac_address = lse.mac_address
-      AND o.start_datetime <= l.lookup_timestamp
-      AND (o.end_datetime IS NULL OR o.end_datetime > l.lookup_timestamp)
-    ORDER BY o.start_datetime DESC
-    LIMIT 1
-) own ON lse.mac_address IS NOT NULL
-LEFT JOIN users u ON u.id = own.user_id
-LEFT JOIN LATERAL (
-    SELECT n2.src_port, n2.dst_port
-    FROM nat_sessions n2
-    WHERE n2.src_ip = l.client_ip
-      AND n2.dst_ip = l.resolved_ip
-      AND n2.session_start >= l.lookup_timestamp - INTERVAL '5 minutes'
-      AND n2.session_start <= l.lookup_timestamp + INTERVAL '30 minutes'
-    ORDER BY n2.session_start
-    LIMIT 1
-) n ON true
-ORDER BY
-    l.lookup_timestamp,
-    host(l.client_ip),
-    l.client_port,
-    l.domain_name,
-    l.id;
-
 
 
 -- Populated by dns-parser polling the Pi-Hole v6 API.
@@ -519,6 +460,67 @@ CREATE TABLE IF NOT EXISTS ip_leases (
 CREATE INDEX IF NOT EXISTS idx_il_mac    ON ip_leases(mac_address);
 CREATE INDEX IF NOT EXISTS idx_il_ip     ON ip_leases(ip_address);
 CREATE INDEX IF NOT EXISTS idx_il_expiry ON ip_leases(lease_expiry);
+
+-- View: DNS lookups enriched with lease→device→user info and optional NAT port data.
+-- Join path: dns_lookups → ip_leases (by IP + time) → device_ownership (by MAC + time) → users.
+-- NAT session is joined on matching src_ip + dst_ip within ±30 min to surface WAN/dst ports.
+CREATE OR REPLACE VIEW dns_traffic_view AS
+SELECT DISTINCT ON (
+    l.lookup_timestamp,
+    host(l.client_ip),
+    l.client_port,
+    l.domain_name
+)
+    l.id                          AS lookup_id,
+    l.lookup_timestamp,
+    host(l.client_ip)             AS client_ip,
+    l.client_port                 AS lan_src_port,
+    l.domain_name,
+    host(l.resolved_ip)           AS domain_ip,
+    lse.mac_address               AS src_mac,
+    u.email                       AS user_email,
+    u.first_name                  AS user_first_name,
+    u.last_name                   AS user_last_name,
+    n.src_port                    AS wan_src_port,
+    n.dst_port
+FROM dns_lookups l
+LEFT JOIN LATERAL (
+    SELECT mac_address
+    FROM ip_leases
+    WHERE host(ip_address::inet) = host(l.client_ip)
+      AND lease_start  <= l.lookup_timestamp
+      AND lease_expiry  >  l.lookup_timestamp
+    ORDER BY lease_start DESC
+    LIMIT 1
+) lse ON true
+LEFT JOIN LATERAL (
+    SELECT o.user_id
+    FROM device_ownership o
+    WHERE o.mac_address = lse.mac_address
+      AND o.start_datetime <= l.lookup_timestamp
+      AND (o.end_datetime IS NULL OR o.end_datetime > l.lookup_timestamp)
+    ORDER BY o.start_datetime DESC
+    LIMIT 1
+) own ON lse.mac_address IS NOT NULL
+LEFT JOIN users u ON u.id = own.user_id
+LEFT JOIN LATERAL (
+    SELECT n2.src_port, n2.dst_port
+    FROM nat_sessions n2
+    WHERE n2.src_ip = l.client_ip
+      AND n2.dst_ip = l.resolved_ip
+      AND n2.session_start >= l.lookup_timestamp - INTERVAL '5 minutes'
+      AND n2.session_start <= l.lookup_timestamp + INTERVAL '30 minutes'
+    ORDER BY n2.session_start
+    LIMIT 1
+) n ON true
+ORDER BY
+    l.lookup_timestamp,
+    host(l.client_ip),
+    l.client_port,
+    l.domain_name,
+    l.id;
+
+
 
 -- ── Central sync: outbound event queue ──────────────────────────────────────
 CREATE TABLE IF NOT EXISTS central_outbound_events (

@@ -117,6 +117,41 @@ def _effective_device_ip(mac_address, request_ip):
 
     return request_ip
 
+from ipaddress import ip_address as parse_ip, ip_network as parse_net
+
+def _site_networks():
+    nets = []
+    extra = (os.getenv('SITE_NETWORKS') or '').strip()
+    if extra:
+        for part in extra.split(','):
+            part = part.strip()
+            if part:
+                try:
+                    nets.append(parse_net(part, strict=False))
+                except ValueError:
+                    logger.warning("Ignoring invalid SITE_NETWORKS entry: %s", part)
+    word = (os.getenv('NETWORK_WORD') or '').strip()
+    if word.count('.') == 1:
+        nets.append(parse_net(f"{word}.0.0/16", strict=False))
+    elif word.count('.') == 2:
+        nets.append(parse_net(f"{word}.0/24", strict=False))
+    if not nets:
+        nets = [
+            parse_net('10.0.0.0/8'),
+            parse_net('172.16.0.0/12'),
+            parse_net('192.168.0.0/16'),
+        ]
+    return nets
+
+def client_is_on_site():
+    raw = get_client_ip()
+    try:
+        addr = parse_ip(raw)
+    except Exception:
+        return False
+    if addr.is_loopback:
+        return True
+    return any(addr in net for net in _site_networks())
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -1287,6 +1322,12 @@ def reject_device(token):
 @portal_bp.route('/login', methods=['GET', 'POST'])
 @limiter.limit("5 per minute")
 def user_login():
+    if not client_is_on_site():
+        session.pop('portal_user_id', None)
+        if request.method == 'POST':
+            flash('Sign-in is only available on the Blackfriars network.', 'error')
+        return render_template('user_login.html', off_site=True)
+
     if request.method == 'POST':
         email    = (request.form.get('email')    or '').strip().lower()
         password = (request.form.get('password') or '').strip()
@@ -1317,6 +1358,10 @@ def logout():
 
 @portal_bp.route('/user_home', methods=['GET', 'POST'])
 def user_home():
+    if not client_is_on_site():
+        session.pop('portal_user_id', None)
+        flash('Device management is only available on the Blackfriars network.', 'error')
+        return redirect(url_for('portal.user_login'))
     portal_user_id = session.get('portal_user_id')
     user = None
     calling_device = None
@@ -1599,6 +1644,10 @@ def forgot_network_password():
 
 @portal_bp.route('/adopt')
 def adopt_devices():
+    if not client_is_on_site():
+        session.pop('portal_user_id', None)
+        flash('Device management is only available on the Blackfriars network.', 'error')
+        return redirect(url_for('portal.user_login'))
     user, device = current_user_from_device()
     if not user:
         return render_template(
@@ -1711,6 +1760,10 @@ def adopt_devices():
 
 @portal_bp.route('/adopt', methods=['POST'])
 def adopt_device():
+    if not client_is_on_site():
+        session.pop('portal_user_id', None)
+        flash('Device management is only available on the Blackfriars network.', 'error')
+        return redirect(url_for('portal.user_login'))
     user, device = current_user_from_device()
     if not user:
         flash('Please connect from a registered device to adopt devices.', 'error')
@@ -1906,6 +1959,10 @@ def adopt_device():
 
 @portal_bp.route('/adopt/change-vlan', methods=['POST'])
 def adopt_change_vlan():
+    if not client_is_on_site():
+        session.pop('portal_user_id', None)
+        flash('Device management is only available on the Blackfriars network.', 'error')
+        return redirect(url_for('portal.user_login'))
     user, _ = current_user_from_device()
     if not user:
         flash('Please connect from a registered device to manage VLANs.', 'error')

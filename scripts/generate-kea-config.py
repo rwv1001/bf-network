@@ -186,6 +186,7 @@ def make_vlan_subnet(
     prefix: int,
     switch_hosts_raw: str,
     gateway_octet: int,
+    wan_iface: str,
 ) -> dict:
     network = ipaddress.IPv4Network(f"{network_word}.{vlan}.0/{prefix}", strict=False)
     bounds = pool_bounds(prefix)
@@ -211,7 +212,7 @@ def make_vlan_subnet(
                 "client-classes": ["NOT_BLOCKED"]
             },
         ],
-        "interface": f"eth0.{vlan}",
+        "interface": f"{wan_iface}.{vlan}",
         "option-data": [
             {"name": "routers", "data": router}
         ],
@@ -269,7 +270,7 @@ def fetch_vlan_gateway_octets(
 
 def main():
     network_word = require_env("NETWORK_WORD")
-
+    wan_iface = os.environ.get("WAN_IFACE", "eth0").strip() or "eth0"
     wired_vlan      = _get_wired_vlan()
     management_vlan = _get_management_vlan()
 
@@ -331,7 +332,7 @@ def main():
         gateway_octet = vlan_gw_octets.get(vlan, fallback_octet)
         subnet4.append(
             make_vlan_subnet(
-                network_word, vlan, prefix, switch_hosts_raw, gateway_octet
+                network_word, vlan, prefix, switch_hosts_raw, gateway_octet, wan_iface,
             )
         )
 
@@ -342,7 +343,7 @@ def main():
         "pools": [
             {"pool": f"{network_word}.{wired_vlan}.1 - {network_word}.{wired_vlan}.255"}
         ],
-        "interface": f"eth0.{wired_vlan}",
+        "interface": f"{wan_iface}.{wired_vlan}",
         "option-data": [
             {"name": "routers",             "data": unregistered_gw},
             {"name": "domain-name-servers", "data": hijack_dns_ip},
@@ -357,7 +358,7 @@ def main():
         "pools": [
             {"pool": f"{network_word}.{management_vlan}.1 - {network_word}.{management_vlan}.254"}
         ],
-        "interface": f"eth0.{management_vlan}",
+        "interface": f"{wan_iface}.{management_vlan}",
         "option-data": [
             {"name": "routers",             "data": mgmt_gateway},
             {"name": "domain-name-servers", "data": "8.8.8.8, 8.8.4.4"},
@@ -366,8 +367,8 @@ def main():
     })
 
     interfaces = (
-        [f"eth0.{v}" for v in sorted(vlan_prefix_map) if v not in SPECIAL_VLANS]
-        + [f"eth0.{wired_vlan}", f"eth0.{management_vlan}"]
+        [f"{wan_iface}.{v}" for v in sorted(vlan_prefix_map) if v not in SPECIAL_VLANS]
+        + [f"{wan_iface}.{wired_vlan}", f"{wan_iface}.{management_vlan}"]
     )
 
     config = {

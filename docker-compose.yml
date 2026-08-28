@@ -80,6 +80,7 @@ services:
       KEA_VALID_LIFETIME: ${KEA_VALID_LIFETIME:-3600}
       KEA_RENEW_TIMER: ${KEA_RENEW_TIMER:-600}
       KEA_REBIND_TIMER: ${KEA_REBIND_TIMER:-1200}
+      WAN_IFACE: ${WAN_IFACE:-eth0}
     entrypoint: |
       sh -c '
       # Abort early if any required variable is missing
@@ -293,6 +294,7 @@ services:
       PORTAL_ADMIN_PASSWORD: ${PORTAL_ADMIN_PASSWORD:?PORTAL_ADMIN_PASSWORD is required}
       PORTAL_FORWARD_PORT: ${PORTAL_FORWARD_PORT:-8081}
       UNIFI_FORWARD_PORT: ${UNIFI_FORWARD_PORT:-8080}
+      WAN_IFACE: ${WAN_IFACE:-eth0}
     volumes:
       - ./captive-portal/app:/app
       - ./shared/restart-queue:/restart-queue
@@ -447,6 +449,7 @@ services:
       NETWORK_WORD: ${NETWORK_WORD:-192.168}
       PORTAL_IP: ${PORTAL_IP:?PORTAL_IP is required}
       PORTAL_IP_BYTE: ${PORTAL_IP_BYTE:-4}
+      WAN_IFACE: ${WAN_IFACE:-eth0}
     volumes:
       - ./pihole/etc-pihole:/etc/pihole
       - ./pihole/logs:/var/log/pihole
@@ -461,13 +464,12 @@ services:
           printf '%s %s\n' "$${PORTAL_IP}" "$$PORTAL_DOMAIN" > /etc/pihole/custom.list
         fi
         mkdir -p /etc/dnsmasq.d
-        printf 'bind-interfaces\nexcept-interface=eth0.99\nlisten-address=127.0.0.1\nlisten-address=%s\n' "$${PORTAL_IP}" > /etc/dnsmasq.d/99-local-bind.conf
-        # Replace placeholders in static config files with environment values
-        if [ -n "$${MANAGEMENT_VLAN:-}" ]; then
-          sed -i "s/eth0\.\$${MANAGEMENT_VLAN:-99}/eth0.$${MANAGEMENT_VLAN}/g" /etc/pihole/dnsmasq.conf
-          sed -i "s/eth0\.\$${MANAGEMENT_VLAN:-99}/eth0.$${MANAGEMENT_VLAN}/g" /etc/dnsmasq.d/99-local-bind.conf
-          find /etc/pihole -type f \( -name custom.list -o -name 'captive-portal.hosts' \) -exec sed -i "s/192\.168\.\$${MANAGEMENT_VLAN:-99}/192.168.$${MANAGEMENT_VLAN}/g" {} \;
-        fi
+        WAN_IFACE="$${WAN_IFACE:-eth0}"
+        MGMT_VLAN="$${MANAGEMENT_VLAN:-99}"
+        mkdir -p /etc/dnsmasq.d
+        printf 'bind-interfaces\nexcept-interface=%s.%s\nlisten-address=127.0.0.1\nlisten-address=%s\n' \
+          "$$WAN_IFACE" "$$MGMT_VLAN" "$${PORTAL_IP}" \
+          > /etc/dnsmasq.d/99-local-bind.conf
         exec /usr/bin/start.sh
 
   # ── DNSmasq hijack (captive-portal redirect for unregistered devices) ─────────

@@ -1,7 +1,7 @@
 # Pi-hole configuration file (v6.5)
 # Encoding: UTF-8
 # This file is managed by pihole-FTL
-# Last updated on 2026-04-09 21:46:11 UTC
+# Last updated on 2026-08-28 17:46:53 BST
 
 [dns]
   # Upstream DNS Servers to be used by Pi-hole. If this is not set, Pi-hole will not
@@ -1128,7 +1128,7 @@
     #
     # Allowed values are:
     #     A valid Pi-hole password hash
-    pwhash = "$BALLOON-SHA256$v=1$s=1024,t=32$SW3W0rit3en0VYRaUzdZ1A==$SZzghCcSykVh0hbbTDhf0i95Y/0JBGyXoIyuN9Cc7QY=" ### CHANGED, default = ""
+    pwhash = "$BALLOON-SHA256$v=1$s=1024,t=32$D/HdcRO+BF/kVRDjNVbTNQ==$h1AT94iuVC9WR90R3P5lbaurxX5/u+QP2WUMC+a2YFU=" ### CHANGED, default = ""
 
     # Pi-hole 2FA TOTP secret. When set to something different than "", 2FA authentication
     # will be enforced for the API and the web interface. This setting is write-only, you
@@ -1400,7 +1400,9 @@
   #
   # Allowed values are:
   #     Array of valid dnsmasq config line options
-  dnsmasq_lines = []
+  dnsmasq_lines = [
+    "log-queries=extra"
+  ] ### CHANGED (env), default = []
 
   # Log additional information about queries and replies to pihole.log
   #
@@ -1716,12 +1718,13 @@
   all = false
 
 # Configuration statistics:
-# 166 total entries out of which 158 entries are default
-# --> 8 entries are modified
-# 6 entries are forced through environment:
+# 166 total entries out of which 157 entries are default
+# --> 9 entries are modified
+# 7 entries are forced through environment:
 #   - dns.upstreams
 #   - dns.interface
 #   - dns.listeningMode
 #   - webserver.port
 #   - webserver.api.max_sessions
 #   - misc.etc_dnsmasq_d
+#   - misc.dnsmasq_lines

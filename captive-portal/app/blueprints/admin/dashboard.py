@@ -282,6 +282,12 @@ def index():
         .all()
     )
     unregistered_total = len(unregistered_devices)
+    fixed_ip_reservations = (
+        Device.query
+        .filter(Device.fixed_ip.isnot(None), Device.fixed_ip != '')
+        .order_by(Device.fixed_ip.asc())
+        .all()
+    )
 
     # ── Lease stats ───────────────────────────────────────────────────────────
     prefix_by_id = get_vlan_prefix_by_id()
@@ -338,6 +344,7 @@ def index():
         devices_page=devices_page, devices_per_page=devices_per_page,
         devices_pages=devices_pages, devices_total=devices_total,
         devices_search=devices_search, devices_sort=devices_sort, devices_order=devices_order,
+        fixed_ip_reservations=fixed_ip_reservations,
         users=users,
         users_page=users_page, users_per_page=users_per_page,
         users_pages=users_pages, users_total=users_total,
@@ -775,4 +782,77 @@ def process_request(request_id):
         flash('Request rejected', 'info')
         logger.info("Admin rejected registration request for %s", reg_request.email)
 
+    return redirect(url_for('admin.dashboard.index'))
+
+def _vlan_id_from_ip(ip: str):
+    try:
+        return int(str(ip).split('.')[2])
+    except (IndexError, ValueError):
+        return None
+
+
+@dashboard_bp.route('/fixed-ip-reservations', methods=['POST'])
+@login_required
+@permission_required('manage_users')
+def fixed_ip_reservations():
+    """Reserve a MAC→IP in Kea so a self-assigned static IP is not leased out."""
+    action = (request.form.get('action') or 'add').strip().lower()
+    mac = (request.form.get('mac_address') or '').strip().lower()
+    ip = (request.form.get('ip') or '').strip()
+
+    if not mac:
+        flash('MAC address is required.', 'error')
+        return redirect(url_for('admin.dashboard.index'))
+
+    device = Device.query.filter_by(mac_address=mac).first()
+    kea = _get_kea()
+
+    if action == 'delete':
+        old_ip = (device.fixed_ip if device else None) or ip
+        vlan_id = (device.current_vlan if device else None) or _vlan_id_from_ip(old_ip)
+        if kea and old_ip and vlan_id:
+            try:
+                kea.clear_fixed_ip(mac, vlan_id)
+            except Exception as exc:
+                logger.warning("Kea clear_reservation failed for %s: %s", mac, exc)
+        if device:
+            device.fixed_ip = None
+            db.session.commit()
+        flash(f'Cleared fixed IP reservation for {mac}.', 'success')
+        return redirect(url_for('admin.dashboard.index'))
+
+    try:
+        ipaddress.IPv4Address(ip)
+    except Exception:
+        flash(f'Invalid IP address: {ip}', 'error')
+        return redirect(url_for('admin.dashboard.index'))
+
+    vlan_id = request.form.get('vlan_id', type=int) or _vlan_id_from_ip(ip)
+    if not vlan_id:
+        flash('Could not determine VLAN. Enter a VLAN ID.', 'error')
+        return redirect(url_for('admin.dashboard.index'))
+
+    clash = Device.query.filter(Device.fixed_ip == ip, Device.mac_address != mac).first()
+    if clash:
+        flash(f'{ip} is already reserved for {clash.mac_address}.', 'error')
+        return redirect(url_for('admin.dashboard.index'))
+
+    if kea:
+        try:
+            if not kea.reserve_fixed_ip(mac, vlan_id, ip):
+                flash('Kea rejected the reservation (IP outside subnet).', 'error')
+                return redirect(url_for('admin.dashboard.index'))
+        except Exception as exc:
+            logger.exception("Kea reservation failed for %s -> %s", mac, ip)
+            flash(f'Kea reservation failed: {exc}', 'error')
+            return redirect(url_for('admin.dashboard.index'))
+
+    if not device:
+        device = Device(mac_address=mac, current_vlan=vlan_id, device_name='static')
+        db.session.add(device)
+    device.fixed_ip = ip
+    if not device.current_vlan:
+        device.current_vlan = vlan_id
+    db.session.commit()
+    flash(f'Reserved {ip} for {mac} (VLAN {vlan_id}).', 'success')
     return redirect(url_for('admin.dashboard.index'))

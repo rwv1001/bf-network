@@ -41,6 +41,37 @@ isp_routers_bp = Blueprint('isp_routers', __name__)
 def _net_word() -> str:
     return os.getenv('NETWORK_WORD', '192.168')
 
+def _subnet_from_gateway(gateway_ip: str, prefix: int) -> str:
+    addr = ipaddress.IPv4Address(gateway_ip.strip())
+    net = ipaddress.IPv4Network((int(addr), prefix), strict=False)
+    return str(net)
+
+
+def _parse_gateway_and_prefix(form, default_gw=None, default_prefix=24):
+    raw_gw = (form.get('gateway_ip') or '').strip() or (default_gw or '')
+    raw_pfx = (form.get('prefix_len') or '').strip()
+    try:
+        prefix = int(raw_pfx) if raw_pfx else int(default_prefix)
+    except (TypeError, ValueError):
+        prefix = 24
+    if prefix < 8 or prefix > 30:
+        raise ValueError('Prefix length must be between 8 and 30.')
+    if not raw_gw:
+        raise ValueError('Gateway IP is required.')
+    try:
+        ipaddress.IPv4Address(raw_gw)
+    except ipaddress.AddressValueError as exc:
+        raise ValueError(f'Invalid gateway IP: {raw_gw}') from exc
+    subnet = _subnet_from_gateway(raw_gw, prefix)
+    return raw_gw, prefix, subnet
+
+
+def _prefix_from_subnet(subnet: str) -> int:
+    try:
+        return ipaddress.IPv4Network(subnet, strict=False).prefixlen
+    except Exception:
+        return 24
+
 
 def _write_hp5130_policy_or_warn(context: str) -> bool:
     """Refresh /scripts/scriptdata/hp5130-policy.json after DB-backed config changes."""
@@ -91,11 +122,12 @@ def _push_job_read(job_id: str):
 # ---------------------------------------------------------------------------
 
 def _build_isp_router_switch_config(router: ISPRouter, switch_host: str) -> str:
-    last_octet = switch_host.split('.')[-1]
-    # subnet is e.g. "192.168.1.0/24" → prefix "192.168.1"
-    subnet_ip = router.subnet.split('/')[0].strip()
-    subnet_prefix = subnet_ip.rsplit('.', 1)[0]
-    host_ip = f"{subnet_prefix}.{last_octet}"
+    last_octet = int(switch_host.split('.')[-1])
+    net = ipaddress.IPv4Network(router.subnet, strict=False)
+    host_ip = str(ipaddress.IPv4Address(int(net.network_address) + last_octet))
+    if ipaddress.IPv4Address(host_ip) >= net.broadcast_address:
+        host_ip = str(ipaddress.IPv4Address(int(net.network_address) + 2))
+    netmask = str(net.netmask)
     pbr_name   = router.pbr_name
     nqa_name   = pbr_name.lower().replace('-', '').replace(' ', '_')
     track_id   = router.id
@@ -117,7 +149,7 @@ def _build_isp_router_switch_config(router: ISPRouter, switch_host: str) -> str:
         'quit',
         f'interface Vlan-interface{router.vlan_id}',
         f' description UPLINK-TO-{name_upper}',
-        f' ip address {host_ip} 255.255.255.0',
+        f' ip address {host_ip} {netmask}',
         'quit',
         'acl advanced 3001',
         ' description PBR-local-traffic-normal-routing',
@@ -415,15 +447,20 @@ def admin_isp_routers():
             except ValueError:
                 flash('VLAN ID must be an integer.', 'error')
                 return redirect(url_for('admin.isp_routers.admin_isp_routers'))
-            subnet = f'{_net_word()}.{vlan_id}.0/24'
+            try:
+                gateway_ip, prefix_len, subnet = _parse_gateway_and_prefix(request.form)
+            except ValueError as exc:
+                flash(str(exc), 'error')
+                return redirect(url_for('admin.isp_routers.admin_isp_routers'))
             if ISPRouter.query.filter_by(name=name).first():
                 flash(f'A router named "{name}" already exists.', 'error')
                 return redirect(url_for('admin.isp_routers.admin_isp_routers'))
             nat_logger_type = request.form.get('nat_logger_type', 'none').strip()
-            if nat_logger_type not in ('none', 'udm', 'openwrt'):
+            if nat_logger_type not in ('none', 'udm', 'openwrt', 'opnsense'):
                 nat_logger_type = 'none'
             router = ISPRouter(
                 name=name, subnet=subnet, vlan_id=vlan_id,
+                gateway_ip=gateway_ip,
                 switch_port=switch_port, switch_host=switch_host_f,
                 dhcp_snooping_trust=True, nat_logger_type=nat_logger_type,
             )
@@ -472,11 +509,19 @@ def admin_isp_routers():
                 threading.Thread(target=_bg_add, daemon=True).start()
             else:
                 flash('ACL baseline was not pushed because the HP5130 policy JSON is stale.', 'warning')
+            net = ipaddress.IPv4Network(router.subnet, strict=False)
+            switch_hosts = get_switch_hosts()
+            last = int((switch_hosts[0] if switch_hosts else '0.0.0.2').split('.')[-1])
+            switch_svi = str(ipaddress.IPv4Address(int(net.network_address) + last))
+            net = ipaddress.IPv4Network(router.subnet, strict=False)
+            switch_hosts = get_switch_hosts()
+            last = int((switch_hosts[0] if switch_hosts else '0.0.0.2').split('.')[-1])
+            switch_svi = str(ipaddress.IPv4Address(int(net.network_address) + last))
             flash(
                 f'ISP router "{name}" added. '
                 f'⚠ Set the router LAN IP to {router.gateway_ip} and add a '
                 f'static route: Target {_net_word()}.0.0 / Mask 255.255.0.0 / '
-                f'Gateway {_net_word()}.{vlan_id}.2 on the router.',
+                f'Gateway {switch_svi} on the router.',
                 'success',
             )
             return redirect(url_for('admin.isp_routers.admin_isp_routers'))
@@ -487,6 +532,7 @@ def admin_isp_routers():
             old_switch_host = router.switch_host
             old_vlan_id     = router.vlan_id
             old_pbr_name    = router.pbr_name
+            old_gateway_ip = router.gateway_ip
             router.name = request.form.get('name', router.name).strip()
             if router.vlan_id != 1:
                 try:
@@ -495,14 +541,24 @@ def admin_isp_routers():
                         router.vlan_id = new_vlan_id
                 except (ValueError, TypeError):
                     pass
-            router.subnet      = f'{_net_word()}.{router.vlan_id}.0/24'
+            try:
+                gateway_ip, prefix_len, subnet = _parse_gateway_and_prefix(
+                    request.form,
+                    default_gw=router.gateway_ip,
+                    default_prefix=_prefix_from_subnet(router.subnet),
+                )
+            except ValueError as exc:
+                flash(str(exc), 'error')
+                return redirect(url_for('admin.isp_routers.admin_isp_routers'))
+            router.gateway_ip = gateway_ip
+            router.subnet = subnet
             new_port_raw       = request.form.get('switch_port', '').strip() or None
             new_switch_host_f, new_port = _parse_port_value(new_port_raw) if new_port_raw else ('', None)
             router.switch_port = new_port
             router.switch_host = new_switch_host_f
             router.dhcp_snooping_trust = True
             new_nat = request.form.get('nat_logger_type', router.nat_logger_type).strip()
-            if new_nat in ('none', 'udm', 'openwrt'):
+            if new_nat in ('none', 'udm', 'openwrt', 'opnsense'):
                 router.nat_logger_type = new_nat
             vlan_changed = old_vlan_id != router.vlan_id
             port_changed = old_port != new_port
@@ -533,9 +589,9 @@ def admin_isp_routers():
                     host_cmds.setdefault(host, []).append(_build_remove_isp_router_pbr(old_pbr_name))
 
             if vlan_changed:
-                old_gw = f'{_net_word()}.{old_vlan_id}.1'
+                old_gw = router.gateway_ip
                 for host in get_switch_hosts():
-                    host_cmds.setdefault(host, []).append(_build_pbr_undo_next_hop(router.pbr_name, old_gw))
+                    host_cmds.setdefault(host, []).append(_build_pbr_undo_next_hop(router.pbr_name, old_gateway_ip))
                     host_cmds.setdefault(host, []).append(_build_remove_isp_router_vlan(old_vlan_id))
 
             if old_port and port_changed:

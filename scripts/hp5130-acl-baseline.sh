@@ -264,7 +264,12 @@ for router in routers:
     name = pbr_name(router)
     track_id = int(router.get("track_id") or router_id)
     nqa = router.get("nqa_name") or nqa_name(router)
-    router_subnet = router.get("subnet") or f"{network_word}.{router_vlan}.0/24"
+    router_subnet = router.get("subnet")
+    if not router_subnet:
+        raise SystemExit(
+            f"ISP router {router.get('name')!r} (id={router.get('id')}) "
+            f"has no subnet in hp5130-policy.json"
+        )
     router_switch_ip = switch_ip_for_subnet(router_subnet, router.get("switch_ip"))
     _, _, router_netmask = wildcard(router_subnet)
 
@@ -407,7 +412,9 @@ for vlan in vlans:
     if target_id == int(wired_vlan_id):
         # Deny all ISP router uplink subnets (no internet access at all)
         for router in routers:
-            rnet = router.get("subnet") or f"{network_word}.{router['vlan_id']}.0/24"
+            rnet = router.get("subnet")
+            if not rnet:
+                continue
             try:
                 src, src_wc, _ = wildcard(rnet)
                 emit(f" rule {rule} deny ip source {src} {src_wc}")

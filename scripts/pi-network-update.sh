@@ -6,6 +6,7 @@ KEA_CONFIG_PATH="${KEA_CONFIG_PATH:-}"
 PYTHON_BIN="${PYTHON_BIN:-}"
 NETWORK_DIR="${NETWORK_DIR:-/etc/systemd/network}"
 NETWORK_WORD="${NETWORK_WORD:-192.168}"
+WAN_IFACE="${WAN_IFACE:-eth0}"
 PORTAL_IP_BYTE="${PORTAL_IP_BYTE:-4}"
 
 if [ -z "$VLAN_LIST" ]; then
@@ -132,23 +133,23 @@ for VLAN_ID in $VLAN_LIST; do
   fi
 
   FILE_PATH=$(ls -1 "$NETWORK_DIR"/*-eth0."${VLAN_ID}".network 2>/dev/null | head -n 1 || true)
+  FILE_PATH=$(ls -1 "$NETWORK_DIR"/*-"${WAN_IFACE}"."${VLAN_ID}".network 2>/dev/null | head -n 1 || true)
   if [ -z "$FILE_PATH" ]; then
-    echo "No systemd-networkd file found for VLAN $VLAN_ID" >&2
-    exit 1
+    FILE_PATH=$(ls -1 "$NETWORK_DIR"/*-vlan-"${VLAN_ID}".network 2>/dev/null | head -n 1 || true)
   fi
 
   update_network_file "$FILE_PATH" "$ADDRESS"
   echo "Updated $FILE_PATH to Address=$ADDRESS"
 
   if command -v ip >/dev/null 2>&1; then
-    for existing in $($SUDO ip -4 addr show dev "eth0.${VLAN_ID}" | awk '/inet /{print $2}'); do
-      $SUDO ip addr del "$existing" dev "eth0.${VLAN_ID}" >/dev/null 2>&1 || true
+    for existing in $($SUDO ip -4 addr show dev "${WAN_IFACE}.${VLAN_ID}}" | awk '/inet /{print $2}'); do
+      $SUDO ip addr del "$existing" dev "${WAN_IFACE}.${VLAN_ID}}" >/dev/null 2>&1 || true
     done
-    $SUDO ip addr add "$ADDRESS" dev "eth0.${VLAN_ID}" >/dev/null 2>&1 || true
+    $SUDO ip addr add "$ADDRESS" dev "${WAN_IFACE}.${VLAN_ID}}" >/dev/null 2>&1 || true
   fi
 
   if command -v networkctl >/dev/null 2>&1; then
-    $SUDO networkctl reconfigure "eth0.${VLAN_ID}" >/dev/null 2>&1 || true
+    $SUDO networkctl reconfigure "${WAN_IFACE}.${VLAN_ID}}" >/dev/null 2>&1 || true
   fi
 done
 

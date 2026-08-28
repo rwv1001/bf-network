@@ -863,6 +863,85 @@ class KeaIntegration:
             logger.error(f"Error getting Kea stats: {e}")
             return {}
 
+    def reserve_fixed_ip(self, mac: str, vlan: int, ip_address: str) -> bool:
+        """Pin MAC→IP so Kea will not lease that address to anyone else."""
+        mac = mac.lower().replace('-', ':')
+        subnet_id = self._resolve_subnet_id(vlan)
+        try:
+            ip_value = ipaddress.IPv4Address(ip_address)
+        except Exception:
+            logger.error("Invalid fixed IP: %s", ip_address)
+            return False
+
+        prefix = _prefix_for_vlan(vlan)
+        network = ipaddress.IPv4Network(f"{_net_word()}.{vlan}.0/{prefix}", strict=False)
+        if ip_value not in network or ip_value in (network.network_address, network.broadcast_address):
+            logger.error("Fixed IP %s not a usable host in VLAN %s (%s)", ip_address, vlan, network)
+            return False
+
+        existing = self.get_reservation(mac, vlan) or {}
+        existing_res = existing.get("reservation") or {}
+        reservation = {
+            "subnet-id": subnet_id,
+            "hw-address": mac,
+            "ip-address": str(ip_value),
+            "user-context": dict(existing_res.get("user-context") or {}),
+        }
+        reservation["user-context"]["fixed-ip"] = True
+        reservation["user-context"]["registered"] = True
+        if existing_res.get("hostname"):
+            reservation["hostname"] = existing_res["hostname"]
+
+        try:
+            self._send_command({
+                "command": "reservation-del",
+                "service": ["dhcp4"],
+                "arguments": {
+                    "subnet-id": subnet_id,
+                    "identifier-type": "hw-address",
+                    "identifier": mac,
+                },
+            })
+        except Exception as exc:
+            logger.debug("reservation-del before fixed-ip for %s: %s", mac, exc)
+
+        response = self._send_command({
+            "command": "reservation-add",
+            "service": ["dhcp4"],
+            "arguments": {"reservation": reservation},
+        })
+        text = response.get("text", "")
+        if response.get("result") == 0 or "duplicate" in text.lower():
+            logger.info("Fixed-IP reservation %s -> %s VLAN %s", mac, ip_address, vlan)
+            return True
+        logger.error("Fixed-IP reservation failed for %s: %s", mac, text)
+        return False
+
+    def clear_fixed_ip(self, mac: str, vlan: int) -> bool:
+        """Remove the pinned address; keep a class-only reservation if present."""
+        mac = mac.lower().replace('-', ':')
+        existing = self.get_reservation(mac, vlan)
+        if not existing:
+            return self.delete_host_reservation(mac)
+
+        reservation = dict(existing.get("reservation") or {})
+        reservation.pop("ip-address", None)
+        ctx = dict(reservation.get("user-context") or {})
+        ctx.pop("fixed-ip", None)
+        reservation["user-context"] = ctx
+        reservation["subnet-id"] = self._resolve_subnet_id(vlan)
+        reservation["hw-address"] = mac
+
+        self.unregister_mac(mac, vlan)
+        if ctx.get("registered") or reservation.get("hostname"):
+            response = self._send_command({
+                "command": "reservation-add",
+                "service": ["dhcp4"],
+                "arguments": {"reservation": reservation},
+            })
+            return response.get("result") == 0
+        return True
+
 
 # Helper function for easy integration
 def get_kea_client(control_socket: Optional[str] = None, api_url: Optional[str] = None) -> KeaIntegration:
@@ -877,3 +956,5 @@ def get_kea_client(control_socket: Optional[str] = None, api_url: Optional[str] 
         KeaIntegration instance
     """
     return KeaIntegration(control_socket=control_socket, api_url=api_url)
+
+
