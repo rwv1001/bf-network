@@ -435,7 +435,7 @@ services:
     environment:
       FTLCONF_webserver_api_password: ${PIHOLE_WEBPASSWORD:-changeme}
       FTLCONF_dns_listeningMode: SINGLE
-      FTLCONF_dns_interface: eth0.${MANAGEMENT_VLAN:-99}
+      FTLCONF_dns_interface: ${WAN_IFACE}.${MANAGEMENT_VLAN}
       FTLCONF_dns_upstreams: "8.8.8.8;8.8.4.4"
       FTLCONF_webserver_port: "8055"
       FTLCONF_webserver_api_max_sessions: "100"
