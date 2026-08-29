@@ -137,6 +137,7 @@
     .role-group label.selected-pi           { background: #fdebd0; color: #784212; border-color: #e67e22; }
     .role-group label.selected-inter_switch { background: #f4ecf7; color: #6c3483; border-color: #8e44ad; }
     .role-group label.selected-uplink_udm   { background: #fdedec; color: #7b241c; border-color: #e74c3c; }
+    .role-group label.selected-fixed_ip { background: #e8f4fd; color: #1565c0; border-color: #1565c0; border-width: 3px; font-weight: 700; }
     .role-group label.selected-unknown      { background: #f2f3f4; color: #626567; border-color: #000; }
 
     .flash-messages { margin-bottom: 16px; }
@@ -250,17 +251,19 @@
                      id="rg_{{ host }}_{{ port.port_name | replace('/', '_') | replace('.', '_') }}"
                      data-host="{{ host }}"
                      data-port="{{ port.port_name }}"
-                     {% if is_locked %}title="Managed by ISP Router '{{ locked_ports[port.port_name] }}' — change on the ISP Routers page"{% endif %}>
+                     {% if is_locked %}title="{{ locked_ports[port.port_name] }}"{% endif %}
                 {% for role_key, role_label in port_roles.items() %}
                     {% set is_uplink_udm = role_key == 'uplink_udm' %}
+                    {% set is_fixed_ip = role_key == 'fixed_ip' %}
                     <label id="lbl_{{ host }}_{{ port.port_name | replace('/', '_') | replace('.', '_') }}_{{ role_key }}"
-                           class="{% if port.port_role == role_key %}selected-{{ role_key }}{% endif %}{% if is_locked %} role-locked-label{% endif %}{% if is_uplink_udm %} role-locked-label{% endif %}"
-                           {% if is_uplink_udm %}title="Uplinks to Router ports are set on the ISP routers page"{% endif %}>
+                           class="{% if port.port_role == role_key %}selected-{{ role_key }}{% endif %}{% if is_locked %} role-locked-label{% endif %}{% if is_uplink_udm or is_fixed_ip %} role-locked-label{% endif %}"
+                           {% if is_uplink_udm %}title="Uplinks to Router ports are set on the ISP routers page"{% endif %}
+                           {% if is_fixed_ip %}title="This is set in the Fixed IPs section of the dashboard"{% endif %}>
                         <input type="radio"
                                name="role_{{ host }}_{{ port.port_name }}"
                                value="{{ role_key }}"
                                {% if port.port_role == role_key %}checked{% endif %}
-                               {% if is_locked or is_uplink_udm %}disabled{% endif %}>
+                               {% if is_locked or is_uplink_udm or is_fixed_ip %}disabled{% endif %}>
                         <span>{{ role_label }}</span>
                     </label>
                 {% endfor %}

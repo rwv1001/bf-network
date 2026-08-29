@@ -37,6 +37,7 @@ PORT_ROLES = {
     'pi':           'Pi / Kea',
     'inter_switch': 'Inter-Switch Link',
     'uplink_udm':   'Uplink to Router',
+    'fixed_ip':     'Fixed IP device',
     'unknown':      'Unclassified',
 }
 
@@ -234,11 +235,18 @@ def refresh_switch_ports() -> dict:
     return results
 
 
-def _get_isp_router_locked_ports() -> dict:
-    """Return {port_name: router_name} for all ISP routers that have a port assigned."""
-    from models import ISPRouter
-    return {r.switch_port: r.name
-            for r in ISPRouter.query.filter(ISPRouter.switch_port.isnot(None)).all()}
+def _get_locked_ports() -> dict:
+    """port_name -> lock label. Roles set elsewhere cannot be changed here."""
+    from models import ISPRouter, Device
+    locked = {
+        r.switch_port: f"ISP {r.name}"
+        for r in ISPRouter.query.filter(ISPRouter.switch_port.isnot(None)).all()
+        if r.switch_port
+    }
+    for d in Device.query.filter(Device.fixed_ip.isnot(None), Device.fixed_ip != '').all():
+        if d.switch_iface:
+            locked[d.switch_iface] = f"Fixed IP {d.mac_address}"
+    return locked
 
 
 def _build_port_config(port_name: str, role: str, description: str = '') -> str:
@@ -437,7 +445,7 @@ def list_switch_ports():
         ports_by_switch=ports_by_switch,
         switch_hosts=switch_hosts,
         port_roles=PORT_ROLES,
-        locked_ports=_get_isp_router_locked_ports(),
+        locked_ports=_get_locked_ports(),
     )
 
 
@@ -548,12 +556,22 @@ def update_single():
     if not host or not port_name or role not in PORT_ROLES:
         return jsonify({'success': False, 'error': 'Invalid request'})
 
-    locked = _get_isp_router_locked_ports()
+    locked = _get_locked_ports()
     if port_name in locked:
+        label = locked[port_name]
+        if label.startswith('Fixed IP'):
+            hint = 'Change it in the dashboard Fixed IPs section.'
+        else:
+            hint = 'Change it on the ISP Routers page.'
         return jsonify({
             'success': False,
-            'error': f'Port is locked as uplink to router "{locked[port_name]}". '
-                     'Change it via ISP Routers page.',
+            'error': f'Port is locked ({label}). {hint}',
+        })
+
+    if role == 'fixed_ip':
+        return jsonify({
+            'success': False,
+            'error': 'Fixed-IP ports are set on the dashboard Fixed IPs section.',
         })
 
     row = db.session.execute(

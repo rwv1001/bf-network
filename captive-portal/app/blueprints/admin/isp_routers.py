@@ -352,10 +352,6 @@ def _parse_port_value(raw: str) -> tuple:
     return switch_host_for_port(raw), raw
 
 
-def _get_isp_router_locked_ports() -> dict:
-    return {r.switch_port: r.name
-            for r in ISPRouter.query.filter(ISPRouter.switch_port.isnot(None)).all()}
-
 
 def push_pbr_nqa_to_switches() -> bool:
     """
@@ -534,6 +530,8 @@ def admin_isp_routers():
             old_pbr_name    = router.pbr_name
             old_gateway_ip = router.gateway_ip
             router.name = request.form.get('name', router.name).strip()
+
+
             if router.vlan_id != 1:
                 try:
                     new_vlan_id = int(request.form.get('vlan_id', router.vlan_id))

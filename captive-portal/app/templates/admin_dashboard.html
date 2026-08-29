@@ -1088,6 +1088,21 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
         <input type="number" name="vlan_id" min="1" max="4094" placeholder="from IP if blank"
                style="padding:8px;border:1px solid #ddd;border-radius:4px;width:110px;">
     </div>
+    <div>
+        <label style="font-size:12px;font-weight:600;display:block;">Switch</label>
+        <select name="switch_host" style="padding:8px;border:1px solid #ddd;border-radius:4px;">
+            <option value="">—</option>
+            {% for h in switch_hosts %}
+            <option value="{{ h }}">{{ h }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div>
+        <label style="font-size:12px;font-weight:600;display:block;">Port</label>
+        <input type="text" name="switch_port" placeholder="GE1/0/11"
+               style="padding:8px;border:1px solid #ddd;border-radius:4px;width:120px;">
+    </div>
+
     <button type="submit" class="btn btn-small">Reserve</button>
 </form>
 
@@ -1099,6 +1114,8 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
             <th>MAC</th>
             <th>Reserved IP</th>
             <th>VLAN</th>
+            <th>Switch</th>
+            <th>Port</th>
             <th>Name</th>
             <th>Current DHCP IP</th>
             <th></th>
@@ -1110,6 +1127,8 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
             <td style="font-family:monospace;font-size:12px;">{{ d.mac_address }}</td>
             <td style="font-family:monospace;">{{ d.fixed_ip }}</td>
             <td>{{ d.current_vlan or '—' }}</td>
+            <td>{{ d.switch_host or '—' }}</td>
+            <td style="font-family:monospace;">{{ d.switch_iface or '—' }}</td>
             <td>{{ d.device_name or '—' }}</td>
             <td style="font-family:monospace;font-size:12px;">{{ d.ip_address or '—' }}</td>
             <td>
@@ -1268,6 +1287,7 @@ function saveDashboardPrefs() {
     <h3 style="margin-top:0; color:#1565c0;">&#x1F4CC; Fixed IP Reservation</h3>
     <p style="font-size:13px; color:#555; margin-bottom:4px;">Device: <strong id="fixedIpMac"></strong></p>
     <p style="font-size:13px; color:#555; margin-bottom:16px;">VLAN: <strong id="fixedIpVlan"></strong></p>
+
     <label style="display:block; font-weight:600; margin-bottom:6px;">IP Address</label>
     <input id="fixedIpInput" type="text" placeholder="e.g. 192.168.40.10"
            style="width:100%; padding:9px 12px; border:1px solid #ccc; border-radius:4px; font-size:14px; box-sizing:border-box;">

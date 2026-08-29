@@ -123,6 +123,7 @@ def run_switch_command(host: str, command: str, extra_input: str = '',
                 "SSH to %s succeeded (returncode=0). Output length: %d chars",
                 host, len(result.stdout or "")
             )
+            logger.info("SSH %s output:\n%s", host, result.stdout)
 
         return result.stdout if result.stdout and result.stdout.strip() else None
 

@@ -16,6 +16,7 @@ import logging
 import os
 import secrets
 import threading
+import re
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
@@ -99,6 +100,7 @@ def _replug_switch_port_for_mac(mac_address):
 @login_required
 def index():
     """Admin dashboard with pending requests, users, registered devices, unregistered devices."""
+    from core.switch import get_switch_hosts
     if not (current_user.can_manage_users or current_user.can_manage_vlans
             or current_user.can_view_traffic or current_user.can_manage_admins):
         return redirect(url_for('admin.manage_admins.no_permissions'))
@@ -356,6 +358,7 @@ def index():
         pending_search=pending_search, pending_sort=pending_sort, pending_order=pending_order,
         unregistered_devices=unregistered_devices,
         unregistered_total=unregistered_total,
+        switch_hosts=get_switch_hosts(),
         vlan_map=vlan_map,
         wired_unregistered_vlan=get_wired_unregistered_vlan_id(),
         wired_vlan_choices=[
@@ -790,6 +793,53 @@ def _vlan_id_from_ip(ip: str):
     except (IndexError, ValueError):
         return None
 
+def _hp_mac(mac: str) -> str:
+    h = re.sub(r'[^0-9a-f]', '', mac.lower())
+    return f"{h[0:4]}-{h[4:8]}-{h[8:12]}"
+
+
+def _set_port_role(host, port_name, role, description=''):
+    db.session.execute(
+        text("""
+            UPDATE switch_ports
+            SET port_role = :role, last_updated = NOW()
+            WHERE switch_host = :host AND port_name = :name
+        """),
+        {'role': role, 'host': host, 'name': port_name},
+    )
+
+
+def _push_static_binding(host, port_name, ip, mac, vlan_id, undo=False):
+    from core.switch import expand_switch_iface_name, run_switch_command, COMMON_PORT_UNDO_COMMANDS
+    iface = expand_switch_iface_name(port_name)
+    hp_mac = _hp_mac(mac)
+    bind = f'ip source binding ip-address {ip} mac-address {hp_mac}'
+    if undo:
+        cmds = [
+            'system-view',
+            f'interface {iface}',
+			] + COMMON_PORT_UNDO_COMMANDS + [
+            f'interface {iface}',
+            f'undo {bind}',
+            'undo port hybrid pvid',
+            f'undo port hybrid vlan {vlan_id}',
+            'quit', 'quit', 'save force',
+        ]
+    else:
+        cmds = [
+            'system-view',
+            f'interface {iface}',
+			] + COMMON_PORT_UNDO_COMMANDS + [
+            f'interface {iface}',
+            'port link-type hybrid',
+            'undo port hybrid vlan 1',
+            f'port hybrid vlan {vlan_id} untagged',
+            f'port hybrid pvid vlan {vlan_id}',
+            bind,
+            'quit', 'quit', 'save force',
+        ]
+    return run_switch_command(host, '\n'.join(cmds))
+
 
 @dashboard_bp.route('/fixed-ip-reservations', methods=['POST'])
 @login_required
@@ -813,6 +863,12 @@ def fixed_ip_reservations():
         if kea and old_ip and vlan_id:
             try:
                 kea.clear_fixed_ip(mac, vlan_id)
+                if device and device.switch_host and device.switch_iface and old_ip and vlan_id:
+                    _push_static_binding(device.switch_host, device.switch_iface, old_ip,
+                                        mac, vlan_id, undo=True)
+                    _set_port_role(device.switch_host, device.switch_iface, 'unknown')
+                    device.switch_host = None
+                    device.switch_iface = None
             except Exception as exc:
                 logger.warning("Kea clear_reservation failed for %s: %s", mac, exc)
         if device:
@@ -823,6 +879,7 @@ def fixed_ip_reservations():
 
     try:
         ipaddress.IPv4Address(ip)
+        
     except Exception:
         flash(f'Invalid IP address: {ip}', 'error')
         return redirect(url_for('admin.dashboard.index'))
@@ -846,13 +903,36 @@ def fixed_ip_reservations():
             logger.exception("Kea reservation failed for %s -> %s", mac, ip)
             flash(f'Kea reservation failed: {exc}', 'error')
             return redirect(url_for('admin.dashboard.index'))
+    
+
 
     if not device:
         device = Device(mac_address=mac, current_vlan=vlan_id, device_name='static')
         db.session.add(device)
+   
+
+    new_host = (request.form.get('switch_host') or '').strip()
+    new_port = (request.form.get('switch_port') or '').strip()
+
+    old_host = device.switch_host if device else None
+    old_port = device.switch_iface if device else None
+    old_ip = device.fixed_ip if device else None
+    old_vlan = device.current_vlan if device else None
+
     device.fixed_ip = ip
     if not device.current_vlan:
         device.current_vlan = vlan_id
+
+    if old_host and old_port and (old_host, old_port) != (new_host, new_port):
+        if old_ip and old_vlan:
+            _push_static_binding(old_host, old_port, old_ip, mac, old_vlan, undo=True)
+        _set_port_role(old_host, old_port, 'unknown')
+
+    if new_host and new_port:
+        _push_static_binding(new_host, new_port, ip, mac, vlan_id, undo=False)
+        _set_port_role(new_host, new_port, 'fixed_ip')
+        device.switch_host = new_host
+        device.switch_iface = new_port
     db.session.commit()
     flash(f'Reserved {ip} for {mac} (VLAN {vlan_id}).', 'success')
     return redirect(url_for('admin.dashboard.index'))
