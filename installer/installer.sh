@@ -435,7 +435,7 @@ display_saved_answers() {
         while IFS= read -r key; do
             # Optional: redact obvious secrets
             case "${key,,}" in
-                *secret*|*api_key*|*token*)
+                *seacret*|*aapi_key*|*taoken*)
                     printf '  %s=%s\n' "$key" "(redacted)"
                     ;;
                 *)
@@ -911,7 +911,7 @@ pick_oracle_key_dest_on_pi() {
     while pi_ssh "test -e \$HOME/.ssh/$(remote_quote "$name")"; do
         printf -v name '%s_v%02d' "$base" "$n"
         n=$((n + 1))
-        [ "$n" -le 99 ] || die "Too many existing Oracle keys on the Pi."
+        [ "$n" -le 99 ] || die "Too many existing Oracle keys on the target host."
     done
 
     ORACLE_KEY_DEST_NAME="$name"
@@ -942,7 +942,7 @@ install_oracle_key_on_pi() {
     rm -f "$pub_tmp"
     pi_sudo "mv /tmp/${dest_name}.pub ${dest}.pub && chmod 644 ${dest}.pub && chown ${PI_USER}:${PI_USER} ${dest}.pub"
 
-    echo "Installed Pi key: ${dest}"
+    echo "Installed target host key: ${dest}"
     echo "ORACLE_VPS_SSH_KEY_PATH=${ORACLE_VPS_SSH_KEY_PATH}"
     echo
     echo "============================================================"
@@ -1318,6 +1318,11 @@ derive_pi_server_values() {
 
     # EXTERNAL_VLANS_CSV / EXTERNAL_VLAN_SUBNETS_CSV set during prompt section
     EXTERNAL_VLANS="${EXTERNAL_VLANS_CSV:-}"
+    # Uplink VLAN for ISP i is (i+1): ISP 0 → VLAN 1, ISP 1 → VLAN 2, …
+    ISP_VLANS=""
+    for i in $(printf '%s\n' "${!ISP_NAMES[@]}" | sort -n); do
+        ISP_VLANS="$(csv_append "$ISP_VLANS" "$((i + 1))")"
+    done
     EXTERNAL_VLAN_SUBNETS="${EXTERNAL_VLAN_SUBNETS_CSV:-}"
 }
 sync_dns01_certificate_to_repo() {
@@ -1356,7 +1361,7 @@ setup_dns01_certificate() {
         curl https://get.acme.sh | sh -s email=$q_email
     fi"
     info "1. Installed acme.sh for DNS-01 certificate issuance."
-
+    pi_sudo "/root/.acme.sh/acme.sh --set-default-ca --server letsencrypt"
     # Create certificate directory
     pi_sudo "mkdir -p $q_cert_dir && chmod 755 $q_cert_dir"
     info "2. Created certificate directory: $CERT_DIR"
@@ -1370,7 +1375,7 @@ setup_dns01_certificate() {
 
     pi_sudo "printf \"%s\n\" \"#!/bin/sh\" \"docker restart npm >/dev/null 2>&1 || docker restart nginx-proxy-manager >/dev/null 2>&1 || exit 0\" > /usr/local/sbin/bf-network-acme-reload && chmod 755 /usr/local/sbin/bf-network-acme-reload"
     info "4. Created reload command for acme.sh to restart NPM after renewal."
-    pi_sudo "export BUNNY_API_KEY=\$(cat /root/.bunny_api_key); /root/.acme.sh/acme.sh --issue --dns dns_bunny $q_domain_args --key-file $q_cert_dir/privkey.pem --fullchain-file $q_cert_dir/fullchain.pem --reloadcmd /usr/local/sbin/bf-network-acme-reload --force --debug 2 --log /tmp/acme-bunny.log || { cat /tmp/acme-bunny.log; exit 1; }"
+    pi_sudo "export BUNNY_API_KEY=\$(cat /root/.bunny_api_key); /root/.acme.sh/acme.sh --issue --dns dns_bunny --server letsencrypt $q_domain_args --key-file $q_cert_dir/privkey.pem --fullchain-file $q_cert_dir/fullchain.pem --reloadcmd /usr/local/sbin/bf-network-acme-reload --force --debug 2 --log /tmp/acme-bunny.log || { cat /tmp/acme-bunny.log; exit 1; }"
     info "5. Certificate issuance completed. Check /tmp/acme-bunny.log for details."
     
     # Permissions on the certificate files
@@ -1536,6 +1541,8 @@ write_pi_env_file() {
         write_env_line PORTAL_URL "$PORTAL_URL"
         write_env_line PORTAL_POLL_URL "$PORTAL_POLL_URL"
 
+        write_env_line WAN_IFACE "$WAN_IFACE"
+
         write_env_line NPM_ADMIN_EMAIL "$NPM_ADMIN_EMAIL"
         write_env_line NPM_ADMIN_PASSWORD "$NPM_ADMIN_PASSWORD"
         # NPM's built-in HTTP-01 cannot work in the Oracle VPS reverse-tunnel design,
@@ -1604,6 +1611,7 @@ write_pi_env_file() {
         write_env_line VLAN_PREFIX_MAP "$VLAN_PREFIX_MAP"
         write_env_line EXTERNAL_VLANS "${EXTERNAL_VLANS:-}"
         write_env_line EXTERNAL_VLAN_SUBNETS "${EXTERNAL_VLAN_SUBNETS:-}"
+        write_env_line ISP_VLANS "${ISP_VLANS:-}"
 
         write_env_line SWITCH_PASS ""
         write_env_line USER_DEVICE_INTERFACES ""
@@ -1656,7 +1664,13 @@ write_pi_env_file() {
 # =============================================================================
 
 configure_pi_networkd() {
-    info "Configuring Pi systemd-networkd VLAN interfaces"
+    info "Configuring systemd-networkd VLAN interfaces on $WAN_IFACE"
+
+    : "${WAN_IFACE:?WAN_IFACE is not set}"
+
+    pi_sudo "modprobe 8021q || true"
+    pi_sudo "mkdir -p /etc/modules-load.d"
+    pi_sudo "grep -qxF 8021q /etc/modules-load.d/bf-vlan.conf 2>/dev/null || echo 8021q > /etc/modules-load.d/bf-vlan.conf"
 
     local tmpdir
     tmpdir="$(mktemp -d)"
@@ -1665,34 +1679,37 @@ configure_pi_networkd() {
 
     {
         echo "[Match]"
-        echo "Name=eth0"
+        echo "Name=$WAN_IFACE"
         echo
         echo "[Network]"
+        echo "DHCP=no"
+        echo "LinkLocalAddressing=no"
+        echo "ConfigureWithoutCarrier=yes"
         for vlan in "${all_pi_vlans[@]}"; do
-            echo "VLAN=eth0.$vlan"
+            echo "VLAN=${WAN_IFACE}.${vlan}"
         done
-    } > "$tmpdir/10-eth0.network"
+    } > "$tmpdir/00-bf-uplink.network"
 
     for vlan in "${all_pi_vlans[@]}"; do
-        cat > "$tmpdir/11-eth0.$vlan.netdev" <<EOF
+        cat > "$tmpdir/11-vlan-${vlan}.netdev" <<EOF
 [NetDev]
-Name=eth0.$vlan
+Name=${WAN_IFACE}.${vlan}
 Kind=vlan
 
 [VLAN]
 Id=$vlan
 EOF
 
-        cat > "$tmpdir/21-eth0.$vlan.network" <<EOF
+        cat > "$tmpdir/21-vlan-${vlan}.network" <<EOF
 [Match]
-Name=eth0.$vlan
+Name=${WAN_IFACE}.${vlan}
 
 [Network]
 Address=${LOCAL_BASE}.${vlan}.${PORTAL_IP_BYTE}/24
 EOF
 
         if [ "$vlan" = "$MANAGEMENT_VLAN" ]; then
-            cat >> "$tmpdir/21-eth0.$vlan.network" <<EOF
+            cat >> "$tmpdir/21-vlan-${vlan}.network" <<EOF
 MACVLAN=macvlan-dns
 EOF
         fi
@@ -1716,21 +1733,32 @@ Address=${HIJACK_DNS_IP}/32
 LinkLocalAddressing=no
 EOF
 
-    cat > "$tmpdir/99-unmanaged-eth0.conf" <<EOF
+    cat > "$tmpdir/99-unmanaged-uplink.conf" <<EOF
 [keyfile]
-unmanaged-devices=interface-name:eth0;interface-name:eth0.*
+unmanaged-devices=interface-name:${WAN_IFACE};interface-name:${WAN_IFACE}.*
 EOF
 
     pi_sudo "mkdir -p /etc/systemd/network /etc/NetworkManager/conf.d"
-    pi_sudo "rm -f /etc/systemd/network/10-eth0.network /etc/systemd/network/11-eth0.*.netdev /etc/systemd/network/21-eth0.*.network /etc/systemd/network/45-macvlan-dns.netdev /etc/systemd/network/55-macvlan-dns.network"
+    # drop both old eth0-named units and previous generic names
+    pi_sudo "rm -f /etc/systemd/network/10-eth0.network \
+        /etc/systemd/network/10-uplink.network \
+        /etc/systemd/network/00-bf-uplink.network \
+        /etc/systemd/network/11-eth0.*.netdev \
+        /etc/systemd/network/11-vlan-*.netdev \
+        /etc/systemd/network/21-eth0.*.network \
+        /etc/systemd/network/21-vlan-*.network \
+        /etc/systemd/network/45-macvlan-dns.netdev \
+        /etc/systemd/network/55-macvlan-dns.network \
+        /etc/NetworkManager/conf.d/99-unmanaged-eth0.conf \
+        /etc/NetworkManager/conf.d/99-unmanaged-uplink.conf"
 
     for file in "$tmpdir"/*; do
         local base
         base="$(basename "$file")"
-        echo "Copying $file in $tmpdir to Pi... /tmp/$base "
+        echo "Copying $base to server..."
         pi_scp_to "$file" "/tmp/$base"
         case "$base" in
-            99-unmanaged-eth0.conf)
+            99-unmanaged-uplink.conf)
                 pi_sudo "mv /tmp/$base /etc/NetworkManager/conf.d/$base"
                 ;;
             *)
@@ -1742,18 +1770,159 @@ EOF
     pi_sudo "find /etc/systemd/network -type f -exec chown root:root {} +"
     pi_sudo "find /etc/systemd/network -type f -exec chmod 644 {} +"
 
-    pi_sudo "if [ -f /etc/dhcpcd.conf ] && ! grep -q \"denyinterfaces eth0\" /etc/dhcpcd.conf; then
-        printf \"\n# bf-network: eth0 is managed by systemd-networkd\n\" >> /etc/dhcpcd.conf
-        printf \"denyinterfaces eth0 eth0.*\n\" >> /etc/dhcpcd.conf  
-    fi"
-    pi_sudo "systemctl enable systemd-networkd"
-    pi_sudo "systemctl restart systemd-networkd || true"
-    pi_sudo "systemctl restart NetworkManager || true"
-    pi_sudo "systemctl restart dhcpcd || true"
+    case "${TARGET_HOST_KIND,,}" in
+        ubuntu|intel|pc)
+            info "Ubuntu: VLANs on $WAN_IFACE only; do not restart Wi-Fi"
+            pi_sudo "systemctl disable --now systemd-networkd-wait-online.service || true"
+
+            # Stop netplan DHCP/default-route on the trunk NIC only.
+            # Do not set a global renderer and do not move other netplan files.
+            pi_sudo "mkdir -p /etc/netplan /etc/netplan/backup-bf-network
+                rm -f /etc/netplan/99-bf-network-disable.yaml
+                cat > /etc/netplan/60-bf-uplink-no-default.yaml <<EOF
+# bf-network: ${WAN_IFACE} is a VLAN parent only; Wi-Fi stays on existing netplan
+network:
+  version: 2
+  ethernets:
+    ${WAN_IFACE}:
+      dhcp4: false
+      dhcp6: false
+      optional: true
+EOF
+                chmod 600 /etc/netplan/60-bf-uplink-no-default.yaml
+                netplan generate || true"
+
+            if pi_ssh "systemctl list-unit-files NetworkManager.service 2>/dev/null | grep -q NetworkManager.service"; then
+                pi_sudo "nmcli device set ${WAN_IFACE} managed no 2>/dev/null || true"
+                pi_sudo "nmcli device disconnect ${WAN_IFACE} 2>/dev/null || true"
+            fi
+
+            pi_sudo "systemctl enable systemd-networkd"
+            pi_sudo "systemctl start systemd-networkd"
+            pi_sudo "networkctl reload"
+            pi_sudo "networkctl reconfigure ${WAN_IFACE}"
+            for vlan in "${all_pi_vlans[@]}"; do
+                pi_sudo "networkctl reconfigure ${WAN_IFACE}.${vlan} || true"
+            done
+
+            if ! pi_ssh "ip link show ${WAN_IFACE}.${MANAGEMENT_VLAN} >/dev/null 2>&1"; then
+                die "Ubuntu networkd did not create ${WAN_IFACE}.${MANAGEMENT_VLAN}. Check /run/systemd/network vs /etc/systemd/network/00-bf-uplink.network"
+            fi
+            ;;
+        *)
+            info "Pi: dhcpcd + networkd + netplan hand-off for $WAN_IFACE"
+            pi_sudo "if [ -f /etc/dhcpcd.conf ] && ! grep -q \"denyinterfaces ${WAN_IFACE}\" /etc/dhcpcd.conf; then
+                printf \"\\n# bf-network: ${WAN_IFACE} is managed by systemd-networkd\\n\" >> /etc/dhcpcd.conf
+                printf \"denyinterfaces ${WAN_IFACE} ${WAN_IFACE}.*\\n\" >> /etc/dhcpcd.conf
+            fi"
+            pi_sudo "systemctl enable systemd-networkd"
+            pi_sudo "systemctl restart systemd-networkd || true"
+            pi_sudo "systemctl restart NetworkManager || true"
+            pi_sudo "systemctl restart dhcpcd || true"
+            pi_sudo "mkdir -p /etc/netplan
+if compgen -G '/etc/netplan/*.yaml' >/dev/null; then
+    mkdir -p /etc/netplan/backup-bf-network
+    mv /etc/netplan/*.yaml /etc/netplan/backup-bf-network/ 2>/dev/null || true
+fi
+cat > /etc/netplan/99-bf-network-disable.yaml <<'EOF'
+# bf-network: VLANs are owned by systemd-networkd
+network:
+  version: 2
+  renderer: networkd
+EOF
+chmod 600 /etc/netplan/99-bf-network-disable.yaml
+netplan generate || true
+systemctl enable --now systemd-networkd
+systemctl disable --now systemd-networkd-wait-online.service || true
+"
+            ;;
+    esac
+
+    pi_sudo "ip link show ${WAN_IFACE} || true"
+    pi_sudo "networkctl status ${WAN_IFACE} || true"
+    for vlan in "${all_pi_vlans[@]}"; do
+        pi_sudo "ip addr show ${WAN_IFACE}.${vlan} || true"
+    done
+
+    rm -rf "$tmpdir"
+
+    if ! pi_ssh "ip link show ${WAN_IFACE}.${MANAGEMENT_VLAN} >/dev/null 2>&1"; then
+        die "VLAN ${WAN_IFACE}.${MANAGEMENT_VLAN} was not created on the target host."
+    fi
+
+    if ! pi_ssh "echo still_connected"; then
+        die "Lost SSH to $PI_WIFI_IP after networkd change. Use the console; do not re-run until Wi-Fi is back."
+    fi
+}
+detect_target_docker_arch() {
+    local machine
+    machine="$(pi_ssh "uname -m" | tr -d '\r\n')"
+    case "$machine" in
+        x86_64|amd64) echo "amd64" ;;
+        aarch64|arm64) echo "arm64" ;;
+        *)
+            case "${TARGET_HOST_KIND,,}" in
+                ubuntu|intel|pc) echo "amd64" ;;
+                *) echo "arm64" ;;
+            esac
+            ;;
+    esac
+}
+
+# Cloned docker-compose.yml pins FreeRADIUS to arm64v8. That cannot run on
+# Intel/AMD Ubuntu (exec /entrypoint.sh: exec format error).
+patch_freeradius_image_for_target() {
+    local arch q_repo tmp_patch image platform
+    arch="$(detect_target_docker_arch)"
+    q_repo="$(shell_quote "$PI_REPO_DIR")"
+
+    if [ "$arch" = "amd64" ]; then
+        image="freeradius/freeradius-dev:v3.2.x"
+        platform="linux/amd64"
+    else
+        image="freeradius/freeradius-dev:arm64v8-v3.2.x"
+        platform="linux/arm64"
+    fi
+
+    info "Setting FreeRADIUS image for ${arch}: ${image} (${platform})"
+
+    tmp_patch="$(mktemp)"
+    cat > "$tmp_patch" <<'PYEOF'
+#!/usr/bin/env python3
+import re
+import sys
+from pathlib import Path
+
+image, platform = sys.argv[1], sys.argv[2]
+path = Path("docker-compose.yml")
+text = path.read_text()
+
+new_text, n = re.subn(
+    r"(?m)^([ \t]+)image:\s*freeradius/[^\n]+\n(?:[ \t]+platform:[^\n]+\n)?",
+    rf"\1image: {image}\n\1platform: {platform}\n",
+    text,
+    count=1,
+)
+if n != 1:
+    raise SystemExit(f"freeradius image line not found or patched {n} times")
+
+if new_text != text:
+    path.write_text(new_text)
+    print(f"CHANGED {image} {platform}")
+else:
+    print(f"UNCHANGED {image} {platform}")
+PYEOF
+
+    pi_scp_to "$tmp_patch" "/tmp/bf-patch-freeradius-arch.py"
+    rm -f "$tmp_patch"
+    pi_sudo "cd $q_repo && python3 /tmp/bf-patch-freeradius-arch.py \
+        $(shell_quote "$image") $(shell_quote "$platform") && \
+        rm -f /tmp/bf-patch-freeradius-arch.py" \
+        || die "Failed to set the FreeRADIUS image for ${arch}."
 }
 
 patch_repo_for_install() {
-    info "Patching bf-network repository for this Pi user and generated values"
+    info "Patching bf-network repository for this target host user and generated values"
 
     local q_repo
     q_repo="$(shell_quote "$PI_REPO_DIR")"
@@ -1855,7 +2024,7 @@ s/\"valid-lifetime\": 600,/\"valid-lifetime\": int(os.environ.get(\"KEA_VALID_LI
 SEOF
 sed -i -f /tmp/fix-kea.sed scripts/generate-kea-config.py
 rm -f /tmp/fix-kea.sed"
-    
+    patch_freeradius_image_for_target
     unset 'COMPLETED_STEPS[pi_compose_up]'
 
 
@@ -1999,7 +2168,7 @@ wipe_pi_docker_data() {
     local q_repo
     q_repo="$(shell_quote "$PI_REPO_DIR")"
 
-    info "Wiping bf-network Docker containers and volumes on the Pi (clean DB)"
+    info "Wiping bf-network Docker containers and volumes on the target host (clean DB)"
 
     # Stop and remove containers, networks, and named volumes declared in compose
     pi_sudo "cd $q_repo && if docker compose version >/dev/null 2>&1; then
@@ -2209,7 +2378,7 @@ configure_pi_backups() {
         return 0
     fi
 
-    info "Installing simple PostgreSQL backup cron job on Pi"
+    info "Installing simple PostgreSQL backup cron job on target host"
 
     local tmpdir
     tmpdir="$(mktemp -d)"
@@ -2590,7 +2759,7 @@ chown $q_user:$q_user $q_unifi/.env"
 
 
 install_pi_server() {
-    info "Installing bf-network on Pi server"
+    info "Installing bf-network on target host server"
 
     local q_repo q_user
     q_repo="$(shell_quote "$PI_REPO_DIR")"
@@ -2598,22 +2767,22 @@ install_pi_server() {
 
 
     if ! step_done "pi_ssh_check"; then
-        echo "Testing SSH access to Pi at $PI_WIFI_IP..."
-        pi_ssh "echo Pi SSH OK"
-        pi_ssh "ip link show eth0 >/dev/null || { echo eth0 not found on Pi; exit 1; }"
+        echo "Testing SSH access to target host at $PI_WIFI_IP..."
+        pi_ssh "echo target host SSH OK"
+        pi_ssh "ip link show ${WAN_IFACE} >/dev/null || { echo ${WAN_IFACE} not found on target host; exit 1; }"
         complete_step "pi_ssh_check"
     else
-        echo "Skipping completed step: Pi SSH check"
+        echo "Skipping completed step: target host SSH check"
     fi
 
     if ! step_done "pi_docker"; then
-        echo "Checking Docker status on the Raspberry Pi..."
+        echo "Checking Docker status on the Raspberry target host..."
         if pi_sudo "command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1" >/dev/null 2>&1; then
-            echo "Docker and Docker Compose are already installed and working on the Pi."
+            echo "Docker and Docker Compose are already installed and working on the target host."
             pi_sudo "docker --version"
             pi_sudo "docker compose version"
         else
-            echo "Docker or Docker Compose not working on the Pi. Installing..."
+            echo "Docker or Docker Compose not working on the target host. Installing..."
             pi_sudo "apt-get update -qq"
             pi_sudo "apt-get remove -y docker.io docker-compose || true"
             pi_sudo "curl -fsSL https://get.docker.com -o /tmp/get-docker.sh"
@@ -2635,7 +2804,7 @@ install_pi_server() {
 
     if ! step_done "pi_repo_clone"; then
         
-        info "Cloning bf-network repository on the Pi"
+        info "Cloning bf-network repository on the target host"
         pi_sudo "cd $q_repo && docker compose down --remove-orphans 2>/dev/null || true"
         pi_sudo "rm -rf $q_repo"
         pi_sudo "git clone --branch $(shell_quote "$BF_REPO_BRANCH") $(shell_quote "$BF_REPO_URL") $q_repo"
@@ -2679,7 +2848,7 @@ install_pi_server() {
     
 
     if ! step_done "pi_oracle_key"; then
-        info "Installing Oracle VPS private key on the Pi"
+        info "Installing Oracle VPS private key on the target host"
         pick_oracle_key_dest_on_pi
         install_oracle_key_on_pi "$ORACLE_KEY_DEST_NAME"
         unset 'COMPLETED_STEPS[pi_env_file]'
@@ -2692,7 +2861,7 @@ install_pi_server() {
 
 
     if ! step_done "pi_env_file"; then
-        info "Writing Pi .env file"
+        info "Writing target host .env file"
         write_pi_env_file
         pi_scp_to "$ENV_TMP" "/tmp/bf-network.env"
         pi_sudo "mv /tmp/bf-network.env $q_repo/.env && chmod 600 $q_repo/.env && chown $q_user:$q_user $q_repo/.env"
@@ -2700,13 +2869,13 @@ install_pi_server() {
         unset 'COMPLETED_STEPS[pi_compose_up]'
         complete_step "pi_env_file"
     else
-        echo "Skipping completed step: Pi .env file"
+        echo "Skipping completed step: target host .env file"
     fi
 
 
 
     if ! step_done "pi_switch_key"; then
-        info "Installing HP 5130 SSH key on the Pi"
+        info "Installing HP 5130 SSH key on the target host"
         pi_sudo "mkdir -p /home/$PI_USER/.ssh"
         pi_scp_to "$KEY_PATH" "/tmp/$SWITCH_KEY_BASENAME"
         pi_scp_to "$KEY_PATH.pub" "/tmp/$SWITCH_KEY_BASENAME.pub"
@@ -2730,7 +2899,7 @@ install_pi_server() {
     # state may mark the broader repository patch complete even though the
     # cloned compose file still contains the obsolete /usr/sbin path.
     ensure_kea_lfc_path
-
+    patch_freeradius_image_for_target
     # Always refresh npm/setup.py during development because it is small,
     # idempotent, and fixes both first-run admin setup and DNS-01 cert import.
 
@@ -2741,21 +2910,21 @@ install_pi_server() {
         unset 'COMPLETED_STEPS[pi_compose_up]'
         complete_step "pi_networkd"
     else
-        echo "Skipping completed step: Pi network configuration"
+        echo "Skipping completed step: target host network configuration"
     fi
 
     if ! step_done "setup_pi_chrony"; then
         setup_pi_chrony        
         complete_step "setup_pi_chrony"
     else
-        echo "Skipping completed step: Pi chrony setup"
+        echo "Skipping completed step: target host chrony setup"
     fi
 
     if ! step_done "setup_pi_tftp_server"; then
         setup_pi_tftp_server        
         complete_step "setup_pi_tftp_server"
     else
-        echo "Skipping completed step: Pi TFTP server setup"
+        echo "Skipping completed step: target host TFTP server setup"
     fi
 
     
@@ -2774,7 +2943,7 @@ install_pi_server() {
         unset 'COMPLETED_STEPS[seed_isp_routers]'
         complete_step "pi_db_wipe"
     else
-        echo "Skipping completed step: Pi Docker DB wipe"
+        echo "Skipping completed step: target host Docker DB wipe"
     fi
 
    
@@ -2880,11 +3049,11 @@ install_pi_server() {
 }
 
 validate_pi_server() {
-    info "Validating Pi server"
+    info "Validating target host server"
 
-    pi_ssh "ip addr show eth0 || true"
+    pi_ssh "ip addr show ${WAN_IFACE} || true"
     for vlan in "${VLAN_LIST[@]}" "$MANAGEMENT_VLAN" "$WIRED_VLAN"; do
-        pi_ssh "ip addr show eth0.$vlan || true"
+        pi_ssh "ip addr show ${WAN_IFACE}.$vlan || true"
     done
     pi_ssh "ip addr show macvlan-dns || true"
 
@@ -2896,12 +3065,12 @@ validate_pi_server() {
     pi_ssh "test -f $(shell_quote "$PI_REPO_DIR/kea/config/dhcp4.json") && echo 'Kea config generated OK' || echo 'Kea config not generated yet'"
 
     echo
-    echo "Pi server summary:"
+    echo "target host server summary:"
     echo "  Portal IP:       $PORTAL_IP"
     echo "  Hijack DNS IP:   $HIJACK_DNS_IP"
     echo "  Wired gateway:   $UNREGISTERED_GW"
     echo "  Switch hosts:    $SWITCH_HOSTS"
-    echo "  Pi repo:         $PI_REPO_DIR"
+    echo "  target host repo:         $PI_REPO_DIR"
 }
 
 # =============================================================================
@@ -2909,7 +3078,7 @@ validate_pi_server() {
 # =============================================================================
 
 echo "=========================================="
-echo "   HP 5130 + Pi Server Initial Setup Wizard"
+echo "   HP 5130 + target host Server Initial Setup Wizard"
 echo "=========================================="
 echo
 
@@ -3528,20 +3697,30 @@ setup_nat_logger_keys() {
           $(shell_quote "$pi_ssh_dir")/tel_key.pub"
 
     echo
-    echo "Install the matching public key on a router before setting its type:"
+    echo "Install the matching public key on a router before setting its type."
+    echo "ssh-copy-id from this machine, or paste the key on the router."
     echo
-    echo "  UDM:"
+    echo "  UDM (key: ${udm_key}):"
     echo "    ssh-copy-id -i ${udm_key}.pub root@<UDM-IP>"
-    echo "    # or on the UDM:"
+    echo "    # or on the UDM as root:"
     echo "    mkdir -p ~/.ssh && chmod 700 ~/.ssh"
     echo "    echo '$(cat "${udm_key}.pub")' >> ~/.ssh/authorized_keys"
+    echo "    chmod 600 ~/.ssh/authorized_keys"
     echo
-    echo "  OpenWRT / Teltonika:"
+    echo "  OpenWRT / Teltonika (key: ${tel_key}):"
     echo "    ssh-copy-id -i ${tel_key}.pub root@<ROUTER-IP>"
-    echo 
-    echo "  OPNsense (same key):"
-    echo "    System > Settings > Administration → enable Secure Shell"
+    echo "    # or on the router as root:"
+    echo "    mkdir -p ~/.ssh && chmod 700 ~/.ssh"
+    echo "    echo '$(cat "${tel_key}.pub")' >> ~/.ssh/authorized_keys"
+    echo "    chmod 600 ~/.ssh/authorized_keys"
+    echo
+    echo "  OPNsense (same key as OpenWRT: ${tel_key}):"
+    echo "    System > Settings > Administration → enable Secure Shell (permit root login)"
     echo "    ssh-copy-id -i ${tel_key}.pub root@<OPNSENSE-IP>"
+    echo "    # or on OPNsense as root:"
+    echo "    mkdir -p ~/.ssh && chmod 700 ~/.ssh"
+    echo "    echo '$(cat "${tel_key}.pub")' >> ~/.ssh/authorized_keys"
+    echo "    chmod 600 ~/.ssh/authorized_keys"
     echo
     if ! answer_exists "nat_logger_keys_ready"; then
         prompt_ack "nat_logger_keys_ready" \
@@ -3641,17 +3820,30 @@ Public key converted to HP 5130 format successfully.
 ==========================================
 EOF
 
-info "Pi Server Setup"
-echo "Before continuing, install Raspberry Pi OS on the Pi and make sure SSH works over WiFi."
-echo "By entering the Pi private key location and/or generating a new public/private key for the Pi Server, you authorise this installer to use sudo on the Pi,"
+info "Target host setup"
+echo "Before continuing, install the OS (Raspberry Pi OS or Ubuntu Server) and confirm SSH works."
+echo "Wi-Fi SSH is fine so you are not locked out while the wired NIC is reconfigured."
+echo "By providing an SSH key you authorise this installer to use sudo on that host,"
 echo "install Docker/Docker Compose, replace the bf-network repository directory,"
-echo "configure /etc/systemd/network for eth0 VLANs, and reboot the Pi if required."
+echo "configure systemd-networkd VLAN subinterfaces on the wired uplink, and reboot if required."
 echo
+echo "The install user MUST have passwordless sudo. On the target host run:"
+echo
+echo "  whoami"
+echo "  sudo -n true && echo passwordless_ok || echo needs_password"
+echo
+echo "If that prints needs_password:"
+echo
+echo "  sudo mkdir -p /etc/sudoers.d"
+echo "  echo \"\$(whoami) ALL=(ALL) NOPASSWD: ALL\" | sudo tee /etc/sudoers.d/bf-network"
+echo "  sudo chmod 440 /etc/sudoers.d/bf-network"
+echo "  sudo visudo -cf /etc/sudoers.d/bf-network"
+echo "  sudo -n true && echo passwordless_ok"
+echo
+prompt_required PI_WIFI_IP "SSH address of the target host (Wi-Fi IP is OK)"
+prompt_default PI_USER "SSH username on the target host" "admin"
 
-prompt_required PI_WIFI_IP "Enter the Pi WiFi IP address"
-prompt_default PI_USER "Enter the Pi SSH username" "admin"
-
-info "Pi SSH key"
+info "Target host SSH key"
 
 SAFE_PI="$(echo "$PI_WIFI_IP" | tr '.' '_' | tr -cd '[:alnum:]_')"
 DEFAULT_PI_KEY_PATH="$SSH_DIR/pi_${SAFE_PI}"
@@ -3659,7 +3851,7 @@ DEFAULT_PI_KEY_PATH="$SSH_DIR/pi_${SAFE_PI}"
 if answer_exists "pi_key_path"; then
     PI_KEY_PATH="${SAVED_ANSWERS[pi_key_path]}"
     if [ ! -f "$PI_KEY_PATH" ]; then
-        echo "Saved Pi key missing: $PI_KEY_PATH"
+        echo "Saved target host key missing: $PI_KEY_PATH"
         unset 'SAVED_ANSWERS[pi_key_path]'
         state_save
     fi
@@ -3667,7 +3859,7 @@ fi
 
 if ! answer_exists "pi_key_path"; then
     prompt_line has_pi_key \
-        "Do you already have an SSH private key for the Pi? (y/n): " \
+        "Do you already have an SSH private key for the target host? (y/n): " \
         "has_pi_key"
 
     if is_yes "$has_pi_key"; then
@@ -3685,7 +3877,7 @@ if ! answer_exists "pi_key_path"; then
         save_answer "pi_key_path" "$PI_KEY_PATH"
 
         if [ ! -f "$PI_KEY_PATH" ]; then
-            echo "Generating new SSH key pair for the Pi: $PI_KEY_PATH"
+            echo "Generating new SSH key pair for the target host: $PI_KEY_PATH"
             ssh-keygen -t ed25519 -f "$PI_KEY_PATH" -N "" -C "bf-network-pi-${SAFE_PI}"
             # fallback if ed25519 not wanted:
             # ssh-keygen -t rsa -b 4096 -f "$PI_KEY_PATH" -N "" -C "..."
@@ -3695,10 +3887,10 @@ if ! answer_exists "pi_key_path"; then
         if ! answer_exists "pi_public_key_installed"; then
             echo
             echo "============================================================"
-            echo "  Install this public key on the Pi"
+            echo "  Install this public key on the target host"
             echo "============================================================"
             echo
-            echo "On the Pi (as ${PI_USER}), run:"
+            echo "On the target host (as ${PI_USER}), run:"
             echo
             echo "  mkdir -p ~/.ssh && chmod 700 ~/.ssh"
             echo "  echo '$(cat "${PI_KEY_PATH}.pub")' >> ~/.ssh/authorized_keys"
@@ -3707,28 +3899,98 @@ if ! answer_exists "pi_key_path"; then
             echo "Or from this machine (if password SSH still works once):"
             echo "  ssh-copy-id -i ${PI_KEY_PATH}.pub ${PI_USER}@${PI_WIFI_IP}"
             echo
-            echo "Also enable passwordless sudo (required for key-only installs):"
+            echo "Also enable passwordless sudo (required; this installer uses sudo -n):"
             echo
-            echo "  echo '${PI_USER} ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/bf-network"
+            echo "  whoami"
+            echo "  sudo -n true && echo passwordless_ok || echo needs_password"
+            echo
+            echo "  sudo mkdir -p /etc/sudoers.d"
+            echo "  echo '${PI_USER} ALL=(ALL) NOPASSWD: ALL' | sudo tee /etc/sudoers.d/bf-network"
             echo "  sudo chmod 440 /etc/sudoers.d/bf-network"
+            echo "  sudo visudo -cf /etc/sudoers.d/bf-network"
+            echo "  sudo -n true && echo passwordless_ok"
+            echo
             echo
             echo "============================================================"
             prompt_ack "pi_public_key_installed" \
-                "Press Enter after the public key and sudoers entry are installed on the Pi..."
+                "Press Enter after the public key and sudoers entry are installed on the target host..."
         fi 
     fi
 fi
 
-[ -f "$PI_KEY_PATH" ] || die "Pi private key missing: $PI_KEY_PATH"
+[ -f "$PI_KEY_PATH" ] || die "target host private key missing: $PI_KEY_PATH"
 
 
 if ! pi_ssh_raw "echo pi SSH OK" >/dev/null 2>&1; then
     die "Cannot SSH to ${PI_USER}@${PI_WIFI_IP} with key $PI_KEY_PATH.
-Install the public key on the Pi first."
+Install the public key on the target host first."
 fi
 
+if ! pi_ssh_raw "sudo -n true" >/dev/null 2>&1; then
+    die "User ${PI_USER} on ${PI_WIFI_IP} does not have passwordless sudo.
+On the target host run:
+
+  whoami
+  sudo -n true && echo passwordless_ok || echo needs_password
+
+  sudo mkdir -p /etc/sudoers.d
+  echo \"\$(whoami) ALL=(ALL) NOPASSWD: ALL\" | sudo tee /etc/sudoers.d/bf-network
+  sudo chmod 440 /etc/sudoers.d/bf-network
+  sudo visudo -cf /etc/sudoers.d/bf-network
+  sudo -n true && echo passwordless_ok
+
+Then re-run this installer."
+fi
+
+detect_vlan_parent_iface() {
+    pi_ssh 'bash -s' <<'REMOTE'
+set +e
+# token before @, drop VLAN subifs (name.number) and virtuals
+ip -o link show | awk -F': ' '
+function base(n) {
+    sub(/@.*$/, "", n)
+    return n
+}
+$0 !~ /[<,]UP[,>]/ { next }
+{
+    n = base($2)
+    if (n == "lo") next
+    if (n ~ /^(wlan|wlp|wwan|wwp)/) next
+    if (n ~ /^(docker|veth|br-|virbr|cni|flannel|tailscale|tun|tap|wg|zt|macvlan)/) next
+    if (n ~ /\./) next
+    if (n ~ /@/) next
+    if (n ~ /^(eth|eno|ens|enp|enx)[0-9]/) {
+        print n
+        exit
+    }
+}
+'
+REMOTE
+}
+_detected="$(detect_vlan_parent_iface | tr -d '\r')"
+[ -n "$_detected" ] || _detected="eth0"
+
+prompt_default WAN_IFACE \
+    "Wired interface that will carry 802.1Q VLANs (not the Wi-Fi SSH NIC)" \
+    "$_detected"
+
+_default_kind="ubuntu"
+case "$WAN_IFACE" in
+    eth0|eth0.*) _default_kind="pi" ;;
+esac
+prompt_default TARGET_HOST_KIND \
+    "Target host type: pi (Raspberry Pi OS / dhcpcd) or ubuntu (Intel/AMD, NetworkManager)" \
+    "$_default_kind"
+
+_ssh_iface="$(pi_ssh "ip -o -4 addr show to ${PI_WIFI_IP} | awk '{print \$2; exit}'" | tr -d '\r')"
+if [ -n "$_ssh_iface" ] && [ "$_ssh_iface" = "$WAN_IFACE" ]; then
+    die "WAN_IFACE ($WAN_IFACE) is the same NIC as SSH ($PI_WIFI_IP / $_ssh_iface).
+Pick the other interface for VLANs so this installer cannot drop SSH."
+fi
+echo "SSH stays on ${_ssh_iface:-unknown} ($PI_WIFI_IP); VLANs go on $WAN_IFACE."
+
 prompt_default PI_REPO_DIR "Enter bf-network install directory" "/home/$PI_USER/bf-network"
-prompt_default PORTAL_IP_BYTE "Enter Pi server last octet" "4"
+prompt_default PORTAL_IP_BYTE "Enter target host server last octet" "4"
 prompt_default HIJACK_DNS_IP_BYTE "Enter hijack DNS last octet" "5"
 prompt_default ADMIN_EMAIL "Admin notification email" "robert.verrill@english.op.org"
 
@@ -3916,7 +4178,7 @@ prompt_default SWITCH_REPLUG_ENABLED "Enable automatic switch replug after wired
 prompt_default SWITCH_REPLUG_DELAY_SEC "Switch replug delay seconds" "3"
 
 info "UniFi Network Controller (Docker)"
-prompt_default INSTALL_UNIFI_CONTROLLER "Install UniFi controller on the Pi?" "y" "install_unifi_controller"
+prompt_default INSTALL_UNIFI_CONTROLLER "Install UniFi controller on the target host?" "y" "install_unifi_controller"
 
 
 
@@ -3971,7 +4233,7 @@ derive_pi_server_values
 cat <<EOF
 
 ==========================================
-Derived Pi/server network settings
+Derived target host/server network settings
 ==========================================
 NETWORK_WORD=$NETWORK_WORD
 VALID_VLANS=$VALID_VLANS
@@ -3991,7 +4253,7 @@ RADIUS_SERVER=$RADIUS_SERVER
 SWITCH_KEY_PATH=$DOCKER_SWITCH_KEY_PATH
 ==========================================
 EOF
-prompt_ack "derived_settings_confirmed" "Press Enter to continue with switch configuration, then Pi installation..."
+prompt_ack "derived_settings_confirmed" "Press Enter to continue with switch configuration, then target host installation..."
 
 # =============================================================================
 # Main switch configuration loop
@@ -4039,7 +4301,7 @@ time repeating at 03:15
 #
 "
     while true; do
-        prompt_line KEA_PORT "Is a Kea Pi server being connected to this switch? Enter port number (1-${NUMBER_OF_PORTS[$j]}) or press Enter for none: " "switch_${j}_kea_port"
+        prompt_line KEA_PORT "Is a Kea target host server being connected to this switch? Enter port number (1-${NUMBER_OF_PORTS[$j]}) or press Enter for none: " "switch_${j}_kea_port"
 
         if [ -z "$KEA_PORT" ]; then
             KEA_PORT=""
@@ -4296,7 +4558,7 @@ ntp-service unicast-server 162.159.200.1
     
 
     if [ "$j" -eq 0 ]; then
-        echo "Please plug the USB serial cable into the Pi/computer and the RJ45 end into the console port of the FIRST switch."
+        echo "Please plug the USB serial cable into the Pi installer/computer and the RJ45 end into the console port of the FIRST switch."
     else
         echo "Please move the RJ45 end of the serial cable to the console port of the NEXT switch ($MGMT_IP)."
     fi
@@ -4898,26 +5160,26 @@ EOF
 apply_central_secrets_to_pi() {
 
     if step_done "central_site_env_update"; then
-        echo "Central secrets already applied to Pi; skipping."
+        echo "Central secrets already applied to target host; skipping."
         return 0
     fi
     if [ -z "${CENTRAL_API_KEY:-}" ] && [ -z "${CENTRAL_PUSH_SECRET:-}" ]; then
-        echo "No central secrets to apply on the Pi."
+        echo "No central secrets to apply on the target host."
         return 0
     fi
 
     local q_repo
     q_repo="$(shell_quote "$PI_REPO_DIR")"
 
-    info "Writing central secrets into Pi .env and restarting web"
+    info "Writing central secrets into target host .env and restarting web"
 
     write_pi_env_file
     pi_scp_to "$ENV_TMP" "/tmp/bf-network.env"
     pi_sudo "mv /tmp/bf-network.env $q_repo/.env && chmod 600 $q_repo/.env && chown $PI_USER:$PI_USER $q_repo/.env"
     rm -f "$ENV_TMP"
 
-    pi_sudo "cd $q_repo && docker compose up -d web --force-recreate"
-    echo "Restarted captive-portal web with CENTRAL_API_KEY / CENTRAL_PUSH_SECRET."
+    pi_sudo "cd $q_repo && docker compose up -d kea web --force-recreate --no-deps"
+    echo "Restarted kea and web with CENTRAL_API_KEY / CENTRAL_PUSH_SECRET."
 }
 
 
@@ -4935,4 +5197,4 @@ install_pi_server
 setup_bf_central
 apply_central_secrets_to_pi
 
-echo "All switches and the Pi server have been processed."
+echo "All switches and the target host server have been processed."

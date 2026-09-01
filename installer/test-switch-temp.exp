@@ -336,71 +336,163 @@ if {$do_wipe} {
     }
 
     set login_user "admin"
-    set current_pass ""
+    set saved_pass $current_pass
+    if {$saved_pass eq "" && $new_password ne ""} {
+        set saved_pass $new_password
+    }
+    # Password we will set if factory-default (empty) login works
+    set target_pass $current_pass
+    if {$target_pass eq ""} {
+        set target_pass $new_password
+    }
 
-    if {$woke != 3} {
-        if {$woke == 1} {
-            send "$login_user\r"
+    proc resync_login_prompt {} {
+        upvar woke woke
+        set woke 0
+        for {set wake 1} {$wake <= 8} {incr wake} {
+            send "\r"
             expect {
-                -re {[Pp]assword:} {}
-                timeout {
-                    puts "ERROR: No Password prompt after factory reset"
-                    exit 1
-                }
+                -re {[Ll]ogin:|[Uu]sername:} { set woke 1; return }
+                -re {[Pp]assword:}           { set woke 2; return }
+                -re {<[^>\r\n]+>}            { set woke 3; return }
+                timeout {}
             }
         }
-        send "\r"
+    }
+
+    proc apply_first_login {old_pass new_pass} {
         expect {
-            -re {AAA authentication failed\.|[Ii]ncorrect|[Ll]ogin failed} {
-                puts "ERROR: Factory-default admin login failed"
-                exit 2
+            -re {[Oo]ld password:} {}
+            timeout {}
+        }
+        send "$old_pass\r"
+        expect {
+            -re {[Nn]ew password:} {}
+            timeout {
+                puts "ERROR: No New password prompt after factory reset"
+                exit 1
             }
-            -re {First login|password reset|Old password:} {
-                puts "First-login password change required after factory reset"
-                expect {
-                    -re {[Oo]ld password:} {}
-                    timeout {}
-                }
-                send "\r"
-                expect {
-                    -re {[Nn]ew password:} {}
-                    timeout {
-                        puts "ERROR: No New password prompt after factory reset"
-                        exit 1
-                    }
-                }
-                if {$new_password eq ""} {
-                    puts "ERROR: Factory reset requires setting admin password. Pass -np."
-                    exit 1
-                }
-                send "$new_password\r"
-                expect {
-                    -re {[Cc]onfirm|[Nn]ew password:} {}
-                    timeout {
-                        puts "ERROR: No confirm-password prompt after factory reset"
-                        exit 1
-                    }
-                }
-                send "$new_password\r"
-                expect {
-                    -re {not meet|invalid|too simple|Password is absent|Please retry} {
-                        puts "ERROR: New admin password rejected by switch complexity policy"
-                        exit 1
-                    }
-                    -re {<[^>\r\n]+>} {}
-                    timeout {
-                        puts "ERROR: Login timed out after first-login password change"
-                        exit 1
-                    }
-                }
-                set current_pass $new_password
+        }
+        if {$new_pass eq ""} {
+            puts "ERROR: Need -np (or a non-empty -cp) to set admin password after empty login"
+            exit 1
+        }
+        send "$new_pass\r"
+        expect {
+            -re {[Cc]onfirm|[Nn]ew password:} {}
+            timeout {
+                puts "ERROR: No confirm-password prompt after factory reset"
+                exit 1
+            }
+        }
+        send "$new_pass\r"
+        expect {
+            -re {not meet|invalid|too simple|Password is absent|Please retry} {
+                puts "ERROR: New admin password rejected by switch complexity policy"
+                exit 1
             }
             -re {<[^>\r\n]+>} {}
             timeout {
-                puts "ERROR: Login timed out after factory reset"
-                puts "Last buffer: $expect_out(buffer)"
+                puts "ERROR: Login timed out after first-login password change"
                 exit 1
             }
+        }
+    }
+
+    if {$woke != 3} {
+        set logged_in 0
+        set used_empty 0
+        set max_try 4
+        for {set try 1} {$try <= $max_try} {incr try} {
+            if {$try % 2 == 1} {
+                set try_pass ""
+                puts "Post-wipe login try $try/$max_try: empty password"
+            } else {
+                set try_pass $saved_pass
+                puts "Post-wipe login try $try/$max_try: saved/current password"
+            }
+
+            if {$woke == 1} {
+                send "$login_user\r"
+                expect {
+                    -re {[Pp]assword:} {}
+                    timeout {
+                        puts "ERROR: No Password prompt after factory reset"
+                        exit 1
+                    }
+                }
+            }
+
+            send "$try_pass\r"
+
+            expect {
+                -re {AAA authentication failed\.|[Ii]ncorrect|[Ll]ogin failed} {
+                    puts "Post-wipe login failed with this password"
+                    resync_login_prompt
+                    continue
+                }
+                -re {First login|password reset|Old password:} {
+                    puts "First-login password change required after factory reset"
+                    apply_first_login $try_pass $target_pass
+                    set current_pass $target_pass
+                    set new_password $target_pass
+                    set change_password 1
+                    set used_empty [expr {$try_pass eq ""}]
+                    set logged_in 1
+                }
+                -re {<[^>\r\n]+>} {
+                    set current_pass $try_pass
+                    set used_empty [expr {$try_pass eq ""}]
+                    set logged_in 1
+                }
+                timeout {
+                    puts "Post-wipe login timed out; trying next password"
+                    resync_login_prompt
+                    continue
+                }
+            }
+            if {$logged_in} {
+                break
+            }
+        }
+
+        if {!$logged_in} {
+            puts "ERROR: Login failed after factory reset (tried empty and current passwords)"
+            exit 2
+        }
+
+        # Empty password worked and first-login did not already set one
+        if {$used_empty && $current_pass eq "" && $target_pass ne ""} {
+            puts "Empty factory login succeeded — setting admin password"
+            send "system-view\r"
+            expect {
+                -re {\[[^\]]+\]} {}
+                timeout {
+                    puts "ERROR: no system-view after empty login"
+                    exit 1
+                }
+            }
+            send "local-user admin\r"
+            expect -re {\[[^\]]+\]}
+            send "password simple $target_pass\r"
+            expect {
+                -re {[Oo]ld password:} {
+                    send "\r"
+                    expect -re {\[[^\]]+\]}
+                }
+                -re {\[[^\]]+\]} {}
+            }
+            send "authorization-attribute user-role network-admin\r"
+            expect -re {\[[^\]]+\]}
+            send "service-type ssh https terminal\r"
+            expect -re {\[[^\]]+\]}
+            send "quit\r"
+            expect -re {\[[^\]]+\]}
+            send "quit\r"
+            expect -re {<[^>\r\n]+>}
+            set current_pass $target_pass
+            set new_password $target_pass
+            set change_password 1
         }
     }
 
