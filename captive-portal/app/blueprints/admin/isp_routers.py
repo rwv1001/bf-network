@@ -204,6 +204,7 @@ def _build_isp_router_port_config(port_name: str, router: ISPRouter) -> str:
         ' port link-type trunk',
         ' port trunk permit vlan 1',
         f' port trunk permit vlan {router.vlan_id}',
+        f' port trunk pvid vlan {router.vlan_id}',
     ]
     if external_vlans_list:
         lines.append(f' port trunk permit vlan {external_vlans_list}')

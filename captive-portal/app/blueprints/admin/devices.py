@@ -271,51 +271,138 @@ def delete_device(device_id):
 @permission_required('manage_users')
 def reassign_device(device_id):
     device = Device.query.get_or_404(device_id)
-    owner_raw = request.form.get('owner', '').strip()
-    if not owner_raw or ':' not in owner_raw:
-        flash('An owner must be selected.', 'error')
+    owner_raw = (request.form.get('owner') or '').strip()
+    vlan_raw = (request.form.get('vlan_id') or '').strip()
+    name = (request.form.get('device_name') or '').strip()
+    want_json = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+
+    def _fail(msg):
+        if want_json:
+            return jsonify({'ok': False, 'error': msg}), 400
+        flash(msg, 'error')
         return redirect(url_for('admin.dashboard.index'))
 
-    owner_type, owner_id_str = owner_raw.split(':', 1)
-    try:
-        owner_id = int(owner_id_str)
-    except ValueError:
-        flash('Invalid owner ID.', 'error')
-        return redirect(url_for('admin.dashboard.index'))
+    if not owner_raw and not vlan_raw and not name:
+        return _fail('Select a new owner, VLAN, and/or device type.')
 
+    changed = []
     new_user = None
     new_admin = None
-    if owner_type == 'user':
-        new_user = User.query.get(owner_id)
-        if not new_user:
-            flash('User not found.', 'error')
-            return redirect(url_for('admin.dashboard.index'))
-    elif owner_type == 'admin':
-        new_admin = Admin.query.get(owner_id)
-        if not new_admin:
-            flash('Admin not found.', 'error')
-            return redirect(url_for('admin.dashboard.index'))
-    else:
-        flash('Invalid owner type.', 'error')
-        return redirect(url_for('admin.dashboard.index'))
+    old_user = device.user
 
-    old_user  = device.user
-    old_label = old_user.email if old_user else (
-        f'admin:{device.admin.username}' if device.admin else 'unowned')
-    close_ownership(device.mac_address, commit=False)
-    open_ownership(device.mac_address, user_id=new_user.id if new_user else None,
-                   admin_id=new_admin.id if new_admin else None, commit=False)
+    if owner_raw:
+        if ':' not in owner_raw:
+            return _fail('Invalid owner value.')
+        owner_type, owner_id_str = owner_raw.split(':', 1)
+        try:
+            owner_id = int(owner_id_str)
+        except ValueError:
+            return _fail('Invalid owner ID.')
+
+        if owner_type == 'user':
+            new_user = User.query.get(owner_id)
+            if not new_user:
+                return _fail('User not found.')
+        elif owner_type == 'admin':
+            new_admin = Admin.query.get(owner_id)
+            if not new_admin:
+                return _fail('Admin not found.')
+        else:
+            return _fail('Invalid owner type.')
+
+        old_label = old_user.email if old_user else (
+            f'admin:{device.admin.username}' if getattr(device, 'admin', None) else 'unowned')
+        close_ownership(device.mac_address, commit=False)
+        open_ownership(
+            device.mac_address,
+            user_id=new_user.id if new_user else None,
+            admin_id=new_admin.id if new_admin else None,
+            commit=False,
+        )
+        new_label = new_user.email if new_user else f'admin:{new_admin.username}'
+        changed.append(f'owner {new_label}')
+        logger.info(
+            "Admin reassigned device %s from %s to %s",
+            device.mac_address, old_label, new_label,
+        )
+
+    target_vlan = None
+    if vlan_raw:
+        try:
+            target_vlan = int(vlan_raw)
+        except ValueError:
+            return _fail('Invalid VLAN.')
+
+        device.assigned_vlan = target_vlan
+        device.current_vlan = target_vlan
+        if device.connection_type == 'wired' or device.is_wired:
+            device.is_wired = True
+            device.wired_target_vlan = target_vlan
+        if device.registration_status == 'wrong_vlan':
+            device.registration_status = 'registered'
+        if hasattr(device, 'stale'):
+            device.stale = False
+        changed.append(f'VLAN {target_vlan}')
+
+    if name:
+        device.device_name = name
+        changed.append(f'type {name}')
+
     db.session.commit()
 
-    new_label = new_user.email if new_user else f'admin:{new_admin.username}'
     if new_user:
         central_client.queue_device_reassigned(device, old_user, new_user)
-    logger.info("Admin reassigned device %s from %s to %s",
-                device.mac_address, old_label, new_label)
-    flash(f'Device {device.mac_address} reassigned to {new_label}.', 'success')
+
+    if target_vlan:
+        kea = _get_kea()
+        if kea:
+            try:
+                kea.register_mac(
+                    mac=device.mac_address,
+                    vlan=target_vlan,
+                    hostname=device.device_name or 'device',
+                    ip_address=None,
+                )
+            except Exception as exc:
+                logger.warning("Kea registration failed for %s: %s", device.mac_address, exc)
+        if device.connection_type == 'wired' or device.is_wired:
+            send_coa_change(device.mac_address, target_vlan)
+            _replug_switch_port_for_mac(device.mac_address)
+        try:
+            central_client.queue_device_vlan_changed(device)
+        except Exception:
+            pass
+
+    owner_name = owner_email = owner_value = ''
+    own = get_active_ownership(device.mac_address)
+    if own and getattr(own, 'user_id', None):
+        u = User.query.get(own.user_id)
+        if u:
+            owner_name = f'{(u.first_name or "")} {(u.last_name or "")}'.strip() or u.email
+            owner_email = u.email or ''
+            owner_value = f'user:{u.id}'
+    elif own and getattr(own, 'admin_id', None):
+        a = Admin.query.get(own.admin_id)
+        if a:
+            owner_name = f'🔒 {a.username}'
+            owner_email = a.email or ''
+            owner_value = f'admin:{a.id}'
+
+    payload = {
+        'ok': True,
+        'device_id': device.id,
+        'mac': device.mac_address,
+        'device_name': device.device_name or '',
+        'vlan': device.assigned_vlan or device.current_vlan,
+        'owner_name': owner_name,
+        'owner_email': owner_email,
+        'owner_value': owner_value,
+        'message': f'Device {device.mac_address} updated ({", ".join(changed)}).',
+    }
+    if want_json:
+        return jsonify(payload)
+    flash(payload['message'], 'success')
     return redirect(url_for('admin.dashboard.index'))
-
-
 # ---------------------------------------------------------------------------
 # Disconnect device
 # ---------------------------------------------------------------------------

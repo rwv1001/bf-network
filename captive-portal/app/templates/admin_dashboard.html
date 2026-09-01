@@ -582,9 +582,9 @@ document.getElementById('assignDeviceModal').addEventListener('click', function(
                 <input type="text" id="reassignMacAddress" readonly style="width: 100%; padding: 8px; border: 1px solid #ddd; background: #f5f5f5; box-sizing: border-box;">
             </div>
             <div style="margin-bottom: 15px;">
-                <label for="reassignOwner" style="display: block; margin-bottom: 5px; font-weight: bold;">New Owner: *</label>
-                <select name="owner" id="reassignOwner" required style="width: 100%; padding: 8px; border: 1px solid #ddd;">
-                    <option value="">-- Select an owner --</option>
+                <label for="reassignOwner" style="display: block; margin-bottom: 5px; font-weight: bold;">Owner</label>
+                <select name="owner" id="reassignOwner" style="width: 100%; padding: 8px; border: 1px solid #ddd;">
+                    <option value="">-- Keep current owner --</option>
                     <optgroup label="Users">
                     {% for u in users %}
                     <option value="user:{{ u.id }}">{{ u.email }}{% if u.full_name %} ({{ u.full_name }}){% endif %}</option>
@@ -597,6 +597,21 @@ document.getElementById('assignDeviceModal').addEventListener('click', function(
                     </optgroup>
                 </select>
             </div>
+            <div style="margin-bottom: 15px;">
+                <label for="reassignVlanId" style="display: block; margin-bottom: 5px; font-weight: bold;">VLAN</label>
+                <select name="vlan_id" id="reassignVlanId" style="width: 100%; padding: 8px; border: 1px solid #ddd;">
+                    <option value="">-- Keep current VLAN --</option>
+                    {% for choice in wired_vlan_choices %}
+                    <option value="{{ choice.vlan_id }}" data-wired-enabled="{{ 'true' if choice.wired_enabled else 'false' }}">{{ choice.label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label for="reassignDeviceName" style="display: block; margin-bottom: 5px; font-weight: bold;">Device type</label>
+                <input type="text" name="device_name" id="reassignDeviceName"
+                       placeholder="e.g. Photocopier"
+                       style="width: 100%; padding: 8px; border: 1px solid #ddd; box-sizing: border-box;">
+            </div>
             <div style="display: flex; gap: 10px; margin-top: 20px;">
                 <button type="submit" class="btn">Reassign</button>
                 <button type="button" onclick="hideReassignDeviceForm()" class="btn" style="background: #999;">Cancel</button>
@@ -605,15 +620,83 @@ document.getElementById('assignDeviceModal').addEventListener('click', function(
     </div>
 </div>
 <script>
-function showReassignDeviceForm(deviceId, mac) {
+function showReassignDeviceForm(deviceId, mac, currentVlan, ownerValue, connectionType, deviceName) {
     document.getElementById('reassignMacAddress').value = mac;
     document.getElementById('reassignDeviceForm').action = '/admin/device/' + deviceId + '/reassign';
-    document.getElementById('reassignOwner').value = '';
+    document.getElementById('reassignDeviceForm').dataset.deviceId = String(deviceId);
+    document.getElementById('reassignOwner').value = ownerValue || '';
+    document.getElementById('reassignDeviceName').value = deviceName || '';
+    var vlanSelect = document.getElementById('reassignVlanId');
+    vlanSelect.value = currentVlan ? String(currentVlan) : '';
+    var isWired = (connectionType === 'wired');
+    Array.from(vlanSelect.options).forEach(function(opt) {
+        if (!opt.value) return;
+        if (isWired && opt.dataset.wiredEnabled === 'false') {
+            opt.hidden = true;
+            opt.disabled = true;
+        } else {
+            opt.hidden = false;
+            opt.disabled = false;
+        }
+    });
     document.getElementById('reassignDeviceModal').style.display = 'block';
 }
+document.addEventListener('click', function (e) {
+    var btn = e.target.closest('.reassign-btn');
+    if (!btn) return;
+    showReassignDeviceForm(
+        parseInt(btn.dataset.id, 10),
+        btn.dataset.mac || '',
+        btn.dataset.vlan || '',
+        btn.dataset.owner || '',
+        btn.dataset.connection || '',
+        btn.dataset.name || ''
+    );
+});
 function hideReassignDeviceForm() {
     document.getElementById('reassignDeviceModal').style.display = 'none';
 }
+document.getElementById('reassignDeviceForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var form = this;
+    var btn = form.querySelector('button[type=submit]');
+    btn.disabled = true;
+    fetch(form.action, {
+        method: 'POST',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        body: new FormData(form)
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+        btn.disabled = false;
+        if (!data.ok) {
+            alert(data.error || 'Reassign failed');
+            return;
+        }
+        var row = document.getElementById('device-row-' + data.device_id);
+        if (row) {
+            var typeCell = row.querySelector('.dev-type');
+            if (typeCell) typeCell.textContent = data.device_name || '-';
+            var vlanCell = row.querySelector('.dev-vlan');
+            if (vlanCell && data.vlan) vlanCell.textContent = 'VLAN ' + data.vlan;
+            var ownerCell = row.querySelector('.dev-owner');
+            if (ownerCell && data.owner_name) ownerCell.textContent = data.owner_name;
+            var emailCell = row.querySelector('.dev-email');
+            if (emailCell && data.owner_email) emailCell.textContent = data.owner_email;
+            var reBtn = row.querySelector('.reassign-btn');
+            if (reBtn) {
+                reBtn.dataset.vlan = String(data.vlan || '');
+                reBtn.dataset.owner = data.owner_value || '';
+                reBtn.dataset.name = data.device_name || '';
+            }
+        }
+        hideReassignDeviceForm();
+    })
+    .catch(function (err) {
+        btn.disabled = false;
+        alert('Reassign failed: ' + err);
+    });
+});
 document.getElementById('reassignDeviceModal').addEventListener('click', function(e) {
     if (e.target === this) hideReassignDeviceForm();
 });
@@ -920,7 +1003,9 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
     </thead>
     <tbody>
         {% for ownership, device, user, admin in devices %}
-        <tr {% if device.registration_status == 'blocked' %}style="background: #ffebee;"{% endif %}>
+            <tr id="device-row-{{ device.id }}"
+            data-connection="{{ device.connection_type or '' }}"
+            {% if device.registration_status == 'blocked' %}style="background: #ffebee;"{% endif %}>
             <td style="font-family: monospace; font-size: 12px;">{{ device.mac_address }}</td>
             <td style="font-family: monospace; font-size: 12px;">
                 {% if device.ip_address %}
@@ -929,8 +1014,8 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
                     <em style="color: #999;">-</em>
                 {% endif %}
             </td>
-            <td>{{ device.device_name or '-' }}</td>
-            <td>
+            <td class="dev-type">{{ device.device_name or '-' }}</td>
+            <td class="dev-owner">
                 {% if admin %}
                     <span title="Admin">&#128274; {{ admin.username }}</span>
                 {% elif user %}
@@ -939,7 +1024,7 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
                     <em style="color: #999;">Unknown</em>
                 {% endif %}
             </td>
-            <td>
+            <td class="dev-email">
                 {% if admin %}
                     {{ admin.email or '-' }}
                 {% elif user %}
@@ -990,7 +1075,7 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
                     <em style="color: #999;">-</em>
                 {% endif %}
             </td>
-            <td>VLAN {{ device.current_vlan }}</td>
+            <td class="dev-vlan">VLAN {{ device.current_vlan }}</td>
             <td style="font-size: 12px; max-width: 150px;">
                 {% if user and user.notes %}
                     <span title="{{ user.notes }}" style="cursor: help;">
@@ -1027,7 +1112,15 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
                     </button>
                 </form>
                 {% if current_user.can_manage_users %}
-                <button onclick="showReassignDeviceForm({{ device.id }}, '{{ device.mac_address }}')" class="btn btn-small" style="background: #4a7c59; margin-left: 5px;">&#8599; Reassign</button>
+                <button type="button"
+                        class="btn btn-small reassign-btn"
+                        style="background: #4a7c59; margin-left: 5px;"
+                        data-id="{{ device.id }}"
+                        data-mac="{{ device.mac_address }}"
+                        data-vlan="{{ device.assigned_vlan or device.current_vlan or '' }}"
+                        data-owner="{% if admin %}admin:{{ admin.id }}{% elif user %}user:{{ user.id }}{% endif %}"
+                        data-connection="{{ device.connection_type or '' }}"
+                        data-name="{{ device.device_name or '' }}">&#8599; Reassign</button>
                 {% endif %}
                 {% if device.registration_status == 'registered' %}
                 <button onclick="showFixedIpDialog({{ device.id }}, '{{ device.mac_address }}', '{{ device.fixed_ip or '' }}', {{ device.current_vlan or 0 }}, '{{ device.ip_address or '' }}')"
@@ -1066,12 +1159,14 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
 </div>
 <div class="section-pane-body">
 <div class="info-box" style="margin-bottom:16px;">
-    Use this when a device sets its own static IP. Kea will not offer that address to anyone else.
-    The device does not need to use DHCP.
+    Use this when a device sets its own static IP. The MAC is registered to an owner and VLAN
+    (same list as Assign / Reassign) so RADIUS and ACLs treat it as a known device.
+    Kea only reserves the address when that VLAN is Kea-managed.
 </div>
 
 <form method="POST" action="{{ url_for('admin.dashboard.fixed_ip_reservations') }}"
-      style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-bottom:18px;">
+      style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-bottom:10px;"
+      onsubmit="return confirmFixedIpKeaWarning();">
     <input type="hidden" name="action" value="add">
     <div>
         <label style="font-size:12px;font-weight:600;display:block;">MAC *</label>
@@ -1080,31 +1175,71 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
     </div>
     <div>
         <label style="font-size:12px;font-weight:600;display:block;">IP *</label>
-        <input type="text" name="ip" required placeholder="10.7.40.10"
-               style="padding:8px;border:1px solid #ddd;border-radius:4px;min-width:140px;">
+        <input type="text" name="ip" id="fixedIpReserveIp" required placeholder="192.168.40.10"
+               style="padding:8px;border:1px solid #ddd;border-radius:4px;min-width:140px;"
+               oninput="updateFixedIpKeaWarning()">
     </div>
     <div>
-        <label style="font-size:12px;font-weight:600;display:block;">VLAN</label>
-        <input type="number" name="vlan_id" min="1" max="4094" placeholder="from IP if blank"
-               style="padding:8px;border:1px solid #ddd;border-radius:4px;width:110px;">
-    </div>
-    <div>
-        <label style="font-size:12px;font-weight:600;display:block;">Switch</label>
-        <select name="switch_host" style="padding:8px;border:1px solid #ddd;border-radius:4px;">
-            <option value="">—</option>
-            {% for h in switch_hosts %}
-            <option value="{{ h }}">{{ h }}</option>
+        <label style="font-size:12px;font-weight:600;display:block;">VLAN *</label>
+        <select name="vlan_id" id="fixedIpReserveVlan" required
+                style="padding:8px;border:1px solid #ddd;border-radius:4px;min-width:220px;"
+                onchange="updateFixedIpKeaWarning()">
+            <option value="">-- Select VLAN --</option>
+            {% for choice in wired_vlan_choices %}
+            <option value="{{ choice.vlan_id }}">{{ choice.label }}</option>
             {% endfor %}
         </select>
     </div>
     <div>
-        <label style="font-size:12px;font-weight:600;display:block;">Port</label>
-        <input type="text" name="switch_port" placeholder="GE1/0/11"
-               style="padding:8px;border:1px solid #ddd;border-radius:4px;width:120px;">
+        <label style="font-size:12px;font-weight:600;display:block;">Owner *</label>
+        <select name="owner" required style="padding:8px;border:1px solid #ddd;border-radius:4px;min-width:240px;">
+            <option value="">-- Select an owner --</option>
+            <optgroup label="Users">
+            {% for u in users %}
+            <option value="user:{{ u.id }}">{{ u.email }} ({{ u.first_name }} {{ u.last_name }})</option>
+            {% endfor %}
+            </optgroup>
+            <optgroup label="Admins">
+            {% for a in admins %}
+            <option value="admin:{{ a.id }}">{{ a.username }}{% if a.email %} &lt;{{ a.email }}&gt;{% endif %}</option>
+            {% endfor %}
+            </optgroup>
+        </select>
     </div>
-
+    <div>
+        <label style="font-size:12px;font-weight:600;display:block;">Name</label>
+        <input type="text" name="device_name" placeholder="Photocopier"
+               style="padding:8px;border:1px solid #ddd;border-radius:4px;min-width:160px;">
+    </div>
     <button type="submit" class="btn btn-small">Reserve</button>
 </form>
+<p id="fixedIpKeaWarning" style="display:none;color:#9a5b00;background:#fff6e5;border:1px solid #f0d9a6;padding:8px 12px;border-radius:4px;font-size:13px;margin:0 0 16px 0;"></p>
+<script>
+var _keaManagedVlans = {{ kea_managed_vlan_ids | default([]) | tojson }};
+function updateFixedIpKeaWarning() {
+    var el = document.getElementById('fixedIpKeaWarning');
+    var vlanSel = document.getElementById('fixedIpReserveVlan');
+    var ipEl = document.getElementById('fixedIpReserveIp');
+    if (!el || !vlanSel) return;
+    var vlan = parseInt(vlanSel.value, 10);
+    var ip = (ipEl && ipEl.value) ? ipEl.value.trim() : '';
+    if (vlan && ip && _keaManagedVlans.indexOf(vlan) === -1) {
+        el.style.display = 'block';
+        el.textContent = 'VLAN ' + vlan + ' is not managed by Kea. ' + ip +
+            ' will be stored on the device for RADIUS/ACL, but no DHCP reservation will be created. Make sure the upstream router for this VLAN does not give that address to someone else.';
+    } else {
+        el.style.display = 'none';
+        el.textContent = '';
+    }
+}
+function confirmFixedIpKeaWarning() {
+    var el = document.getElementById('fixedIpKeaWarning');
+    if (el && el.style.display !== 'none' && el.textContent) {
+        return confirm(el.textContent + '\n\nCreate the reservation anyway?');
+    }
+    return true;
+}
+</script>
 
 {% if fixed_ip_reservations %}
 <div class="table-responsive">
@@ -1114,8 +1249,7 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
             <th>MAC</th>
             <th>Reserved IP</th>
             <th>VLAN</th>
-            <th>Switch</th>
-            <th>Port</th>
+            <th>Owner</th>
             <th>Name</th>
             <th>Current DHCP IP</th>
             <th></th>
@@ -1124,14 +1258,52 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
     <tbody>
         {% for d in fixed_ip_reservations %}
         <tr>
-            <td style="font-family:monospace;font-size:12px;">{{ d.mac_address }}</td>
-            <td style="font-family:monospace;">{{ d.fixed_ip }}</td>
-            <td>{{ d.current_vlan or '—' }}</td>
-            <td>{{ d.switch_host or '—' }}</td>
-            <td style="font-family:monospace;">{{ d.switch_iface or '—' }}</td>
-            <td>{{ d.device_name or '—' }}</td>
-            <td style="font-family:monospace;font-size:12px;">{{ d.ip_address or '—' }}</td>
+            <form method="POST" action="{{ url_for('admin.dashboard.fixed_ip_reservations') }}">
+            <input type="hidden" name="action" value="add">
+            <input type="hidden" name="mac_address" value="{{ d.mac_address }}">
+            <td style="font-family:monospace;font-size:12px;vertical-align:middle;">{{ d.mac_address }}</td>
             <td>
+                <input type="text" name="ip" required value="{{ d.fixed_ip }}"
+                       style="padding:6px;border:1px solid #ddd;border-radius:4px;width:170px;font-family:monospace;">
+            </td>
+            <td>
+                <select name="vlan_id" required style="padding:6px;border:1px solid #ddd;border-radius:4px;min-width:180px;">
+                    {% for choice in wired_vlan_choices %}
+                    <option value="{{ choice.vlan_id }}"
+                            {% if (d.assigned_vlan or d.current_vlan) == choice.vlan_id %}selected{% endif %}>
+                        {{ choice.label }}
+                    </option>
+                    {% endfor %}
+                </select>
+            </td>
+            <td>
+                <select name="owner" required style="padding:6px;border:1px solid #ddd;border-radius:4px;min-width:200px;">
+                    <option value="">-- Select an owner --</option>
+                    <optgroup label="Users">
+                    {% for u in users %}
+                    <option value="user:{{ u.id }}" {% if d.owner_value == 'user:' ~ u.id %}selected{% endif %}>
+                        {{ u.email }} ({{ u.first_name }} {{ u.last_name }})
+                    </option>
+                    {% endfor %}
+                    </optgroup>
+                    <optgroup label="Admins">
+                    {% for a in admins %}
+                    <option value="admin:{{ a.id }}" {% if d.owner_value == 'admin:' ~ a.id %}selected{% endif %}>
+                        {{ a.username }}{% if a.email %} &lt;{{ a.email }}&gt;{% endif %}
+                    </option>
+                    {% endfor %}
+                    </optgroup>
+                </select>
+            </td>
+            <td>
+                <input type="text" name="device_name" value="{{ d.device_name or '' }}"
+                       title="{{ d.device_name or '' }}"
+                       style="padding:6px;border:1px solid #ddd;border-radius:4px;width:140px;">
+            </td>
+            <td style="font-family:monospace;font-size:12px;vertical-align:middle;">{{ d.ip_address or '—' }}</td>
+            <td style="white-space:nowrap;">
+                <button type="submit" class="btn btn-small">Save</button>
+            </form>
                 <form method="POST" action="{{ url_for('admin.dashboard.fixed_ip_reservations') }}" style="display:inline;"
                       onsubmit="return confirm('Remove reservation for {{ d.mac_address }}?');">
                     <input type="hidden" name="action" value="delete">

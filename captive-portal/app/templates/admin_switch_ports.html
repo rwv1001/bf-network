@@ -251,7 +251,7 @@
                      id="rg_{{ host }}_{{ port.port_name | replace('/', '_') | replace('.', '_') }}"
                      data-host="{{ host }}"
                      data-port="{{ port.port_name }}"
-                     {% if is_locked %}title="{{ locked_ports[port.port_name] }}"{% endif %}
+                     {% if is_locked %}title="{{ locked_ports[port.port_name] }}"{% endif %} >
                 {% for role_key, role_label in port_roles.items() %}
                     {% set is_uplink_udm = role_key == 'uplink_udm' %}
                     {% set is_fixed_ip = role_key == 'fixed_ip' %}
@@ -357,6 +357,12 @@ document.querySelectorAll('.role-group').forEach(group => {
                 }
                 if (row) {
                     row.classList.toggle('row-unclassified', newRole === 'unknown');
+                    const descEl = row.querySelector('.port-desc');
+                    if (descEl && data.description !== undefined) {
+                        const text = data.description || '—';
+                        descEl.textContent = text;
+                        descEl.setAttribute('title', data.description || '');
+                    }
                 }
             } else {
                 if (statusEl) statusEl.innerHTML = '<span class="status-err">✗ ' + (data.error || 'Failed') + '</span>';

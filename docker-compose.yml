@@ -32,7 +32,7 @@ services:
       - ./scripts:/scripts:ro
       - ./scripts/scriptdata:/scripts/scriptdata:ro
       - ./shared/acl-queue:/acl-queue
-      - /home/admin/.ssh:/keys:ro
+      - /home/rwv1001/.ssh:/keys:ro
       - ./kea/logs:/kea/logs
       - /etc/localtime:/etc/localtime:ro
     environment:
@@ -235,13 +235,14 @@ services:
       VALID_VLANS: ${VALID_VLANS:-10,20,30,40,50,60,70,80,90}
       EXTERNAL_VLANS: ${EXTERNAL_VLANS:-}
       EXTERNAL_VLAN_SUBNETS: ${EXTERNAL_VLAN_SUBNETS:-}
+      ISP_VLANS: ${ISP_VLANS:-}
       ADMIN_EXTRA_VLANS: ${ADMIN_EXTRA_VLANS:-1}
       VLAN_DEFAULTS: ${VLAN_DEFAULTS:-10:friars,20:staff,30:students,40:guests,50:contractors,60:iot,70:wifi-registered,80:kiosk,90:printers,99:management,250:wired_unregistered}
       VLAN_POOL_STATUSES: ${VLAN_POOL_STATUSES:-friars,staff,students,guests,contractors,volunteers,iot}
       VLAN_SUBNET_ID_MAP: ${VLAN_SUBNET_ID_MAP:-}
       EMAIL_VERIFICATION_REQUIRED: ${EMAIL_VERIFICATION_REQUIRED:-false}
       VERIFICATION_TIMEOUT_MINUTES: ${VERIFICATION_TIMEOUT_MINUTES:-15}
-      WIFI_CONFIRM_TIMEOUT_SEC: ${WIFI_CONFIRM_TIMEOUT_SEC:-120}
+      WIFI_CONFIRM_TIMEOUT_SEC: ${WIFI_CONFIRM_TIMEOUT_SEC:-1200}
       WIFI_CONFIRM_SWEEP_ENABLED: ${WIFI_CONFIRM_SWEEP_ENABLED:-true}
       WIFI_CONFIRM_SWEEP_INTERVAL_SEC: ${WIFI_CONFIRM_SWEEP_INTERVAL_SEC:-30}
       CENTRAL_API_URL: ${CENTRAL_API_URL:-}
@@ -306,7 +307,7 @@ services:
       - ./scripts:/scripts:ro
       - ./scripts/scriptdata:/scripts/scriptdata
       - ./shared/acl-queue:/acl-queue
-      - /home/admin/.ssh:/keys:ro
+      - /home/rwv1001/.ssh:/keys:ro
       - /etc/systemd/network:/host-systemd-network
       - ./watchdog:/watchdog-data
       - ${GIT_REPO_DIR}:${GIT_REPO_DIR}
@@ -392,7 +393,7 @@ services:
     network_mode: host
     entrypoint: ["/tunnel-entrypoint.sh"]
     volumes:
-      - /home/admin/.ssh:/keys:ro
+      - /home/rwv1001/.ssh:/keys:ro
       - ./captive-portal/tunnel-entrypoint.sh:/tunnel-entrypoint.sh:ro
       - /etc/localtime:/etc/localtime:ro
     environment:
@@ -404,7 +405,8 @@ services:
 
   # ── FreeRADIUS ────────────────────────────────────────────────────────────────
   freeradius:
-    image: freeradius/freeradius-dev:arm64v8-v3.2.x
+    image: freeradius/freeradius-dev:v3.2.x
+    platform: linux/amd64    
     container_name: freeradius
     restart: unless-stopped
     network_mode: host
@@ -582,7 +584,7 @@ services:
       # Persistent state (debounce / alert tracking)
       - ./watchdog:/data
       # SSH key for optional peer reboot
-      - /home/admin/.ssh:/keys:ro
+      - /home/rwv1001/.ssh:/keys:ro
       # Syslog log directory — for staleness check
       - ./syslog-container/logs:/logs:ro
       - /etc/localtime:/etc/localtime:ro

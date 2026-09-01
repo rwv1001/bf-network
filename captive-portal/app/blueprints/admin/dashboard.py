@@ -290,6 +290,23 @@ def index():
         .order_by(Device.fixed_ip.asc())
         .all()
     )
+    for _d in fixed_ip_reservations:
+        _own = get_active_ownership(_d.mac_address)
+        if _own and getattr(_own, 'user_id', None):
+            _u = User.query.get(_own.user_id)
+            _d.owner_label = _u.email if _u else f'user:{_own.user_id}'
+            _d.owner_value = f'user:{_own.user_id}'
+        elif _own and getattr(_own, 'admin_id', None):
+            _a = Admin.query.get(_own.admin_id)
+            _d.owner_label = (
+                f'admin:{_a.username}' if _a else f'admin:{_own.admin_id}'
+            )
+            _d.owner_value = f'admin:{_own.admin_id}'
+        else:
+            _d.owner_label = '—'
+            _d.owner_value = ''
+
+    
 
     # ── Lease stats ───────────────────────────────────────────────────────────
     prefix_by_id = get_vlan_prefix_by_id()
@@ -338,6 +355,29 @@ def index():
         }
         for entry in get_admin_assignable_entries()
     ]
+    # ISP router VLANs that are not already in the assignable VLAN list.
+    # VLAN 1 is added separately as "Upstream Management".
+    _seen_vlan_ids = {1} | {c['vlan_id'] for c in _base}
+    _isp_vlan_choices = []
+    try:
+        for router in ISPRouter.query.order_by(ISPRouter.vlan_id.asc()).all():
+            if router.vlan_id is None:
+                continue
+            try:
+                vid = int(router.vlan_id)
+            except (TypeError, ValueError):
+                continue
+            if vid in _seen_vlan_ids:
+                continue
+            _seen_vlan_ids.add(vid)
+            router_name = (getattr(router, 'name', None) or '').strip() or f'VLAN {vid}'
+            _isp_vlan_choices.append({
+                'vlan_id': vid,
+                'label': f'ISP {router_name} (VLAN {vid})',
+                'wired_enabled': True,
+            })
+    except Exception:
+        logger.warning("Could not load ISP router VLANs for assign dropdown", exc_info=True)
 
     # ── AJAX partial rendering ────────────────────────────────────────────────
     is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
@@ -367,11 +407,12 @@ def index():
                 'label': 'Upstream Management (VLAN 1)',
                 'wired_enabled': True,
             },
-        ] + [c for c in _base if c['vlan_id'] != 1],
+        ] + [c for c in _base if c['vlan_id'] != 1]+ _isp_vlan_choices,
         lease_stats=lease_stats,
         domain_policies=domain_policies,
         test_env=_is_test_env(),
         dashboard_hidden_sections=dashboard_hidden_sections,
+        kea_managed_vlan_ids=sorted(_kea_managed_vlan_ids()),
     )
 
     if is_ajax:
@@ -787,6 +828,48 @@ def process_request(request_id):
 
     return redirect(url_for('admin.dashboard.index'))
 
+def _normalize_mac(raw: str):
+    cleaned = re.sub(r'[^0-9a-fA-F]', '', raw or '').lower()
+    if len(cleaned) != 12:
+        return None
+    return ':'.join(cleaned[i:i + 2] for i in range(0, 12, 2))
+
+
+def _kea_managed_vlan_ids():
+    """VLANs Kea actually serves (VALID_VLANS). ISP VLANs are usually excluded."""
+    try:
+        from core.vlan_utils import parse_valid_vlan_ids
+        return {int(v) for v in parse_valid_vlan_ids()}
+    except Exception:
+        ids = set()
+        for raw in (os.getenv('VALID_VLANS') or '').split(','):
+            raw = raw.strip()
+            if raw.isdigit():
+                ids.add(int(raw))
+        return ids
+
+
+def _assignable_vlan_ids():
+    """Same VLAN set as the assign / reassign dropdowns."""
+    ids = {1}
+    try:
+        for entry in get_admin_assignable_entries():
+            if getattr(entry, 'vlan_id', None) is not None:
+                ids.add(int(entry.vlan_id))
+    except Exception:
+        logger.warning("Could not load admin-assignable VLANs", exc_info=True)
+    try:
+        for router in ISPRouter.query.all():
+            if router.vlan_id is None:
+                continue
+            try:
+                ids.add(int(router.vlan_id))
+            except (TypeError, ValueError):
+                continue
+    except Exception:
+        logger.warning("Could not load ISP router VLANs", exc_info=True)
+    return ids
+
 def _vlan_id_from_ip(ip: str):
     try:
         return int(str(ip).split('.')[2])
@@ -845,30 +928,29 @@ def _push_static_binding(host, port_name, ip, mac, vlan_id, undo=False):
 @login_required
 @permission_required('manage_users')
 def fixed_ip_reservations():
-    """Reserve a MAC→IP in Kea so a self-assigned static IP is not leased out."""
+    """Register a static-IP device to an owner + VLAN. Reserve in Kea only when Kea manages that VLAN."""
     action = (request.form.get('action') or 'add').strip().lower()
-    mac = (request.form.get('mac_address') or '').strip().lower()
+    mac = _normalize_mac(request.form.get('mac_address') or '')
     ip = (request.form.get('ip') or '').strip()
 
     if not mac:
-        flash('MAC address is required.', 'error')
+        flash('A valid MAC address is required.', 'error')
         return redirect(url_for('admin.dashboard.index'))
 
     device = Device.query.filter_by(mac_address=mac).first()
     kea = _get_kea()
+    kea_vlans = _kea_managed_vlan_ids()
 
     if action == 'delete':
         old_ip = (device.fixed_ip if device else None) or ip
-        vlan_id = (device.current_vlan if device else None) or _vlan_id_from_ip(old_ip)
-        if kea and old_ip and vlan_id:
+        vlan_id = (
+            (device.assigned_vlan if device else None)
+            or (device.current_vlan if device else None)
+            or _vlan_id_from_ip(old_ip)
+        )
+        if kea and old_ip and vlan_id and vlan_id in kea_vlans:
             try:
                 kea.clear_fixed_ip(mac, vlan_id)
-                if device and device.switch_host and device.switch_iface and old_ip and vlan_id:
-                    _push_static_binding(device.switch_host, device.switch_iface, old_ip,
-                                        mac, vlan_id, undo=True)
-                    _set_port_role(device.switch_host, device.switch_iface, 'unknown')
-                    device.switch_host = None
-                    device.switch_iface = None
             except Exception as exc:
                 logger.warning("Kea clear_reservation failed for %s: %s", mac, exc)
         if device:
@@ -877,16 +959,47 @@ def fixed_ip_reservations():
         flash(f'Cleared fixed IP reservation for {mac}.', 'success')
         return redirect(url_for('admin.dashboard.index'))
 
+    owner_raw = (request.form.get('owner') or '').strip()
+    if not owner_raw or ':' not in owner_raw:
+        flash('An owner (user or admin) is required.', 'error')
+        return redirect(url_for('admin.dashboard.index'))
+    owner_type, owner_id_str = owner_raw.split(':', 1)
+    try:
+        owner_id = int(owner_id_str)
+    except ValueError:
+        flash('Invalid owner.', 'error')
+        return redirect(url_for('admin.dashboard.index'))
+
+    new_user = new_admin = None
+    if owner_type == 'user':
+        new_user = User.query.get(owner_id)
+        if not new_user:
+            flash('User not found.', 'error')
+            return redirect(url_for('admin.dashboard.index'))
+    elif owner_type == 'admin':
+        new_admin = Admin.query.get(owner_id)
+        if not new_admin:
+            flash('Admin not found.', 'error')
+            return redirect(url_for('admin.dashboard.index'))
+    else:
+        flash('Invalid owner type.', 'error')
+        return redirect(url_for('admin.dashboard.index'))
+
     try:
         ipaddress.IPv4Address(ip)
-        
     except Exception:
         flash(f'Invalid IP address: {ip}', 'error')
         return redirect(url_for('admin.dashboard.index'))
 
-    vlan_id = request.form.get('vlan_id', type=int) or _vlan_id_from_ip(ip)
+    try:
+        vlan_id = int(request.form.get('vlan_id') or 0)
+    except (TypeError, ValueError):
+        vlan_id = 0
     if not vlan_id:
-        flash('Could not determine VLAN. Enter a VLAN ID.', 'error')
+        flash('Select a VLAN from the list.', 'error')
+        return redirect(url_for('admin.dashboard.index'))
+    if vlan_id not in _assignable_vlan_ids():
+        flash(f'VLAN {vlan_id} is not in the assignable VLAN list.', 'error')
         return redirect(url_for('admin.dashboard.index'))
 
     clash = Device.query.filter(Device.fixed_ip == ip, Device.mac_address != mac).first()
@@ -894,45 +1007,80 @@ def fixed_ip_reservations():
         flash(f'{ip} is already reserved for {clash.mac_address}.', 'error')
         return redirect(url_for('admin.dashboard.index'))
 
-    if kea:
-        try:
-            if not kea.reserve_fixed_ip(mac, vlan_id, ip):
-                flash('Kea rejected the reservation (IP outside subnet).', 'error')
+    kea_managed = vlan_id in kea_vlans
+    kea_warning = None
+    if kea_managed:
+        if kea:
+            try:
+                reserved = False
+                if hasattr(kea, 'reserve_fixed_ip'):
+                    reserved = kea.reserve_fixed_ip(mac, vlan_id, ip)
+                elif hasattr(kea, 'register_mac'):
+                    reserved = kea.register_mac(
+                        mac=mac, vlan=vlan_id, hostname='static', ip_address=ip,
+                    )
+                if not reserved:
+                    flash('Kea rejected the reservation (IP outside subnet or Kea error).', 'error')
+                    return redirect(url_for('admin.dashboard.index'))
+            except Exception as exc:
+                logger.exception("Kea reservation failed for %s -> %s", mac, ip)
+                flash(f'Kea reservation failed: {exc}', 'error')
                 return redirect(url_for('admin.dashboard.index'))
-        except Exception as exc:
-            logger.exception("Kea reservation failed for %s -> %s", mac, ip)
-            flash(f'Kea reservation failed: {exc}', 'error')
-            return redirect(url_for('admin.dashboard.index'))
-    
-
+        else:
+            kea_warning = (
+                f'VLAN {vlan_id} is Kea-managed but Kea is unavailable; '
+                f'{ip} was saved on the device only.'
+            )
+    else:
+        kea_warning = (
+            f'VLAN {vlan_id} is not managed by Kea. {ip} was recorded on the device '
+            f'but no DHCP reservation was created. The upstream router for this VLAN '
+            f'must not hand {ip} to another client.'
+        )
 
     if not device:
-        device = Device(mac_address=mac, current_vlan=vlan_id, device_name='static')
+        device = Device(mac_address=mac, device_name='static')
         db.session.add(device)
-   
+        db.session.flush()
 
-    new_host = (request.form.get('switch_host') or '').strip()
-    new_port = (request.form.get('switch_port') or '').strip()
-
-    old_host = device.switch_host if device else None
-    old_port = device.switch_iface if device else None
-    old_ip = device.fixed_ip if device else None
-    old_vlan = device.current_vlan if device else None
+    name = (request.form.get('device_name') or '').strip()
+    if name:
+        device.device_name = name
+    elif not device.device_name:
+        device.device_name = 'static'    
 
     device.fixed_ip = ip
-    if not device.current_vlan:
-        device.current_vlan = vlan_id
+    device.assigned_vlan = vlan_id
+    device.current_vlan = vlan_id
+    device.wired_target_vlan = vlan_id
+    device.is_wired = True
+    device.connection_type = device.connection_type or 'wired'
+    device.ownership_validated = True
+    if hasattr(device, 'stale'):
+        device.stale = False
+    if device.registration_status in (None, '', 'unregistered', 'wrong_vlan', 'pending'):
+        device.registration_status = 'registered'
 
-    if old_host and old_port and (old_host, old_port) != (new_host, new_port):
-        if old_ip and old_vlan:
-            _push_static_binding(old_host, old_port, old_ip, mac, old_vlan, undo=True)
-        _set_port_role(old_host, old_port, 'unknown')
+    close_ownership(mac, commit=False)
+    open_ownership(
+        mac,
+        user_id=new_user.id if new_user else None,
+        admin_id=new_admin.id if new_admin else None,
+        commit=False,
+    )
+    try:
+        set_internet_accessible(device, True, commit=False)
+    except TypeError:
+        set_internet_accessible(device, True)
 
-    if new_host and new_port:
-        _push_static_binding(new_host, new_port, ip, mac, vlan_id, undo=False)
-        _set_port_role(new_host, new_port, 'fixed_ip')
-        device.switch_host = new_host
-        device.switch_iface = new_port
     db.session.commit()
-    flash(f'Reserved {ip} for {mac} (VLAN {vlan_id}).', 'success')
+
+    owner_label = new_user.email if new_user else f'admin:{new_admin.username}'
+    flash(f'Reserved {ip} for {mac} on VLAN {vlan_id}, owned by {owner_label}.', 'success')
+    if kea_warning:
+        flash(kea_warning, 'warning')
+    logger.info(
+        "Fixed IP reserved: %s -> %s vlan=%s owner=%s kea_managed=%s",
+        mac, ip, vlan_id, owner_label, kea_managed,
+    )
     return redirect(url_for('admin.dashboard.index'))

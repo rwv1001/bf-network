@@ -19,6 +19,19 @@ WIRED_VLAN="${WIRED_VLAN:-250}"
 MANAGEMENT_VLAN="${MANAGEMENT_VLAN:-99}"
 VALID_VLANS="${VALID_VLANS:-10,20,30,40,50,60,70,80,90}"
 VLANS_LIST=$(echo "$VALID_VLANS" | tr ',' ' ')
+# ISP uplink VLANs (e.g. "1,2"). VLAN 1 is never untagged on user ports.
+ISP_VLANS="${ISP_VLANS:-}"
+ISP_UNTAGGED=""
+for vid in $(echo "$ISP_VLANS" | tr ',' ' '); do
+    vid=$(echo "$vid" | tr -d ' ')
+    [ -n "$vid" ] || continue
+    [ "$vid" = "1" ] && continue
+    case " $VLANS_LIST $MANAGEMENT_VLAN $WIRED_VLAN $ISP_UNTAGGED " in
+        *" $vid "*) continue ;;
+    esac
+    ISP_UNTAGGED="$ISP_UNTAGGED $vid"
+done
+ISP_UNTAGGED=$(echo "$ISP_UNTAGGED" | xargs)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BASE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -69,7 +82,7 @@ log() {
 # Required variables
 : "${USER_DEVICE_INTERFACES:?USER_DEVICE_INTERFACES not set}"
 
-log "START action=reset_ports switch=$SWITCH_HOST user=$SWITCH_USER interfaces=$USER_DEVICE_INTERFACES wired_vlan=$WIRED_VLAN mgmt_vlan=$MANAGEMENT_VLAN vlans_list=$VLANS_LIST"
+log "START action=reset_ports switch=$SWITCH_HOST user=$SWITCH_USER interfaces=$USER_DEVICE_INTERFACES wired_vlan=$WIRED_VLAN mgmt_vlan=$MANAGEMENT_VLAN vlans_list=$VLANS_LIST isp_vlans=$ISP_VLANS isp_untagged=$ISP_UNTAGGED"
 
 # SSH configuration (match hp5130-acl.sh)
 SSH_TTY_FLAG="${SSH_TTY_FLAG:--tt}"
@@ -126,7 +139,7 @@ description wired port
 port link-type access
 port link-type hybrid
 undo port hybrid vlan 1
-port hybrid vlan ${VLANS_LIST} ${MANAGEMENT_VLAN} untagged
+port hybrid vlan ${VLANS_LIST} ${MANAGEMENT_VLAN} ${ISP_UNTAGGED} untagged
 port hybrid vlan ${WIRED_VLAN} untagged
 port hybrid pvid vlan ${WIRED_VLAN}
 mac-vlan enable

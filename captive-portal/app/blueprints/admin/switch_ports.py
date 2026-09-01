@@ -286,13 +286,27 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
     body = list(COMMON_PORT_UNDO_COMMANDS)
 
     if role == 'wired':
+        wired_untagged = vlans_list
+        if external_vlans_list:
+            wired_untagged = f'{vlans_list} {external_vlans_list}'.strip()
+        try:
+            isp_untagged = [
+                str(r.vlan_id)
+                for r in ISPRouter.query.order_by(ISPRouter.vlan_id).all()
+                if r.vlan_id is not None and int(r.vlan_id) != 1
+            ]
+        except Exception:
+            isp_untagged = []
+        if isp_untagged:
+            wired_untagged = f'{wired_untagged} {" ".join(isp_untagged)}'.strip()
         body.extend([
             'mac-authentication',
             f'interface {expanded}',
             'port link-type access',
             'port link-type hybrid',
             'undo port hybrid vlan 1',
-            f'port hybrid vlan {vlans_list} {mgmt_vlan} untagged',
+            f'port hybrid vlan {wired_untagged} untagged',
+            f'port hybrid vlan {mgmt_vlan} untagged',
             f'port hybrid vlan {wired_vlan} untagged',
             f'port hybrid pvid vlan {wired_vlan}',
             'mac-vlan enable',
@@ -310,6 +324,16 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
         ap_tagged = vlans_list
         if external_vlans_list:
             ap_tagged = f'{vlans_list} {external_vlans_list}'.strip()
+        try:
+            isp_tagged = [
+                str(r.vlan_id)
+                for r in ISPRouter.query.order_by(ISPRouter.vlan_id).all()
+                if r.vlan_id is not None and int(r.vlan_id) != 1
+            ]
+        except Exception:
+            isp_tagged = []
+        if isp_tagged:
+            ap_tagged = f'{ap_tagged} {" ".join(isp_tagged)}'.strip()
         body.extend([
             f'interface {expanded}',
             'port link-type access',
@@ -397,11 +421,16 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
         body.extend(inter_cmds)
 
     if desc:
-        body.append(f'description {desc}')
-
+        body.extend([
+            f'interface {expanded}',
+            f'description {desc}',
+        ])
     # unknown role → just apply the common undos + description (if any)
-
     return '\n'.join(head + body + ['quit', 'quit', 'save force'])
+
+    
+
+    
 
 
 # ---------------------------------------------------------------------------
@@ -483,12 +512,12 @@ def update():
         return redirect(url_for('admin.switch_ports.list_switch_ports'))
 
     ROLE_DESC = {
-        'ap':           'AP-UPLINK',
-        'cheapap':      'CHEAP-AP',
-        'wired':        'WIRED-ACCESS',
-        'pi':           'PI-TRUNK',
-        'inter_switch': 'ISL',
-        'uplink_udm':   'UDM-UPLINK',
+        'ap':           'Uplink to UniFi AP',
+        'cheapap':      'Cheap AP',
+        'wired':        'wired port',
+        'pi':           'TRUNK-TO-PI-Kea',
+        'inter_switch': 'Inter-switch link',
+        'uplink_udm':   'TRUNK-TO-UDM',
         'unknown':      None,
     }
 
@@ -518,6 +547,7 @@ def update():
                 'system-view',
                 f'interface {expanded}',
                 f'description {desc}',
+                'quit',
                 'quit',
                 'save force',
             ])
@@ -584,7 +614,7 @@ def update_single():
 
     existing_desc, existing_role = row
     if existing_role == role:
-        return jsonify({'success': True, 'message': 'No change needed'})
+        return jsonify({'success': True, 'message': 'No change needed', 'description': existing_desc or '', 'role': role})
 
     cmds = _build_port_config(port_name, role, existing_desc)
     result = run_switch_command(host, cmds)
@@ -608,4 +638,4 @@ def update_single():
     )
     db.session.commit()
     logger.info("Admin set %s %s → %s", host, port_name, role)
-    return jsonify({'success': True})
+    return jsonify({'success': True, 'description': new_desc, 'role': role, })
