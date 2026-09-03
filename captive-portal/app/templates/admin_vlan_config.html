@@ -376,6 +376,218 @@
         <p style="color: #888;">Loading switch configuration&#8230;</p>
     </div>
 </div>
+<div class="section-container" id="switch-terminal-section" style="margin-top: 2rem;">
+    <h2>HP5130 SSH Terminal</h2>
+
+    <div style="display:flex; gap:10px; align-items:center; margin-bottom:10px;">
+        <label for="switch-terminal-host">Switch:</label>
+
+        <select id="switch-terminal-host">
+            {% for host in switch_hosts %}
+            <option value="{{ host }}">{{ host }}</option>
+            {% endfor %}
+        </select>
+
+        <button type="button" id="switch-terminal-connect">Connect</button>
+        <button type="button" id="switch-terminal-disconnect" disabled>Disconnect</button>
+
+        <span id="switch-terminal-status" style="color:#666; font-size:13px;">
+            Disconnected
+        </span>
+    </div>
+
+    <div id="switch-terminal" style="
+        height: 520px;
+        background: #000;
+        border-radius: 6px;
+        overflow: hidden;
+    "></div>
+
+    <p style="font-size:12px; color:#777; margin-top:8px;">
+        Drag with the left button to select and copy. Right-click pastes at the cursor.
+    </p>
+</div>
+<link rel="stylesheet" href="/static/vendor/xterm/xterm.css">
+<script src="/static/vendor/socket.io/socket.io.min.js"></script>
+<script src="/static/vendor/xterm/xterm.js"></script>
+<script src="/static/vendor/xterm/xterm-addon-fit.js"></script>
+
+<script>
+(function() {
+    var terminalEl = document.getElementById('switch-terminal');
+    var hostSelect = document.getElementById('switch-terminal-host');
+    var connectBtn = document.getElementById('switch-terminal-connect');
+    var disconnectBtn = document.getElementById('switch-terminal-disconnect');
+    var statusEl = document.getElementById('switch-terminal-status');
+
+    if (!terminalEl || !hostSelect || !connectBtn) return;
+
+    var term = new Terminal({
+        cursorBlink: true,
+        scrollback: 10000,
+        convertEol: true,
+        fontFamily: 'Consolas, Menlo, Monaco, monospace',
+        fontSize: 13,
+        rightClickSelectsWord: false,
+        theme: {
+            background: '#000000',
+            foreground: '#d4d4d4'
+        }
+    });
+
+    var fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(terminalEl);
+    fitAddon.fit();
+
+    var socket = null;
+    var connected = false;
+
+    function setStatus(text) {
+        if (statusEl) statusEl.textContent = text;
+    }
+
+    function fallbackCopy(text) {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); } catch (e) {}
+        document.body.removeChild(ta);
+    }
+
+    function copySelection() {
+        var selected = term.getSelection();
+        if (!selected) return;
+
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(selected).catch(function() {
+                fallbackCopy(selected);
+            });
+        } else {
+            fallbackCopy(selected);
+        }
+    }
+
+    function pasteFromClipboard() {
+        function send(text) {
+            if (!text || !socket || !connected) return;
+            socket.emit('input', { data: text });
+        }
+
+        if (navigator.clipboard && navigator.clipboard.readText) {
+            navigator.clipboard.readText().then(send).catch(function() {});
+        }
+    }
+
+    // PuTTY: left-drag, release = copy
+    term.element.addEventListener('mouseup', function(e) {
+        if (e.button !== 0) return;
+        if (term.hasSelection && term.hasSelection()) {
+            copySelection();
+        }
+    });
+
+    // PuTTY: right-click = paste at cursor
+    term.element.addEventListener('contextmenu', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        pasteFromClipboard();
+    });
+
+    function sendResize() {
+        if (!socket || !connected) return;
+        fitAddon.fit();
+        socket.emit('resize', {
+            cols: term.cols,
+            rows: term.rows
+        });
+    }
+
+    window.addEventListener('resize', function() {
+        sendResize();
+    });
+
+    connectBtn.addEventListener('click', function() {
+        if (socket) return;
+
+        term.clear();
+        term.focus();
+
+        socket = io('/switch-terminal', {
+            transports: ['websocket'],
+            withCredentials: true
+        });
+
+        socket.on('connect', function() {
+            connected = true;
+            connectBtn.disabled = true;
+            disconnectBtn.disabled = false;
+            hostSelect.disabled = true;
+            setStatus('Connected to ' + hostSelect.value);
+
+            fitAddon.fit();
+
+            socket.emit('start', {
+                host: hostSelect.value,
+                cols: term.cols,
+                rows: term.rows
+            });
+        });
+
+        socket.on('terminal_output', function(msg) {
+            if (msg && msg.data) {
+                term.write(msg.data);
+            }
+        });
+
+        socket.on('terminal_error', function(msg) {
+            term.writeln('');
+            term.writeln('[terminal error] ' + ((msg && msg.message) || 'Unknown error'));
+        });
+
+        socket.on('terminal_closed', function() {
+            term.writeln('');
+            term.writeln('[terminal closed]');
+            cleanupSocket();
+        });
+
+        socket.on('disconnect', function() {
+            cleanupSocket();
+        });
+
+        term.onData(function(data) {
+            if (socket && connected) {
+                socket.emit('input', {data: data});
+            }
+        });
+    });
+
+    disconnectBtn.addEventListener('click', function() {
+        if (socket) {
+            socket.disconnect();
+        }
+        cleanupSocket();
+    });
+
+    function cleanupSocket() {
+        connected = false;
+
+        if (socket) {
+            socket.off();
+            socket = null;
+        }
+
+        connectBtn.disabled = false;
+        disconnectBtn.disabled = true;
+        hostSelect.disabled = false;
+        setStatus('Disconnected');
+    }
+})();
+</script>
 
 <script>
     const form = document.getElementById('vlan-config-form');

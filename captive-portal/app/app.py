@@ -24,7 +24,9 @@ from flask_login import current_user
 from sqlalchemy import text
 from werkzeug.security import generate_password_hash
 
-from extensions import csrf, db, login_manager
+from extensions import csrf, db, login_manager, socketio
+
+from blueprints.admin.switch_terminal import SwitchTerminalNamespace
 from models import (
     Admin, CentralOutboundEvent, Device, DeviceOwnership, IPLease,
     RegistrationRequest, UnregisteredLease, User, VlanMapping,
@@ -76,6 +78,8 @@ def create_app():
     csrf.init_app(app)
     login_manager.init_app(app)
     login_manager.login_view = 'admin.manage_admins.login'
+    socketio.init_app(app)
+    socketio.on_namespace(SwitchTerminalNamespace("/switch-terminal"))
 
     # ── Seed VLANs from .env on first run (only if table is empty) ────────────
     with app.app_context():

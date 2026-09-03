@@ -20,6 +20,7 @@ from flask import Blueprint, flash, jsonify, redirect, render_template, request,
 from flask_login import login_required
 
 from extensions import db
+from core.switch import get_switch_hosts
 from models import ISPRouter, Setting, VlanMapping
 from core.auth import permission_required
 from core.network import (
@@ -486,6 +487,7 @@ def vlan_config():
         isp_routers=isp_routers,
         kea_config_json=kea_config_json,
         vlan_push_job_id=session.get('vlan_push_job_id'),
+        switch_hosts=get_switch_hosts(),
     )
 
 
