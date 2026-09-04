@@ -32,7 +32,7 @@ services:
       - ./scripts:/scripts:ro
       - ./scripts/scriptdata:/scripts/scriptdata:ro
       - ./shared/acl-queue:/acl-queue
-      - /home/rwv1001/.ssh:/keys:ro
+      - /home/admin/.ssh:/keys:ro
       - ./kea/logs:/kea/logs
       - /etc/localtime:/etc/localtime:ro
     environment:
@@ -307,7 +307,7 @@ services:
       - ./scripts:/scripts:ro
       - ./scripts/scriptdata:/scripts/scriptdata
       - ./shared/acl-queue:/acl-queue
-      - /home/rwv1001/.ssh:/keys:ro
+      - /home/admin/.ssh:/keys:ro
       - /etc/systemd/network:/host-systemd-network
       - ./watchdog:/watchdog-data
       - ${GIT_REPO_DIR}:${GIT_REPO_DIR}
@@ -393,7 +393,7 @@ services:
     network_mode: host
     entrypoint: ["/tunnel-entrypoint.sh"]
     volumes:
-      - /home/rwv1001/.ssh:/keys:ro
+      - /home/admin/.ssh:/keys:ro
       - ./captive-portal/tunnel-entrypoint.sh:/tunnel-entrypoint.sh:ro
       - /etc/localtime:/etc/localtime:ro
     environment:
@@ -403,10 +403,24 @@ services:
       ORACLE_VPS_HTTPS_PORT: ${ORACLE_VPS_HTTPS_PORT:-9443}
       ORACLE_VPS_SSH_KEY_PATH: ${ORACLE_VPS_SSH_KEY_PATH:-/keys/oracle_rsa}
 
+  mdns:
+    image: python:3-alpine
+    container_name: mdns-reflector
+    restart: unless-stopped
+    network_mode: host
+    cap_add: [NET_ADMIN, NET_RAW]
+    environment:
+      MDNS_PEERS_FILE: /mdns/peers.json
+    volumes:
+      - ./mdns/reflector.py:/reflector.py:ro
+      - ./mdns/peers.json:/mdns/peers.json:ro
+      - /etc/localtime:/etc/localtime:ro
+    command: ["python", "/reflector.py"]
+
   # ── FreeRADIUS ────────────────────────────────────────────────────────────────
   freeradius:
-    image: freeradius/freeradius-dev:v3.2.x
-    platform: linux/amd64    
+    image: freeradius/freeradius-dev:arm64v8-v3.2.x
+    platform: linux/arm64
     container_name: freeradius
     restart: unless-stopped
     network_mode: host
@@ -584,7 +598,7 @@ services:
       # Persistent state (debounce / alert tracking)
       - ./watchdog:/data
       # SSH key for optional peer reboot
-      - /home/rwv1001/.ssh:/keys:ro
+      - /home/admin/.ssh:/keys:ro
       # Syslog log directory — for staleness check
       - ./syslog-container/logs:/logs:ro
       - /etc/localtime:/etc/localtime:ro

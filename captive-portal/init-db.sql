@@ -153,7 +153,8 @@ CREATE TABLE IF NOT EXISTS vlan_mappings (
     wired_enabled BOOLEAN DEFAULT FALSE NOT NULL,
     require_password BOOLEAN DEFAULT FALSE NOT NULL,
     isp_router_id INTEGER REFERENCES isp_routers(id) ON DELETE SET NULL,
-    visible_vlans TEXT
+    visible_vlans TEXT,
+    allow_doh BOOLEAN DEFAULT FALSE NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS switch_ports (
@@ -309,6 +310,9 @@ FROM dns_resolutions
 GROUP BY domain_name
 ORDER BY total_queries DESC;
 
+
+
+
 -- ── Table 9: DeviceOwnership history ────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS device_ownership (
     id             SERIAL PRIMARY KEY,
@@ -384,7 +388,47 @@ CREATE INDEX IF NOT EXISTS idx_dl_resolved   ON dns_lookups(resolved_ip);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_dl_dedup ON dns_lookups (lookup_timestamp, client_ip, client_port, domain_name, resolved_ip);    
 
 
+CREATE OR REPLACE VIEW traffic_combined AS
+SELECT
+    l.lookup_id,
+    l.lookup_timestamp,
+    l.client_ip,
+    l.lan_src_port,
+    l.domain_name,
+    l.domain_ip,
+    l.src_mac,
+    l.user_email,
+    l.user_first_name,
+    l.user_last_name,
+    l.wan_src_port,
+    l.dst_port,
+    'dns'::text AS traffic_source
+FROM dns_traffic_view l
 
+UNION ALL
+
+SELECT
+    n.session_id AS lookup_id,
+    n.session_start AS lookup_timestamp,
+    host(n.src_ip::inet) AS client_ip,
+    n.src_port AS lan_src_port,
+    n.domain_name,
+    host(n.dst_ip::inet) AS domain_ip,
+    n.src_mac,
+    n.user_email,
+    n.user_first_name,
+    n.user_last_name,
+    n.src_port AS wan_src_port,
+    n.dst_port,
+    'nat'::text AS traffic_source
+FROM nat_sessions_enriched n
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM dns_lookups d
+    WHERE host(d.client_ip) = host(n.src_ip::inet)
+      AND d.lookup_timestamp >= n.session_start - INTERVAL '5 minutes'
+      AND d.lookup_timestamp <= COALESCE(n.session_end, n.session_start) + INTERVAL '5 minutes'
+);
 -- Populated by dns-parser polling the Pi-Hole v6 API.
 -- client_ip joins to devices.ip_address → users for attribution.
 -- ============================================================

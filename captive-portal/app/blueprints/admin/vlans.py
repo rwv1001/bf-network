@@ -172,13 +172,14 @@ def vlan_config():
         remove_statuses   = set(request.form.getlist('vlan_remove'))
         isp_router_ids    = request.form.getlist('vlan_isp_router')
         visible_vlans_list = request.form.getlist('vlan_visible_vlans')
-
+        allow_doh_statuses = set(request.form.getlist('vlan_allow_doh'))
         warnings = []
         errors = []
         seen_statuses = set()
         seen_vlan_ids = set()
         pbr_changes = []
         visibility_changed = False
+        doh_changed = False
 
         for index, status_raw in enumerate(statuses):
             status = (status_raw or '').strip().lower()
@@ -249,10 +250,17 @@ def vlan_config():
                 if (mapping.visible_vlans or '') != new_vv:
                     visibility_changed = True
                 mapping.visible_vlans = new_vv or None
+                allow_doh = status in allow_doh_statuses
+                if bool(getattr(mapping, "allow_doh", False)) != allow_doh:
+                    doh_changed = True
+                mapping.allow_doh = allow_doh
             else:
                 new_vv = parse_visible_vlans(visible_vlans_list, index)
                 if new_vv:
                     visibility_changed = True
+                allow_doh = status in allow_doh_statuses
+                if allow_doh:
+                    doh_changed = True
                 mapping = VlanMapping(
                     status=status,
                     vlan_id=vlan_id,
@@ -262,6 +270,7 @@ def vlan_config():
                     require_password=require_password,
                     isp_router_id=new_isp_router_id,
                     visible_vlans=new_vv or None,
+                    allow_doh=allow_doh,
                 )
                 db.session.add(mapping)
 
@@ -326,6 +335,7 @@ def vlan_config():
         _pbr_changes        = list(pbr_changes)
         _prefix_changed     = prefix_changed
         _visibility_changed = visibility_changed
+        _doh_changed        = doh_changed
         _changed_statuses   = list(changed_statuses)
         _hp5130_policy_write_error = _hp5130_policy_error
         _vlan_map           = get_vlan_map()
@@ -343,6 +353,8 @@ def vlan_config():
 
         def _background_vlan_push():
             from app import app as _app
+            from core.vlan_utils import sync_mdns_reflector
+            from subprocess import run
             _errors = []
             rdb = _pihole_redis()
 
@@ -364,10 +376,16 @@ def vlan_config():
                             _errors.append(f'HP5130 policy JSON: {_hp5130_policy_write_error}')
 
                         # Run full ACL + PBR + NQA baseline when anything relevant changed
-                        if _pbr_changes or _prefix_changed or _visibility_changed:
+                        if _pbr_changes or _prefix_changed or _visibility_changed or _doh_changed:
                             ok = reset_acl_baseline()
                             if not ok:
                                 _errors.append('ACL/PBR/NQA baseline push failed')
+                        if _visibility_changed or _prefix_changed:
+                            try:
+                                sync_mdns_reflector()
+                            except Exception as exc:
+                                logger.exception("Failed to sync mDNS reflector: %s", exc)
+                                _errors.append(f'mDNS reflector sync failed: {exc}')
 
                         # 2. Re-apply per-device blocks AFTER the baseline
                         #    (this is critical — baseline would have wiped them)

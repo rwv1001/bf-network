@@ -597,3 +597,43 @@ def parse_visible_vlans(visible_vlans_list: list, index: int) -> str:
     raw = visible_vlans_list[index] if index < len(visible_vlans_list) else ''
     parts = [p.strip() for p in raw.split(',') if p.strip().isdigit()]
     return ','.join(parts)
+
+
+
+
+def get_visible_vlan_graph() -> dict:
+    """Return {vlan_id: set(peer_vlan_ids)} from VlanMapping.visible_vlans."""
+    graph = {}
+    for entry in get_vlan_entries():
+        if not entry.vlan_id:
+            continue
+        peers = set()
+        raw = entry.visible_vlans or ""
+        for part in raw.split(","):
+            part = part.strip()
+            if part.isdigit() and int(part) != int(entry.vlan_id):
+                peers.add(int(part))
+        graph[int(entry.vlan_id)] = peers
+    for vid, peers in list(graph.items()):
+        for peer in list(peers):
+            graph.setdefault(peer, set()).add(vid)
+    return graph
+
+
+def sync_mdns_reflector() -> dict:
+    """Rebuild pair-aware mDNS config from current Visible VLANs and restart the container."""
+    
+
+    # Import the standalone script functions without relying on package layout.
+    import importlib.util
+
+    script_path = os.getenv(
+        "MDNS_SYNC_SCRIPT",
+        "/scripts/sync-mdns-reflector.py",
+    )
+    if not os.path.isfile(script_path):
+        raise FileNotFoundError(f"mDNS sync script not found: {script_path}")
+    spec = importlib.util.spec_from_file_location("sync_mdns_reflector", script_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.sync_from_graph(get_visible_vlan_graph())

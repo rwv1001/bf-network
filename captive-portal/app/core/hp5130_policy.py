@@ -122,6 +122,7 @@ def _vlan_record(mapping: VlanMapping, router_ids: set[int], default_router_id: 
         "ssid": mapping.ssid,
         "wired_enabled": bool(mapping.wired_enabled),
         "require_password": bool(mapping.require_password),
+        "allow_doh": bool(getattr(mapping, "allow_doh", False)),
         "prefix": prefix,
         "subnet": str(subnet),
         "network_address": str(subnet.network_address),

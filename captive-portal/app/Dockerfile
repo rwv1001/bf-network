@@ -57,4 +57,8 @@ EXPOSE 8081
 
 
 ENV PORTAL_FORWARD_PORT=8081
-CMD gunicorn --bind 0.0.0.0:${PORTAL_FORWARD_PORT:-8081} --workers 2 --timeout 120 --access-logfile - --access-logformat '%(h)s %(l)s %(u)s %(t)s "%(r)s" %(s)s %(b)s %(D)s' --preload app:app
+CMD gunicorn --bind 0.0.0.0:${PORTAL_FORWARD_PORT:-8081} \
+    --worker-class gthread --workers 1 --threads 8 --timeout 0 \
+    --access-logfile - \
+    --access-logformat '%(h)s %(l)s %(u)s %(t)s "%(r)s" %(s)s %(b)s %(D)s' \
+    app:app

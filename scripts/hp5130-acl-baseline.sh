@@ -242,16 +242,27 @@ emit("acl advanced 3001")
 emit(" description PBR-local-traffic-normal-routing")
 
 rule = 10
+lan_src, lan_wc, _ = wildcard(str(lan_net))
 for vlan in vlans:
     if int(vlan["vlan_id"]) == int(wired_vlan_id):
         continue
-
     src, src_wc, _ = wildcard(vlan["subnet"])
-    emit(
-        f" rule {rule} permit ip source {src} {src_wc} "
-        f"destination {lan_net.network_address} {lan_net.hostmask}"
-    )
+    emit(f" rule {rule} permit ip source {src} {src_wc} destination {lan_net.network_address} {lan_net.hostmask}")
     rule += 10
+
+    own = routers_by_id.get(int(vlan["resolved_isp_router_id"]))
+    visible = set(int(v) for v in vlan.get("visible_vlans", []))
+    for router in routers:
+        rnet = router.get("subnet")
+        if not rnet:
+            continue
+        is_own = own is not None and int(router["id"]) == int(own["id"])
+        is_visible = int(router["vlan_id"]) in visible
+        if not (is_own or is_visible):
+            continue
+        dst, dst_wc, _ = wildcard(rnet)
+        emit(f" rule {rule} permit ip source {src} {src_wc} destination {dst} {dst_wc}")
+        rule += 10
 
 emit("quit")
 
@@ -324,34 +335,44 @@ for router in routers:
     emit(f" rule 5 permit ip source {portal_ip} 0")
 
     rule = 1000
+    router_gw = router.get("gateway_ip")
+    router_vid = int(router["vlan_id"])
     for vlan in vlans:
-        # Skip WIRED_VLAN here — we add the full subnet in the blocked pool section instead
         if int(vlan["vlan_id"]) == int(wired_vlan_id):
             continue
-        if int(vlan["resolved_isp_router_id"]) != router_id:
-            src, src_wc, _ = wildcard(vlan["subnet"])
+        if int(vlan["resolved_isp_router_id"]) == router_id:
+            continue
+        src, src_wc, _ = wildcard(vlan["subnet"])
+        visible = set(int(v) for v in vlan.get("visible_vlans", []))
+        if router_vid in visible and router_gw:
+            emit(f" rule {rule} deny ip source {src} {src_wc} destination {router_gw} 0")
+        else:
             emit(f" rule {rule} deny ip source {src} {src_wc}")
-            rule += 10
+        rule += 10
 
     rule = 5000
-    for ip in doh_dot_ips.split():
-        emit(
-            f" rule {rule} deny tcp source {lan_net.network_address} {lan_net.hostmask} "
-            f"destination {ip} 0 destination-port eq 443"
-        )
-        rule += 1
-
-    for ip in doh_dot_ips.split():
-        emit(
-            f" rule {rule} deny tcp source {lan_net.network_address} {lan_net.hostmask} "
-            f"destination {ip} 0 destination-port eq 853"
-        )
-        rule += 1
-        emit(
-            f" rule {rule} deny udp source {lan_net.network_address} {lan_net.hostmask} "
-            f"destination {ip} 0 destination-port eq 853"
-        )
-        rule += 1
+    for vlan in vlans:
+        if int(vlan["vlan_id"]) == int(wired_vlan_id):
+            continue
+        if vlan.get("allow_doh"):
+            continue
+        src, src_wc, _ = wildcard(vlan["subnet"])
+        for ip in doh_dot_ips.split():
+            emit(
+                f" rule {rule} deny tcp source {src} {src_wc} "
+                f"destination {ip} 0 destination-port eq 443"
+            )
+            rule += 1
+            emit(
+                f" rule {rule} deny tcp source {src} {src_wc} "
+                f"destination {ip} 0 destination-port eq 853"
+            )
+            rule += 1
+            emit(
+                f" rule {rule} deny udp source {src} {src_wc} "
+                f"destination {ip} 0 destination-port eq 853"
+            )
+            rule += 1
 
     rule = 20000
     for src, src_wc in blocked_pool_sources:

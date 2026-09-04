@@ -1577,6 +1577,10 @@ write_pi_env_file() {
         write_env_line PORTAL_IP_BYTE "$PORTAL_IP_BYTE"
         write_env_line HIJACK_DNS_IP_BYTE "$HIJACK_DNS_IP_BYTE"
 
+        write_env_line PI_DEFAULT_ROUTE_SOURCE "${PI_DEFAULT_ROUTE_SOURCE:-wifi}"
+        write_env_line PI_DEFAULT_ROUTE_DEV "${PI_DEFAULT_ROUTE_DEV:-}"
+        write_env_line PI_DEFAULT_ROUTE_GW "${PI_DEFAULT_ROUTE_GW:-}"
+
         write_env_line PORTAL_UID "1000"
         write_env_line PORTAL_GID "1000"
         write_env_line GIT_REPO_DIR "$PI_REPO_DIR"
@@ -1676,6 +1680,13 @@ configure_pi_networkd() {
     tmpdir="$(mktemp -d)"
 
     local all_pi_vlans=("${VLAN_LIST[@]}" "$MANAGEMENT_VLAN" "$WIRED_VLAN")
+    local i vid
+
+    # ISP VLANs 1..N (needed for printers and for an ISP default route)
+    for i in $(printf '%s\n' "${!ISP_NAMES[@]}" | sort -n); do
+        vid=$((i + 1))
+        all_pi_vlans+=("$vid")
+    done
 
     {
         echo "[Match]"
@@ -1691,6 +1702,7 @@ configure_pi_networkd() {
     } > "$tmpdir/00-bf-uplink.network"
 
     for vlan in "${all_pi_vlans[@]}"; do
+        
         cat > "$tmpdir/11-vlan-${vlan}.netdev" <<EOF
 [NetDev]
 Name=${WAN_IFACE}.${vlan}
@@ -1699,13 +1711,22 @@ Kind=vlan
 [VLAN]
 Id=$vlan
 EOF
+        local addr="" 
+        addr="${LOCAL_BASE}.${vlan}.${PORTAL_IP_BYTE}/24"
+
+        # ISP VLANs use the reserved Pi IP on the ISP subnet, not LOCAL_BASE.vlan.4
+        for i in $(printf '%s\n' "${!ISP_NAMES[@]}" | sort -n); do
+            if [ "$vlan" = "$((i + 1))" ] && [ -n "${ISP_PI_IP[$i]:-}" ]; then
+                addr="${ISP_PI_IP[$i]}/24"
+            fi
+        done
 
         cat > "$tmpdir/21-vlan-${vlan}.network" <<EOF
 [Match]
 Name=${WAN_IFACE}.${vlan}
 
 [Network]
-Address=${LOCAL_BASE}.${vlan}.${PORTAL_IP_BYTE}/24
+Address=${addr}
 EOF
 
         if [ "$vlan" = "$MANAGEMENT_VLAN" ]; then
@@ -1713,6 +1734,18 @@ EOF
 MACVLAN=macvlan-dns
 EOF
         fi
+
+        if [ "${PI_DEFAULT_ROUTE_SOURCE,,}" != "wifi" ] \
+            && [ "${WAN_IFACE}.${vlan}" = "${PI_DEFAULT_ROUTE_DEV}" ] \
+            && [ -n "${PI_DEFAULT_ROUTE_GW}" ]; then
+            cat >> "$tmpdir/21-vlan-${vlan}.network" <<EOF
+
+[Route]
+Gateway=${PI_DEFAULT_ROUTE_GW}
+Metric=${PI_DEFAULT_ROUTE_METRIC:-100}
+EOF
+        fi    
+
     done
 
     cat > "$tmpdir/45-macvlan-dns.netdev" <<EOF
@@ -1838,6 +1871,24 @@ systemctl disable --now systemd-networkd-wait-online.service || true
             ;;
     esac
 
+    if [ "${PI_DEFAULT_ROUTE_SOURCE,,}" != "wifi" ]; then
+        case "${TARGET_HOST_KIND,,}" in
+        pi|raspi|raspberry)
+            pi_sudo "bash -s" <<REMOTE
+set -e
+f=/etc/dhcpcd.conf
+grep -q 'bf-network wifi metric' "\$f" 2>/dev/null && exit 0
+cat >> "\$f" <<EOF
+
+# bf-network wifi metric
+interface ${PI_WIFI_IFACE:-wlan0}
+metric ${PI_WIFI_ROUTE_METRIC:-600}
+EOF
+REMOTE
+            ;;
+        esac
+    fi
+
     pi_sudo "ip link show ${WAN_IFACE} || true"
     pi_sudo "networkctl status ${WAN_IFACE} || true"
     for vlan in "${all_pi_vlans[@]}"; do
@@ -1921,6 +1972,31 @@ PYEOF
         || die "Failed to set the FreeRADIUS image for ${arch}."
 }
 
+install_switch_terminal_static_assets() {
+    info "Installing switch-terminal static assets (xterm + socket.io client)"
+
+    local q_repo static_root
+    q_repo="$(shell_quote "$PI_REPO_DIR")"
+    static_root="$PI_REPO_DIR/captive-portal/app/static/vendor"
+
+    pi_sudo "mkdir -p \
+        $(shell_quote "$static_root/xterm") \
+        $(shell_quote "$static_root/socket.io")"
+
+    # Pin versions so installs are reproducible
+    pi_sudo "curl -fsSL -o $(shell_quote "$static_root/xterm/xterm.js") \
+        https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"
+    pi_sudo "curl -fsSL -o $(shell_quote "$static_root/xterm/xterm.css") \
+        https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css"
+    pi_sudo "curl -fsSL -o $(shell_quote "$static_root/xterm/xterm-addon-fit.js") \
+        https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"
+    pi_sudo "curl -fsSL -o $(shell_quote "$static_root/socket.io/socket.io.min.js") \
+        https://cdn.jsdelivr.net/npm/socket.io-client@4.7.5/dist/socket.io.min.js"
+
+    pi_sudo "chown -R $(shell_quote "$PI_USER"):$(shell_quote "$PI_USER") $(shell_quote "$PI_REPO_DIR/captive-portal/app/static/vendor")"
+    echo "Switch-terminal vendor assets installed under static/vendor/"
+}
+
 patch_repo_for_install() {
     info "Patching bf-network repository for this target host user and generated values"
 
@@ -1929,7 +2005,7 @@ patch_repo_for_install() {
 
     info "1"
 
-    pi_sudo "set -x; cd $q_repo && sed -i 's#/home/admin/.ssh:/keys:ro#/home/$PI_USER/.ssh:/keys:ro#g' docker-compose.yml"
+    pi_sudo "set -x; cd $q_repo && sed -i -E 's#[^[:space:]]+(/[.]ssh:/keys:ro)#/home/${PI_USER}\1#g' docker-compose.yml"
     info "2"
     pi_sudo "set -x; cd $q_repo && sed -i \"s|SWITCH_KEY_PATH: /keys/id_rsa|SWITCH_KEY_PATH: \\\${SWITCH_KEY_PATH:-/keys/id_rsa}|g\" docker-compose.yml"
     info "3"
@@ -2818,6 +2894,13 @@ install_pi_server() {
         echo "Skipping completed step: repository clone"
     fi
 
+    if ! step_done "pi_terminal_assets"; then
+        install_switch_terminal_static_assets
+        complete_step "pi_terminal_assets"
+    else
+        echo "Skipping completed step: switch-terminal static assets"
+    fi
+
     
     pi_sudo "mkdir -p $q_repo/freeradius/raddb/mods-config/files
         # Make sure it is a file, not a directory
@@ -2858,6 +2941,8 @@ install_pi_server() {
         ORACLE_KEY_DEST_NAME="${SAVED_ANSWERS[oracle_key_dest_name]:-oracle_rsa}"
         ORACLE_VPS_SSH_KEY_PATH="/keys/${ORACLE_KEY_DEST_NAME}"
     fi
+
+    collect_pi_default_route_answers
 
 
     if ! step_done "pi_env_file"; then
@@ -2902,7 +2987,6 @@ install_pi_server() {
     patch_freeradius_image_for_target
     # Always refresh npm/setup.py during development because it is small,
     # idempotent, and fixes both first-run admin setup and DNS-01 cert import.
-
 
     
     if ! step_done "pi_networkd"; then
@@ -3455,6 +3539,172 @@ for i in $(printf '%s\n' "${!ISP_NAMES[@]}" | sort -n); do
     ISP_GW[$i]="$gw"
 done
 
+# =============================================================================
+# Pi addresses on ISP uplink VLANs (mDNS / printer LAN)
+# =============================================================================
+
+suggest_free_ips_on_subnet() {
+    local three="$1"
+    local do_scan="$2"
+    local network="${three}.0/24"
+    local used=""
+    local candidate_octet ip skip
+
+    if is_yes "$do_scan" && command -v nmap >/dev/null 2>&1; then
+        echo
+        echo "Scanning ${network} for used addresses..."
+        used="$(nmap -sn "$network" 2>/dev/null | grep "Nmap scan report for" | awk '{print $NF}' | tr -d '()' || true)"
+        if [ -n "$used" ]; then
+            echo "Used IPs on ${network}:"
+            echo "$used" | sort -t . -k 4 -n
+        else
+            echo "nmap returned no live hosts (this machine may not reach ${network})."
+        fi
+    elif is_yes "$do_scan"; then
+        echo "nmap is not installed; suggesting unused last octets without a live scan."
+    fi
+
+    echo "Suggested free IPs on ${three}.0/24 (skipping .1, .254, switch IPs, ISP gateway):"
+    for candidate_octet in 4 5 6 7 8 9 10 11 12 13 14 15 20 24 30 40; do
+        ip="${three}.${candidate_octet}"
+        skip=0
+        [ -n "$used" ] && echo "$used" | grep -qx "$ip" && skip=1
+        [ "$ip" = "${three}.1" ] && skip=1
+        [ "$ip" = "${three}.254" ] && skip=1
+        for gw in "${ISP_GW[@]}"; do
+            [ "$ip" = "$gw" ] && skip=1
+        done
+        for sw in "${IPS[@]}"; do
+            [ "$(last_octet "$sw")" = "$candidate_octet" ] && skip=1
+        done
+        [ "$skip" -eq 0 ] && echo "  $ip"
+    done
+}
+
+declare -A ISP_PI_IP=()
+
+info "Pi static IPs on ISP VLANs (needed for Bonjour/mDNS to printers on those LANs)"
+
+echo
+echo "The Pi must sit on each ISP VLAN that may host a printer."
+echo "Pick an address that is NOT the ISP gateway, a switch SVI, or in the"
+echo "router DHCP pool — then reserve it on that router."
+
+prompt_line scan_isp_pi \
+    "Would you like to scan each ISP subnet for used IPs? (y/n): " \
+    "scan_isp_pi_ips"
+
+if is_yes "$scan_isp_pi"; then
+    if ! command -v nmap >/dev/null 2>&1; then
+        echo "nmap is not installed (recommended for finding free IPs)."
+        prompt_line install_nmap_isp \
+            "Would you like to install nmap now? (y/n): " \
+            "install_nmap_isp_pi"
+        if is_yes "$install_nmap_isp"; then
+            apt-get update -qq
+            apt-get install -y nmap
+        else
+            echo "Skipping live scan. You will choose IPs from suggested last octets."
+        fi
+    fi
+fi
+
+for i in $(printf '%s\n' "${!ISP_NAMES[@]}" | sort -n); do
+    vid=$((i + 1))
+    three="${ISP_NETWORK_PORTION[$i]}"
+    default_ip="${three}.${PORTAL_IP_BYTE:-4}"
+
+    suggest_free_ips_on_subnet "$three" "$scan_isp_pi"
+
+    while true; do
+        prompt_default isp_pi_ip \
+            "Static IP for the Pi on ISP ${ISP_NAMES[$i]} (VLAN ${vid}, net ${three}.0/24)" \
+            "$default_ip" \
+            "isp_${i}_pi_ip"
+        if [[ "$isp_pi_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+           && [ "$(first_three_octets "$isp_pi_ip")" = "$three" ]; then
+            if [ "$isp_pi_ip" = "${ISP_GW[$i]}" ]; then
+                echo "That is the ISP gateway. Choose another address."
+                invalidate_answer "isp_${i}_pi_ip"
+                continue
+            fi
+            ISP_PI_IP[$i]="$isp_pi_ip"
+            break
+        fi
+        echo "Enter an IPv4 address in ${three}.0/24."
+        invalidate_answer "isp_${i}_pi_ip"
+    done
+
+    cat <<EOF
+
+Reserve this address in the DHCP server on ${ISP_NAMES[$i]} (VLAN ${vid}):
+  Host:  pi-mdns-vlan${vid}
+  IP:    ${ISP_PI_IP[$i]}
+
+If you skip the reservation, that router may later give the same IP to a
+phone or the printer.
+
+EOF
+    prompt_ack "isp_${i}_dhcp_reserved" \
+        "Press Enter after you have reserved ${ISP_PI_IP[$i]} on ${ISP_NAMES[$i]}, or to continue and do it later: "
+done
+
+collect_pi_default_route_answers() {
+    info "Pi host default internet route"
+
+    echo
+    echo "This is the Pi's own default route (apt, portal, outbound APIs)."
+    echo "It does NOT change guest VLAN internet — that stays on the 5130 PBR."
+    echo
+    echo "  wifi        — keep using the Wi-Fi SSH NIC (current behaviour, best for recovery)"
+    echo "  management  — default via the first switch SVI on VLAN ${MANAGEMENT_VLAN}"
+    
+    echo
+
+   prompt_default PI_DEFAULT_ROUTE_SOURCE \
+        "Pi default internet source (wifi / management)" \
+        "wifi" \
+        "pi_default_route_source"
+
+    case "${PI_DEFAULT_ROUTE_SOURCE,,}" in
+        wifi|management) ;;
+        *)
+            echo "Invalid source; using wifi."
+            PI_DEFAULT_ROUTE_SOURCE="wifi"
+            save_answer "pi_default_route_source" "wifi"
+            ;;
+    esac
+
+    PI_DEFAULT_ROUTE_DEV=""
+    PI_DEFAULT_ROUTE_GW=""
+    PI_DEFAULT_ROUTE_METRIC="100"
+    PI_WIFI_ROUTE_METRIC="600"
+
+    case "${PI_DEFAULT_ROUTE_SOURCE,,}" in
+        wifi)
+            PI_DEFAULT_ROUTE_DEV="${PI_WIFI_IFACE:-wlan0}"
+            PI_DEFAULT_ROUTE_GW=""
+            echo "Pi default will stay on Wi-Fi (${PI_DEFAULT_ROUTE_DEV})."
+            ;;
+        management)
+            PI_DEFAULT_ROUTE_DEV="${WAN_IFACE}.${MANAGEMENT_VLAN}"
+            PI_DEFAULT_ROUTE_GW="${MGMT_GATEWAY:-${LOCAL_BASE}.${MANAGEMENT_VLAN}.${FIRST_SWITCH_OCTET}}"
+            prompt_default PI_DEFAULT_ROUTE_GW \
+                "Gateway for Pi default route on ${PI_DEFAULT_ROUTE_DEV}" \
+                "$PI_DEFAULT_ROUTE_GW" \
+                "pi_default_route_gw_management"
+            echo "Pi default will be via ${PI_DEFAULT_ROUTE_GW} dev ${PI_DEFAULT_ROUTE_DEV}."
+            echo "Which ISP that actually uses depends on PBR for VLAN ${MANAGEMENT_VLAN}."
+            ;;        
+    esac
+
+    if [ "${SAVED_ANSWERS[pi_default_route_dev]:-}" != "$PI_DEFAULT_ROUTE_DEV" ] || [ "${SAVED_ANSWERS[pi_default_route_gw]:-}" != "${PI_DEFAULT_ROUTE_GW:-}" ]; then
+        unset 'COMPLETED_STEPS[pi_networkd]'
+    fi
+    save_answer "pi_default_route_dev" "$PI_DEFAULT_ROUTE_DEV"
+    save_answer "pi_default_route_gw" "${PI_DEFAULT_ROUTE_GW:-}"
+}
+
 declare -a ISP_SWITCH_HOST=()
 declare -a ISP_SWITCH_PORT=()
 
@@ -3987,6 +4237,7 @@ if [ -n "$_ssh_iface" ] && [ "$_ssh_iface" = "$WAN_IFACE" ]; then
     die "WAN_IFACE ($WAN_IFACE) is the same NIC as SSH ($PI_WIFI_IP / $_ssh_iface).
 Pick the other interface for VLANs so this installer cannot drop SSH."
 fi
+PI_WIFI_IFACE="${_ssh_iface:-wlan0}"
 echo "SSH stays on ${_ssh_iface:-unknown} ($PI_WIFI_IP); VLANs go on $WAN_IFACE."
 
 prompt_default PI_REPO_DIR "Enter bf-network install directory" "/home/$PI_USER/bf-network"
@@ -4000,7 +4251,7 @@ echo "You need one public VPS (e.g. Oracle Cloud) with Nginx installed."
 echo "All domains will point to the same VPS IP."
 echo
 
-prompt_default MAIN_DOMAIN "Main domain (e.g. bf-network.duckdns.org)" "bf-network.duckdns.org"
+prompt_default MAIN_DOMAIN "Main domain (e.g. priory.english.op.org)" "priory.english.op.org"
 PORTAL_URL="https://${MAIN_DOMAIN}"
 CERT_STORE_DIR="/var/lib/bf-network-installer/certs/${MAIN_DOMAIN}"
 CERT_REPO_DIR="${PI_REPO_DIR}/npm/letsencrypt/live/${MAIN_DOMAIN}"
@@ -4114,7 +4365,7 @@ prompt_default PORTAL_ADMIN_USER "Initial portal admin username" "admin"
 prompt_secret_required PORTAL_ADMIN_PASSWORD "Initial portal admin password"
 prompt_default EMAIL_VERIFICATION_REQUIRED "Require email verification?" "false"
 prompt_default VERIFICATION_TIMEOUT_MINUTES "Verification timeout minutes" "15"
-prompt_default WIFI_CONFIRM_TIMEOUT_SEC "WiFi confirmation timeout seconds" "120"
+prompt_default WIFI_CONFIRM_TIMEOUT_SEC "WiFi confirmation timeout seconds" "1200"
 
 info "Microsoft Graph Email"
 echo
@@ -4165,10 +4416,8 @@ info "Bunny.net DNS-01 Certificate (for local HTTPS)"
 
 prompt_required BUNNY_API_KEY "Bunny.net API Key (Account → API Keys)"
 
-
-
 info "Kea / Logging / Backups"
-prompt_default KEA_LEASE_LIFETIME "Kea lease lifetime seconds" "600"
+prompt_default KEA_LEASE_LIFETIME "Kea lease lifetime seconds" "86400"
 prompt_default TEST_ENV "Enable TEST_ENV?" "true"
 prompt_default ENABLE_DB_BACKUPS "Set up automatic database backups?" "y"
 prompt_default BACKUP_RETENTION_DAYS "Backup retention days" "30"
@@ -4770,7 +5019,7 @@ info "Central API (bf-central)"
 
 prompt_default CENTRAL_HOST \
     "bf-central SSH hostname or IP" \
-    "bf-central.duckdns.org" \
+    "bf-central.english.op.org" \
     "central_ssh_host"
 
 prompt_default CENTRAL_SSH_USER \

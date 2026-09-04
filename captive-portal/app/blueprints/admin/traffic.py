@@ -34,6 +34,7 @@ ALL_COLUMNS = [
     ('user_last_name',   'Last Name'),
     ('wan_src_port',     'WAN Port'),
     ('dst_port',         'Dest Port'),
+    ('traffic_source', 'Source'),
 ]
 
 _DEFAULT_COLUMNS = [
@@ -102,14 +103,14 @@ def traffic():
 
     # Sorting
     if has_query_params and ('sort' in request.args or 'order' in request.args):
-        sort_col   = request.args.get('sort', 'session_start')
+        sort_col   = request.args.get('sort', 'lookup_timestamp')
         sort_order = request.args.get('order', 'desc')
     else:
-        sort_col   = saved_settings.get('sort_col', 'session_start')
+        sort_col   = saved_settings.get('sort_col', 'lookup_timestamp')
         sort_order = saved_settings.get('sort_order', 'desc')
 
     if sort_col not in valid_column_names:
-        sort_col = 'session_start'
+        sort_col = 'lookup_timestamp'
     if sort_order not in ('asc', 'desc'):
         sort_order = 'desc'
 
@@ -150,7 +151,7 @@ def traffic():
     param_counter = 0
 
     for col_name, filter_value in filters.items():
-        if col_name in ('session_start', 'session_end'):
+        if col_name in ('session_start', 'session_end', 'lookup_timestamp'):
             if ' to ' in filter_value.lower():
                 parts = filter_value.lower().split(' to ')
                 if len(parts) == 2:
@@ -200,19 +201,17 @@ def traffic():
     logger.info(f"has_query_params: {has_query_params}")
     logger.info(f"Filters being applied: {filters}")
 
-    count_sql = f"SELECT COUNT(*) FROM nat_sessions_enriched WHERE {where_clause}"
-    logger.info("COUNT SQL:")
-    logger.info(count_sql)
-    logger.info(f"PARAMS: {params}")
+    
     # ================================================================
 
     from sqlalchemy import text as _text
 
     # Primary source: dns_traffic_view (dns_lookups enriched with user + NAT port info).
     # Fallback to pihole blocked queries if dns_lookups is still empty.
-    dns_count = db.session.execute(_text("SELECT COUNT(*) FROM dns_lookups")).scalar()
-    using_dns_fallback = (dns_count == 0)
-    source_view = "pihole_blocked_enriched" if using_dns_fallback else "dns_traffic_view"
+    dns_count = db.session.execute(_text("SELECT COUNT(*) FROM dns_lookups")).scalar() or 0
+    nat_count = db.session.execute(_text("SELECT COUNT(*) FROM nat_sessions")).scalar() or 0
+    using_dns_fallback = (dns_count == 0 and nat_count == 0)
+    source_view = "pihole_blocked_enriched" if using_dns_fallback else "traffic_combined"
 
     # pihole_blocked_enriched has the same column names for shared columns, but
     # not lookup_id/lan_src_port/domain_ip/wan_src_port; map these for that view.
@@ -230,7 +229,8 @@ def traffic():
             user_first_name,
             user_last_name,
             NULL::INTEGER AS wan_src_port,
-            dst_port
+            dst_port,
+            'pihole'::text AS traffic_source
         """
         valid_sort = {
             'lookup_id': 'session_id', 'lookup_timestamp': 'session_start',
@@ -242,6 +242,11 @@ def traffic():
     else:
         select_cols_sql = ', '.join(c for c, _ in ALL_COLUMNS)
         effective_sort = sort_col if sort_col in {c for c, _ in ALL_COLUMNS} else 'lookup_timestamp'
+
+    count_sql = f"SELECT COUNT(*) FROM {source_view} WHERE {where_clause}"
+    logger.info("COUNT SQL:")
+    logger.info(count_sql)
+    logger.info(f"PARAMS: {params}")
 
     total = db.session.execute(
         _text(f"SELECT COUNT(*) FROM {source_view} WHERE {where_clause}"),

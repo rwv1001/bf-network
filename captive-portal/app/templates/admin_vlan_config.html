@@ -243,9 +243,10 @@
                         <th>SSID</th>
                         <th>Wired</th>
                         <th>Pwd Reqd</th>
+                        <th>Allow DoH</th>
                         <th>Subnet Size</th>
                         <th>ISP Router</th>
-                        <th>Visible VLANs<br><span style="font-weight:400;font-size:11px;color:#888">empty&nbsp;=&nbsp;no&nbsp;inter&#8209;VLAN&nbsp;access</span></th>
+                        <th>Visible VLANs<br><span style="font-weight:400;font-size:11px;color:#888">empty = no inter-VLAN access; ISP tick = LAN on that uplink, not its gateway</span></th>
                     </tr>
                 </thead>
                 <tbody>
@@ -286,6 +287,15 @@
                                    name="vlan_require_password"
                                    value="{{ entry.status }}"
                                    {% if entry.require_password %}checked{% endif %}>
+                        </td>
+                        <td>
+                            <label style="display: inline-flex; align-items: center; gap: 6px;">
+                                <input type="checkbox"
+                                    name="vlan_allow_doh"
+                                    value="{{ entry.status }}"
+                                    {% if entry.allow_doh %}checked{% endif %}>
+                                Allow
+                            </label>
                         </td>
                         <td>
                             {% if entry.status in prefix_statuses %}
@@ -329,6 +339,18 @@
                                            data-vid="{{ peer.vlan_id }}"
                                            {% if peer.vlan_id|string in current_ids and entry.visible_vlans %}checked{% endif %}>
                                     {{ peer.display_name or peer.status }} ({{ peer.vlan_id }})
+                                </label>
+                                {% endif %}
+                                {% endfor %}
+                                {% for r in isp_routers %}
+                                {% if r.vlan_id != entry.vlan_id %}
+                                <label class="vv-chip" title="{{ r.subnet }} gw {{ r.gateway_ip }}">
+                                    <input type="checkbox"
+                                        class="vv-cb"
+                                        data-row="{{ outer_loop.index }}"
+                                        data-vid="{{ r.vlan_id }}"
+                                        {% if r.vlan_id|string in current_ids and entry.visible_vlans %}checked{% endif %}>
+                                    {{ r.name }} (VLAN {{ r.vlan_id }})
                                 </label>
                                 {% endif %}
                                 {% endfor %}
@@ -627,6 +649,10 @@
                 var statusInput = row.querySelector('input[name="vlan_status"]');
                 var wiredCb    = row.querySelector('input[name="vlan_wired"]');
                 var pwdCb      = row.querySelector('input[name="vlan_require_password"]');
+                var dohCb = row.querySelector('input[name="vlan_allow_doh"]');
+                if (statusInput && dohCb && !dohCb.value) {
+                    dohCb.value = statusInput.value;
+                }
                 if (statusInput && wiredCb && !wiredCb.value) {
                     wiredCb.value = statusInput.value;
                 }
