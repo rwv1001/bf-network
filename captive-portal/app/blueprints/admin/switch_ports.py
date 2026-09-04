@@ -373,17 +373,33 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
         ])
 
     elif role == 'pi':
-        body.extend([
+        try:
+            isp_vlan_str = ' '.join(
+                str(r.vlan_id)
+                for r in ISPRouter.query.order_by(ISPRouter.vlan_id).all()
+                if r.vlan_id is not None
+            )
+        except Exception:
+            isp_vlan_str = '1'
+        if not isp_vlan_str:
+            isp_vlan_str = '1'
+        pi_cmds = [
             f'interface {expanded}',
             'port link-type access',
             'port link-type trunk',
-            'port trunk permit vlan 1',
+            'undo port trunk permit vlan 1',
+            f'port trunk permit vlan {isp_vlan_str}',
             f'port trunk permit vlan {vlans_list}',
             f'port trunk permit vlan {mgmt_vlan} {wired_vlan}',
+        ]
+        if external_vlans_list:
+            pi_cmds.append(f'port trunk permit vlan {external_vlans_list}')
+        pi_cmds.extend([
             'port trunk pvid vlan 1',
             'arp detection trust',
             'dhcp snooping trust',
         ])
+        body.extend(pi_cmds)
 
     elif role == 'uplink_udm':
         uplink_cmds = [
@@ -429,7 +445,22 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
     return '\n'.join(head + body + ['quit', 'quit', 'save force'])
 
     
-
+def refresh_pi_trunk_vlans() -> None:
+    """Re-push every port with role 'pi' so ISP VLANs stay on the Kea trunk."""
+    rows = db.session.execute(
+        text("""
+            SELECT switch_host, port_name, port_description
+            FROM switch_ports
+            WHERE port_role = 'pi'
+        """)
+    ).fetchall()
+    for host, port_name, desc in rows:
+        cmds = _build_port_config(port_name, 'pi', desc or '')
+        result = run_switch_command(host, cmds)
+        if result is None:
+            logger.warning("Failed to refresh Pi trunk on %s %s", host, port_name)
+        else:
+            logger.info("Refreshed Pi trunk VLANs on %s %s", host, port_name)
     
 
 

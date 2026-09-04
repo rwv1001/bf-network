@@ -1580,6 +1580,7 @@ write_pi_env_file() {
         write_env_line PI_DEFAULT_ROUTE_SOURCE "${PI_DEFAULT_ROUTE_SOURCE:-wifi}"
         write_env_line PI_DEFAULT_ROUTE_DEV "${PI_DEFAULT_ROUTE_DEV:-}"
         write_env_line PI_DEFAULT_ROUTE_GW "${PI_DEFAULT_ROUTE_GW:-}"
+        write_env_line PI_ENABLE_ISP_MDNS "${PI_ENABLE_ISP_MDNS:-n}"
 
         write_env_line PORTAL_UID "1000"
         write_env_line PORTAL_GID "1000"
@@ -1711,23 +1712,37 @@ Kind=vlan
 [VLAN]
 Id=$vlan
 EOF
-        local addr="" 
+        local addr=""
+        local is_isp_vlan=0
         addr="${LOCAL_BASE}.${vlan}.${PORTAL_IP_BYTE}/24"
 
-        # ISP VLANs use the reserved Pi IP on the ISP subnet, not LOCAL_BASE.vlan.4
+        # ISP VLANs often share a subnet with site Wi-Fi. Do not address them
+        # during install or they steal 192.168.1.0/24 from wlan0.
         for i in $(printf '%s\n' "${!ISP_NAMES[@]}" | sort -n); do
-            if [ "$vlan" = "$((i + 1))" ] && [ -n "${ISP_PI_IP[$i]:-}" ]; then
-                addr="${ISP_PI_IP[$i]}/24"
+            if [ "$vlan" = "$((i + 1))" ]; then
+                is_isp_vlan=1
+                break
             fi
         done
 
-        cat > "$tmpdir/21-vlan-${vlan}.network" <<EOF
+        if [ "$is_isp_vlan" -eq 1 ]; then
+            cat > "$tmpdir/21-vlan-${vlan}.network" <<EOF
+[Match]
+Name=${WAN_IFACE}.${vlan}
+
+[Network]
+# Address deferred until finalize_pi_isp_mdns_interfaces
+ConfigureWithoutCarrier=yes
+EOF
+        else
+            cat > "$tmpdir/21-vlan-${vlan}.network" <<EOF
 [Match]
 Name=${WAN_IFACE}.${vlan}
 
 [Network]
 Address=${addr}
 EOF
+        fi
 
         if [ "$vlan" = "$MANAGEMENT_VLAN" ]; then
             cat >> "$tmpdir/21-vlan-${vlan}.network" <<EOF
@@ -2943,6 +2958,7 @@ install_pi_server() {
     fi
 
     collect_pi_default_route_answers
+    collect_pi_mdns_isp_answers
 
 
     if ! step_done "pi_env_file"; then
@@ -3703,6 +3719,150 @@ collect_pi_default_route_answers() {
     fi
     save_answer "pi_default_route_dev" "$PI_DEFAULT_ROUTE_DEV"
     save_answer "pi_default_route_gw" "${PI_DEFAULT_ROUTE_GW:-}"
+}
+
+collect_pi_mdns_isp_answers() {
+    info "mDNS / printing on ISP LAN (VLAN 1..N)"
+
+    echo
+    echo "Devices on an ISP router LAN (e.g. EE-Deco 192.168.1.0/24) can reach"
+    echo "printers on a user VLAN only if the Pi reflects mDNS on that ISP VLAN."
+    echo "That requires a Pi IP on ${WAN_IFACE:-eth0}.N and VLAN N on the Pi trunk."
+    echo
+    echo "  n — leave ISP VLAN NICs unaddressed. VLAN-1 Bonjour then depends on"
+    echo "      Wi-Fi (wlan0). Fine for install; printing dies if Wi-Fi dies."
+    echo "  y — at the END of install, add the reserved ISP Pi IPs. If the Pi"
+    echo "      default route is 'management', Wi-Fi IPv4 is then disabled and"
+    echo "      you SSH to the management address instead."
+    echo
+
+    prompt_default PI_ENABLE_ISP_MDNS \
+        "Enable Pi IPs on ISP VLANs for Ethernet mDNS/printing? (y/n)" \
+        "n" \
+        "pi_enable_isp_mdns"
+}
+
+finalize_pi_isp_mdns_interfaces() {
+    : "${WAN_IFACE:?WAN_IFACE is not set}"
+    : "${PI_USER:?PI_USER is not set}"
+
+    if step_done "pi_isp_mdns_ifaces"; then
+        echo "Skipping completed step: ISP VLAN addresses / mDNS cutover"
+        return 0
+    fi
+
+    info "ISP VLAN addresses and mDNS cutover"
+
+    if ! is_yes "${PI_ENABLE_ISP_MDNS:-n}"; then
+        echo "Leaving ${WAN_IFACE}.1..N without IPv4."
+        echo "If you need Deco-LAN <-> VLAN printing, keep Wi-Fi associated;"
+        echo "Bonjour on 192.168.1.0/24 will use wlan0 and needs a stable AP."
+        complete_step "pi_isp_mdns_ifaces"
+        return 0
+    fi
+
+    if [ "${PI_DEFAULT_ROUTE_SOURCE,,}" = "wifi" ]; then
+        cat <<EOF
+Pi internet is Wi-Fi. Not adding IPs on ${WAN_IFACE}.1..N.
+
+Those addresses are the same subnet as wlan0 and would black-hole SSH
+and break Bonjour. VLAN-1 printing will use wlan0; that AP must stay up.
+
+Later, to move printing onto Ethernet:
+  1. SSH to ${LOCAL_BASE}.${MANAGEMENT_VLAN}.${PORTAL_IP_BYTE}
+  2. Permit ISP VLANs on the Pi trunk (already in new switch configs)
+  3. Add Address=${ISP_PI_IP[0]:-<reserved>}/24 on ${WAN_IFACE}.1
+  4. Disable IPv4 on the Wi-Fi connection
+EOF
+        complete_step "pi_isp_mdns_ifaces"
+        return 0
+    fi
+
+    local mgmt_ip
+    mgmt_ip="${LOCAL_BASE}.${MANAGEMENT_VLAN}.${PORTAL_IP_BYTE}"
+
+    cat <<EOF
+
+About to put reserved IPs on ISP VLAN interfaces (${WAN_IFACE}.1 .. .${NUM_ISPS}).
+That is the same subnet as site Wi-Fi. SSH to ${PI_WIFI_IP} will drop.
+
+After this step, SSH with the same key to the management address:
+  ssh -i ${PI_KEY_PATH} ${PI_USER}@${mgmt_ip}
+
+Checking that management path works before touching Wi-Fi...
+EOF
+
+    if ! pi_ssh "ip addr show ${WAN_IFACE}.${MANAGEMENT_VLAN} | grep -q ${mgmt_ip}"; then
+        die "Management address ${mgmt_ip} is not on ${WAN_IFACE}.${MANAGEMENT_VLAN}. Refusing cutover."
+    fi
+    if ! pi_ssh "ping -c 2 -W 2 ${PI_DEFAULT_ROUTE_GW} >/dev/null"; then
+        die "Cannot ping management gateway ${PI_DEFAULT_ROUTE_GW}. Refusing cutover. Use the console."
+    fi
+
+    echo "Probing SSH to ${mgmt_ip} from this installer host..."
+    if ! ssh -i "$PI_KEY_PATH" -o BatchMode=yes -o ConnectTimeout=8 \
+        -o StrictHostKeyChecking=accept-new \
+        "${PI_USER}@${mgmt_ip}" "echo management_ssh_ok" >/dev/null 2>&1; then
+        die "Cannot SSH to ${PI_USER}@${mgmt_ip} yet.
+Keep using Wi-Fi (${PI_WIFI_IP}). Re-run later with:
+  sudo ./installer.sh --forget-step pi_isp_mdns_ifaces
+after you can:  ssh -i ${PI_KEY_PATH} ${PI_USER}@${mgmt_ip}"
+    fi
+
+    echo "Management SSH works. Switching installer SSH target to ${mgmt_ip}."
+    PI_WIFI_IP="$mgmt_ip"
+
+    local i vid tmp_net
+    for i in $(printf '%s\n' "${!ISP_NAMES[@]}" | sort -n); do
+        vid=$((i + 1))
+        if [ -z "${ISP_PI_IP[$i]:-}" ]; then
+            echo "Skipping VLAN ${vid}: no reserved ISP_PI_IP."
+            continue
+        fi
+        echo "Addressing ${WAN_IFACE}.${vid} as ${ISP_PI_IP[$i]}/24"
+        tmp_net="$(mktemp)"
+        cat > "$tmp_net" <<EOF
+[Match]
+Name=${WAN_IFACE}.${vid}
+
+[Network]
+Address=${ISP_PI_IP[$i]}/24
+ConfigureWithoutCarrier=yes
+EOF
+        pi_scp_to "$tmp_net" "/tmp/21-vlan-${vid}.network"
+        rm -f "$tmp_net"
+        pi_sudo "mv /tmp/21-vlan-${vid}.network /etc/systemd/network/21-vlan-${vid}.network && networkctl reload || true"
+        pi_sudo "networkctl reconfigure ${WAN_IFACE}.${vid} || true"
+    done
+
+    echo "Disabling IPv4 on Wi-Fi so 192.168.1.0/24 is only on Ethernet."
+    tmp_net="$(mktemp)"
+    cat > "$tmp_net" <<'REMOTE'
+#!/bin/bash
+set -e
+IFACE="${PI_WIFI_IFACE:-wlan0}"
+command -v nmcli >/dev/null 2>&1 || exit 0
+nmcli -t -f NAME,DEVICE con show --active | awk -F: -v iface="$IFACE" '$2==iface {print $1}' | while read -r con; do
+    [ -n "$con" ] || continue
+    nmcli con modify "$con" ipv4.method disabled || true
+    nmcli con up "$con" || true
+done
+REMOTE
+    # Expand IFACE in the remote script
+    sed -i "s/\${PI_WIFI_IFACE:-wlan0}/${PI_WIFI_IFACE:-wlan0}/" "$tmp_net"
+    pi_scp_to "$tmp_net" "/tmp/bf-disable-wlan-ipv4.sh"
+    rm -f "$tmp_net"
+    pi_sudo "bash /tmp/bf-disable-wlan-ipv4.sh && rm -f /tmp/bf-disable-wlan-ipv4.sh" || true
+
+    if ! ssh -i "$PI_KEY_PATH" -o BatchMode=yes -o ConnectTimeout=8 \
+        "${PI_USER}@${mgmt_ip}" "echo still_ok"; then
+        die "Lost SSH after cutover. Use console, then:
+  ssh -i ${PI_KEY_PATH} ${PI_USER}@${mgmt_ip}"
+    fi
+
+    echo "Cutover complete. Ongoing SSH: ${PI_USER}@${mgmt_ip}"
+    save_answer "pi_wifi_ip_after_cutover" "$mgmt_ip"
+    complete_step "pi_isp_mdns_ifaces"
 }
 
 declare -a ISP_SWITCH_HOST=()
@@ -4739,7 +4899,7 @@ interface $iface
 description TRUNK-TO-PI-Kea
 port link-type trunk
 undo port trunk permit vlan 1
-port trunk permit vlan ${VLAN_LIST[*]} $MANAGEMENT_VLAN $WIRED_VLAN
+port trunk permit vlan 1 to $NUM_ISPS ${VLAN_LIST[*]} $MANAGEMENT_VLAN $WIRED_VLAN
 port trunk pvid vlan 1
 arp detection trust
 dhcp snooping trust
@@ -5446,4 +5606,11 @@ install_pi_server
 setup_bf_central
 apply_central_secrets_to_pi
 
+# Last Pi step: ISP VLAN addresses. Can drop Wi-Fi SSH.
+finalize_pi_isp_mdns_interfaces
+
 echo "All switches and the target host server have been processed."
+if is_yes "${PI_ENABLE_ISP_MDNS:-n}" && [ "${PI_DEFAULT_ROUTE_SOURCE,,}" != "wifi" ]; then
+    echo "Admin SSH to the Pi is now:"
+    echo "  ssh -i ${PI_KEY_PATH} ${PI_USER}@${LOCAL_BASE}.${MANAGEMENT_VLAN}.${PORTAL_IP_BYTE}"
+fi

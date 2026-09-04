@@ -386,6 +386,12 @@ def vlan_config():
                             except Exception as exc:
                                 logger.exception("Failed to sync mDNS reflector: %s", exc)
                                 _errors.append(f'mDNS reflector sync failed: {exc}')
+                            try:
+                                from blueprints.admin.switch_ports import refresh_pi_trunk_vlans
+                                refresh_pi_trunk_vlans()
+                            except Exception as exc:
+                                logger.exception("Failed to refresh Pi trunk VLANs: %s", exc)
+                                _errors.append(f'Pi trunk VLAN refresh failed: {exc}')
 
                         # 2. Re-apply per-device blocks AFTER the baseline
                         #    (this is critical — baseline would have wiped them)

@@ -231,6 +231,7 @@
 
         <div class="info-box">
             <p><strong>Pool size warning:</strong> If you reduce a subnet size, any host reservations outside the new range will be dropped by Kea after the restart.</p>
+            <p>Ticking an ISP under Visible VLANs allows printers and other Bonjour devices on that ISP LAN to be discovered from the user VLAN. Save applies ACLs and the mDNS reflector. The Pi trunk is updated to carry those ISP VLANs.</p>
         </div>
 
         <div class="table-responsive">
@@ -246,7 +247,7 @@
                         <th>Allow DoH</th>
                         <th>Subnet Size</th>
                         <th>ISP Router</th>
-                        <th>Visible VLANs<br><span style="font-weight:400;font-size:11px;color:#888">empty = no inter-VLAN access; ISP tick = LAN on that uplink, not its gateway</span></th>
+                        <th>Visible VLANs<br><span style="font-weight:400;font-size:11px;color:#888">empty = isolated. Peer VLAN tick = unicast + mDNS to that VLAN. ISP tick = unicast + Bonjour to that ISP LAN (Pi must have an IP on that VLAN; Wi-Fi is not enough if you want this without an AP)</span></th>
                     </tr>
                 </thead>
                 <tbody>
