@@ -323,6 +323,24 @@ CREATE TABLE IF NOT EXISTS device_ownership (
     end_datetime   TIMESTAMP
 );
 
+-- ── Table 7: IPLease tracking ────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS ip_leases (
+    id                SERIAL PRIMARY KEY,
+    ip_address        VARCHAR(45)  NOT NULL,
+    vlan_id           INTEGER,
+    mac_address       VARCHAR(17),
+    lease_start       TIMESTAMP    NOT NULL,
+    lease_expiry      TIMESTAMP    NOT NULL,
+    from_blocked_pool BOOLEAN      NOT NULL DEFAULT FALSE,
+    dns_hijacked      BOOLEAN      NOT NULL DEFAULT FALSE
+);
+
+CREATE INDEX IF NOT EXISTS idx_il_mac    ON ip_leases(mac_address);
+CREATE INDEX IF NOT EXISTS idx_il_ip     ON ip_leases(ip_address);
+CREATE INDEX IF NOT EXISTS idx_il_expiry ON ip_leases(lease_expiry);
+
+
+
 -- View: NAT sessions with DNS and user info (JOIN view)
 CREATE OR REPLACE VIEW nat_sessions_enriched AS
 SELECT
@@ -388,47 +406,6 @@ CREATE INDEX IF NOT EXISTS idx_dl_resolved   ON dns_lookups(resolved_ip);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_dl_dedup ON dns_lookups (lookup_timestamp, client_ip, client_port, domain_name, resolved_ip);    
 
 
-CREATE OR REPLACE VIEW traffic_combined AS
-SELECT
-    l.lookup_id,
-    l.lookup_timestamp,
-    l.client_ip,
-    l.lan_src_port,
-    l.domain_name,
-    l.domain_ip,
-    l.src_mac,
-    l.user_email,
-    l.user_first_name,
-    l.user_last_name,
-    l.wan_src_port,
-    l.dst_port,
-    'dns'::text AS traffic_source
-FROM dns_traffic_view l
-
-UNION ALL
-
-SELECT
-    n.session_id AS lookup_id,
-    n.session_start AS lookup_timestamp,
-    host(n.src_ip::inet) AS client_ip,
-    n.src_port AS lan_src_port,
-    n.domain_name,
-    host(n.dst_ip::inet) AS domain_ip,
-    n.src_mac,
-    n.user_email,
-    n.user_first_name,
-    n.user_last_name,
-    n.src_port AS wan_src_port,
-    n.dst_port,
-    'nat'::text AS traffic_source
-FROM nat_sessions_enriched n
-WHERE NOT EXISTS (
-    SELECT 1
-    FROM dns_lookups d
-    WHERE host(d.client_ip) = host(n.src_ip::inet)
-      AND d.lookup_timestamp >= n.session_start - INTERVAL '5 minutes'
-      AND d.lookup_timestamp <= COALESCE(n.session_end, n.session_start) + INTERVAL '5 minutes'
-);
 -- Populated by dns-parser polling the Pi-Hole v6 API.
 -- client_ip joins to devices.ip_address → users for attribution.
 -- ============================================================
@@ -489,22 +466,6 @@ CREATE INDEX IF NOT EXISTS idx_do_user_id    ON device_ownership(user_id);
 CREATE INDEX IF NOT EXISTS idx_do_mac_active ON device_ownership(mac_address)
     WHERE end_datetime IS NULL;
 
--- ── Table 7: IPLease tracking ────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS ip_leases (
-    id                SERIAL PRIMARY KEY,
-    ip_address        VARCHAR(45)  NOT NULL,
-    vlan_id           INTEGER,
-    mac_address       VARCHAR(17),
-    lease_start       TIMESTAMP    NOT NULL,
-    lease_expiry      TIMESTAMP    NOT NULL,
-    from_blocked_pool BOOLEAN      NOT NULL DEFAULT FALSE,
-    dns_hijacked      BOOLEAN      NOT NULL DEFAULT FALSE
-);
-
-CREATE INDEX IF NOT EXISTS idx_il_mac    ON ip_leases(mac_address);
-CREATE INDEX IF NOT EXISTS idx_il_ip     ON ip_leases(ip_address);
-CREATE INDEX IF NOT EXISTS idx_il_expiry ON ip_leases(lease_expiry);
-
 -- View: DNS lookups enriched with lease→device→user info and optional NAT port data.
 -- Join path: dns_lookups → ip_leases (by IP + time) → device_ownership (by MAC + time) → users.
 -- NAT session is joined on matching src_ip + dst_ip within ±30 min to surface WAN/dst ports.
@@ -563,6 +524,49 @@ ORDER BY
     l.client_port,
     l.domain_name,
     l.id;
+
+CREATE OR REPLACE VIEW traffic_combined AS
+SELECT
+    l.lookup_id,
+    l.lookup_timestamp,
+    l.client_ip,
+    l.lan_src_port,
+    l.domain_name,
+    l.domain_ip,
+    l.src_mac,
+    l.user_email,
+    l.user_first_name,
+    l.user_last_name,
+    l.wan_src_port,
+    l.dst_port,
+    'dns'::text AS traffic_source
+FROM dns_traffic_view l
+
+UNION ALL
+
+SELECT
+    n.session_id AS lookup_id,
+    n.session_start AS lookup_timestamp,
+    host(n.src_ip::inet) AS client_ip,
+    n.src_port AS lan_src_port,
+    n.domain_name,
+    host(n.dst_ip::inet) AS domain_ip,
+    n.src_mac,
+    n.user_email,
+    n.user_first_name,
+    n.user_last_name,
+    n.src_port AS wan_src_port,
+    n.dst_port,
+    'nat'::text AS traffic_source
+FROM nat_sessions_enriched n
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM dns_lookups d
+    WHERE host(d.client_ip) = host(n.src_ip::inet)
+      AND d.lookup_timestamp >= n.session_start - INTERVAL '5 minutes'
+      AND d.lookup_timestamp <= COALESCE(n.session_end, n.session_start) + INTERVAL '5 minutes'
+);
+
 
 
 

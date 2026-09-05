@@ -383,6 +383,12 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
             isp_vlan_str = '1'
         if not isp_vlan_str:
             isp_vlan_str = '1'
+        # Unused native VLAN so every Pi subinterface stays tagged.
+        pi_native = str(os.getenv('PI_TRUNK_NATIVE_VLAN', '1028'))
+        body.extend([
+            f'vlan {pi_native}',
+            f'name pi-trunk-native',
+        ])
         pi_cmds = [
             f'interface {expanded}',
             'port link-type access',
@@ -391,11 +397,12 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
             f'port trunk permit vlan {isp_vlan_str}',
             f'port trunk permit vlan {vlans_list}',
             f'port trunk permit vlan {mgmt_vlan} {wired_vlan}',
+            f'port trunk permit vlan {pi_native}',
         ]
         if external_vlans_list:
             pi_cmds.append(f'port trunk permit vlan {external_vlans_list}')
         pi_cmds.extend([
-            'port trunk pvid vlan 1',
+            f'port trunk pvid vlan {pi_native}',
             'arp detection trust',
             'dhcp snooping trust',
         ])

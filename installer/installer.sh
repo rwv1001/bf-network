@@ -24,6 +24,7 @@ EXPECT_SCRIPT="$SCRIPT_DIR/test-switch-temp.exp"
 BF_REPO_URL="https://github.com/rwv1001/bf-network.git"
 BF_REPO_BRANCH="main"
 KEA_LFC_FIX_REV="2026-08-21-v4"
+PI_TRUNK_NATIVE_VLAN="${PI_TRUNK_NATIVE_VLAN:-1028}"
 
 # Encrypted, resumable installer state. Override with --state-file PATH.
 STATE_FILE="${BF_INSTALL_STATE_FILE:-/var/lib/bf-network-installer/state.gpg}"
@@ -1857,32 +1858,47 @@ EOF
                 die "Ubuntu networkd did not create ${WAN_IFACE}.${MANAGEMENT_VLAN}. Check /run/systemd/network vs /etc/systemd/network/00-bf-uplink.network"
             fi
             ;;
-        *)
-            info "Pi: dhcpcd + networkd + netplan hand-off for $WAN_IFACE"
+            *)
+            info "Pi: hand eth0 to networkd; leave Wi-Fi (wlan0) alone"
+            # dhcpcd: stop managing the trunk only. Do not restart dhcpcd —
+            # that drops wlan0 when dhcpcd still owns Wi-Fi.
             pi_sudo "if [ -f /etc/dhcpcd.conf ] && ! grep -q \"denyinterfaces ${WAN_IFACE}\" /etc/dhcpcd.conf; then
                 printf \"\\n# bf-network: ${WAN_IFACE} is managed by systemd-networkd\\n\" >> /etc/dhcpcd.conf
                 printf \"denyinterfaces ${WAN_IFACE} ${WAN_IFACE}.*\\n\" >> /etc/dhcpcd.conf
             fi"
-            pi_sudo "systemctl enable systemd-networkd"
-            pi_sudo "systemctl restart systemd-networkd || true"
-            pi_sudo "systemctl restart NetworkManager || true"
-            pi_sudo "systemctl restart dhcpcd || true"
+            pi_sudo "dhcpcd -k ${WAN_IFACE} 2>/dev/null || true"
+
+            pi_sudo "systemctl disable --now systemd-networkd-wait-online.service || true"
+
+            # Netplan: only disable DHCP on the trunk NIC. Do not move other
+            # yaml files and do not set a global renderer (that kills NM Wi-Fi).
             pi_sudo "mkdir -p /etc/netplan
-if compgen -G '/etc/netplan/*.yaml' >/dev/null; then
-    mkdir -p /etc/netplan/backup-bf-network
-    mv /etc/netplan/*.yaml /etc/netplan/backup-bf-network/ 2>/dev/null || true
-fi
-cat > /etc/netplan/99-bf-network-disable.yaml <<'EOF'
-# bf-network: VLANs are owned by systemd-networkd
+                rm -f /etc/netplan/99-bf-network-disable.yaml
+                cat > /etc/netplan/60-bf-uplink-no-default.yaml <<EOF
+# bf-network: ${WAN_IFACE} is a VLAN parent only; Wi-Fi stays as-is
 network:
   version: 2
-  renderer: networkd
+  ethernets:
+    ${WAN_IFACE}:
+      dhcp4: false
+      dhcp6: false
+      optional: true
 EOF
-chmod 600 /etc/netplan/99-bf-network-disable.yaml
-netplan generate || true
-systemctl enable --now systemd-networkd
-systemctl disable --now systemd-networkd-wait-online.service || true
-"
+                chmod 600 /etc/netplan/60-bf-uplink-no-default.yaml
+                netplan generate || true"
+
+            if pi_ssh "systemctl list-unit-files NetworkManager.service 2>/dev/null | grep -q NetworkManager.service"; then
+                pi_sudo "nmcli device set ${WAN_IFACE} managed no 2>/dev/null || true"
+                pi_sudo "nmcli device disconnect ${WAN_IFACE} 2>/dev/null || true"
+            fi
+
+            pi_sudo "systemctl enable systemd-networkd"
+            pi_sudo "systemctl start systemd-networkd"
+            pi_sudo "networkctl reload"
+            pi_sudo "networkctl reconfigure ${WAN_IFACE}"
+            for vlan in "${all_pi_vlans[@]}"; do
+                pi_sudo "networkctl reconfigure ${WAN_IFACE}.${vlan} || true"
+            done
             ;;
     esac
 
@@ -3831,8 +3847,12 @@ ConfigureWithoutCarrier=yes
 EOF
         pi_scp_to "$tmp_net" "/tmp/21-vlan-${vid}.network"
         rm -f "$tmp_net"
-        pi_sudo "mv /tmp/21-vlan-${vid}.network /etc/systemd/network/21-vlan-${vid}.network && networkctl reload || true"
+        pi_sudo "mv /tmp/21-vlan-${vid}.network /etc/systemd/network/21-vlan-${vid}.network"
+        pi_sudo "chown root:root /etc/systemd/network/21-vlan-${vid}.network"
+        pi_sudo "chmod 644 /etc/systemd/network/21-vlan-${vid}.network"
+        pi_sudo "networkctl reload || true"
         pi_sudo "networkctl reconfigure ${WAN_IFACE}.${vid} || true"
+        pi_sudo "ip addr show ${WAN_IFACE}.${vid} || true"
     done
 
     echo "Disabling IPv4 on Wi-Fi so 192.168.1.0/24 is only on Ethernet."
@@ -3844,6 +3864,11 @@ IFACE="${PI_WIFI_IFACE:-wlan0}"
 command -v nmcli >/dev/null 2>&1 || exit 0
 nmcli -t -f NAME,DEVICE con show --active | awk -F: -v iface="$IFACE" '$2==iface {print $1}' | while read -r con; do
     [ -n "$con" ] || continue
+    nmcli con modify "$con" ipv4.dns "" || true
+    nmcli con modify "$con" ipv4.dns-search "" || true
+    nmcli con modify "$con" ipv4.ignore-auto-dns no || true
+    nmcli con modify "$con" ipv4.gateway "" || true
+    nmcli con modify "$con" ipv4.addresses "" || true
     nmcli con modify "$con" ipv4.method disabled || true
     nmcli con up "$con" || true
 done
@@ -4895,12 +4920,16 @@ dhcp snooping trust
     if [ -n "$KEA_PORT" ]; then
         iface="$(get_interface "$KEA_PORT" "${MAX_1GBS_PORT[$j]}")"
         KEA_CONFIG+="
+vlan ${PI_TRUNK_NATIVE_VLAN:-1028}
+name pi_trunk_native
+description UNUSED-NATIVE-ON-PI-TRUNK
+#
 interface $iface
 description TRUNK-TO-PI-Kea
 port link-type trunk
 undo port trunk permit vlan 1
-port trunk permit vlan 1 to $NUM_ISPS ${VLAN_LIST[*]} $MANAGEMENT_VLAN $WIRED_VLAN
-port trunk pvid vlan 1
+port trunk permit vlan 1 to $NUM_ISPS ${VLAN_LIST[*]} $MANAGEMENT_VLAN $WIRED_VLAN ${PI_TRUNK_NATIVE_VLAN:-1028}
+port trunk pvid vlan ${PI_TRUNK_NATIVE_VLAN:-1028}
 arp detection trust
 dhcp snooping trust
 #
