@@ -18,6 +18,7 @@ import threading
 
 from flask import Blueprint, flash, jsonify, redirect, render_template, request, session, url_for
 from flask_login import login_required
+from sqlalchemy import or_
 
 from extensions import db
 from core.switch import get_switch_hosts
@@ -38,6 +39,44 @@ from core.hp5130_policy import write_hp5130_policy_file
 logger = logging.getLogger(__name__)
 
 vlans_bp = Blueprint('vlans', __name__)
+
+
+def _find_mapping_by_status(status):
+    """Return the canonical mapping for status, ignoring historical case drift."""
+    return (
+        VlanMapping.query
+        .filter(db.func.lower(VlanMapping.status) == status)
+        .order_by(VlanMapping.id)
+        .first()
+    )
+
+
+def _prune_duplicate_vlan_mappings(mapping, status, vlan_id):
+    """Remove stale rows that would duplicate this canonical status or VLAN ID."""
+    if not mapping:
+        return
+    duplicates = (
+        VlanMapping.query
+        .filter(
+            VlanMapping.id != mapping.id,
+            or_(
+                db.func.lower(VlanMapping.status) == status,
+                VlanMapping.vlan_id == vlan_id,
+            ),
+        )
+        .all()
+    )
+    for duplicate in duplicates:
+        logger.warning(
+            "Removing duplicate VLAN mapping id=%s status=%s vlan_id=%s in favour of id=%s status=%s vlan_id=%s",
+            duplicate.id,
+            duplicate.status,
+            duplicate.vlan_id,
+            mapping.id,
+            status,
+            vlan_id,
+        )
+        db.session.delete(duplicate)
 
 
 def _pihole_redis():
@@ -194,7 +233,7 @@ def vlan_config():
                 continue
 
             if status in remove_statuses:
-                mapping = VlanMapping.query.filter_by(status=status).first()
+                mapping = _find_mapping_by_status(status)
                 if mapping:
                     db.session.delete(mapping)
                 continue
@@ -228,8 +267,9 @@ def vlan_config():
                 int(isp_router_id_raw) if isp_router_id_raw.strip().isdigit() else None
             )
 
-            mapping = VlanMapping.query.filter_by(status=status).first()
+            mapping = _find_mapping_by_status(status)
             if mapping:
+                _prune_duplicate_vlan_mappings(mapping, status, vlan_id)
                 old_isp_router = mapping.isp_router
                 new_isp_router = (
                     ISPRouter.query.get(new_isp_router_id) if new_isp_router_id else None
@@ -240,6 +280,7 @@ def vlan_config():
                         old_isp_router.pbr_name if old_isp_router else None,
                         new_isp_router.pbr_name if new_isp_router else None,
                     ))
+                mapping.status        = status
                 mapping.vlan_id       = vlan_id
                 mapping.display_name  = display_name
                 mapping.ssid          = ssid

@@ -286,7 +286,7 @@ class VlanMapping(db.Model):
     
     id = db.Column(db.Integer, primary_key=True)
     status = db.Column(db.String(50), unique=True, nullable=False)
-    vlan_id = db.Column(db.Integer, nullable=False)
+    vlan_id = db.Column(db.Integer, unique=True, nullable=False)
     display_name = db.Column(db.String(100))
     ssid = db.Column(db.String(100))
     wired_enabled = db.Column(db.Boolean, default=False, nullable=False)

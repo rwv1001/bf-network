@@ -157,6 +157,9 @@ CREATE TABLE IF NOT EXISTS vlan_mappings (
     allow_doh BOOLEAN DEFAULT FALSE NOT NULL
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS ux_vlan_mappings_status_lower ON vlan_mappings (lower(status));
+CREATE UNIQUE INDEX IF NOT EXISTS ux_vlan_mappings_vlan_id ON vlan_mappings(vlan_id);
+
 CREATE TABLE IF NOT EXISTS switch_ports (
     id               SERIAL PRIMARY KEY,
     switch_host      VARCHAR(255) NOT NULL,

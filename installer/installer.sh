@@ -1748,6 +1748,8 @@ EOF
         if [ "$vlan" = "$MANAGEMENT_VLAN" ]; then
             cat >> "$tmpdir/21-vlan-${vlan}.network" <<EOF
 MACVLAN=macvlan-dns
+DNS=8.8.8.8
+DNS=1.1.1.1
 EOF
         fi
 
@@ -1935,6 +1937,17 @@ REMOTE
     if ! pi_ssh "echo still_connected"; then
         die "Lost SSH to $PI_WIFI_IP after networkd change. Use the console; do not re-run until Wi-Fi is back."
     fi
+
+    # networkd DNS= on eth0.99 is ignored without systemd-resolved.
+    # NM owns /etc/resolv.conf and leaves it empty → dig/docker use [::1]:53.
+    info "Pin host resolv.conf to public DNS (Pi itself, not clients)"
+    pi_sudo "chattr -i /etc/resolv.conf 2>/dev/null || true"
+    pi_sudo "rm -f /etc/resolv.conf"
+    pi_sudo "printf 'nameserver 8.8.8.8\\nnameserver 1.1.1.1\\n' > /etc/resolv.conf"
+    pi_sudo "chattr +i /etc/resolv.conf"
+    pi_sudo "mkdir -p /etc/docker"
+    pi_sudo "test -f /etc/docker/daemon.json || printf '%s\\n' '{\\n  \\"dns\\": [\\"8.8.8.8\\", \\"1.1.1.1\\"]\\n}' > /etc/docker/daemon.json"
+    pi_sudo "systemctl reload docker 2>/dev/null || systemctl restart docker 2>/dev/null || true"
 }
 detect_target_docker_arch() {
     local machine

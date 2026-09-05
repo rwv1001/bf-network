@@ -117,6 +117,39 @@ def _effective_device_ip(mac_address, request_ip):
 
     return request_ip
 
+
+def _hydrate_user_from_central(email, user=None):
+    email = (email or '').strip().lower()
+    if not email:
+        return user, None
+    central_user = central_client.lookup_user_at_central(email)
+    if not central_user:
+        return user, None
+    if user is None:
+        user = User.query.filter_by(email=email).first()
+    if user:
+        changed = False
+        if central_user.get('first_name') and not user.first_name:
+            user.first_name = central_user['first_name']
+            changed = True
+        if central_user.get('last_name') and not user.last_name:
+            user.last_name = central_user['last_name']
+            changed = True
+        if central_user.get('phone_number') and not user.phone_number:
+            user.phone_number = central_user['phone_number']
+            changed = True
+        if central_user.get('network_password_hash') and not user.network_password_hash:
+            user.network_password_hash = central_user['network_password_hash']
+            if not user.network_password_approval_mode:
+                user.network_password_approval_mode = 'first_use'
+            changed = True
+        if central_user.get('blocked') and not user.blocked:
+            user.blocked = True
+            changed = True
+        if changed:
+            db.session.commit()
+    return user, central_user
+
 from ipaddress import ip_address as parse_ip, ip_network as parse_net
 
 def _site_networks():
@@ -367,6 +400,8 @@ def api_device_status():
                  f"selected_vlan={selected_vlan}, password_required={password_required}")
 
     if password_required and not device.ownership_validated:
+        if device.user and not device.user.has_network_password:
+            _hydrate_user_from_central(device.user.email, device.user)
         logger.debug(f"Device {mac_address} requires password")
         return jsonify({
             'status': 'need_password',
@@ -508,7 +543,8 @@ def registration_status():
         return resp
 
     if device:
-        current_ip = get_client_ip()
+        request_ip = get_client_ip()
+        current_ip = _effective_device_ip(mac_address, request_ip)
         _, current_vlan, detected_ssid = detect_connection_type(current_ip)
         current_ssid = get_ssid_for_vlan(current_vlan) or detected_ssid
         expected_ssid = get_ssid_for_vlan(device.current_vlan) or device.ssid
@@ -519,6 +555,8 @@ def registration_status():
         _sel_vlan = device.assigned_vlan or current_vlan
         _pw_req = vlan_requires_password(_sel_vlan) if _sel_vlan else False
         if _pw_req and not device.ownership_validated:
+            if device.user and not device.user.has_network_password:
+                _hydrate_user_from_central(device.user.email, device.user)
             _has_pwd = device.user.has_network_password if device.user else False
             if not _has_pwd:
                 pw_resp = jsonify({
@@ -576,6 +614,8 @@ def registration_status():
             payload['reason'] = reg_request.notes
         if reg_request.status == 'pending_password':
             pwd_user = User.query.filter_by(email=reg_request.email).first()
+            if pwd_user and not pwd_user.has_network_password:
+                _hydrate_user_from_central(pwd_user.email, pwd_user)
             if pwd_user and pwd_user.has_network_password:
                 payload['status'] = 'enter_password'
                 payload['message'] = 'Your administrator has set a network password. Please enter it.'
@@ -715,8 +755,8 @@ def register():
                         'phone_number': existing_user.phone_number or '',
                     },
                 })
-            central_user = central_client.lookup_user_at_central(email_check)
-            if central_user and (central_user.get('first_name') or central_user.get('last_name')):
+            _, central_user = _hydrate_user_from_central(email_check)
+            if central_user:
                 return jsonify({
                     'status': 'user_found',
                     'prefill': {
@@ -770,6 +810,7 @@ def register():
             )
 
         selected_vlan = wired_vlan_id if is_wired_unregistered else detected_vlan
+        _, central_user = _hydrate_user_from_central(email)
 
         # Profile snapshot for unregister rollback
         existing_user_before = User.query.filter_by(email=email).first()
@@ -796,9 +837,12 @@ def register():
             user.phone_number = phone_number or user.phone_number
             db.session.commit()
         else:
+            network_password_hash = central_user.get('network_password_hash') if central_user else None
             user = User(
                 email=email, first_name=first_name, last_name=last_name,
                 phone_number=phone_number, begin_date=datetime.utcnow().date(),
+                network_password_hash=network_password_hash,
+                network_password_approval_mode='first_use' if network_password_hash else None,
                 created_by='registration',
             )
             db.session.add(user)

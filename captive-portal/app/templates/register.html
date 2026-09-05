@@ -70,6 +70,13 @@
         return preferred;
     })();
     const apiUrl = (path) => `${pollBase}${path}`;
+    const knownMac = "{{ detected_mac or (device.mac_address if device else '') }}";
+    const apiUrlWithDevice = (path) => {
+        const url = apiUrl(path);
+        if (!knownMac) return url;
+        const separator = url.includes('?') ? '&' : '?';
+        return `${url}${separator}mac=${encodeURIComponent(knownMac)}`;
+    };
     const internetCheckUrls = [
         ...(institutionUrl ? [institutionUrl] : []),
         'https://www.msftconnecttest.com/connecttest.txt',
@@ -90,7 +97,7 @@
         attempts += 1;
         let index = 0;
 
-        fetch(apiUrl('{{ url_for("portal.registration_status") }}')).catch(() => {});
+        fetch(apiUrlWithDevice('{{ url_for("portal.registration_status") }}')).catch(() => {});
 
         const tryNext = () => {
             const url = internetCheckUrls[index];
@@ -684,7 +691,7 @@ document.addEventListener('DOMContentLoaded', function() {
         pollingStarted = true;
 
         pollInterval = setInterval(function() {
-            fetch(apiUrl('{{ url_for("portal.registration_status") }}'))
+            fetch(apiUrlWithDevice('{{ url_for("portal.registration_status") }}'))
                 .then(response => response.json())
                 .then(data => {
                     if (data.status === 'registered') {
@@ -864,7 +871,7 @@ document.addEventListener('DOMContentLoaded', function() {
         if (accessConfirmed) {
             return;
         }
-        fetch(apiUrl('{{ url_for("portal.registration_status") }}'))
+        fetch(apiUrlWithDevice('{{ url_for("portal.registration_status") }}'))
             .then(response => response.json())
             .then(data => {
                 const loadingEl = document.getElementById('statusCheckLoading');
@@ -1095,7 +1102,7 @@ document.addEventListener('DOMContentLoaded', function() {
         mismatchPolling = true;
 
         mismatchInterval = setInterval(() => {
-            fetch(apiUrl('{{ url_for("portal.registration_status") }}'))
+            fetch(apiUrlWithDevice('{{ url_for("portal.registration_status") }}'))
                 .then(response => response.json())
                 .then(data => {
                     if (accessConfirmed) {

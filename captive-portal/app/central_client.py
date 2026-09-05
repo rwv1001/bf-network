@@ -245,11 +245,14 @@ def import_device_from_central(mac_address: str, central_data: dict) -> Optional
     # Upsert user
     user = User.query.filter_by(email=email).first()
     if not user:
+        network_password_hash = central_data.get("network_password_hash") or None
         user = User(
             email=email,
             first_name=central_data.get("first_name") or "",
             last_name=central_data.get("last_name") or "",
             phone_number=central_data.get("phone_number") or "",
+            network_password_hash=network_password_hash,
+            network_password_approval_mode='first_use' if network_password_hash else None,
             begin_date=now.date(),
         )
         app_db.session.add(user)
@@ -261,6 +264,10 @@ def import_device_from_central(mac_address: str, central_data: dict) -> Optional
             user.first_name = central_data["first_name"]
         if not user.last_name and central_data.get("last_name"):
             user.last_name = central_data["last_name"]
+        if not user.network_password_hash and central_data.get("network_password_hash"):
+            user.network_password_hash = central_data["network_password_hash"]
+            if not user.network_password_approval_mode:
+                user.network_password_approval_mode = 'first_use'
 
     # Apply user-level block from central
     if central_data.get("user_blocked") and not getattr(user, "blocked", False):

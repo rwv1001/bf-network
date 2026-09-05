@@ -191,27 +191,29 @@ def traffic():
             where_clauses.append(f"CAST({col_name} AS TEXT) ILIKE :{param_name}")
             params[param_name] = (
                 filter_value if '%' in filter_value else f'%{filter_value}%'
-            )
+            )    
 
     where_clause = ' AND '.join(where_clauses) if where_clauses else '1=1'
+
+    from sqlalchemy import text as _text
+
+    dns_count = db.session.execute(_text("SELECT COUNT(*) FROM dns_lookups")).scalar() or 0
+    nat_count = db.session.execute(_text("SELECT COUNT(*) FROM nat_sessions")).scalar() or 0
+    using_dns_fallback = (dns_count == 0 and nat_count == 0)
+    source_view = "pihole_blocked_enriched" if using_dns_fallback else "traffic_combined"
+
+    if using_dns_fallback:
+        where_clause += " AND CAST(src_ip AS TEXT) NOT IN ('127.0.0.1', '::1')"
+    else:
+        where_clause += " AND CAST(client_ip AS TEXT) NOT IN ('127.0.0.1', '::1')"
 
     # ====================== DEBUG: SQL Queries ======================
     logger.info("=" * 80)
     logger.info("=== TRAFFIC VIEWER DEBUG ===")
     logger.info(f"has_query_params: {has_query_params}")
     logger.info(f"Filters being applied: {filters}")
-
-    
+    logger.info("source_view=%s where=%s", source_view, where_clause)
     # ================================================================
-
-    from sqlalchemy import text as _text
-
-    # Primary source: dns_traffic_view (dns_lookups enriched with user + NAT port info).
-    # Fallback to pihole blocked queries if dns_lookups is still empty.
-    dns_count = db.session.execute(_text("SELECT COUNT(*) FROM dns_lookups")).scalar() or 0
-    nat_count = db.session.execute(_text("SELECT COUNT(*) FROM nat_sessions")).scalar() or 0
-    using_dns_fallback = (dns_count == 0 and nat_count == 0)
-    source_view = "pihole_blocked_enriched" if using_dns_fallback else "traffic_combined"
 
     # pihole_blocked_enriched has the same column names for shared columns, but
     # not lookup_id/lan_src_port/domain_ip/wan_src_port; map these for that view.

@@ -97,6 +97,7 @@ def seed_vlan_mappings() -> int:
     wired_vlan_id = get_wired_vlan_id()
 
     for vlan_id, status in sorted(defaults.items()):
+        status = status.strip().lower()
         if status in existing:
             continue
 

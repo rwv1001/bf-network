@@ -415,6 +415,7 @@ def set_user_password(token):
     user.network_password_set_token_expires = None
     user.network_password_approval_mode = 'first_use'
     db.session.commit()
+    central_client.queue_user_updated(user)
 
     return render_template(
         'admin_set_user_password.html',

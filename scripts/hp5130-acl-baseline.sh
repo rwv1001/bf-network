@@ -356,6 +356,8 @@ for router in routers:
             continue
         if vlan.get("allow_doh"):
             continue
+        if int(vlan["vlan_id"]) == int(management_vlan):
+            continue
         src, src_wc, _ = wildcard(vlan["subnet"])
         for ip in doh_dot_ips.split():
             emit(
@@ -412,8 +414,10 @@ for vlan in vlans:
     # - on user/wired SVIs, allow packets sourced from the portal (replies, DNS)
     # - on the management SVI, allow packets destined for the portal
     if target_id == int(management_vlan):
+        emit(f" rule 24998 permit ip destination {hijack_dns_ip} 0")
         emit(f" rule 24999 permit ip destination {portal_ip} 0")
     else:
+        emit(f" rule 24998 permit ip source {hijack_dns_ip} 0")
         emit(f" rule 24999 permit ip source {portal_ip} 0")
 
     rule = 25000
