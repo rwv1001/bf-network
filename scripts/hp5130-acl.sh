@@ -107,6 +107,29 @@ log() {
   printf '%s %s\n' "$(timestamp)" "$*" >> "$LOG_FILE" 2>/dev/null || true
 }
 
+janitor() {
+  # Hourly housekeeping: dedup stamps only matter for DEDUP_WINDOW seconds,
+  # and the append-only logs would otherwise grow without bound.
+  marker="$QUEUE_BASE/.janitor-last"
+  now_j=$(date +%s)
+  if [ -f "$marker" ]; then
+    last_j=$(cat "$marker" 2>/dev/null || echo 0)
+    case "$last_j" in *[!0-9]*) last_j=0 ;; esac
+    [ $((now_j - last_j)) -lt 3600 ] && return 0
+  fi
+  echo "$now_j" > "$marker" 2>/dev/null || return 0
+  find "$QUEUE_BASE" -maxdepth 1 -name '.dedup-*' -mtime +0 -delete 2>/dev/null || true
+  for lf in "$QUEUE_BASE"/*.log; do
+    [ -f "$lf" ] || continue
+    sz=$(wc -c < "$lf" 2>/dev/null || echo 0)
+    case "$sz" in *[!0-9]*) continue ;; esac
+    if [ "$sz" -gt "${ACL_LOG_MAX_BYTES:-1048576}" ]; then
+      mv -f "$lf" "$lf.1" 2>/dev/null || true
+    fi
+  done
+}
+janitor
+
 enqueue_and_start_worker() {
   log "QUEUE action=$ACTION ip=$IP_ADDRESS host=$SWITCH_HOST"
 

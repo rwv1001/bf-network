@@ -14,6 +14,13 @@
 #   docker compose logs -f web            tail logs for one service
 # =============================================================================
 
+# json-file rotates by size only (not days); 10m x 3 caps each container at 30 MB
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: ${DOCKER_LOG_MAX_SIZE:-10m}
+    max-file: "${DOCKER_LOG_MAX_FILE:-3}"
+
 services:
   kea:
     build:
@@ -22,6 +29,7 @@ services:
     image: kea-custom:3.0-alpine
     container_name: kea
     restart: unless-stopped
+    logging: *default-logging
     network_mode: host
     cap_add: [ NET_ADMIN, NET_RAW ]
     command: ["-c", "/kea/config/dhcp4.json"]
@@ -173,6 +181,7 @@ services:
     image: postgres:15-alpine
     container_name: captive-portal-db
     restart: unless-stopped
+    logging: *default-logging
     environment:
       POSTGRES_DB: ${DB_NAME:-captive_portal}
       POSTGRES_USER: ${DB_USER:-portal_user}
@@ -193,6 +202,7 @@ services:
     image: redis:7-alpine
     container_name: captive-portal-redis
     restart: unless-stopped
+    logging: *default-logging
     volumes:
       - /etc/localtime:/etc/localtime:ro
     network_mode: host
@@ -211,6 +221,7 @@ services:
           PORTAL_GID: ${PORTAL_GID:-1000}
     container_name: captive-portal-web
     restart: unless-stopped
+    logging: *default-logging
     user: "${PORTAL_UID:-1000}:${PORTAL_GID:-1000}"
     environment:
       LOG_LEVEL: DEBUG
@@ -336,6 +347,7 @@ services:
     build: ./captive-portal/nat-parser
     container_name: nat-parser
     restart: unless-stopped
+    logging: *default-logging
     environment:
       DATABASE_URL: postgresql://${DB_USER:-portal_user}:${DB_PASSWORD:-change_this_password}@127.0.0.1:5432/${DB_NAME:-captive_portal}
       LOG_FILE: /logs/remote-syslog.log
@@ -373,6 +385,7 @@ services:
     build: ./captive-portal/dns-parser
     container_name: dns-parser
     restart: unless-stopped
+    logging: *default-logging
     environment:
       DATABASE_URL: postgresql://${DB_USER:-portal_user}:${DB_PASSWORD:-change_this_password}@127.0.0.1:5432/${DB_NAME:-captive_portal}
       LOG_FILE: /logs/pihole.log
@@ -395,6 +408,7 @@ services:
     image: alpine:latest
     container_name: portal-tunnel
     restart: unless-stopped
+    logging: *default-logging
     network_mode: host
     entrypoint: ["/tunnel-entrypoint.sh"]
     volumes:
@@ -412,6 +426,7 @@ services:
     image: python:3-alpine
     container_name: mdns-reflector
     restart: unless-stopped
+    logging: *default-logging
     network_mode: host
     cap_add: [NET_ADMIN, NET_RAW]
     environment:
@@ -430,6 +445,7 @@ services:
     platform: linux/arm64
     container_name: freeradius
     restart: unless-stopped
+    logging: *default-logging
     network_mode: host
     env_file:
       - ./.env
@@ -452,6 +468,7 @@ services:
     container_name: pihole
     network_mode: host
     restart: unless-stopped
+    logging: *default-logging
     cap_add:
       - NET_ADMIN
       - NET_BIND_SERVICE
@@ -501,6 +518,7 @@ services:
     container_name: dnsmasq-hijack
     network_mode: host
     restart: unless-stopped
+    logging: *default-logging
     cap_add:
       - NET_ADMIN
       - NET_BIND_SERVICE
@@ -534,6 +552,7 @@ services:
   npm:
     image: jc21/nginx-proxy-manager:latest
     restart: unless-stopped
+    logging: *default-logging
     network_mode: host
     volumes:
       - ./npm/data:/data
@@ -550,6 +569,7 @@ services:
     image: python:3-alpine
     network_mode: host
     restart: "no"
+    logging: *default-logging
     env_file:
       - ./.env
     volumes:

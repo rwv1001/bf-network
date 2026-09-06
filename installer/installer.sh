@@ -1609,6 +1609,8 @@ write_pi_env_file() {
         write_env_line NAT_RETENTION_DAYS "$NAT_RETENTION_DAYS"
         write_env_line DNS_DEDUP_THRESHOLD_HOURS "12"
         write_env_line DNS_RETENTION_DAYS "$DNS_RETENTION_DAYS"
+        write_env_line DOCKER_LOG_MAX_SIZE "${DOCKER_LOG_MAX_SIZE:-10m}"
+        write_env_line DOCKER_LOG_MAX_FILE "${DOCKER_LOG_MAX_FILE:-3}"
 
         write_env_line VALID_VLANS "$VALID_VLANS"
         write_env_line VLAN_DEFAULTS "$VLAN_DEFAULTS"
@@ -1946,7 +1948,37 @@ REMOTE
     pi_sudo "printf 'nameserver 8.8.8.8\\nnameserver 1.1.1.1\\n' > /etc/resolv.conf"
     pi_sudo "chattr +i /etc/resolv.conf"
     pi_sudo "mkdir -p /etc/docker"
-    pi_sudo "test -f /etc/docker/daemon.json || printf '%s\\n' '{\\n  \\"dns\\": [\\"8.8.8.8\\", \\"1.1.1.1\\"]\\n}' > /etc/docker/daemon.json"
+    # scp a real file instead of printf-escaping through pi_sudo: the old
+    # approach wrote literal backslashes, leaving invalid JSON that would stop
+    # dockerd on its next restart.
+    local daemon_json daemon_sh
+    daemon_json="$(mktemp)"
+    daemon_sh="$(mktemp)"
+    cat > "$daemon_json" <<EOF
+{
+  "dns": ["8.8.8.8", "1.1.1.1"],
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "${DOCKER_LOG_MAX_SIZE:-10m}",
+    "max-file": "${DOCKER_LOG_MAX_FILE:-3}"
+  }
+}
+EOF
+    cat > "$daemon_sh" <<'EOF'
+set -e
+if python3 -c 'import json; json.load(open("/etc/docker/daemon.json"))' 2>/dev/null; then
+  rm -f /tmp/bf-docker-daemon.json
+  echo "daemon.json valid; keeping existing file"
+else
+  mv /tmp/bf-docker-daemon.json /etc/docker/daemon.json
+  chmod 644 /etc/docker/daemon.json
+  echo "daemon.json installed"
+fi
+EOF
+    pi_scp_to "$daemon_json" /tmp/bf-docker-daemon.json
+    pi_scp_to "$daemon_sh" /tmp/bf-docker-daemon.sh
+    rm -f "$daemon_json" "$daemon_sh"
+    pi_sudo "bash /tmp/bf-docker-daemon.sh && rm -f /tmp/bf-docker-daemon.sh"
     pi_sudo "systemctl reload docker 2>/dev/null || systemctl restart docker 2>/dev/null || true"
 }
 detect_target_docker_arch() {
@@ -2743,6 +2775,11 @@ services:
     image: jacobalberty/unifi:latest
     container_name: unifi
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: ${DOCKER_LOG_MAX_SIZE:-10m}
+        max-file: "${DOCKER_LOG_MAX_FILE:-3}"
     volumes:
       - ./data:/unifi
     environment:
@@ -2761,6 +2798,11 @@ services:
     image: alpine:latest
     container_name: unifi-tunnel
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: ${DOCKER_LOG_MAX_SIZE:-10m}
+        max-file: "${DOCKER_LOG_MAX_FILE:-3}"
     network_mode: host
     depends_on:
       - unifi
@@ -4630,6 +4672,9 @@ prompt_default ENABLE_DB_BACKUPS "Set up automatic database backups?" "y"
 prompt_default BACKUP_RETENTION_DAYS "Backup retention days" "30"
 prompt_default NAT_RETENTION_DAYS "NAT log retention days" "90"
 prompt_default DNS_RETENTION_DAYS "DNS log retention days" "90"
+# Docker json-file logs rotate by size, not age: size x files caps each container (10m x 3 = 30 MB)
+prompt_default DOCKER_LOG_MAX_SIZE "Docker per-container log max size before rotation" "10m"
+prompt_default DOCKER_LOG_MAX_FILE "Docker rotated log files kept per container" "3"
 prompt_default SWITCH_REPLUG_ENABLED "Enable automatic switch replug after wired approval?" "true"
 prompt_default SWITCH_REPLUG_DELAY_SEC "Switch replug delay seconds" "3"
 
