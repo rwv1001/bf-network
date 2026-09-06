@@ -15,6 +15,15 @@ import os
 import subprocess
 import sys
 
+_DEFAULT_COMPOSE_DIR = os.getenv("GIT_REPO_DIR") or os.getenv("BF_NETWORK_DIR") or "/home/admin/bf-network"
+for path in (
+    os.getenv("PORTAL_APP_DIR"),
+    "/app",
+    os.path.join(_DEFAULT_COMPOSE_DIR, "captive-portal", "app"),
+):
+    if path and os.path.isdir(path) and path not in sys.path:
+        sys.path.insert(0, path)
+
 log = logging.getLogger("sync-mdns")
 
 
@@ -50,6 +59,38 @@ def _network_dir() -> str:
 
 def _ifname(vlan_id: int) -> str:
     return f"{_wan_iface()}.{int(vlan_id)}"
+
+
+def _live_iface_addr(vlan_id: int) -> str | None:
+    name = _ifname(vlan_id)
+    try:
+        result = subprocess.run(
+            ["ip", "-4", "-json", "addr", "show", "dev", name],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    try:
+        data = json.loads(result.stdout)
+    except Exception:
+        return None
+    for iface in data:
+        for addr in iface.get("addr_info", []):
+            if addr.get("family") == "inet" and addr.get("local"):
+                return addr["local"]
+    return None
+
+
+def _iface_exists(vlan_id: int) -> bool:
+    return subprocess.run(
+        ["ip", "link", "show", "dev", _ifname(vlan_id)],
+        capture_output=True,
+        text=True,
+    ).returncode == 0
 
 def _isp_subnets():
     """{vlan_id: (addr_on_pi, prefixlen)} from ISPRouter."""
@@ -110,6 +151,9 @@ def _vlan_prefix(vlan_id: int) -> int:
 
 
 def _vlan_addr(vlan_id: int) -> str:
+    live = _live_iface_addr(vlan_id)
+    if live:
+        return live
     addrs, _ = _isp_pi_ips()
     if int(vlan_id) in addrs:
         return addrs[int(vlan_id)]
@@ -173,9 +217,15 @@ def write_systemd_vlan(vlan_id: int) -> None:
             with open(path, "r", encoding="utf-8") as handle:
                 existing = handle.read()
         if existing != body:
-            with open(path, "w", encoding="utf-8") as handle:
-                handle.write(body)
-            log.info("wrote %s", path)
+            try:
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(body)
+                log.info("wrote %s", path)
+            except PermissionError:
+                if _iface_exists(vlan_id):
+                    log.warning("cannot persist %s, but %s already exists; continuing", path, name)
+                    continue
+                raise
 
     parent_hint = os.path.join(netdir, f"10-{wan}.network")
     if os.path.exists(parent_hint):
@@ -263,6 +313,16 @@ def sync_from_graph(graph: dict) -> dict:
 
 def sync_from_db() -> dict:
     from core.vlan_utils import get_vlan_entries
+
+    try:
+        from flask import has_app_context
+    except Exception:
+        has_app_context = lambda: False
+
+    if not has_app_context():
+        from app import app as flask_app
+        with flask_app.app_context():
+            return sync_from_graph(visibility_graph(get_vlan_entries()))
 
     return sync_from_graph(visibility_graph(get_vlan_entries()))
 

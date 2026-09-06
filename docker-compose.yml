@@ -411,6 +411,8 @@ services:
     cap_add: [NET_ADMIN, NET_RAW]
     environment:
       MDNS_PEERS_FILE: /mdns/peers.json
+      # 161 SNMP, 427 SLP, 3289 Epson ENPC, 10004/22222 Ricoh discovery
+      DISCOVERY_BCAST_PORTS: ${DISCOVERY_BCAST_PORTS:-161,427,3289,10004,22222}
     volumes:
       - ./mdns/reflector.py:/reflector.py:ro
       - ./mdns/peers.json:/mdns/peers.json:ro

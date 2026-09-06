@@ -231,7 +231,7 @@
 
         <div class="info-box">
             <p><strong>Pool size warning:</strong> If you reduce a subnet size, any host reservations outside the new range will be dropped by Kea after the restart.</p>
-            <p>Ticking an ISP under Visible VLANs allows printers and other Bonjour devices on that ISP LAN to be discovered from the user VLAN. Save applies ACLs and the mDNS reflector. The Pi trunk is updated to carry those ISP VLANs.</p>
+            <p>Ticking an ISP under Visible VLANs allows printers and other devices on that ISP LAN to be discovered from the user VLAN. The reflector carries Bonjour/mDNS, WSD and SSDP multicast, and relays SNMP/SLP discovery broadcasts using the client's own source address so replies route straight back. Save applies ACLs and the discovery reflector. The Pi trunk is updated to carry those ISP VLANs.</p>
         </div>
 
         <div class="table-responsive">

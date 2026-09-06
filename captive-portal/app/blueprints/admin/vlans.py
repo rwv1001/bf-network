@@ -380,6 +380,10 @@ def vlan_config():
         _changed_statuses   = list(changed_statuses)
         _hp5130_policy_write_error = _hp5130_policy_error
         _vlan_map           = get_vlan_map()
+        _mdns_configured    = any(
+            bool((entry.visible_vlans or '').strip())
+            for entry in VlanMapping.query.all()
+        )
         _vlan_prefix_by_id  = {}
         _changed_vlan_ids   = []
         for _status, _prefix in prefix_by_status.items():
@@ -421,12 +425,13 @@ def vlan_config():
                             ok = reset_acl_baseline()
                             if not ok:
                                 _errors.append('ACL/PBR/NQA baseline push failed')
-                        if _visibility_changed or _prefix_changed:
+                        if _visibility_changed or _prefix_changed or _mdns_configured:
                             try:
                                 sync_mdns_reflector()
                             except Exception as exc:
                                 logger.exception("Failed to sync mDNS reflector: %s", exc)
                                 _errors.append(f'mDNS reflector sync failed: {exc}')
+                        if _visibility_changed or _prefix_changed:
                             try:
                                 from blueprints.admin.switch_ports import refresh_pi_trunk_vlans
                                 refresh_pi_trunk_vlans()
