@@ -2058,6 +2058,14 @@ patch_repo_for_install() {
     pi_sudo "set -x; cd $q_repo && sed -i \"s|WATCHDOG_PEER_SSH_KEY: /keys/id_rsa|WATCHDOG_PEER_SSH_KEY: \\\${SWITCH_KEY_PATH:-/keys/id_rsa}|g\" docker-compose.yml"
     info "5"
 
+    # nat-parser (uid 1000) persists its log position under /state; docker would
+    # otherwise create the bind-mount dir as root and the position file never saves.
+    pi_sudo "cd $q_repo && mkdir -p captive-portal/data/nat-parser && chown 1000:1000 captive-portal/data/nat-parser"
+
+    # peers.json in the repository carries the previous site's VLAN interfaces;
+    # start empty so the reflector stays idle until the first VLAN-config save.
+    pi_sudo "cd $q_repo && printf '{}\n' > mdns/peers.json && chown $PI_USER:$PI_USER mdns/peers.json"
+
     # The tunnel entrypoint in the repository defaults to /keys/oracle_rsa and fixed reverse ports.
     # This installer intentionally uses the same mounted key path as switch automation and the
     # remote HTTPS tunnel port entered above.
@@ -2403,7 +2411,8 @@ ON CONFLICT (name) DO UPDATE SET
             idx="${VLAN_ISP_INDEX[$vlan]}"
             isp_name="${ISP_NAMES[$idx]}"
             display="${SAVED_ANSWERS[vlan_${vlan}_name]:-VLAN${vlan}}"
-            status="$display"
+            # status is a canonical lowercase key; mixed case here caused duplicate rows on VLAN-config saves
+            status="${display,,}"
             ssid="${SAVED_ANSWERS[vlan_${vlan}_ssid]:-}"
 
             echo "-- vlan $vlan → isp '$isp_name' (index $idx)"

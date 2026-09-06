@@ -237,11 +237,6 @@ class DNSParser:
                             _, query_id, client_ip, client_port, domain, ip, ts = result
                             self.store_dns_lookup(client_ip, client_port, domain, ip, ts)
                             self.store_dns_resolution(domain, ip)
-                            if client_ip in ("127.0.0.1", "::1"):
-                                return None
-                            if not (domain.startswith('.') or domain == '<Root>'
-                                    or ip.startswith('127.') or ip.startswith('0.')):
-                                return ('lookup', query_id, client_ip, client_port, domain, ip, ts)
                             # Also resolve the pre-CNAME domain if tracked
                             if query_id in self.cname_pending:
                                 orig_domain, _ = self.cname_pending.pop(query_id)
