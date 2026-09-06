@@ -7,6 +7,7 @@ Routes:
 
 import json
 import logging
+import os
 
 from datetime import datetime, timedelta
 
@@ -20,6 +21,75 @@ from core.auth import permission_required
 logger = logging.getLogger(__name__)
 
 traffic_bp = Blueprint('traffic', __name__)
+
+
+def _pi_self_ips(_cache={}):
+    """This host's IPs (web runs host-network, so these are the Pi's own addresses)."""
+    import time as _time
+    now = _time.time()
+    if _cache.get('ts', 0) + 300 > now:
+        return _cache['ips']
+    import socket as _socket, fcntl as _fcntl, struct as _struct
+    ips = {'127.0.0.1', '::1'}
+    try:
+        with _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM) as s:
+            for _idx, ifname in _socket.if_nameindex():
+                try:
+                    ips.add(_socket.inet_ntoa(_fcntl.ioctl(
+                        s.fileno(), 0x8915,  # SIOCGIFADDR
+                        _struct.pack('256s', ifname.encode()[:15]))[20:24]))
+                except OSError:
+                    continue
+    except Exception:
+        pass
+    for env in ('PORTAL_IP', 'HIJACK_DNS_IP'):
+        val = os.getenv(env, '').strip()
+        if val:
+            ips.add(val)
+    _cache.update(ts=now, ips=ips)
+    return ips
+
+
+def _infra_ips(_cache={}):
+    """Router/switch/infrastructure addresses, derived from env and the ISP router table."""
+    import time as _time
+    now = _time.time()
+    if _cache.get('ts', 0) + 300 > now:
+        return _cache['ips']
+    ips = set()
+    for env in ('MGMT_GATEWAY', 'UNREGISTERED_GW', 'UDM_HOST', 'TEL_HOST'):
+        val = os.getenv(env, '').strip()
+        if val:
+            ips.add(val)
+    ips.update(h for h in os.getenv('SWITCH_HOSTS', '').split() if h)
+    octets = [int(b) for b in os.getenv('SWITCH_HOSTS_BYTES', '').split(',') if b.strip().isdigit()]
+    if not octets:
+        # fall back to the last octet of each switch management IP
+        for host in os.getenv('SWITCH_HOSTS', '').split():
+            tail = host.rsplit('.', 1)[-1]
+            if tail.isdigit():
+                octets.append(int(tail))
+    net_word = os.getenv('NETWORK_WORD', '192.168').strip()
+    try:
+        import ipaddress
+        from models import ISPRouter, VlanMapping
+        for vm in VlanMapping.query.all():
+            if vm.vlan_id:
+                for octet in octets:
+                    ips.add(f'{net_word}.{vm.vlan_id}.{octet}')
+        for router in ISPRouter.query.all():
+            if router.gateway_ip:
+                ips.add(router.gateway_ip.strip())
+            if router.switch_host:
+                ips.add(router.switch_host.strip())
+            if router.subnet:
+                net = ipaddress.ip_network(router.subnet, strict=False)
+                for octet in octets:
+                    ips.add(str(net.network_address + octet))
+    except Exception as exc:
+        logger.debug('infra IP derivation from DB failed: %s', exc)
+    _cache.update(ts=now, ips=ips)
+    return ips
 
 ALL_COLUMNS = [
     ('lookup_id',        'ID'),
@@ -203,9 +273,17 @@ def traffic():
     source_view = "pihole_blocked_enriched" if using_dns_fallback else "traffic_combined"
 
     if using_dns_fallback:
-        where_clause += " AND CAST(src_ip AS TEXT) NOT IN ('127.0.0.1', '::1')"
+        ip_col = 'src_ip'
     else:
-        where_clause += " AND CAST(client_ip AS TEXT) NOT IN ('127.0.0.1', '::1')"
+        ip_col = 'client_ip'
+    self_ips = sorted(_pi_self_ips() | _infra_ips())
+    self_params = {}
+    placeholders = []
+    for i, ip in enumerate(self_ips):
+        self_params[f'self_ip_{i}'] = ip
+        placeholders.append(f':self_ip_{i}')
+    where_clause += f" AND CAST({ip_col} AS TEXT) NOT IN ({', '.join(placeholders)})"
+    params.update(self_params)
 
     # ====================== DEBUG: SQL Queries ======================
     logger.info("=" * 80)

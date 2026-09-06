@@ -38,6 +38,32 @@ STALE_LOG_THRESHOLD_SECONDS = int(os.getenv("STALE_LOG_THRESHOLD_SECONDS", "3600
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "5"))
 REINSTALL_COOLDOWN_SECONDS = int(os.getenv("REINSTALL_COOLDOWN_SECONDS", "300"))
 RETENTION_DAYS = int(os.getenv("RETENTION_DAYS", "90"))
+
+
+def local_ips(_cache={}):
+    """IPs of this host (host-network container = the Pi itself), cached 5 min."""
+    now = time.time()
+    if _cache.get("ts", 0) + 300 > now:
+        return _cache["ips"]
+    import socket as _socket, fcntl as _fcntl, struct as _struct
+    ips = {"127.0.0.1", "::1", "0.0.0.0"}
+    try:
+        with _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM) as s:
+            for _idx, ifname in _socket.if_nameindex():
+                try:
+                    ips.add(_socket.inet_ntoa(_fcntl.ioctl(
+                        s.fileno(), 0x8915,  # SIOCGIFADDR
+                        _struct.pack("256s", ifname.encode()[:15]))[20:24]))
+                except OSError:
+                    continue
+    except Exception:
+        pass
+    for env in ("PORTAL_IP", "HIJACK_DNS_IP"):
+        val = os.getenv(env, "").strip()
+        if val:
+            ips.add(val)
+    _cache.update(ts=now, ips=ips)
+    return ips
 FLUSH_INTERVAL_SECONDS = int(os.getenv("FLUSH_INTERVAL_SECONDS", "15"))
 
 # Logging setup
@@ -195,6 +221,8 @@ class NATParser:
 
     def _close_session(self, session_key, session):
         """Close a session and write to database"""
+        if session['src_ip'] in local_ips():
+            return
         try:
             port_map = self._get_port_info_by_ips({session['src_ip']})
             port_info = port_map.get(session['src_ip'], {})
@@ -379,6 +407,8 @@ class NATParser:
             port_map = self._get_port_info_by_ips({s['src_ip'] for s in self.active_sessions.values()})
             with self.db_conn.cursor() as cur:
                 for session in self.active_sessions.values():
+                    if session['src_ip'] in local_ips():
+                        continue
                     port_info    = port_map.get(session['src_ip'], {})
                     src_mac      = port_info.get('src_mac')
                     switch_iface = port_info.get('switch_iface')

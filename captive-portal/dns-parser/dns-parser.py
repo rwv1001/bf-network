@@ -28,6 +28,33 @@ DEDUP_THRESHOLD_HOURS = int(os.getenv("DNS_DEDUP_THRESHOLD_HOURS", "12"))
 CHECK_INTERVAL_SECONDS = int(os.getenv("DNS_CHECK_INTERVAL_SECONDS", "5"))
 RETENTION_DAYS = int(os.getenv("DNS_RETENTION_DAYS", "90"))
 
+
+def local_ips(_cache={}):
+    """IPs of this host (host-network container = the Pi itself), cached 5 min."""
+    import time as _time
+    now = _time.time()
+    if _cache.get("ts", 0) + 300 > now:
+        return _cache["ips"]
+    import socket as _socket, fcntl as _fcntl, struct as _struct
+    ips = {"127.0.0.1", "::1", "0.0.0.0"}
+    try:
+        with _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM) as s:
+            for _idx, ifname in _socket.if_nameindex():
+                try:
+                    ips.add(_socket.inet_ntoa(_fcntl.ioctl(
+                        s.fileno(), 0x8915,  # SIOCGIFADDR
+                        _struct.pack("256s", ifname.encode()[:15]))[20:24]))
+                except OSError:
+                    continue
+    except Exception:
+        pass
+    for env in ("PORTAL_IP", "HIJACK_DNS_IP"):
+        val = os.getenv(env, "").strip()
+        if val:
+            ips.add(val)
+    _cache.update(ts=now, ips=ips)
+    return ips
+
 # Pi-Hole blocked query polling
 PIHOLE_BASE_URL = os.getenv("PIHOLE_BASE_URL", "http://127.0.0.1:8055")
 PIHOLE_PASSWORD  = os.getenv("PIHOLE_WEBPASSWORD", "")
@@ -138,7 +165,7 @@ class DNSParser:
         """Insert one row into dns_lookups (no deduplication)."""
         if ts is None:
             ts = datetime.now()
-        if client_ip in ("127.0.0.1", "::1", "0.0.0.0"):
+        if client_ip in local_ips():
             return
         try:
             with self.db_conn.cursor() as cur:
@@ -278,6 +305,7 @@ class DNSParser:
                 deleted_res = cur.rowcount
                 cur.execute("DELETE FROM dns_lookups WHERE lookup_timestamp < %s", (cutoff_date,))
                 deleted_lkp = cur.rowcount
+                cur.execute("DELETE FROM pihole_blocked_queries WHERE blocked_at < %s", (cutoff_date,))
             self.db_conn.commit()
             if deleted_res or deleted_lkp:
                 logger.info("Cleanup: removed %d resolutions, %d lookups older than %d days",

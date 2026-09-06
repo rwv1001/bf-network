@@ -254,6 +254,11 @@ services:
       TEST_ENV: ${TEST_ENV:-false}
       KEA_CONTROL_SOCKET: ${KEA_CONTROL_SOCKET:-/kea/sockets/kea4-ctrl-socket}
       SWITCH_HOSTS: ${SWITCH_HOSTS:?SWITCH_HOSTS is required – set it in .env}
+      SWITCH_HOSTS_BYTES: ${SWITCH_HOSTS_BYTES:-2}
+      MGMT_GATEWAY: ${MGMT_GATEWAY:-}
+      UNREGISTERED_GW: ${UNREGISTERED_GW:-}
+      UDM_HOST: ${UDM_HOST:-}
+      TEL_HOST: ${TEL_HOST:-}
       PORTAL_IP: ${PORTAL_IP:?PORTAL_IP is required – set it in .env}
       PORTAL_IP_BYTE: ${PORTAL_IP_BYTE:-4}
       HIJACK_DNS_IP: ${HIJACK_DNS_IP:?HIJACK_DNS_IP is required – set it in .env}
