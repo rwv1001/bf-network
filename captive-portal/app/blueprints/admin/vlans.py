@@ -206,12 +206,13 @@ def vlan_config():
         names             = request.form.getlist('vlan_name')
         vlan_ids          = request.form.getlist('vlan_id')
         ssids             = request.form.getlist('vlan_ssid')
-        wired_statuses    = set(request.form.getlist('vlan_wired'))
-        password_statuses = set(request.form.getlist('vlan_require_password'))
-        remove_statuses   = set(request.form.getlist('vlan_remove'))
+        # checkbox values carry the row's key; lowercase to match the canonical status
+        wired_statuses    = {s.strip().lower() for s in request.form.getlist('vlan_wired')}
+        password_statuses = {s.strip().lower() for s in request.form.getlist('vlan_require_password')}
+        remove_statuses   = {s.strip().lower() for s in request.form.getlist('vlan_remove')}
         isp_router_ids    = request.form.getlist('vlan_isp_router')
         visible_vlans_list = request.form.getlist('vlan_visible_vlans')
-        allow_doh_statuses = set(request.form.getlist('vlan_allow_doh'))
+        allow_doh_statuses = {s.strip().lower() for s in request.form.getlist('vlan_allow_doh')}
         warnings = []
         errors = []
         seen_statuses = set()

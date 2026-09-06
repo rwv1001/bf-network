@@ -359,6 +359,18 @@ for router in routers:
         if int(vlan["vlan_id"]) == int(management_vlan):
             continue
         src, src_wc, _ = wildcard(vlan["subnet"])
+        # Pi-bound DNS routes via VLAN 99 (not these uplinks), so this only
+        # blocks external resolvers - port 53 is forced through Pi-hole.
+        emit(
+            f" rule {rule} deny udp source {src} {src_wc} "
+            f"destination-port eq dns"
+        )
+        rule += 1
+        emit(
+            f" rule {rule} deny tcp source {src} {src_wc} "
+            f"destination-port eq dns"
+        )
+        rule += 1
         for ip in doh_dot_ips.split():
             emit(
                 f" rule {rule} deny tcp source {src} {src_wc} "

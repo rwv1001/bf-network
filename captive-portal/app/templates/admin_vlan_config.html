@@ -232,6 +232,7 @@
         <div class="info-box">
             <p><strong>Pool size warning:</strong> If you reduce a subnet size, any host reservations outside the new range will be dropped by Kea after the restart.</p>
             <p>Ticking an ISP under Visible VLANs allows printers and other devices on that ISP LAN to be discovered from the user VLAN. The reflector carries Bonjour/mDNS, WSD and SSDP multicast, and relays SNMP/SLP discovery broadcasts using the client's own source address so replies route straight back. Save applies ACLs and the discovery reflector. The Pi trunk is updated to carry those ISP VLANs.</p>
+            <p><strong>Allow DoH:</strong> unticked (default) forces all DNS through Pi-hole — plain port-53 to external resolvers is blocked, as is DoH/DoT to the major public resolvers. Ticked lifts both restrictions for that VLAN (clients bypass Pi-hole logging; the NAT logger still records their traffic).</p>
         </div>
 
         <div class="table-responsive">
@@ -651,13 +652,14 @@
                 var wiredCb    = row.querySelector('input[name="vlan_wired"]');
                 var pwdCb      = row.querySelector('input[name="vlan_require_password"]');
                 var dohCb = row.querySelector('input[name="vlan_allow_doh"]');
-                if (statusInput && dohCb && !dohCb.value) {
+                // always resync so a renamed key keeps its checkbox flags
+                if (statusInput && dohCb) {
                     dohCb.value = statusInput.value;
                 }
-                if (statusInput && wiredCb && !wiredCb.value) {
+                if (statusInput && wiredCb) {
                     wiredCb.value = statusInput.value;
                 }
-                if (statusInput && pwdCb && !pwdCb.value) {
+                if (statusInput && pwdCb) {
                     pwdCb.value = statusInput.value;
                 }
             });
