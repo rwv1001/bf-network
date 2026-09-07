@@ -58,6 +58,24 @@ def _normalize_mac_input(raw) -> str:
     return ':'.join(cleaned[i:i + 2] for i in range(0, 12, 2))
 
 
+def _parse_csv_date(value):
+    if value is None or not str(value).strip():
+        return None
+    text = str(value).strip()
+    for fmt in ('%Y-%m-%d', '%d/%m/%Y'):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _csv_yn(flag):
+    if flag is None:
+        return ''
+    return 'Y' if flag else 'N'
+
+
 # ---------------------------------------------------------------------------
 # Add user
 # ---------------------------------------------------------------------------
@@ -350,65 +368,88 @@ def import_users():
         stats['rows'] += 1
 
         email_raw = get_value(row, 'email', 'email address', 'e-mail')
-        if not email_raw or not str(email_raw).strip():
+        mac_raw = get_value(row, 'mac address', 'mac', 'mac_address')
+        has_email = bool(email_raw and str(email_raw).strip())
+        has_mac = bool(mac_raw and str(mac_raw).strip())
+        if not has_email and not has_mac:
             errors.append(f"Row {index}: missing email address")
             stats['rows_skipped'] += 1
             continue
 
-        email = str(email_raw).strip().lower()
-        user = User.query.filter_by(email=email).first()
-        created = False
-        if not user:
-            user = User(email=email, begin_date=today, created_by=current_user.username)
-            created = True
+        user = None
+        if has_email:
+            email = str(email_raw).strip().lower()
+            user = User.query.filter_by(email=email).first()
+            created = False
+            if not user:
+                user = User(email=email, begin_date=today, created_by=current_user.username)
+                created = True
 
-        first_name   = get_value(row, 'first name', 'firstname')
-        last_name    = get_value(row, 'second name', 'last name', 'lastname', 'surname')
-        phone_number = get_value(row, 'phone number', 'phone')
-        if first_name   and str(first_name).strip():   user.first_name   = str(first_name).strip()
-        if last_name    and str(last_name).strip():    user.last_name    = str(last_name).strip()
-        if phone_number and str(phone_number).strip(): user.phone_number = str(phone_number).strip()
+            first_name   = get_value(row, 'first name', 'firstname')
+            last_name    = get_value(row, 'second name', 'last name', 'lastname', 'surname')
+            phone_number = get_value(row, 'phone number', 'phone')
+            if first_name   and str(first_name).strip():   user.first_name   = str(first_name).strip()
+            if last_name    and str(last_name).strip():    user.last_name    = str(last_name).strip()
+            if phone_number and str(phone_number).strip(): user.phone_number = str(phone_number).strip()
 
-        allowed_allow = parse_allowed_vlans(user.allowed_vlans_override)
-        allowed_deny  = parse_allowed_vlans(user.allowed_vlans_deny)
-        adopt_allow   = parse_allowed_vlans(user.adoptable_vlans_override)
-        adopt_deny    = parse_allowed_vlans(user.adoptable_vlans_deny)
+            begin_date = _parse_csv_date(get_value(row, 'begin date', 'start date'))
+            if begin_date:
+                user.begin_date = begin_date
+            expiry_date = _parse_csv_date(get_value(row, 'expiry date', 'end date'))
+            if expiry_date:
+                user.expiry_date = expiry_date
+            blocked_flag = parse_csv_bool(get_value(row, 'blocked'))
+            if blocked_flag is not None:
+                user.blocked = blocked_flag
+            approval_flag = parse_csv_bool(get_value(row, 'require approval every device'))
+            if approval_flag is not None:
+                user.require_approval_every_device = approval_flag
+            notes_val = get_value(row, 'user notes', 'notes')
+            if notes_val and str(notes_val).strip():
+                user.notes = str(notes_val).strip()
+            pw_hash = get_value(row, 'network password hash')
+            if pw_hash and str(pw_hash).strip():
+                user.network_password_hash = str(pw_hash).strip()
 
-        for vlan_id, kind, header_name in vlan_flag_columns:
-            flag = parse_csv_bool(row.get(header_name))
-            if flag is None:
-                continue
-            if kind == 'allowed':
-                if flag:
-                    allowed_allow.add(vlan_id); allowed_deny.discard(vlan_id)
+            allowed_allow = parse_allowed_vlans(user.allowed_vlans_override)
+            allowed_deny  = parse_allowed_vlans(user.allowed_vlans_deny)
+            adopt_allow   = parse_allowed_vlans(user.adoptable_vlans_override)
+            adopt_deny    = parse_allowed_vlans(user.adoptable_vlans_deny)
+
+            for vlan_id, kind, header_name in vlan_flag_columns:
+                flag = parse_csv_bool(row.get(header_name))
+                if flag is None:
+                    continue
+                if kind == 'allowed':
+                    if flag:
+                        allowed_allow.add(vlan_id); allowed_deny.discard(vlan_id)
+                    else:
+                        allowed_deny.add(vlan_id); allowed_allow.discard(vlan_id)
                 else:
-                    allowed_deny.add(vlan_id); allowed_allow.discard(vlan_id)
+                    if flag:
+                        adopt_allow.add(vlan_id); adopt_deny.discard(vlan_id)
+                    else:
+                        adopt_deny.add(vlan_id); adopt_allow.discard(vlan_id)
+
+            user.allowed_vlans_override   = format_allowed_vlans(allowed_allow)
+            user.allowed_vlans_deny       = format_allowed_vlans(allowed_deny)
+            user.adoptable_vlans_override = format_allowed_vlans(adopt_allow)
+            user.adoptable_vlans_deny     = format_allowed_vlans(adopt_deny)
+
+            if created:
+                db.session.add(user)
+                db.session.flush()
+                stats['users_created'] += 1
             else:
-                if flag:
-                    adopt_allow.add(vlan_id); adopt_deny.discard(vlan_id)
-                else:
-                    adopt_deny.add(vlan_id); adopt_allow.discard(vlan_id)
+                stats['users_updated'] += 1
 
-        user.allowed_vlans_override   = format_allowed_vlans(allowed_allow)
-        user.allowed_vlans_deny       = format_allowed_vlans(allowed_deny)
-        user.adoptable_vlans_override = format_allowed_vlans(adopt_allow)
-        user.adoptable_vlans_deny     = format_allowed_vlans(adopt_deny)
-
-        if created:
-            db.session.add(user)
-            db.session.flush()
-            stats['users_created'] += 1
-        else:
-            stats['users_updated'] += 1
-
-        mac_raw = get_value(row, 'mac address', 'mac', 'mac_address')
-        if mac_raw and str(mac_raw).strip():
+        if has_mac:
             mac_address = _normalize_mac_input(mac_raw)
             if not mac_address:
                 errors.append(f"Row {index}: invalid MAC address '{mac_raw}'")
             else:
                 device = Device.query.filter_by(mac_address=mac_address).first()
-                if device and device.user_id and device.user_id != user.id:
+                if device and user and device.user_id and device.user_id != user.id:
                     errors.append(
                         f"Row {index}: MAC {mac_address} already belongs to another user"
                     )
@@ -420,8 +461,14 @@ def import_users():
                     else:
                         stats['devices_updated'] += 1
 
-                    close_ownership(mac_address, commit=False)
-                    open_ownership(mac_address, user.id, commit=False)
+                    device.stale = False  # revive soft-deleted rows on (re)import
+
+                    if user:
+                        close_ownership(mac_address, commit=False)
+                        open_ownership(mac_address, user.id, commit=False)
+                    elif not get_active_ownership(mac_address):
+                        # device-only row with no owner: attribute to importing admin
+                        open_ownership(mac_address, admin_id=current_user.id, commit=False)
 
                     device_type = get_value(row, 'device type', 'device')
                     if device_type and str(device_type).strip():
@@ -438,7 +485,7 @@ def import_users():
                         except ValueError:
                             errors.append(f"Row {index}: invalid VLAN ID '{vlan_raw}'")
 
-                    if target_vlan is None:
+                    if target_vlan is None and user:
                         domain_policy = get_domain_policy_for_user(user, domain_policy_map)
                         from core.user_utils import effective_vlan_sets
                         eff_allowed, _, _, _ = effective_vlan_sets(user, domain_policy)
@@ -449,7 +496,34 @@ def import_users():
                                 device.current_vlan = target_vlan
                                 device.ssid = device.ssid or get_ssid_for_vlan(target_vlan)
 
-                    device.registration_status = 'registered'
+                    assigned_raw = get_value(row, 'assigned vlan')
+                    if assigned_raw and str(assigned_raw).strip():
+                        try:
+                            device.assigned_vlan = int(str(assigned_raw).strip())
+                        except ValueError:
+                            errors.append(f"Row {index}: invalid Assigned VLAN '{assigned_raw}'")
+                    wired_target_raw = get_value(row, 'wired target vlan')
+                    if wired_target_raw and str(wired_target_raw).strip():
+                        try:
+                            device.wired_target_vlan = int(str(wired_target_raw).strip())
+                        except ValueError:
+                            errors.append(f"Row {index}: invalid Wired Target VLAN '{wired_target_raw}'")
+                    conn_type = get_value(row, 'connection type')
+                    if conn_type and str(conn_type).strip().lower() in {'wifi', 'wired'}:
+                        device.connection_type = str(conn_type).strip().lower()
+                        device.is_wired = device.connection_type == 'wired'
+                    ownership_flag = parse_csv_bool(get_value(row, 'ownership validated'))
+                    if ownership_flag is not None:
+                        device.ownership_validated = ownership_flag
+                    fixed_ip = get_value(row, 'fixed ip')
+                    if fixed_ip and str(fixed_ip).strip():
+                        device.fixed_ip = str(fixed_ip).strip()
+
+                    reg_status_raw = get_value(row, 'registration status')
+                    if reg_status_raw and str(reg_status_raw).strip():
+                        device.registration_status = str(reg_status_raw).strip().lower()[:50]
+                    else:
+                        device.registration_status = 'registered'
 
     if dry_run:
         db.session.rollback()
@@ -499,4 +573,90 @@ def import_users_template():
 
     response = Response(output.getvalue(), mimetype='text/csv')
     response.headers['Content-Disposition'] = 'attachment; filename=users_import_template.csv'
+    return response
+
+
+@users_bp.route('/users/export', methods=['GET'])
+@login_required
+@permission_required('manage_users')
+def export_users():
+    """Full users+devices backup CSV, round-trippable through /users/import."""
+    from core.vlan_utils import get_vlan_entries as _entries
+    vlan_ids = [
+        e.vlan_id for e in _entries()
+        if e.vlan_id and e.status not in {'restricted', 'unregistered'}
+    ]
+
+    headers = [
+        'Email', 'First Name', 'Second Name', 'Phone Number',
+        'Begin Date', 'Expiry Date', 'Blocked',
+        'Require Approval Every Device', 'User Notes', 'Network Password Hash',
+    ]
+    for vid in vlan_ids:
+        headers += [f'VLAN{vid}Allowed', f'VLAN{vid}Adoptable']
+    headers += [
+        'MAC Address', 'Device Type', 'VLAN ID', 'Assigned VLAN',
+        'Registration Status', 'Connection Type', 'Wired Target VLAN',
+        'Ownership Validated', 'Fixed IP',
+    ]
+    n_user_cols = 10 + 2 * len(vlan_ids)
+
+    def device_cells(device):
+        return [
+            device.mac_address,
+            device.device_name or '',
+            device.current_vlan if device.current_vlan is not None else '',
+            device.assigned_vlan if device.assigned_vlan is not None else '',
+            device.registration_status or '',
+            device.connection_type or '',
+            device.wired_target_vlan if device.wired_target_vlan is not None else '',
+            _csv_yn(device.ownership_validated),
+            device.fixed_ip or '',
+        ]
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(headers)
+
+    exported_macs = set()
+    for user in User.query.order_by(User.email).all():
+        allowed_allow = parse_allowed_vlans(user.allowed_vlans_override)
+        allowed_deny  = parse_allowed_vlans(user.allowed_vlans_deny)
+        adopt_allow   = parse_allowed_vlans(user.adoptable_vlans_override)
+        adopt_deny    = parse_allowed_vlans(user.adoptable_vlans_deny)
+
+        user_cells = [
+            user.email,
+            user.first_name or '',
+            user.last_name or '',
+            user.phone_number or '',
+            user.begin_date.isoformat() if user.begin_date else '',
+            user.expiry_date.isoformat() if user.expiry_date else '',
+            _csv_yn(user.blocked),
+            _csv_yn(user.require_approval_every_device),
+            user.notes or '',
+            user.network_password_hash or '',
+        ]
+        for vid in vlan_ids:
+            user_cells.append('Y' if vid in allowed_allow else ('N' if vid in allowed_deny else ''))
+            user_cells.append('Y' if vid in adopt_allow else ('N' if vid in adopt_deny else ''))
+
+        devices = [d for d in user.devices if not d.stale]
+        if devices:
+            for device in devices:
+                exported_macs.add(device.mac_address)
+                writer.writerow(user_cells + device_cells(device))
+        else:
+            writer.writerow(user_cells + [''] * 9)
+
+    # devices with no active owner (e.g. admin-registered) — email left blank
+    orphans = Device.query.filter(Device.stale == False).order_by(Device.mac_address).all()  # noqa: E712
+    for device in orphans:
+        if device.mac_address in exported_macs or device.user_id:
+            continue
+        writer.writerow([''] * n_user_cols + device_cells(device))
+
+    filename = f"users_devices_backup_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    response = Response(output.getvalue(), mimetype='text/csv')
+    response.headers['Content-Disposition'] = f'attachment; filename={filename}'
     return response

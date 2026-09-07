@@ -707,6 +707,7 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
     <h2>&#128101; Users ({{ users_total }})</h2>
     {% if current_user.can_manage_users %}
     <div style="display:flex; gap:8px;">
+        <a href="{{ url_for('admin.users.export_users') }}" class="btn-pane btn">&#8681; Export CSV</a>
         <a href="{{ url_for('admin.users.import_users') }}" class="btn-pane btn">&#8679; Import Users</a>
         <a href="{{ url_for('admin.users.add_user') }}" class="btn-pane btn">+ Add User</a>
     </div>
