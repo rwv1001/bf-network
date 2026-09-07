@@ -47,15 +47,51 @@ def _load_commit_manifest(tree_hash, file_hash):
         return None
     git_repo_dir = os.environ['GIT_REPO_DIR']
     candidates = [file_hash[:7], file_hash]
+    # origin/main fallback lets newer commits supply manifests for older steps
+    trees = [tree_hash, 'origin/main', 'origin/HEAD']
     for name in candidates:
         blob_path = f'captive-portal/commit-migrations/{name}.json'
+        for tree in trees:
+            try:
+                result = subprocess.run(
+                    ['git', '-C', git_repo_dir, 'show', f'{tree}:{blob_path}'],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    return json.loads(result.stdout)
+            except Exception:
+                pass
+        fs_path = os.path.join(git_repo_dir, blob_path)
+        try:
+            if os.path.exists(fs_path):
+                with open(fs_path) as f:
+                    return json.load(f)
+        except Exception:
+            pass
+    return None
+
+
+def _materialize_migration_script(git_repo_dir, rel_path):
+    """Return a runnable path for a migration script.
+
+    Prefers the working-tree file; if absent (retroactive manifest whose script
+    only exists in a newer commit), extracts the blob from origin/main to /tmp.
+    """
+    script_path = os.path.join(git_repo_dir, 'captive-portal', rel_path)
+    if os.path.exists(script_path):
+        return script_path
+    for tree in ('origin/main', 'origin/HEAD'):
         try:
             result = subprocess.run(
-                ['git', '-C', git_repo_dir, 'show', f'{tree_hash}:{blob_path}'],
+                ['git', '-C', git_repo_dir, 'show', f'{tree}:captive-portal/{rel_path}'],
                 capture_output=True, text=True, timeout=10,
             )
-            if result.returncode == 0 and result.stdout.strip():
-                return json.loads(result.stdout)
+            if result.returncode == 0 and result.stdout:
+                tmp_path = os.path.join('/tmp', f'fw-migration-{os.path.basename(rel_path)}')
+                with open(tmp_path, 'w') as f:
+                    f.write(result.stdout)
+                os.chmod(tmp_path, 0o755)
+                return tmp_path
         except Exception:
             pass
     return None
@@ -417,10 +453,10 @@ def stream(action):
 
                 db_script = (manifest or {}).get('db', {}).get('up')
                 if db_script:
-                    script_path = os.path.join(git_repo_dir, 'captive-portal', db_script)
+                    script_path = _materialize_migration_script(git_repo_dir, db_script)
                     yield emit(f"=== Step 2/3: Running database migration: {db_script} ===")
-                    if not os.path.exists(script_path):
-                        yield emit(f"ERROR: Migration script not found: {script_path}")
+                    if not script_path:
+                        yield emit(f"ERROR: Migration script not found: {db_script}")
                         yield emit("__EXIT__:1")
                         return
                     rc = yield from stream_proc(
@@ -449,10 +485,10 @@ def stream(action):
                 manifest  = _load_commit_manifest(current_hash, status.get('prev_full'))
                 db_script = (manifest or {}).get('db', {}).get('down')
                 if db_script:
-                    script_path = os.path.join(git_repo_dir, 'captive-portal', db_script)
+                    script_path = _materialize_migration_script(git_repo_dir, db_script)
                     yield emit(f"=== Step 1/3: Running rollback migration: {db_script} ===")
-                    if not os.path.exists(script_path):
-                        yield emit(f"ERROR: Migration script not found: {script_path}")
+                    if not script_path:
+                        yield emit(f"ERROR: Migration script not found: {db_script}")
                         yield emit("__EXIT__:1")
                         return
                     rc = yield from stream_proc(
@@ -523,10 +559,10 @@ def stream(action):
 
                     db_script = (step_manifest or {}).get('db', {}).get('up')
                     if db_script:
-                        sp = os.path.join(git_repo_dir, 'captive-portal', db_script)
+                        sp = _materialize_migration_script(git_repo_dir, db_script)
                         yield emit(f"  DB migration: {db_script}")
-                        if not os.path.exists(sp):
-                            yield emit(f"ERROR: Migration script not found: {sp}")
+                        if not sp:
+                            yield emit(f"ERROR: Migration script not found: {db_script}")
                             yield emit("__EXIT__:1")
                             return
                         rc = yield from stream_proc(

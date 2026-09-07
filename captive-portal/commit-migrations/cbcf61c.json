@@ -1,0 +1,16 @@
+{
+  "description": "Multi-protocol mDNS/WSD/SSDP reflector for cross-VLAN printer discovery. Adds optional broadcast relay port list for the mdns container.",
+  "env": {
+    "add": [
+      {
+        "key": "DISCOVERY_BCAST_PORTS",
+        "required": false,
+        "default": "161,427,3289,10004,22222",
+        "description": "Comma-separated UDP broadcast ports relayed between VLAN pairs by the mdns reflector (SNMP/SLP/printer discovery). Leave blank to use the default."
+      }
+    ],
+    "remove": []
+  },
+  "db": null,
+  "notes": "Restart the mdns container after the update. Configure reflector VLAN pairs via Admin \u2192 VLAN Config (mDNS option)."
+}

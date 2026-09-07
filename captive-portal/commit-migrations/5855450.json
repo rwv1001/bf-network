@@ -1,0 +1,14 @@
+{
+  "description": "Deduplicates vlan_mappings rows (case-drift on status, duplicate vlan_id) and enforces uniqueness with indexes ux_vlan_mappings_status_lower and ux_vlan_mappings_vlan_id.",
+  "env": {
+    "add": [],
+    "remove": []
+  },
+  "db": {
+    "up":   "commit-migrations/5855450-up.sh",
+    "down": "commit-migrations/5855450-down.sh",
+    "verify_up": [],
+    "verify_down": []
+  },
+  "notes": "Duplicate rows are removed keeping the lowest id per status/vlan_id. Review Admin \u2192 VLAN Config after the update."
+}

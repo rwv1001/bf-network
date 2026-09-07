@@ -1,0 +1,22 @@
+{
+  "description": "Docker container log rotation defaults (json-file driver caps) applied to all services in docker-compose.yml.",
+  "env": {
+    "add": [
+      {
+        "key": "DOCKER_LOG_MAX_SIZE",
+        "required": false,
+        "default": "10m",
+        "description": "Per-container log file size cap (json-file driver)."
+      },
+      {
+        "key": "DOCKER_LOG_MAX_FILE",
+        "required": false,
+        "default": "3",
+        "description": "Number of rotated log files kept per container."
+      }
+    ],
+    "remove": []
+  },
+  "db": null,
+  "notes": "Log limits only apply when containers are recreated: run 'docker compose up -d' (not just restart) after the update. Also verify /etc/docker/daemon.json is valid JSON \u2014 older installers wrote a corrupt file; the current installer fixes it."
+}

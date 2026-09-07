@@ -1,0 +1,34 @@
+{
+  "description": "Traffic viewer now hides Pi/router/switch infrastructure traffic. Adds optional env overrides for infrastructure IP detection.",
+  "env": {
+    "add": [
+      {
+        "key": "SWITCH_HOSTS_BYTES",
+        "required": false,
+        "default": "2",
+        "description": "Last-octet count used to derive switch management IPs from SWITCH_HOSTS. Leave at default unless switches use unusual addressing."
+      },
+      {
+        "key": "MGMT_GATEWAY",
+        "required": false,
+        "default": "",
+        "description": "Management VLAN gateway IP to exclude from the traffic viewer (optional; auto-derived from DB when blank)."
+      },
+      {
+        "key": "UDM_HOST",
+        "required": false,
+        "default": "",
+        "description": "UDM router IP to exclude from the traffic viewer (optional; falls back to ISP router table)."
+      },
+      {
+        "key": "TEL_HOST",
+        "required": false,
+        "default": "",
+        "description": "Teltonika/OpenWRT router IP to exclude from the traffic viewer (optional; falls back to ISP router table)."
+      }
+    ],
+    "remove": []
+  },
+  "db": null,
+  "notes": "All values are optional \u2014 infrastructure IPs are auto-derived from the DB (ISP routers, VLAN SVIs) when unset. Restart the web container after the update."
+}

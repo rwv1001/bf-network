@@ -1,0 +1,20 @@
+{
+  "description": "Adds per-VLAN DoH blocking (allow_doh) and admin VLAN visibility (visible_vlans) columns to vlan_mappings, and refreshes the traffic_combined view for NAT-only traffic viewing.",
+  "env": {
+    "add": [],
+    "remove": []
+  },
+  "db": {
+    "up":   "commit-migrations/245da90-up.sh",
+    "down": "commit-migrations/245da90-down.sh",
+    "verify_up": [
+      {"type": "column", "table": "vlan_mappings", "column": "allow_doh"},
+      {"type": "column", "table": "vlan_mappings", "column": "visible_vlans"}
+    ],
+    "verify_down": [
+      {"type": "column_absent", "table": "vlan_mappings", "column": "allow_doh"},
+      {"type": "column_absent", "table": "vlan_mappings", "column": "visible_vlans"}
+    ]
+  },
+  "notes": "After deploying, review Admin \u2192 VLAN Config: DoH blocking is off (allow_doh=false) for every VLAN by default; tick 'Allow DoH' for VLANs that should bypass DNS-over-HTTPS blocking."
+}

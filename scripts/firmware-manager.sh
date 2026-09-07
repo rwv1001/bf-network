@@ -64,20 +64,45 @@ _get_affected_stacks() {
 _cmd_status() {
     cd "$GIT_REPO_DIR" || exit 1
 
+    # Pick up new commits from GitHub (tolerate offline/slow network)
+    timeout 20 git -C "$GIT_REPO_DIR" fetch --quiet origin 2>/dev/null || true
+
+    UPSTREAM=""
+    for ref in origin/main origin/HEAD; do
+        if git -C "$GIT_REPO_DIR" rev-parse --verify --quiet "$ref" >/dev/null 2>&1; then
+            UPSTREAM="$ref"
+            break
+        fi
+    done
+
     CURRENT_FULL=$(_full HEAD)
     CURRENT_SHORT=$(_short HEAD)
     CURRENT_SUBJECT=$(_subject HEAD)
 
-    CURRENT_HASH=$(git rev-parse HEAD)
-    NEXT_FULL=$(git rev-list --children --all 2>/dev/null \
-        | awk -v h="$CURRENT_HASH" '$1==h {print $2; exit}')
-    NEXT_SHORT=""
-    NEXT_SUBJECT=""
-    if [[ -n "$NEXT_FULL" && "$NEXT_FULL" != "$CURRENT_FULL" ]]; then
+    # First-parent chain of commits between HEAD and upstream, oldest first
+    AHEAD=()
+    if [[ -n "$UPSTREAM" ]]; then
+        mapfile -t AHEAD < <(git -C "$GIT_REPO_DIR" rev-list --reverse --first-parent "HEAD..$UPSTREAM" 2>/dev/null)
+    fi
+
+    NEXT_FULL=""; NEXT_SHORT=""; NEXT_SUBJECT=""
+    LATEST_FULL=""; LATEST_SHORT=""; LATEST_SUBJECT=""
+    COMMITS_AHEAD_JSON="[]"
+    if (( ${#AHEAD[@]} > 0 )); then
+        NEXT_FULL="${AHEAD[0]}"
         NEXT_SHORT=$(_short "$NEXT_FULL")
         NEXT_SUBJECT=$(_subject "$NEXT_FULL")
-    else
-        NEXT_FULL=""
+        LATEST_FULL="${AHEAD[${#AHEAD[@]}-1]}"
+        LATEST_SHORT=$(_short "$LATEST_FULL")
+        LATEST_SUBJECT=$(_subject "$LATEST_FULL")
+
+        prev="$CURRENT_FULL"
+        entries=()
+        for c in "${AHEAD[@]}"; do
+            entries+=("{\"full\":\"$c\",\"short\":\"$(_short "$c")\",\"subject\":\"$(_json_str "$(_subject "$c")")\",\"from_full\":\"$prev\"}")
+            prev="$c"
+        done
+        COMMITS_AHEAD_JSON="[$(IFS=,; echo "${entries[*]}")]"
     fi
 
     PREV_FULL=$(_full "HEAD^" 2>/dev/null || true)
@@ -106,32 +131,11 @@ _cmd_status() {
     fi
 
     LATEST_DIRS_JSON="[]"
-    LATEST_FULL=""
-    LATEST_SHORT=""
-    LATEST_SUBJECT=""
-    COMMITS_AHEAD_JSON="[]"
-
-    if [[ -n "$NEXT_FULL" ]]; then
-        # Find latest commit
-        CUR_WALK="$NEXT_FULL"
-        PREV_WALK="$CURRENT_FULL"
-        while true; do
-            N=$(git rev-list --children --all 2>/dev/null \
-                | awk -v h="$CUR_WALK" '$1==h {print $2; exit}')
-            [[ -z "$N" || "$N" == "$CUR_WALK" ]] && break
-            PREV_WALK="$CUR_WALK"
-            CUR_WALK="$N"
-        done
-        LATEST_FULL="$CUR_WALK"
-        LATEST_SHORT=$(_short "$LATEST_FULL")
-        LATEST_SUBJECT=$(_subject "$LATEST_FULL")
-
+    if [[ -n "$LATEST_FULL" ]]; then
         mapfile -t _lstacks < <(_get_affected_stacks "HEAD" "$LATEST_FULL")
         compose_ldirs=()
         for d in "${_lstacks[@]}"; do [[ -n "$d" ]] && compose_ldirs+=("\"$d\""); done
         LATEST_DIRS_JSON="[$(IFS=,; echo "${compose_ldirs[*]}")]"
-
-        COMMITS_AHEAD_JSON="[]"
     fi
 
     cat <<JSON
