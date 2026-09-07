@@ -361,6 +361,7 @@ def import_users():
         'devices_created': 0, 'devices_updated': 0, 'rows_skipped': 0,
     }
     errors = []
+    kea_restores = []
 
     for index, row in enumerate(reader, start=2):
         if not row or not any((v or '').strip() for v in row.values()):
@@ -525,11 +526,41 @@ def import_users():
                     else:
                         device.registration_status = 'registered'
 
+                    if device.registration_status == 'registered':
+                        reg_vlan = device.assigned_vlan or device.current_vlan
+                        if reg_vlan:
+                            kea_restores.append((
+                                mac_address, reg_vlan,
+                                device.device_name or 'device',
+                                device.fixed_ip or None,
+                            ))
+
     if dry_run:
         db.session.rollback()
         flash('Dry run complete. No changes were saved.', 'info')
     else:
         db.session.commit()
+
+        # Restore Kea host reservations so the DHCP hook sees devices as registered
+        kea = None
+        if kea_restores:
+            try:
+                from kea_integration import get_kea_client
+                kea = get_kea_client(
+                    control_socket=os.getenv('KEA_CONTROL_SOCKET', '/kea/leases/kea4-ctrl-socket'))
+            except Exception as exc:
+                errors.append(f"Kea client unavailable — reservations not restored: {exc}")
+        if kea:
+            for mac_addr, reg_vlan, hostname, fixed_ip in kea_restores:
+                try:
+                    kea.register_mac(mac=mac_addr, vlan=reg_vlan,
+                                     hostname=hostname, ip_address=fixed_ip)
+                except Exception as exc:
+                    errors.append(f"Kea reservation failed for {mac_addr}: {exc}")
+                try:
+                    send_coa_change(mac_addr, reg_vlan)
+                except Exception:
+                    pass
 
     flash(
         "CSV import complete. Rows: {rows}, Users created: {users_created}, "
