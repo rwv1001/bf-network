@@ -362,6 +362,30 @@ def api_request_unblock():
 # API polling endpoints
 # ---------------------------------------------------------------------------
 
+def _access_enforcement_cleared(mac_address: str) -> bool:
+    """True once the DNS hijack is removed and no per-IP switch ACL rule remains.
+
+    lease.dns_hijacked mirrors the synchronous iptables step; the
+    acl_rule_allocations row is deleted only after the switch confirms the
+    unblock over SSH, so its absence means the async queue has finished.
+    """
+    lease = get_active_iplease(mac_address)
+    if lease is None:
+        return True
+    if lease.dns_hijacked:
+        return False
+    try:
+        from sqlalchemy import text as _sql_text
+        row = db.session.execute(
+            _sql_text("SELECT 1 FROM acl_rule_allocations WHERE ip_address = :ip LIMIT 1"),
+            {'ip': lease.ip_address},
+        ).first()
+        return row is None
+    except Exception as exc:
+        logger.debug("access enforcement check failed (fail-open): %s", exc)
+        return True
+
+
 @portal_bp.route('/api/device-status')
 def api_device_status():
     logger.debug("=== /api/device-status called ===")
@@ -429,6 +453,7 @@ def api_device_status():
         logger.debug(f"Device {mac_address} has full access (internet_accessible=True)")
         return jsonify({
             'status': 'accessible',
+            'access_verified': _access_enforcement_cleared(mac_address),
             'user_home_url': build_portal_url(url_for('portal.user_home')),
             'ownership_validated': bool(device.ownership_validated),
         })
@@ -475,6 +500,7 @@ def api_device_status():
 
             resp_data = {
                 'status': 'accessible',
+                'access_verified': _access_enforcement_cleared(mac_address),
                 'user_home_url': build_portal_url(url_for('portal.user_home')),
                 'ownership_validated': bool(device.ownership_validated),
             }

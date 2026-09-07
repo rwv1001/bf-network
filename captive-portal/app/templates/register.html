@@ -85,7 +85,7 @@
     ];
 
     let attempts = 0;
-    const maxAttempts = 30;
+    const maxAttempts = 60;
 
     const updateWait = (text) => {
         if (waitStatus) {
@@ -97,23 +97,29 @@
         attempts += 1;
         let index = 0;
 
-        fetch(apiUrlWithDevice('{{ url_for("portal.registration_status") }}')).catch(() => {});
-
         const tryNext = () => {
             const url = internetCheckUrls[index];
             index += 1;
             if (!url) {
                 throw new Error('All checks failed');
             }
-            return fetch(url, {
+            const busted = url + (url.includes('?') ? '&' : '?') + 't=' + Date.now();
+            return fetch(busted, {
                 method: 'GET',
                 mode: 'no-cors',
                 cache: 'no-store'
             }).catch(() => tryNext());
         };
 
-        Promise.resolve()
-            .then(tryNext)
+        fetch(apiUrlWithDevice('{{ url_for("portal.api_device_status") }}'))
+            .then(r => r.json())
+            .then(d => {
+                // wait until the server confirms hijack + switch ACL removal
+                if (d && d.status === 'accessible' && d.access_verified === false) {
+                    throw new Error('enforcement pending');
+                }
+                return tryNext();
+            })
             .then(() => {
                 if (waitStatus) {
                     waitStatus.style.display = 'none';
@@ -745,7 +751,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
 
         let attempts = 0;
-        const maxAttempts = 30;
+        const maxAttempts = 60;
 
         const checkAccess = () => {
             attempts += 1;
@@ -757,15 +763,23 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (!url) {
                     throw new Error('All checks failed');
                 }
-                return fetch(url, {
+                const busted = url + (url.includes('?') ? '&' : '?') + 't=' + Date.now();
+                return fetch(busted, {
                     method: 'GET',
                     mode: 'no-cors',
                     cache: 'no-store'
                 }).catch(() => tryNext());
             };
 
-            Promise.resolve()
-                .then(tryNext)
+            fetch(apiUrlWithDevice('{{ url_for("portal.api_device_status") }}'))
+                .then(r => r.json())
+                .then(d => {
+                    // wait until the server confirms hijack + switch ACL removal
+                    if (d && d.status === 'accessible' && d.access_verified === false) {
+                        throw new Error('enforcement pending');
+                    }
+                    return tryNext();
+                })
                 .then(() => {
                     clearInterval(accessInterval);
                     accessInterval = null;
