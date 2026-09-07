@@ -69,6 +69,21 @@ def _make_script_env(switch_host: str = None) -> dict:
 # DNS hijack
 # ---------------------------------------------------------------------------
 
+def _sync_lease_hijack_flag(ip_address: str, hijacked: bool) -> None:
+    """Keep ip_leases.dns_hijacked aligned with the actual iptables state."""
+    try:
+        from models import IPLease
+        updated = IPLease.query.filter(
+            IPLease.ip_address == ip_address,
+            IPLease.dns_hijacked != hijacked,
+        ).update({'dns_hijacked': hijacked}, synchronize_session=False)
+        if updated:
+            db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        logger.warning("Failed to sync dns_hijacked=%s for %s: %s", hijacked, ip_address, exc)
+
+
 def manage_dns_hijack(action: str, ip_address: str) -> bool:
     """
     Manage DNS hijacking for a device IP.
@@ -91,6 +106,7 @@ def manage_dns_hijack(action: str, ip_address: str) -> bool:
         )
         if result.returncode == 0:
             logger.info("DNS %s successful for %s: %s", action, ip_address, result.stdout.strip())
+            _sync_lease_hijack_flag(ip_address, hijacked=(action == 'hijack'))
             return True
         logger.error("DNS %s failed for %s: %s", action, ip_address, result.stderr.strip())
         return False
