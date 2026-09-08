@@ -91,26 +91,22 @@ class SwitchTerminalNamespace(Namespace):
 
         host = (data or {}).get("host", "").strip()
         allowed_hosts = set(get_switch_hosts())
-
         if host not in allowed_hosts:
             emit("terminal_error", {"message": "Invalid switch host."})
             disconnect()
             return
 
+        # Reconnect / double start: drop the old PTY+SSH first
         if request.sid in _terminal_sessions:
-            emit("terminal_error", {"message": "Terminal already running."})
-            return
+            self._cleanup(request.sid)
 
         master_fd, slave_fd = pty.openpty()
-
         rows = int((data or {}).get("rows") or 24)
         cols = int((data or {}).get("cols") or 80)
         set_pty_size(master_fd, rows, cols)
 
-        ssh_args = build_switch_ssh_args(host)
-
         proc = subprocess.Popen(
-            ssh_args,
+            build_switch_ssh_args(host),
             stdin=slave_fd,
             stdout=slave_fd,
             stderr=slave_fd,
@@ -118,9 +114,7 @@ class SwitchTerminalNamespace(Namespace):
             start_new_session=True,
             text=False,
         )
-
         os.close(slave_fd)
-        os.write(master_fd, b"screen-length disable\n")
 
         _terminal_sessions[request.sid] = {
             "host": host,
@@ -128,19 +122,20 @@ class SwitchTerminalNamespace(Namespace):
             "proc": proc,
         }
 
-        logger.warning(
-            "Interactive switch terminal started: user=%s host=%s sid=%s",
-            getattr(current_user, "id", None),
-            host,
-            request.sid,
-        )
+        # delay this until SSH is up, or the banner can swallow it
+        def _send_init():
+            try:
+                os.write(master_fd, b"screen-length disable\n")
+            except OSError:
+                pass
 
-        thread = threading.Thread(
+        threading.Timer(0.8, _send_init).start()
+
+        threading.Thread(
             target=self._reader_loop,
             args=(request.sid, master_fd, proc),
             daemon=True,
-        )
-        thread.start()
+        ).start()
 
     def _reader_loop(self, sid, fd, proc):
         try:
@@ -199,21 +194,32 @@ class SwitchTerminalNamespace(Namespace):
         session = _terminal_sessions.pop(sid, None)
         if not session:
             return
+
         proc = session.get("proc")
         fd = session.get("fd")
+
         try:
             if proc and proc.poll() is None:
-                proc.terminate()
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
                 try:
                     proc.wait(timeout=2)
                 except Exception:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
                     proc.kill()
         except Exception:
             pass
+
         try:
             if fd is not None:
                 os.close(fd)
         except Exception:
             pass
 
-        logger.info("Interactive switch terminal closed: host=%s sid=%s", session.get("host"), sid)
+        logger.info("Interactive switch terminal closed: host=%s sid=%s",
+                    session.get("host"), sid)

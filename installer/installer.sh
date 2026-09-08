@@ -1229,12 +1229,23 @@ pick_free_vps_tunnel_port() {
         echo "  (none detected)"
     fi
 
+    local reuse_busy="${4:-}"
+
     if answer_exists "$answer_key"; then
         candidate="${SAVED_ANSWERS[$answer_key]}"
-        if [[ "$candidate" =~ ^[0-9]+$ ]] && ! printf '%s\n' "$used_ports" | grep -qx "$candidate"; then
-            REPLY_PORT="$candidate"
-            echo "Using saved free tunnel port: $candidate ($answer_key)"
-            return 0
+        if [[ "$candidate" =~ ^[0-9]+$ ]]; then
+            if ! printf '%s\n' "$used_ports" | grep -qx "$candidate"; then
+                REPLY_PORT="$candidate"
+                echo "Using saved free tunnel port: $candidate ($answer_key)"
+                return 0
+            fi
+            # The admin SSH reverse tunnel *is* supposed to listen on this
+            # port. Treat "already in use" as the existing tunnel, not a clash.
+            if [ "$reuse_busy" = "reuse" ]; then
+                REPLY_PORT="$candidate"
+                echo "Keeping saved tunnel port $candidate ($answer_key); it is already listening (existing reverse tunnel)."
+                return 0
+            fi
         fi
         echo "Saved port $candidate is no longer free; choosing again."
         invalidate_answer "$answer_key"
@@ -1255,6 +1266,493 @@ pick_free_vps_tunnel_port() {
         REPLY_PORT="$candidate"
         return 0
     done
+}
+
+# =============================================================================
+# Admin SSH reverse tunnel (Pi sshd via Oracle VPS localhost)
+# =============================================================================
+
+configure_oracle_vps_admin_sshd() {
+    info "Oracle VPS sshd settings for reverse tunnels"
+
+    if ! is_yes "${INSTALL_SSH_TUNNEL:-n}"; then
+        echo "Skipping VPS sshd changes (admin SSH tunnel not requested)."
+        return 0
+    fi
+
+    if step_done "oracle_vps_admin_sshd"; then
+        echo "Skipping completed step: Oracle VPS sshd admin-tunnel settings"
+        return 0
+    fi
+
+    oracle_vps_ssh_raw "echo Oracle VPS SSH OK" >/dev/null
+    oracle_vps_sudo "true" >/dev/null 2>&1 || \
+        die "Oracle VPS sudo must work without a password."
+
+    # Comment any existing copies of these directives so a later line in
+    # sshd_config cannot override the drop-in. Then write a dedicated file.
+    oracle_vps_sudo '
+        set -euo pipefail
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+        apt-get install -y openssh-server
+
+        mkdir -p /etc/ssh/sshd_config.d
+        if ! grep -qE "^[Ii]nclude[[:space:]]+/etc/ssh/sshd_config.d/\*.conf" /etc/ssh/sshd_config; then
+            sed -i "1i Include /etc/ssh/sshd_config.d/*.conf" /etc/ssh/sshd_config
+        fi
+
+        for f in /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf; do
+            [ -f "$f" ] || continue
+            [ "$(basename "$f")" = "99-bf-network-tunnels.conf" ] && continue
+            sed -i -E "s/^[[:space:]]*(AllowTcpForwarding|GatewayPorts|ClientAliveInterval|ClientAliveCountMax)[[:space:]].*/# &/" "$f"
+        done
+
+        cat > /etc/ssh/sshd_config.d/99-bf-network-tunnels.conf <<EOF
+# Written by bf-network installer. Reverse tunnels bind to loopback only.
+# Nginx on this VPS still reaches 127.0.0.1:9443 / 9446. Normal SSH on :22
+# is unchanged.
+AllowTcpForwarding yes
+GatewayPorts no
+ClientAliveInterval 30
+ClientAliveCountMax 3
+EOF
+        chmod 644 /etc/ssh/sshd_config.d/99-bf-network-tunnels.conf
+        sshd -t
+        if systemctl reload ssh 2>/dev/null; then
+            true
+        elif systemctl reload sshd 2>/dev/null; then
+            true
+        else
+            service ssh reload
+        fi
+    '
+
+    echo "VPS sshd: AllowTcpForwarding yes, GatewayPorts no (reverse forwards on 127.0.0.1 only)."
+    echo "Existing portal/UniFi nginx proxies to localhost are unaffected. SSH to the VPS on port 22 is unaffected."
+    complete_step "oracle_vps_admin_sshd"
+}
+
+install_pi_ssh_reverse_tunnel() {
+    info "Pi admin SSH reverse tunnel"
+
+    INSTALL_SSH_TUNNEL="${INSTALL_SSH_TUNNEL:-${SAVED_ANSWERS[install_ssh_tunnel]:-n}}"
+    ORACLE_VPS_SSH_TUNNEL_PORT="${ORACLE_VPS_SSH_TUNNEL_PORT:-${SAVED_ANSWERS[oracle_vps_ssh_tunnel_port]:-22022}}"
+    ORACLE_KEY_DEST_NAME="${ORACLE_KEY_DEST_NAME:-${SAVED_ANSWERS[oracle_key_dest_name]:-oracle_rsa}}"
+
+    if ! is_yes "$INSTALL_SSH_TUNNEL"; then
+        echo "Skipping admin SSH reverse tunnel."
+        return 0
+    fi
+
+    if step_done "pi_ssh_reverse_tunnel"; then
+        echo "Skipping completed step: Pi SSH reverse tunnel"
+        print_ssh_tunnel_usage
+        return 0
+    fi
+
+    [ -n "${ORACLE_VPS_HOST:-}" ] || die "ORACLE_VPS_HOST is not set."
+    [ -n "${ORACLE_VPS_USER:-}" ] || die "ORACLE_VPS_USER is not set."
+    [ -n "${PI_USER:-}" ] || die "PI_USER is not set."
+
+    local key_path="/home/${PI_USER}/.ssh/${ORACLE_KEY_DEST_NAME}"
+    pi_ssh "test -f $(remote_quote "$key_path")" || \
+        die "Oracle VPS private key missing on the Pi: $key_path
+Re-run after --forget-step pi_oracle_key so the installer copies the key."
+
+    echo "Installing autossh and systemd unit on the Pi..."
+    echo "  VPS:        ${ORACLE_VPS_USER}@${ORACLE_VPS_HOST}"
+    echo "  VPS listen: 127.0.0.1:${ORACLE_VPS_SSH_TUNNEL_PORT}"
+    echo "  Pi dest:    127.0.0.1:22"
+    echo "  Key:        $key_path"
+
+    pi_sudo "export DEBIAN_FRONTEND=noninteractive; apt-get update -qq; apt-get install -y autossh openssh-client"
+
+    local unit_tmp
+    unit_tmp="$(mktemp)"
+    cat > "$unit_tmp" <<EOF
+[Unit]
+Description=bf-network admin SSH reverse tunnel to Oracle VPS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${PI_USER}
+Environment=AUTOSSH_GATETIME=0
+Environment=AUTOSSH_PORT=0
+ExecStart=/usr/bin/autossh -M 0 -N \\
+  -o ServerAliveInterval=30 \\
+  -o ServerAliveCountMax=3 \\
+  -o ExitOnForwardFailure=yes \\
+  -o StrictHostKeyChecking=accept-new \\
+  -o UserKnownHostsFile=/home/${PI_USER}/.ssh/known_hosts \\
+  -i ${key_path} \\
+  -R 127.0.0.1:${ORACLE_VPS_SSH_TUNNEL_PORT}:127.0.0.1:22 \\
+  ${ORACLE_VPS_USER}@${ORACLE_VPS_HOST}
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    pi_scp_to "$unit_tmp" "/tmp/pi-ssh-via-vps.service"
+    rm -f "$unit_tmp"
+    pi_sudo "mv /tmp/pi-ssh-via-vps.service /etc/systemd/system/pi-ssh-via-vps.service && chmod 644 /etc/systemd/system/pi-ssh-via-vps.service && systemctl daemon-reload && systemctl enable --now pi-ssh-via-vps.service"
+
+    echo "Waiting for the reverse forward to appear on the VPS..."
+    local i ready=0
+    for i in $(seq 1 15); do
+        if oracle_vps_ssh_raw "ss -ltn | grep -qE '127\\.0\\.0\\.1:${ORACLE_VPS_SSH_TUNNEL_PORT}[[:space:]]'"; then
+            ready=1
+            break
+        fi
+        sleep 2
+    done
+
+    if [ "$ready" -eq 1 ]; then
+        echo "VPS is listening on 127.0.0.1:${ORACLE_VPS_SSH_TUNNEL_PORT}."
+    else
+        echo "WARNING: 127.0.0.1:${ORACLE_VPS_SSH_TUNNEL_PORT} is not listening yet."
+        echo "On the Pi check: sudo systemctl status pi-ssh-via-vps.service"
+        echo "                 journalctl -u pi-ssh-via-vps.service -e"
+    fi
+
+    complete_step "pi_ssh_reverse_tunnel"
+    print_ssh_tunnel_usage
+}
+
+print_ssh_tunnel_usage() {
+    local port="${ORACLE_VPS_SSH_TUNNEL_PORT:-${SAVED_ANSWERS[oracle_vps_ssh_tunnel_port]:-22022}}"
+    local platform="${SSH_CLIENT_PLATFORM:-${SAVED_ANSWERS[ssh_client_platform]:-all}}"
+    local win_user="${WINDOWS_SSH_USER:-${SAVED_ANSWERS[windows_ssh_user]:-YourWindowsUser}}"
+    local mac_user="${MAC_SSH_USER:-${SAVED_ANSWERS[mac_ssh_user]:-YourMacUser}}"
+    local want_putty="${WANT_PUTTY_INSTRUCTIONS:-${SAVED_ANSWERS[want_putty_instructions]:-y}}"
+    local site_id="${SSH_TUNNEL_SITE_ID:-${SAVED_ANSWERS[ssh_tunnel_site_id]:-site}}"
+    local pi_host="${site_id}_pi"
+    local win_ssh="C:/Users/${win_user}/.ssh"
+    local win_ssh_ps="C:\\Users\\${win_user}\\.ssh"
+    local mac_ssh="/Users/${mac_user}/.ssh"
+    local installer_ip
+    installer_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    installer_ip="${installer_ip:-INSTALLER_IP}"
+
+    [ -n "${ORACLE_VPS_HOST:-}" ] || return 0
+    is_yes "${INSTALL_SSH_TUNNEL:-${SAVED_ANSWERS[install_ssh_tunnel]:-n}}" || return 0
+
+    platform="${platform,,}"
+
+    cat <<EOF
+
+============================================================================
+Admin SSH to the Pi via the VPS
+============================================================================
+The Pi is not on the public internet. You SSH to the VPS, then to
+127.0.0.1:${port}, which the Pi has reverse-forwarded to its own port 22.
+
+Do not open TCP ${port} on the VPS firewall. Only VPS port 22 needs to
+be reachable from your laptop.
+
+Client SSH Host alias for this site Pi:  ${pi_host}
+(oracle-vps stays shared across sites. These snippets append; they do not
+replace an existing ~/.ssh/config.)
+
+Two private keys are required (never the .pub files):
+
+  VPS hop:  ${ORACLE_KEY_PATH}
+  Pi hop:   ${PI_KEY_PATH}
+
+This installer machine (copy the keys from here):
+  host: ${installer_ip}
+  user: ${REAL_USER:-$(whoami)}
+
+Redo tunnel:  sudo ./installer.sh --forget-step pi_ssh_reverse_tunnel
+Redo sshd:    sudo ./installer.sh --forget-step oracle_vps_admin_sshd
+EOF
+
+    cat <<EOF
+
+----------------------------------------------------------------------------
+From this installer machine (Linux / Pi)
+----------------------------------------------------------------------------
+ssh -i ${PI_KEY_PATH} \\
+    -o IdentitiesOnly=yes \\
+    -o ProxyJump=${ORACLE_VPS_USER}@${ORACLE_VPS_HOST} \\
+    -p ${port} \\
+    ${PI_USER}@127.0.0.1
+
+~/.ssh/config on this machine:
+
+Host oracle-vps
+    HostName ${ORACLE_VPS_HOST}
+    User ${ORACLE_VPS_USER}
+    IdentityFile ${ORACLE_KEY_PATH}
+    IdentitiesOnly yes
+
+Host ${pi_host}
+    HostName 127.0.0.1
+    Port ${port}
+    User ${PI_USER}
+    IdentityFile ${PI_KEY_PATH}
+    IdentitiesOnly yes
+    ProxyJump oracle-vps
+
+Then:  ssh ${pi_host}
+EOF
+
+    if [[ "$platform" == "linux" || "$platform" == "all" ]]; then
+        cat <<EOF
+
+----------------------------------------------------------------------------
+Another Linux laptop
+----------------------------------------------------------------------------
+# Copy the two private keys from the installer machine, then:
+mkdir -p ~/.ssh
+chmod 700 ~/.ssh
+scp ${REAL_USER:-user}@${installer_ip}:${ORACLE_KEY_PATH} ~/.ssh/oracle_vps
+scp ${REAL_USER:-user}@${installer_ip}:${PI_KEY_PATH} ~/.ssh/${pi_host}
+chmod 600 ~/.ssh/oracle_vps ~/.ssh/${pi_host}
+
+# Appends. Does not replace other Host entries.
+cat >> ~/.ssh/config <<'LINUXCFG'
+Host oracle-vps
+    HostName ${ORACLE_VPS_HOST}
+    User ${ORACLE_VPS_USER}
+    IdentityFile ~/.ssh/oracle_vps
+    IdentitiesOnly yes
+
+Host ${pi_host}
+    HostName 127.0.0.1
+    Port ${port}
+    User ${PI_USER}
+    IdentityFile ~/.ssh/${pi_host}
+    IdentitiesOnly yes
+    ProxyJump oracle-vps
+LINUXCFG
+
+chmod 600 ~/.ssh/config
+ssh ${pi_host}
+EOF
+    fi
+
+    if [[ "$platform" == "mac" || "$platform" == "all" ]]; then
+        cat <<EOF
+
+----------------------------------------------------------------------------
+macOS (user ${mac_user})
+----------------------------------------------------------------------------
+# In Terminal on the Mac, copy the keys from the installer machine:
+mkdir -p ${mac_ssh}
+chmod 700 ${mac_ssh}
+scp ${REAL_USER:-user}@${installer_ip}:${ORACLE_KEY_PATH} ${mac_ssh}/oracle_vps
+scp ${REAL_USER:-user}@${installer_ip}:${PI_KEY_PATH} ${mac_ssh}/${pi_host}
+chmod 600 ${mac_ssh}/oracle_vps ${mac_ssh}/${pi_host}
+
+# Appends. Does not replace other Host entries.
+cat >> ${mac_ssh}/config <<'MACCFG'
+Host oracle-vps
+    HostName ${ORACLE_VPS_HOST}
+    User ${ORACLE_VPS_USER}
+    IdentityFile ${mac_ssh}/oracle_vps
+    IdentitiesOnly yes
+
+Host ${pi_host}
+    HostName 127.0.0.1
+    Port ${port}
+    User ${PI_USER}
+    IdentityFile ${mac_ssh}/${pi_host}
+    IdentitiesOnly yes
+    ProxyJump oracle-vps
+MACCFG
+chmod 600 ${mac_ssh}/config
+ssh ${pi_host}
+EOF
+    fi
+
+    if [[ "$platform" == "windows" || "$platform" == "all" ]]; then
+        cat <<EOF
+
+----------------------------------------------------------------------------
+Windows OpenSSH (PowerShell) — user ${win_user}
+----------------------------------------------------------------------------
+Use Windows OpenSSH (built into Windows 10/11). Do not open the key files
+in Notepad — it can save them as UTF-16 and ssh-keygen will say
+"is not a key file".
+
+1) Copy the two private keys onto this PC (from PowerShell).
+   Binary scp is safest. An existing oracle_vps is often read-only after
+   icacls, so scp then says: open local "...oracle_vps": Permission denied.
+
+   VPS key (shared as oracle_vps):
+
+   If C:\\Users\\${win_user}\\.ssh\\oracle_vps is NOT present:
+scp ${REAL_USER:-user}@${installer_ip}:${ORACLE_KEY_PATH} ${win_ssh_ps}\\oracle_vps
+
+   If it IS present and you want to replace it, paste this first:
+\$dst = "\$env:USERPROFILE\\.ssh\\oracle_vps"
+if (Test-Path \$dst) {
+    attrib -R \$dst
+    icacls \$dst /grant "\${env:USERNAME}:(F)"
+    Remove-Item -LiteralPath \$dst -Force
+}
+scp ${REAL_USER:-user}@${installer_ip}:${ORACLE_KEY_PATH} \$dst
+
+   If it is present and you want to keep it, skip the VPS scp.
+
+   Pi key for this site (${pi_host}):
+
+   If C:\\Users\\${win_user}\\.ssh\\${pi_host} is NOT present:
+scp ${REAL_USER:-user}@${installer_ip}:${PI_KEY_PATH} ${win_ssh_ps}\\${pi_host}
+
+   If it IS present and you want to replace it:
+\$dst = "\$env:USERPROFILE\\.ssh\\${pi_host}"
+if (Test-Path \$dst) {
+    attrib -R \$dst
+    icacls \$dst /grant "\${env:USERNAME}:(F)"
+    Remove-Item -LiteralPath \$dst -Force
+}
+scp ${REAL_USER:-user}@${installer_ip}:${PI_KEY_PATH} \$dst
+
+   If it is present and you want to keep it, skip the Pi scp.
+
+2) Paste this whole block into PowerShell. It creates .ssh, APPENDS the
+   ${pi_host} block if it is not already present (other Host entries are
+   left alone), and fixes key ACLs.
+
+\$sshDir = "${win_ssh_ps}"
+New-Item -ItemType Directory -Force -Path \$sshDir | Out-Null
+\$cfgPath = "\$sshDir\\config"
+\$vpsBlock = @"
+
+Host oracle-vps
+    HostName ${ORACLE_VPS_HOST}
+    User ${ORACLE_VPS_USER}
+    IdentityFile ${win_ssh}/oracle_vps
+    IdentitiesOnly yes
+"@
+\$piBlock = @"
+
+Host ${pi_host}
+    HostName 127.0.0.1
+    Port ${port}
+    User ${PI_USER}
+    IdentityFile ${win_ssh}/${pi_host}
+    IdentitiesOnly yes
+    ProxyJump oracle-vps
+"@
+if (Test-Path \$cfgPath) {
+    \$existing = Get-Content \$cfgPath -Raw
+} else {
+    \$existing = ""
+}
+if (\$existing -notmatch "(?m)^Host oracle-vps(\s|$)") {
+    Add-Content -Path \$cfgPath -Value \$vpsBlock -Encoding ascii
+    Write-Host "Appended Host oracle-vps to \$cfgPath"
+}
+\$existing = ""
+if (Test-Path \$cfgPath) { \$existing = Get-Content \$cfgPath -Raw }
+if (\$existing -notmatch "(?m)^Host ${pi_host}(\s|$)") {
+    Add-Content -Path \$cfgPath -Value \$piBlock -Encoding ascii
+    Write-Host "Appended Host ${pi_host} to \$cfgPath"
+} else {
+    Write-Host "Host ${pi_host} already present in \$cfgPath — left unchanged"
+}
+icacls "\$sshDir\\oracle_vps" /inheritance:r | Out-Null
+icacls "\$sshDir\\oracle_vps" /grant "\${env:USERNAME}:(R)" | Out-Null
+icacls "\$sshDir\\${pi_host}" /inheritance:r | Out-Null
+icacls "\$sshDir\\${pi_host}" /grant "\${env:USERNAME}:(R)" | Out-Null
+ssh-keygen -l -f "\$sshDir\\oracle_vps"
+ssh-keygen -l -f "\$sshDir\\${pi_host}"
+
+3) If ssh-keygen says "is not a key file", the key was saved as UTF-16.
+   Convert it, then retry ssh-keygen:
+
+\$src = "${win_ssh_ps}\\oracle_vps"
+\$text = Get-Content \$src -Raw
+\$text = \$text -replace [char]13, ''
+\$utf8 = New-Object System.Text.UTF8Encoding \$false
+[System.IO.File]::WriteAllText(\$src, \$text.Trim() + [char]10, \$utf8)
+
+   Repeat for ${pi_host} if needed.
+
+4) Test the VPS hop first, then the Pi:
+
+ssh oracle-vps
+ssh ${pi_host}
+
+Each key must start with -----BEGIN OPENSSH PRIVATE KEY-----
+or -----BEGIN RSA PRIVATE KEY-----  (not a .pub line, not a .ppk).
+EOF
+    fi
+
+    if [[ "$platform" == "windows" || "$platform" == "all" ]] && is_yes "$want_putty"; then
+        cat <<EOF
+
+----------------------------------------------------------------------------
+PuTTY on Windows — user ${win_user}
+----------------------------------------------------------------------------
+Yes: PuTTY cannot use the OpenSSH private key files directly. You must
+convert each key to a .ppk with PuTTYgen. You need two .ppk files:
+  ${win_ssh_ps}\\oracle_vps.ppk     (VPS hop, shared)
+  ${win_ssh_ps}\\${pi_host}.ppk     (Pi key for this site)
+
+A) Convert the keys (do this twice, once per key)
+   1. Start PuTTYgen (Start menu → PuTTYgen).
+   2. Conversions → Import key.
+   3. Choose ${win_ssh_ps}\\oracle_vps   (no extension; the OpenSSH file).
+   4. Click "Save private key".
+      If it warns about no passphrase, click Yes (or set one).
+   5. Save as ${win_ssh_ps}\\oracle_vps.ppk
+   6. Repeat steps 2–5 for ${win_ssh_ps}\\${pi_host}
+      and save as ${win_ssh_ps}\\${pi_host}.ppk
+   Do not click "Generate". That would create a new unrelated key.
+
+B) Two PowerShell windows (same idea as the GUI below)
+
+   Window 1 — leave this running:
+& "C:\\Program Files\\PuTTY\\plink.exe" -i "${win_ssh_ps}\\oracle_vps.ppk" -N -L 127.0.0.1:${port}:127.0.0.1:${port} ${ORACLE_VPS_USER}@${ORACLE_VPS_HOST}
+
+   Window 2 — after window 1 is connected:
+& "C:\\Program Files\\PuTTY\\putty.exe" -i "${win_ssh_ps}\\${pi_host}.ppk" -P ${port} ${PI_USER}@127.0.0.1
+
+   Do not use -proxycmd or plink -nc. That closes the connection.
+
+C) Saved PuTTY sessions (GUI) — this is the method that works
+
+   Session 1 — save as oracle-vps-tunnel. Open this first and leave it open.
+     Session → Host Name: ${ORACLE_VPS_HOST}
+     Port: 22
+     Connection → Data → Auto-login username: ${ORACLE_VPS_USER}
+     Connection → SSH → Auth → Credentials → Private key file:
+       ${win_ssh_ps}\\oracle_vps.ppk
+     Connection → SSH: tick "Do not start a shell or command at all"
+     Connection → SSH → Tunnels:
+       Source port: ${port}
+       Destination: 127.0.0.1:${port}
+       Local
+       Add
+     Connection → Proxy: None
+     Session → Saved Sessions: oracle-vps-tunnel → Save
+
+   Session 2 — save as ${pi_host}. Open this after session 1 is connected.
+     Session → Host Name: 127.0.0.1
+     Port: ${port}
+     Connection → Data → Auto-login username: ${PI_USER}
+     Connection → SSH → Auth → Credentials → Private key file:
+       ${win_ssh_ps}\\${pi_host}.ppk
+     Connection → Proxy: None
+     Session → Saved Sessions: ${pi_host} → Save
+
+   Order: open oracle-vps-tunnel, leave it running, then open ${pi_host}.
+   Do not set a Local/SSH proxy on ${pi_host}.
+
+D) First-time host-key prompts
+   Accept the VPS host key, then the Pi host key. The Pi key may already
+   be known as a LAN address (for example 192.168.1.57 or 10.6.99.4).
+   That is expected: 127.0.0.1:${port} is the same machine.
+EOF
+    fi
 }
 
 # =============================================================================
@@ -3221,6 +3719,8 @@ install_pi_server() {
         echo "Skipping completed step: UniFi controller"
     fi
 
+    install_pi_ssh_reverse_tunnel
+
     unset 'COMPLETED_STEPS[validate_pi_server]'
     state_save
 
@@ -3686,29 +4186,49 @@ echo "The Pi must sit on each ISP VLAN that may host a printer."
 echo "Pick an address that is NOT the ISP gateway, a switch SVI, or in the"
 echo "router DHCP pool — then reserve it on that router."
 
-prompt_line scan_isp_pi \
-    "Would you like to scan each ISP subnet for used IPs? (y/n): " \
-    "scan_isp_pi_ips"
+need_isp_pi_scan=0
+for i in $(printf '%s\n' "${!ISP_NAMES[@]}" | sort -n); do
+    if ! answer_exists "isp_${i}_pi_ip"; then
+        need_isp_pi_scan=1
+        break
+    fi
+done
 
-if is_yes "$scan_isp_pi"; then
-    if ! command -v nmap >/dev/null 2>&1; then
-        echo "nmap is not installed (recommended for finding free IPs)."
-        prompt_line install_nmap_isp \
-            "Would you like to install nmap now? (y/n): " \
-            "install_nmap_isp_pi"
-        if is_yes "$install_nmap_isp"; then
-            apt-get update -qq
-            apt-get install -y nmap
-        else
-            echo "Skipping live scan. You will choose IPs from suggested last octets."
+scan_isp_pi="n"
+if [ "$need_isp_pi_scan" -eq 1 ]; then
+    prompt_line scan_isp_pi \
+        "Would you like to scan each ISP subnet for used IPs? (y/n): " \
+        "scan_isp_pi_ips"
+
+    if is_yes "$scan_isp_pi"; then
+        if ! command -v nmap >/dev/null 2>&1; then
+            echo "nmap is not installed (recommended for finding free IPs)."
+            prompt_line install_nmap_isp \
+                "Would you like to install nmap now? (y/n): " \
+                "install_nmap_isp_pi"
+            if is_yes "$install_nmap_isp"; then
+                apt-get update -qq
+                apt-get install -y nmap
+            else
+                echo "Skipping live scan. You will choose IPs from suggested last octets."
+            fi
         fi
     fi
+else
+    echo "Saved Pi IPs exist for every ISP VLAN; skipping subnet scans."
 fi
 
 for i in $(printf '%s\n' "${!ISP_NAMES[@]}" | sort -n); do
     vid=$((i + 1))
     three="${ISP_NETWORK_PORTION[$i]}"
     default_ip="${three}.${PORTAL_IP_BYTE:-4}"
+
+    if answer_exists "isp_${i}_pi_ip"; then
+        isp_pi_ip="${SAVED_ANSWERS[isp_${i}_pi_ip]}"
+        echo "Using saved Pi IP on ISP ${ISP_NAMES[$i]} (VLAN ${vid}): ${isp_pi_ip}"
+        ISP_PI_IP[$i]="$isp_pi_ip"
+        continue
+    fi
 
     suggest_free_ips_on_subnet "$three" "$scan_isp_pi"
 
@@ -4603,6 +5123,80 @@ ORACLE_VPS_SSH_KEY_PATH="/keys/oracle_rsa"
 if ! step_done "oracle_vps_configured"; then
     configure_oracle_vps
     complete_step "oracle_vps_configured"
+fi
+
+info "Admin SSH reverse tunnel via Oracle VPS"
+echo "The Pi is not reachable from the internet. If you enable this, the Pi"
+echo "opens a reverse SSH tunnel so you can hop: laptop -> VPS:22 -> VPS:localhost:PORT -> Pi:22."
+echo "The extra port is bound on 127.0.0.1 only (GatewayPorts no). Port 22 on the VPS is unchanged."
+echo
+prompt_default INSTALL_SSH_TUNNEL \
+    "Install admin SSH reverse tunnel via the VPS? (y/n)" \
+    "y" \
+    "install_ssh_tunnel"
+
+if is_yes "$INSTALL_SSH_TUNNEL"; then
+    if step_done "pi_ssh_reverse_tunnel" && answer_exists "oracle_vps_ssh_tunnel_port"; then
+        ORACLE_VPS_SSH_TUNNEL_PORT="${SAVED_ANSWERS[oracle_vps_ssh_tunnel_port]}"
+        echo "Admin SSH reverse tunnel already completed (127.0.0.1:${ORACLE_VPS_SSH_TUNNEL_PORT})."
+        echo "Not allocating a new port and not starting a second tunnel."
+        echo "To rebuild it:  sudo ./installer.sh --forget-step pi_ssh_reverse_tunnel"
+    else
+        pick_free_vps_tunnel_port 22022 \
+            "oracle_vps_ssh_tunnel_port" \
+            "VPS localhost port for Pi SSH reverse tunnel" \
+            "reuse"
+        ORACLE_VPS_SSH_TUNNEL_PORT="$REPLY_PORT"
+        save_answer "oracle_vps_ssh_tunnel_port" "$ORACLE_VPS_SSH_TUNNEL_PORT"
+    fi
+
+    echo
+    echo "These answers are only used to print copy-and-paste client instructions."
+    _switch0_name="${SAVED_ANSWERS[switch_0_name]:-network}"
+    _safe_site="$(printf '%s' "$_switch0_name" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alpha:]' | head -c 24)"
+    _default_tunnel_site="${CENTRAL_SITE_ID:-${SAVED_ANSWERS[central_site_id]:-bf-${_safe_site}-network}}"
+    prompt_default SSH_TUNNEL_SITE_ID \
+        "Site identifier for SSH Host aliases (Host <id>_pi; does not replace oracle-vps)" \
+        "$_default_tunnel_site" \
+        "ssh_tunnel_site_id"
+    SSH_TUNNEL_SITE_ID="$(printf '%s' "$SSH_TUNNEL_SITE_ID" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]._-' )"
+    [ -n "$SSH_TUNNEL_SITE_ID" ] || SSH_TUNNEL_SITE_ID="site"
+    save_answer "ssh_tunnel_site_id" "$SSH_TUNNEL_SITE_ID"
+    echo "Pi SSH alias will be: ${SSH_TUNNEL_SITE_ID}_pi"
+
+    prompt_default SSH_CLIENT_PLATFORM \
+        "Print SSH client instructions for (windows/mac/linux/all)" \
+        "all" \
+        "ssh_client_platform"
+    case "${SSH_CLIENT_PLATFORM,,}" in
+        windows|mac|linux|all) ;;
+        *)
+            echo "Unknown platform '$SSH_CLIENT_PLATFORM'; using all."
+            SSH_CLIENT_PLATFORM="all"
+            save_answer "ssh_client_platform" "all"
+            ;;
+    esac
+    if [[ "${SSH_CLIENT_PLATFORM,,}" == "windows" || "${SSH_CLIENT_PLATFORM,,}" == "all" ]]; then
+        prompt_default WINDOWS_SSH_USER \
+            "Windows account name (the folder name under C:\\Users)" \
+            "RobertVerrill" \
+            "windows_ssh_user"
+        prompt_default WANT_PUTTY_INSTRUCTIONS \
+            "Also print PuTTY instructions? (y/n)" \
+            "y" \
+            "want_putty_instructions"
+    fi
+    if [[ "${SSH_CLIENT_PLATFORM,,}" == "mac" || "${SSH_CLIENT_PLATFORM,,}" == "all" ]]; then
+        prompt_default MAC_SSH_USER \
+            "macOS account name (the folder name under /Users)" \
+            "${REAL_USER:-admin}" \
+            "mac_ssh_user"
+    fi
+
+    configure_oracle_vps_admin_sshd
+else
+    ORACLE_VPS_SSH_TUNNEL_PORT=""
+    echo "Admin SSH reverse tunnel will not be installed."
 fi
 
 
@@ -5710,3 +6304,4 @@ if is_yes "${PI_ENABLE_ISP_MDNS:-n}" && [ "${PI_DEFAULT_ROUTE_SOURCE,,}" != "wif
     echo "Admin SSH to the Pi is now:"
     echo "  ssh -i ${PI_KEY_PATH} ${PI_USER}@${LOCAL_BASE}.${MANAGEMENT_VLAN}.${PORTAL_IP_BYTE}"
 fi
+print_ssh_tunnel_usage

@@ -31,14 +31,16 @@ logger = logging.getLogger(__name__)
 switch_ports_bp = Blueprint('switch_ports', __name__)
 
 PORT_ROLES = {
-    'ap':           'AP Uplink',
-    'cheapap':      'Cheap AP',
-    'wired':        'Wired Device',
-    'pi':           'Pi / Kea',
-    'inter_switch': 'Inter-Switch Link',
-    'uplink_udm':   'Uplink to Router',
-    'fixed_ip':     'Fixed IP device',
-    'unknown':      'Unclassified',
+    'ap':              'AP Uplink',
+    'cheapap':         'Cheap AP',
+    'migration_ap':    'Migration AP',
+    'wired':           'Wired Device',
+    'migration_wired': 'Migration Wired',
+    'pi':              'Pi / Kea',
+    'inter_switch':    'Inter-Switch Link',
+    'uplink_udm':      'Uplink to Router',
+    'fixed_ip':        'Fixed IP device',
+    'unknown':         'Unclassified (VLAN 1, no auth)',
 }
 
 
@@ -51,6 +53,10 @@ def _detect_port_role(port_name: str, description: str) -> str:
     desc = (description or '').lower()
     if 'udm' in desc or 'usg' in desc:
         return 'uplink_udm'
+    if 'migration' in desc and 'ap' in desc:
+        return 'migration_ap'
+    if 'migration' in desc and 'wired' in desc:
+        return 'migration_wired'
     if ('unifi' in desc and 'ap' in desc) or \
        desc.endswith(' ap') or ' ap ' in desc or \
        '-ap' in desc or desc.startswith('ap'):
@@ -268,13 +274,15 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
     external_vlans_list = ' '.join(v for v in external_vlans_raw.split(',') if v.strip())
 
     CANONICAL_DESC = {
-        'ap':           'Uplink to UniFi AP',
-        'cheapap':      'Cheap AP',
-        'wired':        'wired port',
-        'pi':           'TRUNK-TO-PI-Kea',
-        'inter_switch': 'Inter-switch link',
-        'uplink_udm':   'TRUNK-TO-UDM',
-        'unknown':      '',
+        'ap':              'Uplink to UniFi AP',
+        'cheapap':         'Cheap AP',
+        'migration_ap':    'Migration AP (VLAN 1 native)',
+        'wired':           'wired port',
+        'migration_wired': 'Migration wired VLAN 1',
+        'pi':              'TRUNK-TO-PI-Kea',
+        'inter_switch':    'Inter-switch link',
+        'uplink_udm':      'TRUNK-TO-UDM',
+        'unknown':         '',
     }
     # Role-specific canonical takes priority; only unknown falls back to existing desc.
     canonical = CANONICAL_DESC.get(role, '')
@@ -353,6 +361,44 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
             'poe enable',
         ])
 
+    elif role == 'migration_ap':
+        # Native VLAN 1 so a UniFi SSID on VLAN 1 is untagged. Other SSIDs
+        # stay tagged. No MAC-auth / IPSG so PVID 1 is not overridden.
+        ap_tagged = vlans_list
+        if external_vlans_list:
+            ap_tagged = f'{ap_tagged} {external_vlans_list}'.strip()
+        try:
+            isp_tagged = [
+                str(r.vlan_id)
+                for r in ISPRouter.query.order_by(ISPRouter.vlan_id).all()
+                if r.vlan_id is not None and int(r.vlan_id) != 1
+            ]
+        except Exception:
+            isp_tagged = []
+        if isp_tagged:
+            ap_tagged = f'{ap_tagged} {" ".join(isp_tagged)}'.strip()
+        untagged = ['1']
+        if mgmt_vlan and mgmt_vlan != '1' and mgmt_vlan not in untagged:
+            untagged.append(mgmt_vlan)
+        if wired_vlan and wired_vlan != '1' and wired_vlan not in untagged:
+            untagged.append(wired_vlan)
+        untagged_str = ' '.join(untagged)
+        body.extend([
+            f'interface {expanded}',
+            'port link-type access',
+            'port link-type hybrid',
+            'undo port hybrid vlan 1',
+            f'port hybrid vlan {ap_tagged} tagged',
+            f'port hybrid vlan {untagged_str} untagged',
+            'port hybrid pvid vlan 1',
+            'mac-vlan enable',
+            'undo mac-authentication',
+            'undo ip verify source',
+            'dhcp snooping binding record',
+            'dhcp snooping check mac-address',
+            'poe enable',
+        ])
+
     elif role == 'cheapap':
         body.extend([
             f'interface {expanded}',
@@ -370,6 +416,17 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
             'dhcp snooping binding record',
             'dhcp snooping check mac-address',
             'poe enable',
+        ])
+
+    elif role == 'migration_wired':
+        # Access VLAN 1, no MAC-auth. For hosts still on the old LAN.
+        body.extend([
+            f'interface {expanded}',
+            'port link-type access',
+            'port access vlan 1',
+            'undo mac-authentication',
+            'undo ip verify source',
+            'undo mac-vlan',
         ])
 
     elif role == 'pi':
@@ -550,13 +607,15 @@ def update():
         return redirect(url_for('admin.switch_ports.list_switch_ports'))
 
     ROLE_DESC = {
-        'ap':           'Uplink to UniFi AP',
-        'cheapap':      'Cheap AP',
-        'wired':        'wired port',
-        'pi':           'TRUNK-TO-PI-Kea',
-        'inter_switch': 'Inter-switch link',
-        'uplink_udm':   'TRUNK-TO-UDM',
-        'unknown':      None,
+        'ap':              'Uplink to UniFi AP',
+        'cheapap':         'Cheap AP',
+        'migration_ap':    'Migration AP (VLAN 1 native)',
+        'wired':           'wired port',
+        'migration_wired': 'Migration wired VLAN 1',
+        'pi':              'TRUNK-TO-PI-Kea',
+        'inter_switch':    'Inter-switch link',
+        'uplink_udm':      'TRUNK-TO-UDM',
+        'unknown':         None,
     }
 
     changed = 0
@@ -660,7 +719,9 @@ def update_single():
         return jsonify({'success': False, 'error': f'SSH to {host} failed'})
 
     _CANONICAL_DESC = {
-        'ap': 'Uplink to UniFi AP', 'cheapap': 'Cheap AP', 'wired': 'wired port',
+        'ap': 'Uplink to UniFi AP', 'cheapap': 'Cheap AP',
+        'migration_ap': 'Migration AP (VLAN 1 native)',
+        'wired': 'wired port', 'migration_wired': 'Migration wired VLAN 1',
         'pi': 'TRUNK-TO-PI-Kea', 'inter_switch': 'Inter-switch link',
         'uplink_udm': 'TRUNK-TO-UDM',
     }

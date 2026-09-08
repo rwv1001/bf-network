@@ -467,6 +467,12 @@
     var socket = null;
     var connected = false;
 
+    term.onData(function(data) {
+        if (socket && connected) {
+            socket.emit('input', { data: data });
+        }
+    });
+
     function setStatus(text) {
         if (statusEl) statusEl.textContent = text;
     }
@@ -583,11 +589,7 @@
             cleanupSocket();
         });
 
-        term.onData(function(data) {
-            if (socket && connected) {
-                socket.emit('input', {data: data});
-            }
-        });
+        
     });
 
     disconnectBtn.addEventListener('click', function() {
@@ -602,6 +604,7 @@
 
         if (socket) {
             socket.off();
+            socket.disconnect();
             socket = null;
         }
 
