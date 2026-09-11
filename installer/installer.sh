@@ -17,6 +17,9 @@ set -euo pipefail
 #   - wlan0 is left enabled for recovery/admin access.
 #   - Docker/Docker Compose may be installed on the Pi.
 #   - The bf-network repository is replaced at the chosen path.
+#   - ISP uplink VLANs start at VLAN 2 (install Wi-Fi / first router = VLAN 2,
+#     next ISP = VLAN 3, …). VLAN 1 is unused native so UniFi Default/untagged
+#     is not an ISP LAN.
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,6 +28,28 @@ BF_REPO_URL="https://github.com/rwv1001/bf-network.git"
 BF_REPO_BRANCH="main"
 KEA_LFC_FIX_REV="2026-08-21-v4"
 PI_TRUNK_NATIVE_VLAN="${PI_TRUNK_NATIVE_VLAN:-1028}"
+# First ISP (the LAN you SSH over during install, often 192.168.1.0/24) uses
+# VLAN 2. Further ISPs are 3, 4, … Override with ISP_VLAN_BASE if needed.
+ISP_VLAN_BASE="${ISP_VLAN_BASE:-2}"
+
+# 0-based ISP index → 802.1Q VLAN ID (ISP 0 → 2, ISP 1 → 3, …)
+isp_vlan_id() {
+    echo $((${1:?} + ISP_VLAN_BASE))
+}
+
+last_isp_vlan_id() {
+    local n="${NUM_ISPS:-0}"
+    if [ "$n" -lt 1 ]; then
+        echo "$((ISP_VLAN_BASE - 1))"
+        return 0
+    fi
+    echo $((ISP_VLAN_BASE + n - 1))
+}
+
+# Comware permit list covering unused VLAN 1 plus ISP uplinks 2..last
+isp_trunk_vlan_span() {
+    echo "1 to $(last_isp_vlan_id)"
+}
 
 # Encrypted, resumable installer state. Override with --state-file PATH.
 STATE_FILE="${BF_INSTALL_STATE_FILE:-/var/lib/bf-network-installer/state.gpg}"
@@ -830,6 +855,36 @@ validate_private_base() {
 # Pi SSH helpers
 # =============================================================================
 
+# Reused IPs (old Pi → this PC) leave a stale host key. accept-new does not
+# replace an existing known_hosts line; drop it first.
+ssh_drop_stale_host_key() {
+    local host="$1"
+    local kh
+    for kh in \
+        "${REAL_HOME:-$HOME}/.ssh/known_hosts" \
+        /root/.ssh/known_hosts \
+        "${HOME}/.ssh/known_hosts"
+    do
+        [ -f "$kh" ] || continue
+        ssh-keygen -f "$kh" -R "$host" >/dev/null 2>&1 || true
+        ssh-keygen -f "$kh" -R "[${host}]:22" >/dev/null 2>&1 || true
+    done
+}
+
+# Probe (or reuse) SSH to a host with the Pi key. Recycled IPs get a new host key.
+ssh_pi_host() {
+    local host="$1"
+    shift
+    ssh_drop_stale_host_key "$host"
+    ssh -i "$PI_KEY_PATH" \
+        -o BatchMode=yes \
+        -o IdentitiesOnly=yes \
+        -o ConnectTimeout=8 \
+        -o StrictHostKeyChecking=accept-new \
+        -o UserKnownHostsFile="${REAL_HOME:-$HOME}/.ssh/known_hosts" \
+        "${PI_USER}@${host}" "$@"
+}
+
 pi_ssh_raw() {
     ssh -i "$PI_KEY_PATH" \
         -o BatchMode=yes \
@@ -1469,6 +1524,34 @@ This installer machine (copy the keys from here):
 
 Redo tunnel:  sudo ./installer.sh --forget-step pi_ssh_reverse_tunnel
 Redo sshd:    sudo ./installer.sh --forget-step oracle_vps_admin_sshd
+
+----------------------------------------------------------------------------
+Stale host key for 127.0.0.1:${port}
+----------------------------------------------------------------------------
+Every site tunnel looks like [127.0.0.1]:${port} to your laptop. If you
+replace the Pi/PC, or reuse the port, SSH will say:
+
+  WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!
+  Host key for [127.0.0.1]:${port} has changed
+  Offending ED25519 key in .../known_hosts
+
+That is expected. Remove the old line, then connect again.
+
+Linux / macOS / installer machine:
+  ssh-keygen -R "[127.0.0.1]:${port}"
+
+Windows PowerShell:
+  ssh-keygen -R "[127.0.0.1]:${port}"
+
+PuTTY: if it warns that the host key changed, click Yes after a rebuild
+of this site. To clear stored keys: load the ${pi_host} session and
+accept the new key, or remove
+  HKEY_CURRENT_USER\\Software\\SimonTatham\\PuTTY\\SshHostKeys
+entries for 127.0.0.1:${port}.
+
+Do this once after replacing the Pi/PC, then:
+  ssh-keygen -R "[127.0.0.1]:${port}"
+  ssh ${pi_host}
 EOF
 
     cat <<EOF
@@ -1676,7 +1759,12 @@ ssh-keygen -l -f "\$sshDir\\${pi_host}"
 
    Repeat for ${pi_host} if needed.
 
-4) Test the VPS hop first, then the Pi:
+4) If ssh ${pi_host} says REMOTE HOST IDENTIFICATION HAS CHANGED
+   (common after replacing the Pi/PC; the tunnel is always 127.0.0.1:${port}):
+
+ssh-keygen -R "[127.0.0.1]:${port}"
+
+5) Test the VPS hop first, then the Pi:
 
 ssh oracle-vps
 ssh ${pi_host}
@@ -1708,44 +1796,38 @@ A) Convert the keys (do this twice, once per key)
       and save as ${win_ssh_ps}\\${pi_host}.ppk
    Do not click "Generate". That would create a new unrelated key.
 
-B) Two PowerShell windows (same idea as the GUI below)
+B) One-command login with plink + putty (copy into PowerShell)
+   Adjust the PuTTY install path if yours is different.
 
-   Window 1 — leave this running:
-& "C:\\Program Files\\PuTTY\\plink.exe" -i "${win_ssh_ps}\\oracle_vps.ppk" -N -L 127.0.0.1:${port}:127.0.0.1:${port} ${ORACLE_VPS_USER}@${ORACLE_VPS_HOST}
+\$putty = "C:\\Program Files\\PuTTY\\putty.exe"
+\$plink = "C:\\Program Files\\PuTTY\\plink.exe"
+\$oraclePpk = "${win_ssh_ps}\\oracle_vps.ppk"
+\$piPpk = "${win_ssh_ps}\\${pi_host}.ppk"
+\$proxy = '& "' + \$plink + '" -i "' + \$oraclePpk + '" -nc 127.0.0.1:${port} ${ORACLE_VPS_USER}@${ORACLE_VPS_HOST}'
+& \$putty -i \$piPpk -P ${port} -proxycmd \$proxy ${PI_USER}@127.0.0.1
 
-   Window 2 — after window 1 is connected:
-& "C:\\Program Files\\PuTTY\\putty.exe" -i "${win_ssh_ps}\\${pi_host}.ppk" -P ${port} ${PI_USER}@127.0.0.1
-
-   Do not use -proxycmd or plink -nc. That closes the connection.
-
-C) Saved PuTTY sessions (GUI) — this is the method that works
-
-   Session 1 — save as oracle-vps-tunnel. Open this first and leave it open.
-     Session → Host Name: ${ORACLE_VPS_HOST}
+C) Saved PuTTY sessions (GUI)
+   Session 1 — jump host (save as "oracle-vps"):
+     Host Name: ${ORACLE_VPS_HOST}
      Port: 22
      Connection → Data → Auto-login username: ${ORACLE_VPS_USER}
      Connection → SSH → Auth → Credentials → Private key file:
        ${win_ssh_ps}\\oracle_vps.ppk
-     Connection → SSH: tick "Do not start a shell or command at all"
-     Connection → SSH → Tunnels:
-       Source port: ${port}
-       Destination: 127.0.0.1:${port}
-       Local
-       Add
-     Connection → Proxy: None
-     Session → Saved Sessions: oracle-vps-tunnel → Save
+     Session → Save as: oracle-vps
 
-   Session 2 — save as ${pi_host}. Open this after session 1 is connected.
-     Session → Host Name: 127.0.0.1
+   Session 2 — Pi for this site (save as ${pi_host}):
+     Host Name: 127.0.0.1
      Port: ${port}
      Connection → Data → Auto-login username: ${PI_USER}
      Connection → SSH → Auth → Credentials → Private key file:
        ${win_ssh_ps}\\${pi_host}.ppk
-     Connection → Proxy: None
-     Session → Saved Sessions: ${pi_host} → Save
+     Connection → Proxy
+       Proxy type: Local
+       Telnet command, or local proxy command:
+         "C:\\Program Files\\PuTTY\\plink.exe" -i "${win_ssh_ps}\\oracle_vps.ppk" -nc %host:%port ${ORACLE_VPS_USER}@${ORACLE_VPS_HOST}
+     Session → Save as: ${pi_host}
 
-   Order: open oracle-vps-tunnel, leave it running, then open ${pi_host}.
-   Do not set a Local/SSH proxy on ${pi_host}.
+   Then open session "${pi_host}".
 
 D) First-time host-key prompts
    Accept the VPS host key, then the Pi host key. The Pi key may already
@@ -1817,10 +1899,10 @@ derive_pi_server_values() {
 
     # EXTERNAL_VLANS_CSV / EXTERNAL_VLAN_SUBNETS_CSV set during prompt section
     EXTERNAL_VLANS="${EXTERNAL_VLANS_CSV:-}"
-    # Uplink VLAN for ISP i is (i+1): ISP 0 → VLAN 1, ISP 1 → VLAN 2, …
+    # Uplink VLAN for ISP i is (i+ISP_VLAN_BASE): ISP 0 → VLAN 2, ISP 1 → VLAN 3, …
     ISP_VLANS=""
     for i in $(printf '%s\n' "${!ISP_NAMES[@]}" | sort -n); do
-        ISP_VLANS="$(csv_append "$ISP_VLANS" "$((i + 1))")"
+        ISP_VLANS="$(csv_append "$ISP_VLANS" "$(isp_vlan_id "$i")")"
     done
     EXTERNAL_VLAN_SUBNETS="${EXTERNAL_VLAN_SUBNETS_CSV:-}"
 }
@@ -2169,10 +2251,28 @@ write_pi_env_file() {
 # Pi networkd and repo configuration
 # =============================================================================
 
+install_nic_watchdog() {
+    info "Installing NIC TX-hang watchdog on $WAN_IFACE (Realtek quirks applied automatically)"
+    pi_sudo "IFACE=$WAN_IFACE PING_VLAN=$MANAGEMENT_VLAN TARGETS='$SWITCH_HOSTS' bash $PI_REPO_DIR/scripts/nic-watchdog/install.sh"
+}
+
 configure_pi_networkd() {
-    info "Configuring systemd-networkd VLAN interfaces on $WAN_IFACE"
+    info "Preparing $WAN_IFACE as VLAN parent (no VLAN NICs until end of install)"
 
     : "${WAN_IFACE:?WAN_IFACE is not set}"
+
+    # Trunk parent must never have IPv4. NM treats a DHCP address on the NIC
+    # as "wired is up" and drops Wi-Fi — that is the installer SSH path.
+    # Do not create ${WAN_IFACE}.${MANAGEMENT_VLAN} here: a management
+    # default route / DNS on that iface breaks apt mid-install.
+    echo "Keeping installer SSH on Wi-Fi; ${WAN_IFACE} is VLAN-parent only (no IPv4)."
+    echo "VLAN NICs including ${WAN_IFACE}.${MANAGEMENT_VLAN} are created at the end."
+    pi_sudo "ip -4 addr flush dev ${WAN_IFACE} 2>/dev/null || true"
+    if pi_ssh "command -v nmcli >/dev/null 2>&1"; then
+        pi_sudo "nmcli device set ${WAN_IFACE} managed no 2>/dev/null || true"
+        pi_sudo "nmcli device disconnect ${WAN_IFACE} 2>/dev/null || true"
+        pi_sudo "nmcli radio wifi on 2>/dev/null || true"
+    fi
 
     pi_sudo "modprobe 8021q || true"
     pi_sudo "mkdir -p /etc/modules-load.d"
@@ -2181,15 +2281,7 @@ configure_pi_networkd() {
     local tmpdir
     tmpdir="$(mktemp -d)"
 
-    local all_pi_vlans=("${VLAN_LIST[@]}" "$MANAGEMENT_VLAN" "$WIRED_VLAN")
-    local i vid
-
-    # ISP VLANs 1..N (needed for printers and for an ISP default route)
-    for i in $(printf '%s\n' "${!ISP_NAMES[@]}" | sort -n); do
-        vid=$((i + 1))
-        all_pi_vlans+=("$vid")
-    done
-
+    # Parent unit only — no VLAN= children yet.
     {
         echo "[Match]"
         echo "Name=$WAN_IFACE"
@@ -2198,91 +2290,7 @@ configure_pi_networkd() {
         echo "DHCP=no"
         echo "LinkLocalAddressing=no"
         echo "ConfigureWithoutCarrier=yes"
-        for vlan in "${all_pi_vlans[@]}"; do
-            echo "VLAN=${WAN_IFACE}.${vlan}"
-        done
     } > "$tmpdir/00-bf-uplink.network"
-
-    for vlan in "${all_pi_vlans[@]}"; do
-        
-        cat > "$tmpdir/11-vlan-${vlan}.netdev" <<EOF
-[NetDev]
-Name=${WAN_IFACE}.${vlan}
-Kind=vlan
-
-[VLAN]
-Id=$vlan
-EOF
-        local addr=""
-        local is_isp_vlan=0
-        addr="${LOCAL_BASE}.${vlan}.${PORTAL_IP_BYTE}/24"
-
-        # ISP VLANs often share a subnet with site Wi-Fi. Do not address them
-        # during install or they steal 192.168.1.0/24 from wlan0.
-        for i in $(printf '%s\n' "${!ISP_NAMES[@]}" | sort -n); do
-            if [ "$vlan" = "$((i + 1))" ]; then
-                is_isp_vlan=1
-                break
-            fi
-        done
-
-        if [ "$is_isp_vlan" -eq 1 ]; then
-            cat > "$tmpdir/21-vlan-${vlan}.network" <<EOF
-[Match]
-Name=${WAN_IFACE}.${vlan}
-
-[Network]
-# Address deferred until finalize_pi_isp_mdns_interfaces
-ConfigureWithoutCarrier=yes
-EOF
-        else
-            cat > "$tmpdir/21-vlan-${vlan}.network" <<EOF
-[Match]
-Name=${WAN_IFACE}.${vlan}
-
-[Network]
-Address=${addr}
-EOF
-        fi
-
-        if [ "$vlan" = "$MANAGEMENT_VLAN" ]; then
-            cat >> "$tmpdir/21-vlan-${vlan}.network" <<EOF
-MACVLAN=macvlan-dns
-DNS=8.8.8.8
-DNS=1.1.1.1
-EOF
-        fi
-
-        if [ "${PI_DEFAULT_ROUTE_SOURCE,,}" != "wifi" ] \
-            && [ "${WAN_IFACE}.${vlan}" = "${PI_DEFAULT_ROUTE_DEV}" ] \
-            && [ -n "${PI_DEFAULT_ROUTE_GW}" ]; then
-            cat >> "$tmpdir/21-vlan-${vlan}.network" <<EOF
-
-[Route]
-Gateway=${PI_DEFAULT_ROUTE_GW}
-Metric=${PI_DEFAULT_ROUTE_METRIC:-100}
-EOF
-        fi    
-
-    done
-
-    cat > "$tmpdir/45-macvlan-dns.netdev" <<EOF
-[NetDev]
-Name=macvlan-dns
-Kind=macvlan
-
-[MACVLAN]
-Mode=bridge
-EOF
-
-    cat > "$tmpdir/55-macvlan-dns.network" <<EOF
-[Match]
-Name=macvlan-dns
-
-[Network]
-Address=${HIJACK_DNS_IP}/32
-LinkLocalAddressing=no
-EOF
 
     cat > "$tmpdir/99-unmanaged-uplink.conf" <<EOF
 [keyfile]
@@ -2352,13 +2360,6 @@ EOF
             pi_sudo "systemctl start systemd-networkd"
             pi_sudo "networkctl reload"
             pi_sudo "networkctl reconfigure ${WAN_IFACE}"
-            for vlan in "${all_pi_vlans[@]}"; do
-                pi_sudo "networkctl reconfigure ${WAN_IFACE}.${vlan} || true"
-            done
-
-            if ! pi_ssh "ip link show ${WAN_IFACE}.${MANAGEMENT_VLAN} >/dev/null 2>&1"; then
-                die "Ubuntu networkd did not create ${WAN_IFACE}.${MANAGEMENT_VLAN}. Check /run/systemd/network vs /etc/systemd/network/00-bf-uplink.network"
-            fi
             ;;
             *)
             info "Pi: hand eth0 to networkd; leave Wi-Fi (wlan0) alone"
@@ -2398,9 +2399,6 @@ EOF
             pi_sudo "systemctl start systemd-networkd"
             pi_sudo "networkctl reload"
             pi_sudo "networkctl reconfigure ${WAN_IFACE}"
-            for vlan in "${all_pi_vlans[@]}"; do
-                pi_sudo "networkctl reconfigure ${WAN_IFACE}.${vlan} || true"
-            done
             ;;
     esac
 
@@ -2424,15 +2422,17 @@ REMOTE
 
     pi_sudo "ip link show ${WAN_IFACE} || true"
     pi_sudo "networkctl status ${WAN_IFACE} || true"
-    for vlan in "${all_pi_vlans[@]}"; do
-        pi_sudo "ip addr show ${WAN_IFACE}.${vlan} || true"
-    done
+
+    # Drop leftover VLAN NICs from an earlier run so they cannot steal
+    # routes/DNS mid-install. Do not tear down management if SSH is already
+    # using that address.
+    if [ "$PI_WIFI_IP" != "$PORTAL_IP" ]; then
+        pi_sudo "for n in \$(ls /sys/class/net 2>/dev/null | grep '^${WAN_IFACE}\\.' || true); do ip link delete \"\$n\" 2>/dev/null || true; done"
+    else
+        echo "SSH is ${PORTAL_IP}; leaving ${WAN_IFACE}.${MANAGEMENT_VLAN} in place."
+    fi
 
     rm -rf "$tmpdir"
-
-    if ! pi_ssh "ip link show ${WAN_IFACE}.${MANAGEMENT_VLAN} >/dev/null 2>&1"; then
-        die "VLAN ${WAN_IFACE}.${MANAGEMENT_VLAN} was not created on the target host."
-    fi
 
     if ! pi_ssh "echo still_connected"; then
         die "Lost SSH to $PI_WIFI_IP after networkd change. Use the console; do not re-run until Wi-Fi is back."
@@ -2479,6 +2479,186 @@ EOF
     pi_sudo "bash /tmp/bf-docker-daemon.sh && rm -f /tmp/bf-docker-daemon.sh"
     pi_sudo "systemctl reload docker 2>/dev/null || systemctl restart docker 2>/dev/null || true"
 }
+
+# Create VLAN NICs (management first, then user/wired/ISP). Called at the
+# very end so mid-install apt/DNS stays on Wi-Fi.
+apply_pi_vlan_interfaces() {
+    : "${WAN_IFACE:?WAN_IFACE is not set}"
+    : "${MANAGEMENT_VLAN:?MANAGEMENT_VLAN is not set}"
+
+    if step_done "pi_vlan_ifaces"; then
+        echo "Skipping completed step: VLAN interfaces on ${WAN_IFACE}"
+        return 0
+    fi
+
+    info "Creating VLAN interfaces on ${WAN_IFACE} (end of install)"
+
+    local tmpdir vlan i vid addr is_isp_vlan
+    local -a all_pi_vlans=("$MANAGEMENT_VLAN" "${VLAN_LIST[@]}" "$WIRED_VLAN")
+    for i in $(printf '%s\n' "${!ISP_NAMES[@]}" | sort -n); do
+        all_pi_vlans+=("$(isp_vlan_id "$i")")
+    done
+    # VLAN 1 is unused native / UniFi Default. Never create ${WAN_IFACE}.1.
+    local -a _filtered=()
+    for vlan in "${all_pi_vlans[@]}"; do
+        [ "$vlan" = "1" ] && continue
+        _filtered+=("$vlan")
+    done
+    all_pi_vlans=("${_filtered[@]}")
+
+    tmpdir="$(mktemp -d)"
+
+    {
+        echo "[Match]"
+        echo "Name=$WAN_IFACE"
+        echo
+        echo "[Network]"
+        echo "DHCP=no"
+        echo "LinkLocalAddressing=no"
+        echo "ConfigureWithoutCarrier=yes"
+        for vlan in "${all_pi_vlans[@]}"; do
+            echo "VLAN=${WAN_IFACE}.${vlan}"
+        done
+    } > "$tmpdir/00-bf-uplink.network"
+
+    for vlan in "${all_pi_vlans[@]}"; do
+        cat > "$tmpdir/11-vlan-${vlan}.netdev" <<EOF
+[NetDev]
+Name=${WAN_IFACE}.${vlan}
+Kind=vlan
+
+[VLAN]
+Id=$vlan
+EOF
+        addr="${LOCAL_BASE}.${vlan}.${PORTAL_IP_BYTE}/24"
+        is_isp_vlan=0
+        for i in $(printf '%s\n' "${!ISP_NAMES[@]}" | sort -n); do
+            if [ "$vlan" = "$(isp_vlan_id "$i")" ]; then
+                is_isp_vlan=1
+                break
+            fi
+        done
+
+        if [ "$is_isp_vlan" -eq 1 ]; then
+            cat > "$tmpdir/21-vlan-${vlan}.network" <<EOF
+[Match]
+Name=${WAN_IFACE}.${vlan}
+
+[Network]
+# Address deferred until finalize_pi_isp_mdns_interfaces
+ConfigureWithoutCarrier=yes
+EOF
+        else
+            cat > "$tmpdir/21-vlan-${vlan}.network" <<EOF
+[Match]
+Name=${WAN_IFACE}.${vlan}
+
+[Network]
+Address=${addr}
+ConfigureWithoutCarrier=yes
+EOF
+        fi
+
+        if [ "$vlan" = "$MANAGEMENT_VLAN" ]; then
+            # Address + DNS only. Gateway is added by
+            # apply_pi_mgmt_default_route at the very end of install.
+            cat >> "$tmpdir/21-vlan-${vlan}.network" <<EOF
+MACVLAN=macvlan-dns
+DNS=8.8.8.8
+DNS=1.1.1.1
+EOF
+        fi
+    done
+
+    cat > "$tmpdir/45-macvlan-dns.netdev" <<EOF
+[NetDev]
+Name=macvlan-dns
+Kind=macvlan
+
+[MACVLAN]
+Mode=bridge
+EOF
+
+    cat > "$tmpdir/55-macvlan-dns.network" <<EOF
+[Match]
+Name=macvlan-dns
+
+[Network]
+Address=${HIJACK_DNS_IP}/32
+LinkLocalAddressing=no
+EOF
+
+    for file in "$tmpdir"/*; do
+        local base
+        base="$(basename "$file")"
+        echo "Copying $base to server..."
+        pi_scp_to "$file" "/tmp/$base"
+        pi_sudo "mv /tmp/$base /etc/systemd/network/$base"
+    done
+    rm -rf "$tmpdir"
+
+    pi_sudo "find /etc/systemd/network -type f -exec chown root:root {} +"
+    pi_sudo "find /etc/systemd/network -type f -exec chmod 644 {} +"
+    pi_sudo "networkctl reload || true"
+    pi_sudo "networkctl reconfigure ${WAN_IFACE} || true"
+    for vlan in "${all_pi_vlans[@]}"; do
+        pi_sudo "networkctl reconfigure ${WAN_IFACE}.${vlan} || true"
+        pi_sudo "ip addr show ${WAN_IFACE}.${vlan} || true"
+    done
+
+    if ! pi_ssh "ip link show ${WAN_IFACE}.${MANAGEMENT_VLAN} >/dev/null 2>&1"; then
+        die "Did not create ${WAN_IFACE}.${MANAGEMENT_VLAN}."
+    fi
+    complete_step "pi_vlan_ifaces"
+}
+
+# Last networkd change: default via the first switch on VLAN 99.
+# Doing this earlier steals the host default from Wi-Fi and breaks apt.
+apply_pi_mgmt_default_route() {
+    : "${WAN_IFACE:?WAN_IFACE is not set}"
+    : "${MANAGEMENT_VLAN:?MANAGEMENT_VLAN is not set}"
+
+    if step_done "pi_mgmt_default_route"; then
+        echo "Skipping completed step: management default route"
+        return 0
+    fi
+
+    if [ "${PI_DEFAULT_ROUTE_SOURCE,,}" = "wifi" ] || [ -z "${PI_DEFAULT_ROUTE_GW:-}" ]; then
+        echo "Pi default stays on Wi-Fi; not adding Gateway= on ${WAN_IFACE}.${MANAGEMENT_VLAN}."
+        complete_step "pi_mgmt_default_route"
+        return 0
+    fi
+
+    info "Adding Gateway=${PI_DEFAULT_ROUTE_GW} on ${WAN_IFACE}.${MANAGEMENT_VLAN}"
+
+    local unit="/etc/systemd/network/21-vlan-${MANAGEMENT_VLAN}.network"
+    if ! pi_ssh "test -f $unit"; then
+        echo "No $unit yet; skipping management default route."
+        complete_step "pi_mgmt_default_route"
+        return 0
+    fi
+
+    local tmp
+    tmp="$(mktemp)"
+    cat > "$tmp" <<EOF
+#!/bin/bash
+set -euo pipefail
+f='$unit'
+if grep -q '^Gateway=' "\$f"; then
+    echo "Gateway already present in \$f"
+    exit 0
+fi
+printf '\n[Route]\nGateway=${PI_DEFAULT_ROUTE_GW}\nMetric=${PI_DEFAULT_ROUTE_METRIC:-100}\n' >> "\$f"
+networkctl reload || true
+networkctl reconfigure ${WAN_IFACE}.${MANAGEMENT_VLAN} || true
+ip route show default || true
+EOF
+    pi_scp_to "$tmp" "/tmp/bf-add-mgmt-gw.sh"
+    rm -f "$tmp"
+    pi_sudo "bash /tmp/bf-add-mgmt-gw.sh && rm -f /tmp/bf-add-mgmt-gw.sh"
+    complete_step "pi_mgmt_default_route"
+}
+
 detect_target_docker_arch() {
     local machine
     machine="$(pi_ssh "uname -m" | tr -d '\r\n')"
@@ -2909,7 +3089,7 @@ seed_isp_routers() {
         for i in "${!ISP_NAMES[@]}"; do
             name="${ISP_NAMES[$i]}"
             subnet="${ISP_NETWORK_PORTION[$i]}.0/24"
-            vlan_id=$((i + 1))
+            vlan_id="$(isp_vlan_id "$i")"
             switch_host="${ISP_SWITCH_HOST[$i]:-}"
             switch_port="${ISP_SWITCH_PORT[$i]:-}"
             gateway_ip="${ISP_GW[$i]:-}"
@@ -3583,6 +3763,13 @@ install_pi_server() {
     # idempotent, and fixes both first-run admin setup and DNS-01 cert import.
 
     
+    if [ "${SAVED_ANSWERS[pi_networkd_scope]:-}" != "vlans_at_end" ]; then
+        echo "VLAN NICs are now created only at the end of install; re-running networkd prep."
+        unset 'COMPLETED_STEPS[pi_networkd]'
+        unset 'COMPLETED_STEPS[pi_vlan_ifaces]'
+        save_answer "pi_networkd_scope" "vlans_at_end"
+    fi
+
     if ! step_done "pi_networkd"; then
         configure_pi_networkd
         unset 'COMPLETED_STEPS[pi_compose_up]'
@@ -3590,6 +3777,13 @@ install_pi_server() {
     else
         echo "Skipping completed step: target host network configuration"
     fi
+
+   # if ! step_done "pi_nic_watchdog"; then
+    #    install_nic_watchdog
+     #   complete_step "pi_nic_watchdog"
+   # else
+    #    echo "Skipping completed step: NIC watchdog setup"
+    # fi
 
     if ! step_done "setup_pi_chrony"; then
         setup_pi_chrony        
@@ -4020,6 +4214,40 @@ while true; do
     invalidate_answer "num_isps"
 done
 
+# Re-push switch / Pi ISP-VLAN config if this host still has the old
+# "ISP 0 = VLAN 1" numbering saved from an earlier installer.
+if [ "${SAVED_ANSWERS[isp_vlan_numbering]:-}" != "first_isp_vlan_${ISP_VLAN_BASE}" ]; then
+    echo
+    echo "ISP uplink VLANs now start at VLAN ${ISP_VLAN_BASE}:"
+    echo "  first ISP / install Wi-Fi LAN → VLAN ${ISP_VLAN_BASE}"
+    if [ "$NUM_ISPS" -gt 1 ]; then
+        echo "  further ISPs → VLAN $((ISP_VLAN_BASE + 1)) … $(last_isp_vlan_id)"
+    fi
+    echo "VLAN 1 is reserved as unused native (UniFi Default / untagged sink)."
+    echo "Switch serial config and Pi ISP-VLAN steps will be applied again."
+    for _sw in "${!IPS[@]}"; do
+        unset "COMPLETED_STEPS[switch_${_sw}_configured]"
+    done
+    unset 'COMPLETED_STEPS[pi_networkd]'
+    unset 'COMPLETED_STEPS[pi_env_file]'
+    unset 'COMPLETED_STEPS[pi_isp_mdns_ifaces]'
+    save_answer "isp_vlan_numbering" "first_isp_vlan_${ISP_VLAN_BASE}"
+    save_answer "isp_vlan_base" "$ISP_VLAN_BASE"
+fi
+
+# User / mgmt / wired VLANs must not collide with reserved VLAN 1 or ISP uplinks.
+RESERVED_VLAN_IDS="1"
+for ((_r=0; _r<NUM_ISPS; _r++)); do
+    RESERVED_VLAN_IDS="$RESERVED_VLAN_IDS $(isp_vlan_id "$_r")"
+done
+for _u in "${VLAN_LIST[@]}" "$MANAGEMENT_VLAN" "$WIRED_VLAN"; do
+    for _r in $RESERVED_VLAN_IDS; do
+        if [ "$_u" = "$_r" ]; then
+            die "VLAN $_u is reserved (VLAN 1 = unused native; ISP uplinks start at VLAN ${ISP_VLAN_BASE}). Pick different user / management / wired VLAN IDs."
+        fi
+    done
+done
+
 declare -A ISP_NAMES
 declare -A ISP_NETWORK_PORTION
 
@@ -4036,8 +4264,10 @@ normalize_isp_network_portion() {
 }
 
 for ((v=1; v<=NUM_ISPS; v++)); do
-    prompt_required isp_name "Enter name for ISP VLAN $v (router/ISP name)" "isp_$((v - 1))_name"
-    ISP_NAMES[$((v - 1))]="$isp_name"
+    isp_idx=$((v - 1))
+    isp_vid="$(isp_vlan_id "$isp_idx")"
+    prompt_required isp_name "Enter name for ISP #$v (uplink VLAN $isp_vid, router/ISP name)" "isp_${isp_idx}_name"
+    ISP_NAMES[$isp_idx]="$isp_name"
 
     if [ "$v" -eq 1 ]; then
         if answer_exists "isp_0_network_portion"; then
@@ -4048,13 +4278,13 @@ for ((v=1; v<=NUM_ISPS; v++)); do
         CURRENT_THREE_OCTETS="$(normalize_isp_network_portion "$CURRENT_THREE_OCTETS")" \
             || die "Could not derive a 3-octet ISP network portion from: ${SAVED_ANSWERS[isp_0_network_portion]:-$CURRENT_SUBNET}"
         save_answer "isp_0_network_portion" "$CURRENT_THREE_OCTETS"
-        echo "For ISP VLAN $v ($isp_name), using network portion: $CURRENT_THREE_OCTETS"
-        ISP_NETWORK_PORTION[$((v - 1))]="$CURRENT_THREE_OCTETS"
+        echo "For ISP #$v ($isp_name) on VLAN $isp_vid, using network portion: $CURRENT_THREE_OCTETS"
+        ISP_NETWORK_PORTION[$isp_idx]="$CURRENT_THREE_OCTETS"
     else
-        portion_key="isp_$((v - 1))_network_portion"
+        portion_key="isp_${isp_idx}_network_portion"
         while true; do
             prompt_required isp_network_portion \
-                "Enter ISP VLAN network portion for VLAN $v (e.g. 10.5.2 or 192.168.2)" \
+                "Enter ISP VLAN network portion for VLAN $isp_vid (e.g. 10.5.2 or 192.168.2)" \
                 "$portion_key"
             if normalized="$(normalize_isp_network_portion "$isp_network_portion")"; then
                 isp_network_portion="$normalized"
@@ -4064,17 +4294,25 @@ for ((v=1; v<=NUM_ISPS; v++)); do
             echo "Please enter at least three octets, e.g. 192.168.3 or 192.168.3.254."
             invalidate_answer "$portion_key"
         done
-        ISP_NETWORK_PORTION[$((v - 1))]="$isp_network_portion"
+        ISP_NETWORK_PORTION[$isp_idx]="$isp_network_portion"
     fi
 
     ISP_VLAN_CONFIG+="
-vlan $v
+vlan $isp_vid
 name $isp_name
 description UPLINK-TO-$isp_name
 dhcp snooping binding record
 #
 "
 done
+
+# VLAN 1 stays present as unused native (no SVI). Comware already has VLAN 1.
+ISP_VLAN_CONFIG="
+vlan 1
+name unused_native
+description UNUSED-NATIVE-UNTAGGED
+#
+${ISP_VLAN_CONFIG}"
 
 # Build VLAN config blocks. User VLANs + management + wired.
 VLAN_CONFIG=""
@@ -4103,7 +4341,7 @@ arp detection enable
 #
 "
 
-# ISP_NAMES[i], ISP_NETWORK_PORTION[i], uplink VLAN = i+1  (your existing model)
+# ISP_NAMES[i], ISP_NETWORK_PORTION[i], uplink VLAN = i+ISP_VLAN_BASE (ISP 0 → 2)
 
 declare -A VLAN_ISP_INDEX=()   # vlan_id -> index into ISP_NAMES
 
@@ -4112,7 +4350,7 @@ for vlan in "${VLAN_LIST[@]}"; do
     echo
     echo "User VLAN $vlan — which ISP should carry this VLAN’s traffic?"
     for i in $(printf '%s\n' "${!ISP_NAMES[@]}" | sort -n); do
-        echo "  $((i + 1))) ${ISP_NAMES[$i]}  (uplink VLAN $((i + 1)), net ${ISP_NETWORK_PORTION[$i]}.0/24)"
+        echo "  $((i + 1))) ${ISP_NAMES[$i]}  (uplink VLAN $(isp_vlan_id "$i"), net ${ISP_NETWORK_PORTION[$i]}.0/24)"
     done
     while true; do
         prompt_line ans "Enter ISP number [1-${#ISP_NAMES[@]}]: " "vlan_${vlan}_isp"
@@ -4219,7 +4457,7 @@ else
 fi
 
 for i in $(printf '%s\n' "${!ISP_NAMES[@]}" | sort -n); do
-    vid=$((i + 1))
+    vid="$(isp_vlan_id "$i")"
     three="${ISP_NETWORK_PORTION[$i]}"
     default_ip="${three}.${PORTAL_IP_BYTE:-4}"
 
@@ -4322,14 +4560,14 @@ collect_pi_default_route_answers() {
 }
 
 collect_pi_mdns_isp_answers() {
-    info "mDNS / printing on ISP LAN (VLAN 1..N)"
+    info "mDNS / printing on ISP LAN (VLAN ${ISP_VLAN_BASE}..$(last_isp_vlan_id))"
 
     echo
     echo "Devices on an ISP router LAN (e.g. EE-Deco 192.168.1.0/24) can reach"
     echo "printers on a user VLAN only if the Pi reflects mDNS on that ISP VLAN."
     echo "That requires a Pi IP on ${WAN_IFACE:-eth0}.N and VLAN N on the Pi trunk."
     echo
-    echo "  n — leave ISP VLAN NICs unaddressed. VLAN-1 Bonjour then depends on"
+    echo "  n — leave ISP VLAN NICs unaddressed. First-ISP Bonjour then depends on"
     echo "      Wi-Fi (wlan0). Fine for install; printing dies if Wi-Fi dies."
     echo "  y — at the END of install, add the reserved ISP Pi IPs. If the Pi"
     echo "      default route is 'management', Wi-Fi IPv4 is then disabled and"
@@ -4354,7 +4592,7 @@ finalize_pi_isp_mdns_interfaces() {
     info "ISP VLAN addresses and mDNS cutover"
 
     if ! is_yes "${PI_ENABLE_ISP_MDNS:-n}"; then
-        echo "Leaving ${WAN_IFACE}.1..N without IPv4."
+        echo "Leaving ${WAN_IFACE}.$(isp_vlan_id 0)..$(last_isp_vlan_id) without IPv4."
         echo "If you need Deco-LAN <-> VLAN printing, keep Wi-Fi associated;"
         echo "Bonjour on 192.168.1.0/24 will use wlan0 and needs a stable AP."
         complete_step "pi_isp_mdns_ifaces"
@@ -4363,15 +4601,15 @@ finalize_pi_isp_mdns_interfaces() {
 
     if [ "${PI_DEFAULT_ROUTE_SOURCE,,}" = "wifi" ]; then
         cat <<EOF
-Pi internet is Wi-Fi. Not adding IPs on ${WAN_IFACE}.1..N.
+Pi internet is Wi-Fi. Not adding IPs on ${WAN_IFACE}.$(isp_vlan_id 0)..$(last_isp_vlan_id).
 
 Those addresses are the same subnet as wlan0 and would black-hole SSH
-and break Bonjour. VLAN-1 printing will use wlan0; that AP must stay up.
+and break Bonjour. First-ISP printing will use wlan0; that AP must stay up.
 
 Later, to move printing onto Ethernet:
   1. SSH to ${LOCAL_BASE}.${MANAGEMENT_VLAN}.${PORTAL_IP_BYTE}
   2. Permit ISP VLANs on the Pi trunk (already in new switch configs)
-  3. Add Address=${ISP_PI_IP[0]:-<reserved>}/24 on ${WAN_IFACE}.1
+  3. Add Address=${ISP_PI_IP[0]:-<reserved>}/24 on ${WAN_IFACE}.$(isp_vlan_id 0)
   4. Disable IPv4 on the Wi-Fi connection
 EOF
         complete_step "pi_isp_mdns_ifaces"
@@ -4383,7 +4621,7 @@ EOF
 
     cat <<EOF
 
-About to put reserved IPs on ISP VLAN interfaces (${WAN_IFACE}.1 .. .${NUM_ISPS}).
+About to put reserved IPs on ISP VLAN interfaces (${WAN_IFACE}.$(isp_vlan_id 0) .. .$(last_isp_vlan_id)).
 That is the same subnet as site Wi-Fi. SSH to ${PI_WIFI_IP} will drop.
 
 After this step, SSH with the same key to the management address:
@@ -4400,13 +4638,21 @@ EOF
     fi
 
     echo "Probing SSH to ${mgmt_ip} from this installer host..."
-    if ! ssh -i "$PI_KEY_PATH" -o BatchMode=yes -o ConnectTimeout=8 \
-        -o StrictHostKeyChecking=accept-new \
-        "${PI_USER}@${mgmt_ip}" "echo management_ssh_ok" >/dev/null 2>&1; then
-        die "Cannot SSH to ${PI_USER}@${mgmt_ip} yet.
-Keep using Wi-Fi (${PI_WIFI_IP}). Re-run later with:
+    if ! ssh_pi_host "$mgmt_ip" "echo management_ssh_ok" >/dev/null 2>&1; then
+        cat <<EOF
+Cannot SSH to ${PI_USER}@${mgmt_ip} from this installer host
+(typical when the installer laptop is only on Wi-Fi 192.168.1.0/24).
+
+Not putting IPs on ISP VLAN NICs — that would drop SSH to ${PI_WIFI_IP}.
+Leaving Wi-Fi as the 192.168.1.0/24 path.
+
+Later, from a host that can reach VLAN ${MANAGEMENT_VLAN}:
+  ssh -i ${PI_KEY_PATH} ${PI_USER}@${mgmt_ip}
   sudo ./installer.sh --forget-step pi_isp_mdns_ifaces
-after you can:  ssh -i ${PI_KEY_PATH} ${PI_USER}@${mgmt_ip}"
+  sudo ./installer.sh
+EOF
+        complete_step "pi_isp_mdns_ifaces"
+        return 0
     fi
 
     echo "Management SSH works. Switching installer SSH target to ${mgmt_ip}."
@@ -4414,7 +4660,7 @@ after you can:  ssh -i ${PI_KEY_PATH} ${PI_USER}@${mgmt_ip}"
 
     local i vid tmp_net
     for i in $(printf '%s\n' "${!ISP_NAMES[@]}" | sort -n); do
-        vid=$((i + 1))
+        vid="$(isp_vlan_id "$i")"
         if [ -z "${ISP_PI_IP[$i]:-}" ]; then
             echo "Skipping VLAN ${vid}: no reserved ISP_PI_IP."
             continue
@@ -4439,37 +4685,40 @@ EOF
         pi_sudo "ip addr show ${WAN_IFACE}.${vid} || true"
     done
 
-    echo "Disabling IPv4 on Wi-Fi so 192.168.1.0/24 is only on Ethernet."
+    echo "Disabling IPv4 on Wi-Fi so the ISP LAN is only on ${WAN_IFACE}.$(isp_vlan_id 0)."
+    echo "Installer SSH from here on is ${PI_USER}@${mgmt_ip} (not Wi-Fi)."
     tmp_net="$(mktemp)"
     cat > "$tmp_net" <<'REMOTE'
 #!/bin/bash
-set -e
 IFACE="${PI_WIFI_IFACE:-wlan0}"
 command -v nmcli >/dev/null 2>&1 || exit 0
 nmcli -t -f NAME,DEVICE con show --active | awk -F: -v iface="$IFACE" '$2==iface {print $1}' | while read -r con; do
     [ -n "$con" ] || continue
-    nmcli con modify "$con" ipv4.dns "" || true
-    nmcli con modify "$con" ipv4.dns-search "" || true
-    nmcli con modify "$con" ipv4.ignore-auto-dns no || true
-    nmcli con modify "$con" ipv4.gateway "" || true
-    nmcli con modify "$con" ipv4.addresses "" || true
     nmcli con modify "$con" ipv4.method disabled || true
-    nmcli con up "$con" || true
+    # Do not nmcli con up — that races DHCP and can take Wi-Fi DOWN.
 done
+ip -4 addr flush dev "$IFACE" 2>/dev/null || true
 REMOTE
-    # Expand IFACE in the remote script
     sed -i "s/\${PI_WIFI_IFACE:-wlan0}/${PI_WIFI_IFACE:-wlan0}/" "$tmp_net"
     pi_scp_to "$tmp_net" "/tmp/bf-disable-wlan-ipv4.sh"
     rm -f "$tmp_net"
     pi_sudo "bash /tmp/bf-disable-wlan-ipv4.sh && rm -f /tmp/bf-disable-wlan-ipv4.sh" || true
 
-    if ! ssh -i "$PI_KEY_PATH" -o BatchMode=yes -o ConnectTimeout=8 \
-        "${PI_USER}@${mgmt_ip}" "echo still_ok"; then
-        die "Lost SSH after cutover. Use console, then:
-  ssh -i ${PI_KEY_PATH} ${PI_USER}@${mgmt_ip}"
+    echo
+    if ssh_pi_host "$mgmt_ip" "echo still_ok" >/dev/null 2>&1; then
+        echo "Cutover complete. SSH still works on the management address."
+    else
+        echo "Wi-Fi IPv4 is off and the installer session may have dropped."
+        echo "That is expected. The VLAN addresses are already on the server."
+        echo "This is not a failed install."
     fi
-
-    echo "Cutover complete. Ongoing SSH: ${PI_USER}@${mgmt_ip}"
+    echo
+    echo "Admin SSH to this site from now on:"
+    echo "  ssh -i ${PI_KEY_PATH} ${PI_USER}@${mgmt_ip}"
+    echo
+    echo "If a stale host key appears on your laptop:"
+    echo "  ssh-keygen -R ${mgmt_ip}"
+    echo
     save_answer "pi_wifi_ip_after_cutover" "$mgmt_ip"
     complete_step "pi_isp_mdns_ifaces"
 }
@@ -4539,9 +4788,9 @@ for ((e=0; e<NUM_EXTERNAL_VLANS; e++)); do
             fi
         done
         if [ "$conflict" -eq 0 ]; then
-            for ((v=1; v<=NUM_ISPS; v++)); do
-                if [ "$ext_vlan" = "$v" ]; then
-                    echo "VLAN $ext_vlan is already used as an ISP uplink VLAN."
+            for ((v=0; v<NUM_ISPS; v++)); do
+                if [ "$ext_vlan" = "$(isp_vlan_id "$v")" ] || [ "$ext_vlan" = "1" ]; then
+                    echo "VLAN $ext_vlan is already used as unused native (1) or an ISP uplink VLAN."
                     conflict=1
                     break
                 fi
@@ -5334,6 +5583,8 @@ NETWORK_WORD=$NETWORK_WORD
 VALID_VLANS=$VALID_VLANS
 VLAN_DEFAULTS=$VLAN_DEFAULTS
 VLAN_PREFIX_MAP=$VLAN_PREFIX_MAP
+ISP_VLAN_BASE=$ISP_VLAN_BASE
+ISP_VLANS=$ISP_VLANS
 EXTERNAL_VLANS=${EXTERNAL_VLANS:-}
 EXTERNAL_VLAN_SUBNETS=${EXTERNAL_VLAN_SUBNETS:-}
 MANAGEMENT_VLAN=$MANAGEMENT_VLAN
@@ -5417,7 +5668,9 @@ time repeating at 03:15
         break
     done
 
-    prompt_secret_required CURRENT_PASSWORD "Enter the CURRENT admin password for this switch" "switch_${j}_current_password"
+    prompt_secret_optional CURRENT_PASSWORD \
+        "Enter the CURRENT admin password for this switch (press Enter if the password is empty)" \
+        "switch_${j}_current_password"
     prompt_secret_optional NEW_ADMIN_PASSWORD "Enter NEW admin password for this switch (or press Enter to keep current)" "switch_${j}_new_admin_password"
 
     UPLINK_PORTS=()
@@ -5496,12 +5749,19 @@ time repeating at 03:15
 
     LAST_OCTET="$(last_octet "$MGMT_IP")"
 
-    VLAN_IFACE_CONFIG=""
-    for ((v=1; v<=NUM_ISPS; v++)); do
+    VLAN_IFACE_CONFIG="
+interface Vlan-interface1
+description UNUSED-NATIVE-UNTAGGED
+undo ip address
+undo packet-filter
+#
+"
+    for ((v=0; v<NUM_ISPS; v++)); do
+        isp_vid="$(isp_vlan_id "$v")"
         VLAN_IFACE_CONFIG+="
-interface Vlan-interface$v
-description UPLINK-TO-${ISP_NAMES[$((v - 1))]}
-ip address ${ISP_NETWORK_PORTION[$((v - 1))]}.$LAST_OCTET 255.255.255.0
+interface Vlan-interface${isp_vid}
+description UPLINK-TO-${ISP_NAMES[$v]}
+ip address ${ISP_NETWORK_PORTION[$v]}.$LAST_OCTET 255.255.255.0
 #
 "
     done
@@ -5544,7 +5804,7 @@ ip address ${ext_ip} ${ext_mask}
     for idx in "${!UPLINK_PORTS[@]}"; do
         port="${UPLINK_PORTS[$idx]}"
         isp_index="${UPLINK_ISP_INDEXES[$idx]}"
-        vlan_number=$((isp_index + 1))
+        vlan_number="$(isp_vlan_id "$isp_index")"
         iface="$(get_interface "$port" "${MAX_1GBS_PORT[$j]}")"
         UPLINK_CONFIG+="
 interface $iface
@@ -5552,6 +5812,7 @@ description UPLINK-TO-${ISP_NAMES[$isp_index]}
 port link-type trunk
 undo port trunk permit vlan 1
 port trunk permit vlan $vlan_number
+port trunk pvid vlan $vlan_number
 dhcp snooping trust
 #
 "
@@ -5569,7 +5830,7 @@ dhcp snooping trust
 interface $iface
 description Inter-switch link
 port link-type trunk
-port trunk permit vlan 1 to $NUM_ISPS ${VLAN_LIST[*]} $MANAGEMENT_VLAN $WIRED_VLAN $EXT_VLAN_SPACE
+port trunk permit vlan $(isp_trunk_vlan_span) ${VLAN_LIST[*]} $MANAGEMENT_VLAN $WIRED_VLAN $EXT_VLAN_SPACE
 port trunk pvid vlan 1
 arp detection trust
 dhcp snooping trust
@@ -5589,7 +5850,7 @@ interface $iface
 description TRUNK-TO-PI-Kea
 port link-type trunk
 undo port trunk permit vlan 1
-port trunk permit vlan 1 to $NUM_ISPS ${VLAN_LIST[*]} $MANAGEMENT_VLAN $WIRED_VLAN ${PI_TRUNK_NATIVE_VLAN:-1028}
+port trunk permit vlan $(isp_trunk_vlan_span) ${VLAN_LIST[*]} $MANAGEMENT_VLAN $WIRED_VLAN ${PI_TRUNK_NATIVE_VLAN:-1028}
 port trunk pvid vlan ${PI_TRUNK_NATIVE_VLAN:-1028}
 arp detection trust
 dhcp snooping trust
@@ -5599,11 +5860,9 @@ dhcp snooping trust
     # VLAN-99 address for this switch (NAS-IP)
     SWITCH_NAS_IP="${LOCAL_BASE}.${MANAGEMENT_VLAN}.${LAST_OCTET}"
 
-    DHCP_SNOOP_VLANS="1"
-    if [ "$NUM_ISPS" -gt 1 ]; then
-        DHCP_SNOOP_VLANS="1 to $NUM_ISPS"
-    fi
-    for vlan in "${VLAN_LIST[@]}" "$WIRED_VLAN"; do
+    DHCP_SNOOP_VLANS="$(isp_trunk_vlan_span)"
+    # MANAGEMENT_VLAN must be snooped: APs DHCP on it and IPSG needs bindings
+    for vlan in "${VLAN_LIST[@]}" "$MANAGEMENT_VLAN" "$WIRED_VLAN"; do
         DHCP_SNOOP_VLANS="$DHCP_SNOOP_VLANS $vlan"
     done
 
@@ -6296,12 +6555,22 @@ install_pi_server
 setup_bf_central
 apply_central_secrets_to_pi
 
-# Last Pi step: ISP VLAN addresses. Can drop Wi-Fi SSH.
+# Last Pi steps: VLAN NICs (no VLAN 1, no default on .99), optional ISP IPs,
+# then Gateway= on management only after everything else has finished.
+apply_pi_vlan_interfaces
 finalize_pi_isp_mdns_interfaces
+apply_pi_mgmt_default_route
 
+echo
+echo "============================================================================"
+echo "Installation Complete!"
+echo "============================================================================"
+echo
 echo "All switches and the target host server have been processed."
-if is_yes "${PI_ENABLE_ISP_MDNS:-n}" && [ "${PI_DEFAULT_ROUTE_SOURCE,,}" != "wifi" ]; then
-    echo "Admin SSH to the Pi is now:"
-    echo "  ssh -i ${PI_KEY_PATH} ${PI_USER}@${LOCAL_BASE}.${MANAGEMENT_VLAN}.${PORTAL_IP_BYTE}"
-fi
+echo "Installer SSH during setup uses Wi-Fi. Day-to-day SSH is the management VLAN:"
+echo "  ssh -i ${PI_KEY_PATH} ${PI_USER}@${LOCAL_BASE}.${MANAGEMENT_VLAN}.${PORTAL_IP_BYTE}"
+echo "${WAN_IFACE} stays a VLAN parent (no IPv4). Do not put an address on the bare NIC."
 print_ssh_tunnel_usage
+echo
+echo "Installation Complete!"
+
