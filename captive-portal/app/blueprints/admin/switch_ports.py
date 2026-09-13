@@ -276,9 +276,9 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
     CANONICAL_DESC = {
         'ap':              'Uplink to UniFi AP',
         'cheapap':         'Cheap AP',
-        'migration_ap':    'Migration AP (VLAN 1 native)',
+        'migration_ap':    'Migration AP (VLAN 2 native)',
         'wired':           'wired port',
-        'migration_wired': 'Migration wired VLAN 1',
+        'migration_wired': 'Migration wired VLAN 2',
         'pi':              'TRUNK-TO-PI-Kea',
         'inter_switch':    'Inter-switch link',
         'uplink_udm':      'TRUNK-TO-UDM',
@@ -301,7 +301,7 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
             isp_untagged = [
                 str(r.vlan_id)
                 for r in ISPRouter.query.order_by(ISPRouter.vlan_id).all()
-                if r.vlan_id is not None and int(r.vlan_id) != 1
+                if r.vlan_id is not None and int(r.vlan_id) != 2
             ]
         except Exception:
             isp_untagged = []
@@ -312,7 +312,7 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
             f'interface {expanded}',
             'port link-type access',
             'port link-type hybrid',
-            'undo port hybrid vlan 1',
+            'undo port hybrid vlan 2',
             f'port hybrid vlan {wired_untagged} untagged',
             f'port hybrid vlan {mgmt_vlan} untagged',
             f'port hybrid vlan {wired_vlan} untagged',
@@ -336,7 +336,7 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
             isp_tagged = [
                 str(r.vlan_id)
                 for r in ISPRouter.query.order_by(ISPRouter.vlan_id).all()
-                if r.vlan_id is not None and int(r.vlan_id) != 1
+                if r.vlan_id is not None and int(r.vlan_id) != 2
             ]
         except Exception:
             isp_tagged = []
@@ -347,7 +347,7 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
             'port link-type access',
             'port link-type hybrid',
             f'port hybrid vlan {ap_tagged} tagged',
-            f'port hybrid vlan 1 {mgmt_vlan} {wired_vlan} untagged',
+            f'port hybrid vlan 2 {mgmt_vlan} {wired_vlan} untagged',
             f'port hybrid pvid vlan {wired_vlan}',
             'mac-vlan enable',
             'ip verify source ip-address mac-address',
@@ -362,8 +362,8 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
         ])
 
     elif role == 'migration_ap':
-        # Native VLAN 1 so a UniFi SSID on VLAN 1 is untagged. Other SSIDs
-        # stay tagged. No MAC-auth / IPSG so PVID 1 is not overridden.
+        # Native VLAN 2 so a UniFi SSID on VLAN 2 is untagged. Other SSIDs
+        # stay tagged. No MAC-auth / IPSG so PVID 2 is not overridden.
         ap_tagged = vlans_list
         if external_vlans_list:
             ap_tagged = f'{ap_tagged} {external_vlans_list}'.strip()
@@ -371,26 +371,26 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
             isp_tagged = [
                 str(r.vlan_id)
                 for r in ISPRouter.query.order_by(ISPRouter.vlan_id).all()
-                if r.vlan_id is not None and int(r.vlan_id) != 1
+                if r.vlan_id is not None and int(r.vlan_id) != 2
             ]
         except Exception:
             isp_tagged = []
         if isp_tagged:
             ap_tagged = f'{ap_tagged} {" ".join(isp_tagged)}'.strip()
-        untagged = ['1']
-        if mgmt_vlan and mgmt_vlan != '1' and mgmt_vlan not in untagged:
+        untagged = []
+        if mgmt_vlan and mgmt_vlan != '2' and mgmt_vlan not in untagged:
             untagged.append(mgmt_vlan)
-        if wired_vlan and wired_vlan != '1' and wired_vlan not in untagged:
+        if wired_vlan and wired_vlan != '2' and wired_vlan not in untagged:
             untagged.append(wired_vlan)
         untagged_str = ' '.join(untagged)
         body.extend([
             f'interface {expanded}',
             'port link-type access',
             'port link-type hybrid',
-            'undo port hybrid vlan 1',
+            'undo port hybrid vlan 2',
             f'port hybrid vlan {ap_tagged} tagged',
             f'port hybrid vlan {untagged_str} untagged',
-            'port hybrid pvid vlan 1',
+            'port hybrid pvid vlan 2',
             'mac-vlan enable',
             'undo mac-authentication',
             'undo ip verify source',
@@ -404,7 +404,7 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
             f'interface {expanded}',
             'port link-type access',
             'port link-type hybrid',            
-            f'port hybrid vlan 1 {vlans_list} {mgmt_vlan} {wired_vlan} untagged',
+            f'port hybrid vlan 2 {vlans_list} {mgmt_vlan} {wired_vlan} untagged',
             f'port hybrid pvid vlan {wired_vlan}',
             'mac-vlan enable',
             'ip verify source ip-address mac-address',
@@ -419,11 +419,11 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
         ])
 
     elif role == 'migration_wired':
-        # Access VLAN 1, no MAC-auth. For hosts still on the old LAN.
+        # Access VLAN 2, no MAC-auth. For hosts still on the old LAN.
         body.extend([
             f'interface {expanded}',
             'port link-type access',
-            'port access vlan 1',
+            'port access vlan 2',
             'undo mac-authentication',
             'undo ip verify source',
             'undo mac-vlan',
@@ -437,9 +437,9 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
                 if r.vlan_id is not None
             )
         except Exception:
-            isp_vlan_str = '1'
+            isp_vlan_str = '2'
         if not isp_vlan_str:
-            isp_vlan_str = '1'
+            isp_vlan_str = '2'
         # Unused native VLAN so every Pi subinterface stays tagged.
         pi_native = str(os.getenv('PI_TRUNK_NATIVE_VLAN', '1028'))
         body.extend([
@@ -450,7 +450,7 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
             f'interface {expanded}',
             'port link-type access',
             'port link-type trunk',
-            'undo port trunk permit vlan 1',
+            'undo port trunk permit vlan 2',
             f'port trunk permit vlan {isp_vlan_str}',
             f'port trunk permit vlan {vlans_list}',
             f'port trunk permit vlan {mgmt_vlan} {wired_vlan}',
@@ -470,7 +470,7 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
             f'interface {expanded}',
             'port link-type access',
             'port link-type trunk',
-            'port trunk permit vlan 1',
+            'port trunk permit vlan 2',
         ]
         if external_vlans_list:
             uplink_cmds.append(f'port trunk permit vlan {external_vlans_list}')
@@ -481,8 +481,8 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
         try:
             isp_vlan_ids = [str(r.vlan_id) for r in ISPRouter.query.order_by(ISPRouter.vlan_id).all()]
         except Exception:
-            isp_vlan_ids = ['1']
-        isp_vlan_str = ' '.join(isp_vlan_ids) if isp_vlan_ids else '1'
+            isp_vlan_ids = ['2']
+        isp_vlan_str = ' '.join(isp_vlan_ids) if isp_vlan_ids else '2'
         inter_cmds = [
             f'interface {expanded}',
             'port link-type access',
@@ -494,7 +494,7 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
         if external_vlans_list:
             inter_cmds.append(f'port trunk permit vlan {external_vlans_list}')
         inter_cmds.extend([
-            'port trunk pvid vlan 1',
+            'port trunk pvid vlan 2',
             'arp detection trust',
             'dhcp snooping trust',
         ])
@@ -609,9 +609,9 @@ def update():
     ROLE_DESC = {
         'ap':              'Uplink to UniFi AP',
         'cheapap':         'Cheap AP',
-        'migration_ap':    'Migration AP (VLAN 1 native)',
+        'migration_ap':    'Migration AP (VLAN 2 native)',
         'wired':           'wired port',
-        'migration_wired': 'Migration wired VLAN 1',
+        'migration_wired': 'Migration wired VLAN 2',
         'pi':              'TRUNK-TO-PI-Kea',
         'inter_switch':    'Inter-switch link',
         'uplink_udm':      'TRUNK-TO-UDM',
@@ -720,8 +720,8 @@ def update_single():
 
     _CANONICAL_DESC = {
         'ap': 'Uplink to UniFi AP', 'cheapap': 'Cheap AP',
-        'migration_ap': 'Migration AP (VLAN 1 native)',
-        'wired': 'wired port', 'migration_wired': 'Migration wired VLAN 1',
+        'migration_ap': 'Migration AP (VLAN 2 native)',
+        'wired': 'wired port', 'migration_wired': 'Migration wired VLAN 2',
         'pi': 'TRUNK-TO-PI-Kea', 'inter_switch': 'Inter-switch link',
         'uplink_udm': 'TRUNK-TO-UDM',
     }
