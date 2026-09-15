@@ -377,6 +377,8 @@ def main():
             "interfaces-config": {
                 "interfaces": interfaces,
                 "dhcp-socket-type": "raw",
+                "service-sockets-max-retries": 60,
+                "service-sockets-retry-wait-time": 5000,
             },
             "multi-threading": {"enable-multi-threading": True},
             "control-socket": {
