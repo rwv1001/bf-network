@@ -5640,6 +5640,33 @@ EOF
 prompt_ack "derived_settings_confirmed" "Press Enter to continue with switch configuration, then target host installation..."
 
 # =============================================================================
+# Downstream PoE switch / injector (non-PoE 5130 + UniFi APs)
+# =============================================================================
+
+info "PoE for UniFi APs (read this if the 5130 has no PoE)"
+cat <<'EOF'
+If this HP 5130 does not supply PoE and you power UniFi APs with a
+separate PoE switch or injector (UGREEN and similar) that then plugs
+into the 5130:
+
+  Set the little mode switch on the back of that box to VLAN.
+
+  On these units:
+    Standard — all ports one LAN. AP DHCP Discovers often reach Kea
+               but Offers never get back. The AP never gets an address.
+    VLAN     — port isolation; downlinks only talk to the uplink.
+               This is the required setting in front of a 5130 AP port.
+    Extend   — long cable, 10 Mbps. Do not use this for APs.
+
+  Use one uplink from the PoE box into one 5130 AP/hybrid port.
+  Do not enable 5130 PoE on that same port while the injector is in line.
+  If the 5130 itself has PoE and the AP is plugged straight into it,
+  you can ignore this warning.
+EOF
+prompt_ack "poe_downstream_vlan_mode" \
+    "Press Enter after any downstream PoE switch is set to VLAN (or if the 5130 itself supplies PoE)..."
+
+# =============================================================================
 # Main switch configuration loop
 # =============================================================================
 
