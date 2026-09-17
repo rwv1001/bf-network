@@ -719,7 +719,7 @@ def apply_device_block(device, flash_messages: bool = False,
     db.session.commit()
     clear_unregistered_lease(device.mac_address)
 
-    kea_socket = os.getenv('KEA_CONTROL_SOCKET', '/kea/leases/kea4-ctrl-socket')
+    kea_socket = os.getenv('KEA_CONTROL_SOCKET', '/kea/sockets/kea4-ctrl-socket')
     kea = None
     try:
         kea = get_kea_client(control_socket=kea_socket)
@@ -792,7 +792,7 @@ def apply_device_unblock(device, flash_messages: bool = False,
     db.session.commit()
     clear_unregistered_lease(device.mac_address)
 
-    kea_socket = os.getenv('KEA_CONTROL_SOCKET', '/kea/leases/kea4-ctrl-socket')
+    kea_socket = os.getenv('KEA_CONTROL_SOCKET', '/kea/sockets/kea4-ctrl-socket')
     kea = None
     try:
         kea = get_kea_client(control_socket=kea_socket)

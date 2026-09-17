@@ -2759,22 +2759,29 @@ patch_repo_for_install() {
 
     info "1"
 
-    pi_sudo "set -x; cd $q_repo && sed -i -E 's#[^[:space:]]+(/[.]ssh:/keys:ro)#/home/${PI_USER}\1#g' docker-compose.yml"
+    pi_sudo "set -x; cd $q_repo && if [ -f docker-compose.yml ]; then sed -i -E 's#[^[:space:]]+(/[.]ssh:/keys:ro)#/home/${PI_USER}\1#g' docker-compose.yml; else echo 'Skipping compose key-mount patch; docker-compose.yml missing'; fi"
     info "2"
-    pi_sudo "set -x; cd $q_repo && sed -i \"s|SWITCH_KEY_PATH: /keys/id_rsa|SWITCH_KEY_PATH: \\\${SWITCH_KEY_PATH:-/keys/id_rsa}|g\" docker-compose.yml"
+    pi_sudo "set -x; cd $q_repo && if [ -f docker-compose.yml ]; then sed -i \"s|SWITCH_KEY_PATH: /keys/id_rsa|SWITCH_KEY_PATH: \\\${SWITCH_KEY_PATH:-/keys/id_rsa}|g\" docker-compose.yml; fi"
     info "3"
-    pi_sudo "set -x; cd $q_repo && sed -i \"s|WATCHDOG_SWITCH_KEY_PATH: /keys/id_rsa|WATCHDOG_SWITCH_KEY_PATH: \\\${SWITCH_KEY_PATH:-/keys/id_rsa}|g\" docker-compose.yml"
+    pi_sudo "set -x; cd $q_repo && if [ -f docker-compose.yml ]; then sed -i \"s|WATCHDOG_SWITCH_KEY_PATH: /keys/id_rsa|WATCHDOG_SWITCH_KEY_PATH: \\\${SWITCH_KEY_PATH:-/keys/id_rsa}|g\" docker-compose.yml; fi"
     info "4"
-    pi_sudo "set -x; cd $q_repo && sed -i \"s|WATCHDOG_PEER_SSH_KEY: /keys/id_rsa|WATCHDOG_PEER_SSH_KEY: \\\${SWITCH_KEY_PATH:-/keys/id_rsa}|g\" docker-compose.yml"
+    pi_sudo "set -x; cd $q_repo && if [ -f docker-compose.yml ]; then sed -i \"s|WATCHDOG_PEER_SSH_KEY: /keys/id_rsa|WATCHDOG_PEER_SSH_KEY: \\\${SWITCH_KEY_PATH:-/keys/id_rsa}|g\" docker-compose.yml; fi"
     info "5"
 
     # nat-parser (uid 1000) persists its log position under /state; docker would
     # otherwise create the bind-mount dir as root and the position file never saves.
-    pi_sudo "cd $q_repo && mkdir -p captive-portal/data/nat-parser && chown 1000:1000 captive-portal/data/nat-parser"
+    pi_sudo "cd $q_repo && mkdir -p captive-portal/data/nat-parser && chown 1000:1000 captive-portal/data/nat-parser || echo 'Skipping nat-parser data dir'"
 
     # peers.json in the repository carries the previous site's VLAN interfaces;
     # start empty so the reflector stays idle until the first VLAN-config save.
-    pi_sudo "cd $q_repo && printf '{}\n' > mdns/peers.json && chown $PI_USER:$PI_USER mdns/peers.json"
+    # Older trees (and some pinned SHAs) have no mdns/ directory — do not abort.
+    pi_sudo "cd $q_repo && if [ -d mdns ]; then
+        printf '{}\n' > mdns/peers.json && chown $PI_USER:$PI_USER mdns/peers.json
+      elif [ -f docker-compose.yml ] && grep -qE '(^|[[:space:]\"'\''=])mdns/' docker-compose.yml; then
+        mkdir -p mdns && printf '{}\n' > mdns/peers.json && chown $PI_USER:$PI_USER mdns/peers.json
+      else
+        echo 'Skipping mdns/peers.json — this repository tree has no mdns directory'
+      fi"
 
     # The tunnel entrypoint in the repository defaults to /keys/oracle_rsa and fixed reverse ports.
     # This installer intentionally uses the same mounted key path as switch automation and the
@@ -2855,13 +2862,17 @@ PYEOF
     pi_sudo "cd $q_repo && python3 /tmp/bf-patch-compose.py && rm -f /tmp/bf-patch-compose.py"
 
     # Make Kea lease timers configurable from .env if the generator still has the older constants.
-    pi_sudo "cd $q_repo && cat > /tmp/fix-kea.sed << 'SEOF'
+    pi_sudo "cd $q_repo && if [ -f scripts/generate-kea-config.py ]; then
+        cat > /tmp/fix-kea.sed << 'SEOF'
 s/\"renew-timer\": 300,/\"renew-timer\": int(os.environ.get(\"KEA_RENEW_TIMER\", \"300\")),/
 s/\"rebind-timer\": 480,/\"rebind-timer\": int(os.environ.get(\"KEA_REBIND_TIMER\", \"480\")),/
 s/\"valid-lifetime\": 600,/\"valid-lifetime\": int(os.environ.get(\"KEA_VALID_LIFETIME\", \"600\")),/
 SEOF
-sed -i -f /tmp/fix-kea.sed scripts/generate-kea-config.py
-rm -f /tmp/fix-kea.sed"
+        sed -i -f /tmp/fix-kea.sed scripts/generate-kea-config.py
+        rm -f /tmp/fix-kea.sed
+      else
+        echo 'Skipping Kea timer patch; scripts/generate-kea-config.py not in this tree'
+      fi"
     patch_freeradius_image_for_target
     unset 'COMPLETED_STEPS[pi_compose_up]'
 
@@ -3654,10 +3665,22 @@ install_pi_server() {
     if ! step_done "pi_repo_clone"; then
         
         info "Cloning bf-network repository on the target host"
+        BF_REPO_REF="${BF_REPO_REF:-${SAVED_ANSWERS[bf_repo_ref]:-$BF_REPO_BRANCH}}"
+        echo "Repository: $BF_REPO_URL"
+        echo "Ref:        $BF_REPO_REF"
         pi_sudo "cd $q_repo && docker compose down --remove-orphans 2>/dev/null || true"
         pi_sudo "rm -rf $q_repo"
-        pi_sudo "git clone --branch $(shell_quote "$BF_REPO_BRANCH") $(shell_quote "$BF_REPO_URL") $q_repo"
+        # Clone then checkout so a commit SHA works, not only a branch name.
+        pi_sudo "git clone $(shell_quote "$BF_REPO_URL") $q_repo"
+        if ! pi_sudo "git -C $q_repo checkout $(shell_quote "$BF_REPO_REF")"; then
+            die "Could not check out git ref '$BF_REPO_REF' from $BF_REPO_URL.
+Use a branch (e.g. main), a tag, or a commit SHA that exists on that remote.
+Redo with:  sudo ./installer.sh --forget-answer bf_repo_ref
+            sudo ./installer.sh --forget-step pi_repo_clone"
+        fi
+        pi_sudo "git -C $q_repo rev-parse --short=12 HEAD && git -C $q_repo log -1 --oneline"
         pi_sudo "chown -R $q_user:$q_user $q_repo"
+        save_answer "bf_repo_ref_applied" "$BF_REPO_REF"
         complete_step "pi_repo_clone"
         unset 'COMPLETED_STEPS[pi_repo_patch]'
         unset 'COMPLETED_STEPS[pi_env_file]'    
@@ -3665,6 +3688,7 @@ install_pi_server() {
         state_save
     else
         echo "Skipping completed step: repository clone"
+        echo "Deployed ref: ${SAVED_ANSWERS[bf_repo_ref_applied]:-${BF_REPO_REF:-$BF_REPO_BRANCH}}"
     fi
 
     if ! step_done "pi_terminal_assets"; then
@@ -5259,6 +5283,20 @@ PI_WIFI_IFACE="${_ssh_iface:-wlan0}"
 echo "SSH stays on ${_ssh_iface:-unknown} ($PI_WIFI_IP); VLANs go on $WAN_IFACE."
 
 prompt_default PI_REPO_DIR "Enter bf-network install directory" "/home/$PI_USER/bf-network"
+# Branch, tag, or commit SHA. Default is BF_REPO_BRANCH (main).
+# Example: 245da907b370bb407ca89b9cc990a267f103d50f
+prompt_default BF_REPO_REF \
+    "bf-network git ref to clone (branch, tag, or commit SHA)" \
+    "$BF_REPO_BRANCH" \
+    "bf_repo_ref"
+if [ "${SAVED_ANSWERS[bf_repo_ref_applied]:-}" != "$BF_REPO_REF" ]; then
+    echo "Git ref is '$BF_REPO_REF'; repository will be cloned/checked out again."
+    unset 'COMPLETED_STEPS[pi_repo_clone]'
+    unset 'COMPLETED_STEPS[pi_repo_patch]'
+    unset 'COMPLETED_STEPS[pi_env_file]'
+    unset 'COMPLETED_STEPS[pi_compose_up]'
+    state_save
+fi
 prompt_default PORTAL_IP_BYTE "Enter target host server last octet" "4"
 prompt_default HIJACK_DNS_IP_BYTE "Enter hijack DNS last octet" "5"
 prompt_default ADMIN_EMAIL "Admin notification email" "robert.verrill@english.op.org"
@@ -6540,9 +6578,33 @@ apply_central_secrets_to_pi() {
     echo "Restarted kea and web with CENTRAL_API_KEY / CENTRAL_PUSH_SECRET."
 }
 
+# Recreate the whole stack only after VLAN addresses exist, so Pi-hole/Kea
+# can bind PORTAL_IP and the VLAN ifaces (they fail if started too early).
+restart_pi_compose_stack() {
+    if step_done "pi_compose_final_up"; then
+        echo "Skipping completed step: final docker compose down/build/up"
+        return 0
+    fi
 
+    local q_repo
+    q_repo="$(shell_quote "$PI_REPO_DIR")"
 
+    info "Final docker compose down / build / up (after VLAN interfaces)"
 
+    pi_sudo "i=0
+while [ \$i -lt 30 ]; do
+  if ip -4 addr show dev ${WAN_IFACE}.${MANAGEMENT_VLAN} 2>/dev/null | grep -q 'inet '; then
+    break
+  fi
+  echo \"waiting for ${WAN_IFACE}.${MANAGEMENT_VLAN} ...\"
+  i=\$((i + 1))
+  sleep 2
+done
+ip -4 addr show dev ${WAN_IFACE}.${MANAGEMENT_VLAN} || true
+cd $q_repo && docker compose down && docker compose build && docker compose up -d"
+
+    complete_step "pi_compose_final_up"
+}
 
 # =============================================================================
 # Pi server installation
@@ -6560,6 +6622,7 @@ apply_central_secrets_to_pi
 apply_pi_vlan_interfaces
 finalize_pi_isp_mdns_interfaces
 apply_pi_mgmt_default_route
+restart_pi_compose_stack
 
 echo
 echo "============================================================================"

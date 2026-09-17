@@ -709,7 +709,7 @@ document.addEventListener('DOMContentLoaded', function() {
                             );
                             startMismatchPolling();
                         } else {
-                            showStatus('Request approved! Checking internet access...', 'success');
+                            showStatus('Request approved! Checking internet access.... You may need to unplug and replug your device if no internet access is detected after a couple of minutes.', 'success');
                             if (data.needs_ownership_confirmation) {
                                 showConfirmWarning(data.confirm_timeout_minutes);
                             }

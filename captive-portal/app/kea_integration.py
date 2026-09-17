@@ -51,15 +51,14 @@ def _parse_vlan_prefix_map(raw: str) -> Dict[int, int]:
 def _pool_bounds_for_prefix(prefix: int) -> Dict[str, int]:
     total = 2 ** (32 - prefix)
     block_size = 40 * (2 ** (24 - prefix))
-    # Always start the pool at offset 1 (offset 0 is the network address and
-    # Kea never allocates it). Infrastructure IPs are protected by ghost host
-    # reservations baked into dhcp4.json by generate-kea-config.py.
-    registered_start = 1
-    registered_end = total - block_size - 1
+    last_host = total - 2
+    registered_end = min(total - block_size - 1, last_host)
     blocked_start = registered_end + 1
-    blocked_end = total - 1
+    blocked_end = last_host
+    if blocked_start > blocked_end:
+        blocked_start = blocked_end
     return {
-        "registered_start": registered_start,
+        "registered_start": 1,
         "registered_end": registered_end,
         "blocked_start": blocked_start,
         "blocked_end": blocked_end,
@@ -333,9 +332,9 @@ class KeaIntegration:
             
             subnet_id = self._resolve_subnet_id(vlan)
             
-            # Build command
             command = {
-                "command": "reservation-del",                
+                "command": "reservation-del",
+                "service": ["dhcp4"],
                 "arguments": {
                     "subnet-id": subnet_id,
                     "identifier-type": "hw-address",
@@ -445,43 +444,96 @@ class KeaIntegration:
             logger.error(f"Error getting all reservations for VLAN {vlan}: {e}")
             return []
 
-    def delete_host_reservation(self, mac_address: str) -> bool:
+    def _reservation_subnet_ids_for_mac(self, mac: str) -> List[int]:
+        """Subnet-ids that currently hold a host reservation for this MAC."""
+        found: List[int] = []
+        try:
+            response = self._send_command({
+                "command": "reservation-get-by-hw-address",
+                "service": ["dhcp4"],
+                "arguments": {"hw-address": mac},
+            })
+        except Exception as exc:
+            logger.warning("reservation-get-by-hw-address failed for %s: %s", mac, exc)
+            return found
+
+        if response.get("result") != 0:
+            return found
+
+        args = response.get("arguments") or {}
+        hosts = args.get("hosts") or args.get("reservations") or []
+        if isinstance(args, dict) and args.get("hw-address") and "subnet-id" in args:
+            hosts = [args]
+        for host in hosts:
+            if not isinstance(host, dict):
+                continue
+            sid = host.get("subnet-id", host.get("dhcp4_subnet_id"))
+            try:
+                found.append(int(sid))
+            except (TypeError, ValueError):
+                continue
+        return found
+
+    def _candidate_subnet_ids(self) -> List[int]:
+        ids = {0}
+        for raw in os.getenv("VALID_VLANS", "").split(","):
+            raw = raw.strip()
+            if raw.isdigit():
+                ids.add(int(raw))
+        for env_name, default in (("WIRED_VLAN", "250"), ("MANAGEMENT_VLAN", "99")):
+            raw = os.getenv(env_name, default).strip()
+            if raw.isdigit():
+                ids.add(int(raw))
+        return sorted(ids)
+
+    def delete_all_reservations_for_mac(self, mac_address: str) -> bool:
         """
-        Delete a host reservation by MAC address.
-        Uses subnet-id=0 so it removes the reservation globally (all subnets).
+        Remove every DHCPv4 host reservation for this MAC.
+
+        subnet-id 0 is only the global table, not every VLAN. A registered
+        device can still have a row on VLAN 250 (or any other subnet).
+        Delete whatever reservation-get-by-hw-address returns, then sweep
+        known subnet-ids so a missed get cannot leave KNOWN/REGISTERED.
         """
         if not mac_address:
             return False
+        mac = mac_address.lower().replace("-", ":").replace(".", ":").strip()
+        subnet_ids = set(self._reservation_subnet_ids_for_mac(mac))
+        subnet_ids.update(self._candidate_subnet_ids())
 
-        mac = mac_address.lower().strip()
-
-        cmd = {
-            "command": "reservation-del",
-            "arguments": {
-                "subnet-id": 0,                    # 0 = global + all subnets
-                "identifier-type": "hw-address",
-                "identifier": mac
-            }
-        }
-
-        try:
-            response = self._send_command(cmd)
+        ok = True
+        deleted = 0
+        for sid in sorted(subnet_ids):
+            try:
+                response = self._send_command({
+                    "command": "reservation-del",
+                    "service": ["dhcp4"],
+                    "arguments": {
+                        "subnet-id": sid,
+                        "identifier-type": "hw-address",
+                        "identifier": mac,
+                    },
+                })
+            except Exception as exc:
+                logger.warning("reservation-del %s subnet %s: %s", mac, sid, exc)
+                ok = False
+                continue
             result = response.get("result", -1)
-
+            text = str(response.get("text", ""))
             if result == 0:
-                logger.info("Deleted Kea host reservation for MAC %s", mac)
-                return True
-            elif result == 3:
-                # Kea returns result=3 when the reservation does not exist
-                logger.debug("No host reservation found for MAC %s (already deleted)", mac)
-                return True
+                deleted += 1
+                logger.info("Deleted Kea reservation %s subnet-id %s", mac, sid)
+            elif result in (3,) or "not found" in text.lower() or "fatal" in text.lower():
+                continue
             else:
-                logger.warning("Failed to delete host reservation for %s: %s", mac, response)
-                return False
+                logger.warning("reservation-del %s subnet %s: %s", mac, sid, response)
+                ok = False
+        logger.info("Kea reservation sweep for %s removed %s row(s)", mac, deleted)
+        return ok
 
-        except Exception as exc:
-            logger.warning("Exception while deleting host reservation for %s: %s", mac, exc)
-            return False
+    def delete_host_reservation(self, mac_address: str) -> bool:
+        """Delete every host reservation for a MAC (all subnet-ids)."""
+        return self.delete_all_reservations_for_mac(mac_address)
 
     def set_block_status(
         self,

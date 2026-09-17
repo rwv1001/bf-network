@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 devices_bp = Blueprint('devices', __name__)
 
-KEA_SOCKET = os.getenv('KEA_CONTROL_SOCKET', '/kea/leases/kea4-ctrl-socket')
+KEA_SOCKET = os.getenv('KEA_CONTROL_SOCKET', '/kea/sockets/kea4-ctrl-socket')
 
 
 def _get_kea():
@@ -228,13 +228,14 @@ def delete_device(device_id):
     kea = _get_kea()
     if kea:
         try:
-            if vlan_id:
-                kea.unregister_mac(mac_address, vlan_id)
-            else:
-                # vlan_id unknown — sweep every valid VLAN so no stale reservation is left
-                from core.vlan_utils import parse_valid_vlan_ids
-                for vid in parse_valid_vlan_ids():
-                    kea.unregister_mac(mac_address, vid)
+            # Always sweep every subnet. A single unregister_mac(assigned_vlan)
+            # leaves rows on VLAN 250 (or subnet-id 0) and Kea keeps class KNOWN.
+            kea.delete_all_reservations_for_mac(mac_address)
+            lease = kea.get_lease_by_mac(mac_address)
+            if not lease and vlan_id:
+                lease = kea.get_lease_by_mac(mac_address, subnet_id=vlan_id)
+            if lease and lease.get("ip-address"):
+                kea.force_lease_renewal(mac_address, ip_address=lease["ip-address"])
         except Exception as exc:
             logger.warning("Kea unregister failed for %s: %s", mac_address, exc)
 

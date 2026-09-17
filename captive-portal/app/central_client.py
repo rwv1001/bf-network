@@ -752,7 +752,6 @@ def _apply_inbound(event_type: str, data: dict) -> None:
 
     elif event_type == "unregister_device":
         from core.device_utils import close_ownership, sync_registration_status
-        from core.vlan_utils import parse_valid_vlan_ids
         from kea_integration import get_kea_client
         mac = data.get("mac_address", "").lower()
         device = Device.query.filter_by(mac_address=mac).first()
@@ -760,17 +759,15 @@ def _apply_inbound(event_type: str, data: dict) -> None:
             logger.info("central unregister_device: MAC %s not found locally — skipping", mac)
             return
 
-        vlan_id = device.assigned_vlan or device.current_vlan
-        kea_socket = os.getenv('KEA_CONTROL_SOCKET', '/kea/leases/kea4-ctrl-socket')
+        kea_socket = os.getenv("KEA_CONTROL_SOCKET", "/kea/sockets/kea4-ctrl-socket")
         kea = get_kea_client(control_socket=kea_socket)
         if kea:
-            if vlan_id:
-                kea.unregister_mac(mac=mac, vlan=vlan_id)
-            else:
-                for vid in parse_valid_vlan_ids():
-                    kea.unregister_mac(mac=mac, vlan=vid)
+            kea.delete_all_reservations_for_mac(mac)
+            lease = kea.get_lease_by_mac(mac)
+            if lease and lease.get("ip-address"):
+                kea.force_lease_renewal(mac, ip_address=lease["ip-address"])
 
-        if device.connection_type == 'wired':
+        if device.connection_type == "wired":
             from radius_coa import send_coa_disconnect
             send_coa_disconnect(mac)
 

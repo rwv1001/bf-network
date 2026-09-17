@@ -131,7 +131,7 @@ def _mac_from_lease_file(ip_address: str) -> str:
 
 def _mac_from_kea_socket(ip_address: str) -> str:
     try:
-        kea_socket = os.getenv('KEA_CONTROL_SOCKET', '/kea/leases/kea4-ctrl-socket')
+        kea_socket = os.getenv('KEA_CONTROL_SOCKET', '/kea/sockets/kea4-ctrl-socket')
         from kea_integration import get_kea_client
         kea = get_kea_client(control_socket=kea_socket)
         if kea:
@@ -187,7 +187,7 @@ def get_ip_for_mac(mac_address: str, subnet_id=None) -> str:
         logger.error("Error reading Kea lease file %s: %s", lease_file, exc)
 
     try:
-        kea_socket = os.getenv('KEA_CONTROL_SOCKET', '/kea/leases/kea4-ctrl-socket')
+        kea_socket = os.getenv('KEA_CONTROL_SOCKET', '/kea/sockets/kea4-ctrl-socket')
         from kea_integration import get_kea_client
         kea = get_kea_client(control_socket=kea_socket)
         if kea:

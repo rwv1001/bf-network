@@ -56,12 +56,18 @@ def parse_vlan_prefix_map(raw: str) -> dict:
 def pool_bounds(prefix: int) -> dict:
     total = 2 ** (32 - prefix)
     block_size = 40 * (2 ** (24 - prefix))
-    registered_end = total - block_size - 1
+    # total-1 is the broadcast address. Never put it in a pool.
+    last_host = total - 2
+    registered_end = min(total - block_size - 1, last_host)
+    blocked_start = registered_end + 1
+    blocked_end = last_host
+    if blocked_start > blocked_end:
+        blocked_start = blocked_end
     return {
         "registered_start": 1,
         "registered_end": registered_end,
-        "blocked_start": registered_end + 1,
-        "blocked_end": total - 1,
+        "blocked_start": blocked_start,
+        "blocked_end": blocked_end,
     }
 
 
@@ -341,7 +347,7 @@ def main():
         "subnet": f"{network_word}.{wired_vlan}.0/24",
         "id": wired_vlan,
         "pools": [
-            {"pool": f"{network_word}.{wired_vlan}.1 - {network_word}.{wired_vlan}.255"}
+            {"pool": f"{network_word}.{wired_vlan}.1 - {network_word}.{wired_vlan}.254"}
         ],
         "interface": f"{wan_iface}.{wired_vlan}",
         "option-data": [

@@ -394,13 +394,15 @@ def get_vlan_prefix_by_id() -> dict:
 
 
 def pool_bounds_for_prefix(prefix: int) -> tuple:
-    """Return (registered_start, registered_end, blocked_start, blocked_end) offsets."""
     total = 2 ** (32 - prefix)
     block_size = 40 * (2 ** (24 - prefix))
+    last_host = total - 2
     registered_start = 1
-    registered_end = total - block_size - 1
+    registered_end = min(total - block_size - 1, last_host)
     blocked_start = registered_end + 1
-    blocked_end = total - 1
+    blocked_end = last_host
+    if blocked_start > blocked_end:
+        blocked_start = blocked_end
     return registered_start, registered_end, blocked_start, blocked_end
 
 
@@ -409,18 +411,10 @@ def ip_from_offset(network, offset: int) -> str:
 
 
 def build_pools_for_vlan(vlan_id: int, prefix: int) -> tuple:
-    """Return (subnet_cidr, registered_pools, blocked_pool) for a VLAN."""
     network = ipaddress.IPv4Network(f"{_net_word()}.{vlan_id}.0/{prefix}", strict=False)
-    total = network.num_addresses
-    block_size = 40 * (2 ** (24 - prefix))
-    registered_start = 1
-    registered_end = total - block_size - 1
-    block_start = registered_end + 1
-    block_end = total - 1
-
+    registered_start, registered_end, block_start, block_end = pool_bounds_for_prefix(prefix)
     if registered_end < registered_start:
         raise ValueError(f"Pool size too small for VLAN {vlan_id} /{prefix}")
-
     registered_pools = [
         f"{ip_from_offset(network, registered_start)} - {ip_from_offset(network, registered_end)}"
     ]

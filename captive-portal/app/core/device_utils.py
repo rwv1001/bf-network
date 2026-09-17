@@ -224,7 +224,7 @@ def clear_unregistered_lease(mac_address: str) -> None:
 
 def get_lease_expiry_for_mac(mac_address: str, subnet_id=None):
     """Return the lease expiry datetime for a MAC address via Kea, or None."""
-    kea_socket = os.getenv('KEA_CONTROL_SOCKET', '/kea/leases/kea4-ctrl-socket')
+    kea_socket = os.getenv('KEA_CONTROL_SOCKET', '/kea/sockets/kea4-ctrl-socket')
     try:
         from kea_integration import get_kea_client
         kea = get_kea_client(control_socket=kea_socket)
@@ -281,18 +281,21 @@ def unregister_device(device: Device, commit: bool = True) -> None:
             logger.info("unregister_device: blocked %s at %s until %s",
                         mac_address, ip_address, lease_expiry)
 
-    # Remove Kea reservation / send RADIUS disconnect
-    kea_socket = os.getenv('KEA_CONTROL_SOCKET', '/kea/leases/kea4-ctrl-socket')
-    if device.connection_type == 'wifi' and device.internet_accessible:
-        try:
-            from kea_integration import get_kea_client
-            kea = get_kea_client(control_socket=kea_socket)
-            if kea and vlan_id:
-                if not kea.unregister_mac(mac=mac_address, vlan=vlan_id):
-                    logger.warning("unregister_device: Kea unregister failed for %s", mac_address)
-        except Exception as exc:
-            logger.warning("unregister_device: Kea error for %s: %s", mac_address, exc)
-    elif device.connection_type == 'wired':
+    # Remove Kea reservation on every subnet (11, 250, 0, …), then CoA if wired
+    kea_socket = os.getenv('KEA_CONTROL_SOCKET', '/kea/sockets/kea4-ctrl-socket')
+    try:
+        from kea_integration import get_kea_client
+        kea = get_kea_client(control_socket=kea_socket)
+        if kea:
+            kea.delete_all_reservations_for_mac(mac_address)
+            lease = kea.get_lease_by_mac(mac_address)
+            if not lease and vlan_id:
+                lease = kea.get_lease_by_mac(mac_address, subnet_id=vlan_id)
+            if lease and lease.get("ip-address"):
+                kea.force_lease_renewal(mac_address, ip_address=lease["ip-address"])
+    except Exception as exc:
+        logger.warning("unregister_device: Kea error for %s: %s", mac_address, exc)
+    if device.connection_type == 'wired':
         send_coa_disconnect(mac_address)
 
     # Close ownership history record
@@ -329,7 +332,7 @@ def reset_test_data() -> None:
     """
     from models import CentralOutboundEvent
 
-    kea_socket = os.getenv('KEA_CONTROL_SOCKET', '/kea/leases/kea4-ctrl-socket')
+    kea_socket = os.getenv('KEA_CONTROL_SOCKET', '/kea/sockets/kea4-ctrl-socket')
     kea = None
     if os.path.exists(kea_socket):
         try:
@@ -347,7 +350,7 @@ def reset_test_data() -> None:
             if not vlan_id:
                 continue
             try:
-                kea.unregister_mac(device.mac_address, vlan_id)
+                kea.delete_all_reservations_for_mac(device.mac_address)
             except Exception as exc:
                 logger.warning("Kea unregister failed for %s vlan %s: %s",
                                device.mac_address, vlan_id, exc)

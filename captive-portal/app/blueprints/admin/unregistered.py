@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 unregistered_bp = Blueprint('unregistered', __name__)
 
-KEA_SOCKET = os.getenv('KEA_CONTROL_SOCKET', '/kea/leases/kea4-ctrl-socket')
+KEA_SOCKET = os.getenv('KEA_CONTROL_SOCKET', '/kea/sockets/kea4-ctrl-socket')
 
 
 def _get_kea():

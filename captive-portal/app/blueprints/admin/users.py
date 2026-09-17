@@ -547,7 +547,7 @@ def import_users():
             try:
                 from kea_integration import get_kea_client
                 kea = get_kea_client(
-                    control_socket=os.getenv('KEA_CONTROL_SOCKET', '/kea/leases/kea4-ctrl-socket'))
+                    control_socket=os.getenv('KEA_CONTROL_SOCKET', '/kea/sockets/kea4-ctrl-socket'))
             except Exception as exc:
                 errors.append(f"Kea client unavailable — reservations not restored: {exc}")
         if kea:

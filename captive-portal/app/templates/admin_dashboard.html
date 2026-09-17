@@ -86,6 +86,58 @@
     tr:hover td:nth-child(even) {
         background: #fffef5 !important;
     }
+
+    .action-stack {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        align-items: stretch;
+        justify-content: flex-start;
+        min-width: 108px;
+    }
+    .action-stack form {
+        display: contents;
+    }
+    .action-stack .action-btn,
+    .action-stack a.action-btn,
+    .action-stack button.action-btn,
+    .action-stack span.action-btn {
+        box-sizing: border-box;
+        width: 108px;
+        min-width: 108px;
+        height: 32px;
+        margin: 0 !important;
+        padding: 0 8px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 12px;
+        font-weight: 600;
+        line-height: 1;
+        white-space: nowrap;
+        border: none;
+        border-radius: 4px;
+        text-decoration: none;
+        cursor: pointer;
+        color: #fff;
+    }
+    .action-stack span.action-btn {
+        cursor: not-allowed;
+        opacity: 0.65;
+    }
+    @media (max-width: 1100px) {
+        .action-stack {
+            flex-direction: column;
+            align-items: stretch;
+        }
+        .action-stack .action-btn,
+        .action-stack a.action-btn,
+        .action-stack button.action-btn,
+        .action-stack span.action-btn {
+            width: 100%;
+            min-width: 0;
+        }
+    }
     .toggle-btn {
         padding: 5px 13px;
         border: 1px solid #ccc;
@@ -836,38 +888,38 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
             </td>
             <td>{{ user.devices|length }}</td>
             <td>
-                <a href="{{ url_for('admin.users.edit_user', user_id=user.id) }}" class="btn btn-small">
+                <div class="action-stack">
+                <a href="{{ url_for('admin.users.edit_user', user_id=user.id) }}" class="btn btn-small action-btn" style="background:#2c3e2c;">
                     Edit
                 </a>
                 {% if user.blocked %}
-                <form method="POST" action="{{ url_for('admin.users.unblock_user', user_id=user.id) }}" style="display: inline; margin-left: 5px;">
-                    <button type="submit" class="btn btn-success btn-small"
+                <form method="POST" action="{{ url_for('admin.users.unblock_user', user_id=user.id) }}">
+                    <button type="submit" class="btn btn-success btn-small action-btn"
                             onclick="return confirm('Allow devices for this user?')">
-                        ✅ Unblock
+                        Unblock
                     </button>
                 </form>
                 {% else %}
-                <form method="POST" action="{{ url_for('admin.users.block_user', user_id=user.id) }}" style="display: inline; margin-left: 5px;">
-                    <button type="submit" class="btn btn-danger btn-small"
+                <form method="POST" action="{{ url_for('admin.users.block_user', user_id=user.id) }}">
+                    <button type="submit" class="btn btn-danger btn-small action-btn"
                             onclick="return confirm('Block all devices for this user?')">
-                        🚫 Block
+                        Block
                     </button>
                 </form>
                 {% endif %}
                 {% if current_user.can_manage_users %}
                 {% if user.devices|length == 0 %}
-                <form method="POST" action="{{ url_for('admin.users.delete_user', user_id=user.id) }}" style="display: inline; margin-left: 5px;">
-                    <button type="submit" class="btn btn-small" style="background: #dc3545;"
+                <form method="POST" action="{{ url_for('admin.users.delete_user', user_id=user.id) }}">
+                    <button type="submit" class="btn btn-small action-btn" style="background:#6c757d;"
                             onclick="return confirm('Permanently delete user {{ user.email }}? This cannot be undone.')">
-                        🗑️ Delete
+                        Delete
                     </button>
                 </form>
                 {% else %}
-                <span style="display:inline-block;margin-left:5px;" title="User owns {{ user.devices|length }} device(s) — delete or reassign them first">
-                    <button disabled class="btn btn-small" style="background:#ccc;cursor:not-allowed;opacity:0.6;">🗑️ Delete</button>
-                </span>
+                <span class="action-btn" style="background:#ccc;color:#555;" title="User owns {{ user.devices|length }} device(s) — delete or reassign them first">Delete</span>
                 {% endif %}
                 {% endif %}
+                </div>
             </td>
         </tr>
         {% endfor %}
@@ -1087,46 +1139,48 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
                 {% endif %}
             </td>
             <td>
+                <div class="action-stack">
                 {% if device.registration_status == 'registered' %}
-                <form method="POST" action="{{ url_for('admin.devices.block_device', device_id=device.id) }}" style="display: inline;">
-                    <button type="submit" class="btn btn-danger btn-small" 
+                <form method="POST" action="{{ url_for('admin.devices.block_device', device_id=device.id) }}">
+                    <button type="submit" class="btn btn-danger btn-small action-btn"
                             onclick="return confirm('Block this device? It will be moved to restricted VLAN.')">
-                        🚫 Block
+                        Block
                     </button>
                 </form>
                 {% elif device.registration_status == 'blocked' %}
                 {% if user and user.blocked %}
-                <span class="btn btn-small" style="background:#ccc;cursor:not-allowed;" title="Cannot unblock device while user is blocked">🔒 User blocked</span>
+                <span class="action-btn" style="background:#ccc;color:#555;" title="Cannot unblock device while user is blocked">Blocked</span>
                 {% else %}
-                <form method="POST" action="{{ url_for('admin.devices.unblock_device', device_id=device.id) }}" style="display: inline;">
-                    <button type="submit" class="btn btn-success btn-small">
-                        ✅ Unblock
+                <form method="POST" action="{{ url_for('admin.devices.unblock_device', device_id=device.id) }}">
+                    <button type="submit" class="btn btn-success btn-small action-btn">
+                        Unblock
                     </button>
                 </form>
                 {% endif %}
                 {% endif %}
-                <form method="POST" action="{{ url_for('admin.devices.delete_device', device_id=device.id) }}" style="display: inline; margin-left: 5px;">
-                    <button type="submit" class="btn btn-small" 
-                            style="background: #999;"
+                <form method="POST" action="{{ url_for('admin.devices.delete_device', device_id=device.id) }}">
+                    <button type="submit" class="btn btn-small action-btn"
+                            style="background:#6c757d;"
                             onclick="return confirm('Delete this device? It will be disconnected from the network.')">
-                        🗑️ Delete
+                        Delete
                     </button>
                 </form>
                 {% if current_user.can_manage_users %}
                 <button type="button"
-                        class="btn btn-small reassign-btn"
-                        style="background: #4a7c59; margin-left: 5px;"
+                        class="btn btn-small reassign-btn action-btn"
+                        style="background:#4a7c59;"
                         data-id="{{ device.id }}"
                         data-mac="{{ device.mac_address }}"
                         data-vlan="{{ device.assigned_vlan or device.current_vlan or '' }}"
                         data-owner="{% if admin %}admin:{{ admin.id }}{% elif user %}user:{{ user.id }}{% endif %}"
                         data-connection="{{ device.connection_type or '' }}"
-                        data-name="{{ device.device_name or '' }}">&#8599; Reassign</button>
+                        data-name="{{ device.device_name or '' }}">Reassign</button>
                 {% endif %}
                 {% if device.registration_status == 'registered' %}
-                <button onclick="showFixedIpDialog({{ device.id }}, '{{ device.mac_address }}', '{{ device.fixed_ip or '' }}', {{ device.current_vlan or 0 }}, '{{ device.ip_address or '' }}')"
-                        class="btn btn-small" style="background: #1565c0; color:#fff; margin-left: 5px;" title="Set or clear a fixed IP reservation">&#x1F4CC; Fixed IP</button>
+                <button type="button" onclick="showFixedIpDialog({{ device.id }}, '{{ device.mac_address }}', '{{ device.fixed_ip or '' }}', {{ device.current_vlan or 0 }}, '{{ device.ip_address or '' }}')"
+                        class="btn btn-small action-btn" style="background:#1565c0;" title="Set or clear a fixed IP reservation">Fixed IP</button>
                 {% endif %}
+                </div>
             </td>
         </tr>
         {% endfor %}

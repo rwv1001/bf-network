@@ -223,7 +223,7 @@
 {% set ports = ports_by_switch.get(host, []) %}
 <div class="switch-section">
     <div class="switch-section-header">
-        ߔ {{ host }}
+        🔌 {{ host }}
         <span class="badge">{{ ports|length }} ports</span>
     </div>
 
@@ -271,7 +271,7 @@
                 {% endfor %}
                 </div>
                 {% if is_locked %}
-                <div class="role-locked-badge">ߔ {{ locked_ports[port.port_name] }}</div>
+                <div class="role-locked-badge">🔒{{ locked_ports[port.port_name] }}</div>
                 {% endif %}
                 <div class="role-status" id="status_{{ host }}_{{ port.port_name | replace('/', '_') | replace('.', '_') }}"></div>
             </td>
