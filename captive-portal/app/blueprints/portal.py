@@ -168,23 +168,236 @@ def _site_networks():
         nets.append(parse_net(f"{word}.0.0/16", strict=False))
     elif word.count('.') == 2:
         nets.append(parse_net(f"{word}.0/24", strict=False))
-    if not nets:
-        nets = [
-            parse_net('10.0.0.0/8'),
-            parse_net('172.16.0.0/12'),
-            parse_net('192.168.0.0/16'),
-        ]
+    # Do not fall back to every RFC1918 range. That treats Docker bridges,
+    # home LANs and reverse-proxy hops as "on site" and is what allowed
+    # remote access to /user_home. Operators must set SITE_NETWORKS or
+    # NETWORK_WORD (or rely on VLAN detection below).
     return nets
 
-def client_is_on_site():
-    raw = get_client_ip()
+
+def _parse_ip_safe(value):
     try:
-        addr = parse_ip(raw)
+        return parse_ip((value or '').strip())
     except Exception:
-        return False
-    if addr.is_loopback:
-        return True
-    return any(addr in net for net in _site_networks())
+        return None
+
+
+def _normalize_mac(mac):
+    if not mac:
+        return ''
+    text = str(mac).strip().lower().replace('-', ':').replace('.', ':')
+    if ':' not in text and len(text) == 12:
+        text = ':'.join(text[i:i + 2] for i in range(0, 12, 2))
+    return text
+
+
+def _ips_equal(left, right):
+    a = _parse_ip_safe(left)
+    b = _parse_ip_safe(right)
+    return a is not None and a == b
+
+
+def _proxy_observed_ips():
+    """Addresses the reverse proxy actually saw — not browser-supplied XFF."""
+    seen = set()
+    ordered = []
+
+    def _add(value):
+        addr = _parse_ip_safe(value)
+        if addr is None:
+            return
+        key = str(addr)
+        if key in seen:
+            return
+        seen.add(key)
+        ordered.append(key)
+
+    _add(request.headers.get('X-Real-IP'))
+    _add(request.remote_addr)
+    xff = (request.headers.get('X-Forwarded-For') or '').strip()
+    if xff:
+        hops = [p.strip() for p in xff.split(',') if p.strip()]
+        if hops:
+            # Last hop is appended by our proxy. Do not trust the left-most
+            # value; a remote client can put a 10.6.x.x address there.
+            _add(hops[-1])
+    return ordered
+
+
+def _request_ips_for_lease_match():
+    """IPs we will accept as 'this request' when matching a Kea lease.
+
+    Prefer get_client_ip() (the rest of the portal uses it) and the
+    proxy-observed address. Ignore a client-supplied left-most XFF hop
+    so a remote caller cannot fake 10.6.11.7.
+    """
+    seen = set()
+    ordered = []
+
+    def _add(value):
+        if _is_proxy_or_loopback_ip(value):
+            return
+        addr = _parse_ip_safe(value)
+        if addr is None:
+            return
+        key = str(addr)
+        if key in seen:
+            return
+        seen.add(key)
+        ordered.append(key)
+
+    try:
+        _add(get_client_ip())
+    except Exception:
+        pass
+    for ip in _proxy_observed_ips():
+        _add(ip)
+    return ordered
+
+
+def _mac_from_lease_ip(ip):
+    """Resolve MAC from a proxy-observed client IP via portal lease tables."""
+    if not ip or _is_proxy_or_loopback_ip(ip):
+        return ''
+    try:
+        row = IPLease.query.filter_by(ip_address=str(ip)).first()
+        if row and getattr(row, 'mac_address', None):
+            return _normalize_mac(row.mac_address)
+    except Exception as exc:
+        logger.debug("IPLease MAC lookup failed for %s: %s", ip, exc)
+    try:
+        row = UnregisteredLease.query.filter_by(ip_address=str(ip)).first()
+        if row and getattr(row, 'mac_address', None):
+            return _normalize_mac(row.mac_address)
+    except Exception as exc:
+        logger.debug("UnregisteredLease MAC lookup failed for %s: %s", ip, exc)
+    return ''
+
+
+def _calling_mac():
+    try:
+        mac = _normalize_mac(get_client_mac())
+    except Exception as exc:
+        logger.debug("get_client_mac failed: %s", exc)
+        mac = ''
+    if mac:
+        return mac
+    for ip in _request_ips_for_lease_match():
+        mac = _mac_from_lease_ip(ip)
+        if mac:
+            return mac
+    return ''
+
+
+def _portal_session_user():
+    """User from the password-login session, else from the calling device."""
+    portal_user_id = session.get('portal_user_id')
+    if portal_user_id:
+        user = User.query.get(portal_user_id)
+        if user:
+            return user
+    try:
+        user, _device = current_user_from_device()
+    except Exception:
+        user = None
+    if user:
+        session['portal_user_id'] = user.id
+    return user
+
+
+def _kea_lease_ips_for_mac(mac):
+    """IPs Kea currently associates with this MAC (plus DB lease fallback)."""
+    found = []
+
+    def _remember(value):
+        addr = _parse_ip_safe(value)
+        if addr is None:
+            return
+        text = str(addr)
+        if text not in found:
+            found.append(text)
+
+    kea = _get_kea()
+    if kea:
+        try:
+            _remember(kea.get_lease_ip_for_mac(mac))
+        except TypeError:
+            try:
+                _remember(kea.get_lease_ip_for_mac(mac=mac))
+            except Exception as exc:
+                logger.debug("Kea get_lease_ip_for_mac failed for %s: %s", mac, exc)
+        except Exception as exc:
+            logger.debug("Kea get_lease_ip_for_mac failed for %s: %s", mac, exc)
+        extra = getattr(kea, 'get_leases_for_mac', None) or getattr(kea, 'leases_for_mac', None)
+        if callable(extra):
+            try:
+                leases = extra(mac) or []
+                if isinstance(leases, dict):
+                    leases = [leases]
+                for lease in leases:
+                    if isinstance(lease, dict):
+                        _remember(lease.get('ip_address') or lease.get('ip-address') or lease.get('ip'))
+                    else:
+                        _remember(getattr(lease, 'ip_address', None) or lease)
+            except Exception as exc:
+                logger.debug("Kea extra lease lookup failed for %s: %s", mac, exc)
+
+    try:
+        db_lease = get_active_iplease(mac)
+        if db_lease is not None:
+            _remember(getattr(db_lease, 'ip_address', None))
+    except Exception as exc:
+        logger.debug("DB lease lookup failed for %s: %s", mac, exc)
+
+    try:
+        _remember(get_ip_for_mac(mac))
+    except Exception as exc:
+        logger.debug("get_ip_for_mac failed for %s: %s", mac, exc)
+
+    return found
+
+
+def client_is_on_site():
+    """Device-management pages require a live Kea (or portal) lease.
+
+    The calling device must present a MAC we can see on the wire, and one
+    of the request IPs the proxy observed must be the same IP Kea has
+    issued to that MAC. Being 'in 10.6.0.0/16' is not enough — a spoofed
+    private address would pass that check without a matching lease.
+    """
+    request_ips = _request_ips_for_lease_match()
+    mac = _calling_mac()
+
+    if mac:
+        lease_ips = _kea_lease_ips_for_mac(mac)
+        for req_ip in request_ips:
+            for lease_ip in lease_ips:
+                if _ips_equal(req_ip, lease_ip):
+                    logger.debug("On-site Kea lease match mac=%s ip=%s path=%s", mac, lease_ip, request.path)
+                    return True
+        if lease_ips:
+            logger.info(
+                "Off-site access denied (mac=%s lease_ips=%s request_ips=%s path=%s)",
+                mac, lease_ips, request_ips, request.path,
+            )
+        else:
+            logger.info(
+                "Off-site: mac=%s has no Kea/portal lease; ips=%s path=%s",
+                mac, request_ips, request.path,
+            )
+    else:
+        logger.info("Off-site: no client MAC; ips=%s path=%s", request_ips, request.path)
+
+    # The TCP peer is on a live leased address. That is enough to prove the
+    # caller is on the LAN even when get_client_mac() missed (loopback
+    # X-Real-IP, ARP lag). Do not use left-most XFF here — request_ips
+    # already dropped loopback and untrusted hops.
+    for req_ip in request_ips:
+        if _mac_from_lease_ip(req_ip):
+            logger.debug("On-site lease-IP match ip=%s path=%s", req_ip, request.path)
+            return True
+
+    return False
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -1474,8 +1687,26 @@ def user_home():
         })
 
     effective_allowed, effective_adoptable = get_effective_vlans_for_user(user, domain_policy_map)
-    wired_unregistered_vlan = get_wired_unregistered_vlan_id()
-    all_interaction_vlan_ids = (effective_allowed | effective_adoptable) - {wired_unregistered_vlan}
+    try:
+        wired_unregistered_vlan = get_wired_unregistered_vlan_id()
+        wired_unregistered_vlan = int(wired_unregistered_vlan) if wired_unregistered_vlan is not None else None
+    except (TypeError, ValueError):
+        wired_unregistered_vlan = get_wired_unregistered_vlan_id()
+    # Include the wired unregistered VLAN. Devices waiting there (e.g.
+    # 10.x.250.y on VLAN 250) are the ones a user adopts *onto* an
+    # allowed VLAN such as 99. Excluding 250 hid every wired candidate
+    # from the user home page.
+    all_interaction_vlan_ids = set(effective_allowed | effective_adoptable)
+    if wired_unregistered_vlan:
+        try:
+            wired_targets = set(get_wired_assignable_vlan_ids() or [])
+        except Exception:
+            wired_targets = set()
+        if (
+            wired_unregistered_vlan in all_interaction_vlan_ids
+            or (wired_targets & all_interaction_vlan_ids)
+        ):
+            all_interaction_vlan_ids.add(wired_unregistered_vlan)
     adoptable_leases = (
         load_adoptable_leases(all_interaction_vlan_ids)
         if all_interaction_vlan_ids else []
@@ -1488,15 +1719,31 @@ def user_home():
             continue
         if get_active_ownership(mac):
             continue
-        vlan_id = entry.get('vlan_id')
+        try:
+            vlan_id = int(entry.get('vlan_id'))
+        except (TypeError, ValueError):
+            vlan_id = entry.get('vlan_id')
+        # A device on the wired unregistered VLAN can be adopted directly
+        # when the user may adopt onto at least one wired-assignable VLAN.
+        can_adopt_direct = vlan_id in effective_adoptable
+        if (
+            not can_adopt_direct
+            and wired_unregistered_vlan
+            and vlan_id == wired_unregistered_vlan
+        ):
+            try:
+                wired_targets = set(get_wired_assignable_vlan_ids() or [])
+            except Exception:
+                wired_targets = set()
+            can_adopt_direct = bool(wired_targets & effective_adoptable)
         unregistered_rows.append({
             'mac_address':    mac,
-            'show_mac':       vlan_id in effective_adoptable,
+            'show_mac':       can_adopt_direct or vlan_id in effective_adoptable,
             'ip_address':     entry.get('ip_address'),
             'vlan_id':        vlan_id,
             'vlan_label':     label_for_vlan(vlan_id, vlan_map),
             'first_seen':     entry.get('first_seen'),
-            'needs_approval': vlan_id not in effective_adoptable,
+            'needs_approval': not can_adopt_direct,
         })
 
     if request.method == 'POST':
@@ -1566,13 +1813,19 @@ def user_home():
             except ValueError:
                 flash('Invalid VLAN for adoption request.', 'error')
                 return redirect(url_for('portal.user_home'))
-            _eff_allowed, _eff_adoptable = get_effective_vlans_for_user(user)
-            if adopt_vlan_id not in _eff_allowed:
+            _eff_allowed, _eff_adoptable = get_effective_vlans_for_user(
+                user, domain_policy_map
+            )
+            on_unreg = (
+                wired_unregistered_vlan
+                and adopt_vlan_id == wired_unregistered_vlan
+            )
+            if adopt_vlan_id not in _eff_allowed and not on_unreg:
                 flash('You do not have permission to request adoption for that network.', 'error')
                 return redirect(url_for('portal.user_home'))
-            if adopt_vlan_id in _eff_adoptable:
-                flash('You can adopt this device directly without approval.', 'info')
-                return redirect(url_for('portal.adopt_devices'))
+            if adopt_vlan_id in _eff_adoptable or on_unreg:
+                flash('Use the form on this page to register the device.', 'info')
+                return redirect(url_for('portal.user_home'))
             _adopt_lease = UnregisteredLease.query.filter_by(mac_address=mac_to_adopt).first()
             _adopt_ip = _adopt_lease.ip_address if _adopt_lease else None
             pending = RegistrationRequest(
@@ -1580,6 +1833,7 @@ def user_home():
                 email=user.email, first_name=user.first_name or '',
                 last_name=user.last_name or '', phone_number=user.phone_number or '',
                 device_type='adopted-device', status='pending',
+                requested_vlan=adopt_vlan_id,
                 approval_token=secrets.token_urlsafe(32),
             )
             db.session.add(pending)
@@ -1601,7 +1855,29 @@ def user_home():
             )
             flash('Your adoption request has been sent to the administrator for approval.', 'info')
 
+        elif action == 'adopt_device':
+            return adopt_device()
+
         return redirect(url_for('portal.user_home'))
+
+    destination_vlans = set(effective_adoptable or []) | set(effective_allowed or [])
+    try:
+        destination_vlans |= set(get_wired_assignable_vlan_ids() or [])
+    except Exception:
+        pass
+    if wired_unregistered_vlan is not None:
+        destination_vlans.discard(wired_unregistered_vlan)
+    destination_vlans &= (set(effective_adoptable or []) | set(effective_allowed or []))
+    if wired_unregistered_vlan is not None:
+        destination_vlans.discard(wired_unregistered_vlan)
+    target_vlan_ids = sorted(destination_vlans)
+    target_vlan_options = [
+        {'vlan_id': v, 'label': label_for_vlan(v, vlan_map)}
+        for v in target_vlan_ids
+    ]
+    for row in unregistered_rows:
+        row['target_vlan_options'] = target_vlan_options
+        row['requires_target_vlan'] = True
 
     return render_template(
         'user_home.html',
@@ -1609,6 +1885,8 @@ def user_home():
         owned_devices=owned_device_rows,
         unregistered_devices=unregistered_rows,
         calling_device=calling_device,
+        target_vlan_options=target_vlan_options,
+        wired_unregistered_vlan=wired_unregistered_vlan,
     )
 
 
@@ -1715,10 +1993,16 @@ def forgot_network_password():
 @portal_bp.route('/adopt')
 def adopt_devices():
     if not client_is_on_site():
-        session.pop('portal_user_id', None)
         flash('Device management is only available on the Blackfriars network.', 'error')
-        return redirect(url_for('portal.user_login'))
-    user, device = current_user_from_device()
+        return redirect(url_for('portal.user_home') if session.get('portal_user_id') else url_for('portal.user_login'))
+    user = _portal_session_user()
+    device = None
+    try:
+        _session_user, device = current_user_from_device()
+        if not user:
+            user = _session_user
+    except Exception:
+        device = None
     if not user:
         return render_template(
             'adopt_devices.html', user=None, devices=[], registered_devices=[],
@@ -1735,7 +2019,14 @@ def adopt_devices():
     vlan_map = get_vlan_map()
     wired_unregistered_vlan = get_wired_unregistered_vlan_id()
     _, effective_adoptable = get_effective_vlans_for_user(user)
-    allowed_vlans = sorted(effective_adoptable)
+    allowed_vlans = set(effective_adoptable)
+    if wired_unregistered_vlan:
+        try:
+            wired_targets = set(get_wired_assignable_vlan_ids() or [])
+        except Exception:
+            wired_targets = set()
+        if wired_targets & allowed_vlans:
+            allowed_vlans.add(wired_unregistered_vlan)
     target_vlan_ids = [v for v in allowed_vlans if v != wired_unregistered_vlan]
     target_vlan_options = [
         {'vlan_id': v, 'label': label_for_vlan(v, vlan_map)}
@@ -1748,7 +2039,8 @@ def adopt_devices():
             error='no_permissions',
         )
 
-    candidates = load_adoptable_leases(set(allowed_vlans))
+    candidates = load_adoptable_leases(allowed_vlans)
+    focus_mac = (request.args.get('mac') or '').strip().lower()
 
     owned_macs = [
         o.mac_address for o in
@@ -1817,7 +2109,11 @@ def adopt_devices():
             'age':                  age,
             'requires_target_vlan': entry['vlan_id'] == wired_unregistered_vlan,
             'target_vlan_options':  target_vlan_options,
+            'highlighted':          bool(focus_mac and entry['mac_address'] == focus_mac),
         })
+
+    if focus_mac:
+        adoptable_devices.sort(key=lambda d: not d.get('highlighted'))
 
     return render_template(
         'adopt_devices.html', user=user, devices=adoptable_devices,
@@ -1831,13 +2127,12 @@ def adopt_devices():
 @portal_bp.route('/adopt', methods=['POST'])
 def adopt_device():
     if not client_is_on_site():
-        session.pop('portal_user_id', None)
         flash('Device management is only available on the Blackfriars network.', 'error')
-        return redirect(url_for('portal.user_login'))
-    user, device = current_user_from_device()
+        return redirect(url_for('portal.user_home') if session.get('portal_user_id') else url_for('portal.user_login'))
+    user = _portal_session_user()
     if not user:
-        flash('Please connect from a registered device to adopt devices.', 'error')
-        return redirect(url_for('portal.adopt_devices'))
+        flash('Please sign in to adopt devices.', 'error')
+        return redirect(url_for('portal.user_login'))
 
     mac_address      = (request.form.get('mac_address')      or '').strip().lower()
     vlan_id_raw      = (request.form.get('vlan_id')          or '').strip()
@@ -1862,7 +2157,7 @@ def adopt_device():
         if device_type_raw.lower() == 'other':
             if not device_type_other:
                 flash('Please describe the device type when selecting Other.', 'error')
-                return redirect(url_for('portal.adopt_devices'))
+                return redirect(url_for('portal.user_home'))
             device_label = device_type_other
         else:
             device_label = device_type_raw
@@ -1870,21 +2165,23 @@ def adopt_device():
 
     if not mac_address or not vlan_id:
         flash('Missing device details for adoption.', 'error')
-        return redirect(url_for('portal.adopt_devices'))
+        return redirect(url_for('portal.user_home'))
 
     _, effective_adoptable = get_effective_vlans_for_user(user)
     wired_unregistered_vlan = get_wired_unregistered_vlan_id()
-    if vlan_id not in effective_adoptable:
-        flash('You do not have permission to adopt devices on that VLAN.', 'error')
-        return redirect(url_for('portal.adopt_devices'))
-
-    if vlan_id == wired_unregistered_vlan:
+    on_unregistered_pool = (
+        wired_unregistered_vlan and vlan_id == wired_unregistered_vlan
+    )
+    if on_unregistered_pool:
         if not target_vlan:
             flash('Please select a VLAN for the wired device.', 'error')
-            return redirect(url_for('portal.adopt_devices'))
+            return redirect(url_for('portal.user_home'))
         if target_vlan not in effective_adoptable:
             flash('You do not have permission to assign that VLAN.', 'error')
-            return redirect(url_for('portal.adopt_devices'))
+            return redirect(url_for('portal.user_home'))
+    elif vlan_id not in effective_adoptable:
+        flash('You do not have permission to adopt devices on that VLAN.', 'error')
+        return redirect(url_for('portal.user_home'))
     else:
         target_vlan = vlan_id
 
@@ -1914,7 +2211,7 @@ def adopt_device():
             pending_request, _approval_url, vlan_id, get_ssid_for_vlan(vlan_id)
         )
         flash('Adoption request submitted for approval.', 'info')
-        return redirect(url_for('portal.adopt_devices'))
+        return redirect(url_for('portal.user_home'))
 
     lease = UnregisteredLease.query.filter_by(mac_address=mac_address).first()
     ip_address = lease.ip_address if lease else None
@@ -1936,7 +2233,7 @@ def adopt_device():
 
     if existing and existing.registration_status == 'registered' and existing.user_id != user.id:
         flash('That device is already adopted by another user.', 'error')
-        return redirect(url_for('portal.adopt_devices'))
+        return redirect(url_for('portal.user_home'))
 
     if fixed_ip_requested and reserved_ip:
         ip_address = reserved_ip
@@ -2024,19 +2321,18 @@ def adopt_device():
     )
 
     flash(f'Device {mac_address} adopted successfully.', 'success')
-    return redirect(url_for('portal.adopt_devices'))
+    return redirect(url_for('portal.user_home'))
 
 
 @portal_bp.route('/adopt/change-vlan', methods=['POST'])
 def adopt_change_vlan():
     if not client_is_on_site():
-        session.pop('portal_user_id', None)
         flash('Device management is only available on the Blackfriars network.', 'error')
-        return redirect(url_for('portal.user_login'))
-    user, _ = current_user_from_device()
+        return redirect(url_for('portal.user_home') if session.get('portal_user_id') else url_for('portal.user_login'))
+    user = _portal_session_user()
     if not user:
-        flash('Please connect from a registered device to manage VLANs.', 'error')
-        return redirect(url_for('portal.adopt_devices'))
+        flash('Please sign in to manage VLANs.', 'error')
+        return redirect(url_for('portal.user_login'))
 
     device_id_raw = (request.form.get('device_id') or '').strip()
     target_raw    = (request.form.get('target_vlan') or '').strip()

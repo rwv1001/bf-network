@@ -3616,7 +3616,85 @@ chown $q_user:$q_user $q_unifi/.env"
     echo "  (use set-inform on APs; do not rely on browsing /inform)"
 }
 
+# Pi-hole v6 reads local A records from dns.hosts (written to
+# /etc/pihole/hosts/custom.list). The v5 file /etc/pihole/custom.list is ignored.
+apply_pihole_split_horizon_dns() {
+    if step_done "pi_pihole_local_dns"; then
+        echo "Skipping completed step: Pi-hole split-horizon DNS for ${MAIN_DOMAIN}"
+        return 0
+    fi
 
+    [ -n "${PORTAL_IP:-}" ] || die "PORTAL_IP is not set; cannot configure Pi-hole local DNS."
+    [ -n "${MAIN_DOMAIN:-}" ] || die "MAIN_DOMAIN is not set; cannot configure Pi-hole local DNS."
+
+    info "Pi-hole v6 local DNS: ${MAIN_DOMAIN} -> ${PORTAL_IP}"
+
+    local q_repo
+    q_repo="$(shell_quote "$PI_REPO_DIR")"
+
+    # Keep the v5-era file in the repo for humans; FTL will not use it.
+    pi_sudo "mkdir -p $q_repo/pihole/etc-pihole
+        touch $q_repo/pihole/etc-pihole/custom.list
+        grep -Fqx $(shell_quote "${PORTAL_IP} ${MAIN_DOMAIN}") $q_repo/pihole/etc-pihole/custom.list 2>/dev/null \
+            || echo $(shell_quote "${PORTAL_IP} ${MAIN_DOMAIN}") >> $q_repo/pihole/etc-pihole/custom.list"
+
+    pi_sudo "i=0
+while [ \$i -lt 30 ]; do
+  if docker inspect -f '{{.State.Running}}' pihole 2>/dev/null | grep -qx true; then
+    break
+  fi
+  echo 'waiting for pihole container...'
+  i=\$((i + 1))
+  sleep 2
+done
+docker inspect -f '{{.State.Running}}' pihole | grep -qx true" \
+        || die "Pi-hole container is not running; cannot set dns.hosts."
+
+    local current new_json
+    current="$(pi_ssh "docker exec pihole pihole-FTL --config dns.hosts" | tr -d '\r')"
+    new_json="$(
+        CURRENT_HOSTS="$current" \
+        RECORD_IP="$PORTAL_IP" \
+        RECORD_NAME="$MAIN_DOMAIN" \
+        python3 - <<'PY'
+import json, os
+raw = (os.environ.get("CURRENT_HOSTS") or "").strip()
+ip = os.environ["RECORD_IP"].strip()
+name = os.environ["RECORD_NAME"].strip()
+wanted = f"{ip} {name}"
+hosts = []
+if raw.startswith("["):
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            hosts = [str(x) for x in parsed]
+        elif parsed:
+            hosts = [str(parsed)]
+    except Exception:
+        hosts = []
+elif raw and raw not in {"[]", "null"}:
+    hosts = [raw.strip().strip('"')]
+cleaned = []
+for entry in hosts:
+    parts = str(entry).split()
+    names = parts[1:]
+    if name in names:
+        continue
+    cleaned.append(str(entry))
+cleaned.append(wanted)
+print(json.dumps(cleaned))
+PY
+    )"
+
+    pi_sudo "docker exec pihole pihole-FTL --config dns.hosts $(shell_quote "$new_json")"
+    pi_sudo "docker exec pihole pihole restartdns || docker exec pihole killall -HUP pihole-FTL || true"
+
+    echo "Set Pi-hole dns.hosts to: $new_json"
+    echo "Verify with: docker exec pihole cat /etc/pihole/hosts/custom.list"
+    echo "LAN lookup should return ${PORTAL_IP} for ${MAIN_DOMAIN}."
+
+    complete_step "pi_pihole_local_dns"
+}
 
 install_pi_server() {
     info "Installing bf-network on target host server"
@@ -6631,6 +6709,10 @@ ip -4 addr show dev ${WAN_IFACE}.${MANAGEMENT_VLAN} || true
 cd $q_repo && docker compose down && docker compose build && docker compose up -d"
 
     complete_step "pi_compose_final_up"
+    # compose down/up starts a new FTL process; refresh dns.hosts so
+    # /etc/pihole/hosts/custom.list is generated again.
+    unset 'COMPLETED_STEPS[pi_pihole_local_dns]'
+    apply_pihole_split_horizon_dns
 }
 
 # =============================================================================
@@ -6649,6 +6731,7 @@ apply_central_secrets_to_pi
 apply_pi_vlan_interfaces
 finalize_pi_isp_mdns_interfaces
 apply_pi_mgmt_default_route
+apply_pihole_split_horizon_dns
 restart_pi_compose_stack
 
 echo

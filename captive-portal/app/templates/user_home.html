@@ -18,11 +18,7 @@
 {% endblock %}
 
 {% block content %}
-{% with messages = get_flashed_messages(with_categories=true) %}
-  {% for category, message in messages %}
-    <div class="alert alert-{{ category }}" style="margin-bottom: 16px;">{{ message }}</div>
-  {% endfor %}
-{% endwith %}
+
 
 {# ── Owned devices ──────────────────────────────────────────────────────── #}
 <h2 style="font-size: 1.1em; margin-bottom: 12px; color: #3a4a3a;">Your Devices</h2>
@@ -163,10 +159,33 @@
     </div>
     {% endif %}
     {% if not row.needs_approval %}
-    <a href="{{ url_for('portal.adopt_devices') }}?mac={{ row.mac_address }}&vlan={{ row.vlan_id }}"
-       class="btn btn-primary" style="margin-top: 10px; font-size: 0.85em; padding: 6px 14px; display: inline-block;">
-      Register this device
-    </a>
+    <form method="POST" action="{{ url_for('portal.user_home') }}" style="margin-top: 10px;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="action" value="adopt_device">
+      <input type="hidden" name="mac_address" value="{{ row.mac_address }}">
+      <input type="hidden" name="vlan_id" value="{{ row.vlan_id }}">
+      {% set vlan_opts = row.target_vlan_options or target_vlan_options or [] %}
+      <label style="display:block; font-size:0.85em; margin:8px 0 6px;">
+        Assign to network
+        <select name="target_vlan" required class="form-control" style="margin-top:4px; width:100%;">
+          <option value="">Select VLAN</option>
+          {% for opt in vlan_opts %}
+          <option value="{{ opt.vlan_id }}"
+            {% if opt.vlan_id == row.vlan_id %}selected{% endif %}>{{ opt.label }}</option>
+          {% endfor %}
+        </select>
+        {% if not vlan_opts %}
+        <span style="color:#c62828; font-size:0.9em;">No destination VLANs are configured for this account.</span>
+        {% endif %}
+      </label>
+      <label style="display:block; font-size:0.85em; margin-bottom:6px;">
+        Device type
+        <input type="text" name="device_type" class="form-control" placeholder="e.g. laptop" style="margin-top:4px;">
+      </label>
+      <button type="submit" class="btn btn-primary" style="font-size: 0.85em; padding: 6px 14px;">
+        Register this device
+      </button>
+    </form>
     {% else %}
     <form method="POST" action="{{ url_for('portal.user_home') }}" style="display: inline; margin-top: 10px;">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">

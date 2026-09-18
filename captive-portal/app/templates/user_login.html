@@ -9,10 +9,16 @@
 {% endblock %}
 
 {% block content %}
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% for category, message in messages %}
+    <div class="alert alert-{{ category }}" style="margin-bottom: 16px;">{{ message }}</div>
+  {% endfor %}
+{% endwith %}
+
 {% if off_site %}
 <p style="margin-bottom: 16px;">
-    Sign-in is only available when you are connected to the Blackfriars network.
-    You can still set or reset your password from here.
+    Sign-in and device management are only available when you are connected to
+    the Blackfriars network. You can still set or reset your password from here.
 </p>
 {% else %}
 <form method="POST" action="{{ url_for('portal.user_login') }}">
@@ -36,10 +42,6 @@
     <a href="{{ url_for('portal.register') }}">Register your device</a>
 </p>
 {% endif %}
-<p style="margin-top: 20px; text-align: center; font-size: 0.9em; color: #666;">
-    Don't have an account yet?
-    <a href="{{ url_for('portal.register') }}">Register your device</a>
-</p>
 
 <details style="margin-top: 20px; font-size: 0.9em; color: #666; border: 1px solid #ddd; border-radius: 5px; padding: 10px;">
     <summary style="cursor: pointer; font-weight: 500;">Forgotten your password or never set one?</summary>
@@ -65,7 +67,7 @@ document.getElementById('forgotForm').addEventListener('submit', function(e) {
     var btn   = this.querySelector('button');
     btn.disabled = true;
     btn.textContent = 'Sending…';
-    fetch('/forgot-network-password', {
+    fetch("{{ url_for('portal.forgot_network_password') }}", {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded',
                   'X-Requested-With': 'XMLHttpRequest'},
