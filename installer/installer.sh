@@ -2114,6 +2114,7 @@ write_pi_env_file() {
         write_env_line GRAPH_CLIENT_SECRET "$GRAPH_CLIENT_SECRET"
         write_env_line GRAPH_FROM_EMAIL "$GRAPH_FROM_EMAIL"
         write_env_line ADMIN_EMAIL "$ADMIN_EMAIL"
+        write_env_line DOMAIN_AUTH_PROVIDERS "${DOMAIN_AUTH_PROVIDERS:-}"
 
         write_env_line RADIUS_SECRET "$RADIUS_SECRET"
         write_env_line RADIUS_SERVER "$RADIUS_SERVER"
@@ -2140,7 +2141,16 @@ write_pi_env_file() {
         write_env_line PORTAL_FORWARD_PORT "8081"
         UNIFI_FORWARD_PORT=8080
         write_env_line UNIFI_FORWARD_PORT "$UNIFI_FORWARD_PORT"
-        write_env_line CAPTIVE_CHECK_HOSTS "captive.apple.com,connectivitycheck.gstatic.com,clients3.google.com,msftconnecttest.com,www.msftconnecttest.com"
+        # Captive-portal detection probe domains, by OS:
+        #   Apple (iOS/macOS):   captive.apple.com, www.apple.com
+        #   Android:             connectivitycheck.gstatic.com, connectivitycheck.android.com,
+        #                        clients3.google.com, clients1.google.com, play.googleapis.com
+        #   ChromeOS:            www.gstatic.com, www.google.com (via generate_204), alt gstatic hosts
+        #   Windows (NCSI):      msftconnecttest.com, www.msftconnecttest.com, ipv6.msftconnecttest.com, msftncsi.com, www.msftncsi.com
+        #   Firefox:             detectportal.firefox.com
+        #   GNOME/Linux:         nmcheck.gnome.org, network-test.debian.org, connectivity-check.ubuntu.com
+        #   Samsung/Xiaomi:      connect.rom.miui.com
+        write_env_line CAPTIVE_CHECK_HOSTS "captive.apple.com,www.apple.com,connectivitycheck.gstatic.com,connectivitycheck.android.com,www.gstatic.com,clients3.google.com,clients1.google.com,clients4.google.com,play.googleapis.com,www.google.com,msftconnecttest.com,www.msftconnecttest.com,ipv6.msftconnecttest.com,msftncsi.com,www.msftncsi.com,detectportal.firefox.com,nmcheck.gnome.org,network-test.debian.org,connectivity-check.ubuntu.com,connect.rom.miui.com"
         write_env_line CAPTIVE_PORTAL_IPS "$PORTAL_IP"
 
         write_env_line ORACLE_VPS_HOST "$ORACLE_VPS_HOST"
@@ -5378,6 +5388,22 @@ fi
 prompt_default PORTAL_IP_BYTE "Enter target host server last octet" "4"
 prompt_default HIJACK_DNS_IP_BYTE "Enter hijack DNS last octet" "5"
 prompt_default ADMIN_EMAIL "Admin notification email" "robert.verrill@english.op.org"
+
+# Owned email domains whose identity provider can verify user passwords
+# directly (OAuth2 ROPC against Entra ID). Users on these domains can register
+# devices with the same password they use to read their email. Format:
+#   domain:tenant_id:client_id[;domain2:tenant_id2:client_id2]
+# The client_id must be an Entra app registration with "Allow public client
+# flows" enabled. Leave empty to disable (everyone uses BF-Network passwords).
+info "Owned email domains for password verification"
+echo "If you own an email domain (e.g. english.op.org on Microsoft 365), users on"
+echo "that domain can register devices using their normal email password."
+echo "Passwords for domains you do NOT own cannot be verified - those users will"
+echo "use a BF-Network password instead."
+prompt_default DOMAIN_AUTH_PROVIDERS \
+    "Owned auth domains (domain:tenant_id:client_id;... or empty)" \
+    "" \
+    "domain_auth_providers"
 
 # Ask for main domain
 info "Oracle VPS Reverse Tunnel (Public Front Door)"

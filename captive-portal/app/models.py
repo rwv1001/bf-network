@@ -87,6 +87,9 @@ class User(db.Model):
     created_by = db.Column(db.String(100), default='admin')
     notes = db.Column(db.Text)
     blocked = db.Column(db.Boolean, default=False, nullable=False, index=True)
+    # Replicate this user (and their devices) to every bf-central site, not just
+    # sites where they have registered a device.
+    sync_to_all_sites = db.Column(db.Boolean, default=False, nullable=False)
     
     def __repr__(self):
         return f'<User {self.email}>'
@@ -311,6 +314,8 @@ class DomainPolicy(db.Model):
     domain = db.Column(db.String(255), unique=True, nullable=False, index=True)
     allowed_vlans = db.Column(db.Text)
     adoptable_vlans = db.Column(db.Text)
+    # Replicate all users on this domain (and their devices) to every bf-central site.
+    sync_to_all_sites = db.Column(db.Boolean, default=False, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

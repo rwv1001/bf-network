@@ -1,10 +1,16 @@
 """
 Email service for sending notifications via Microsoft Graph API
+
+Sending is asynchronous by default: send_email() enqueues the message and a
+daemon worker thread delivers it (with retries), so HTTP request handlers are
+never blocked on Microsoft Graph. Set EMAIL_ASYNC=0 to send synchronously.
 """
 
 import os
 import logging
 import json
+import queue
+import threading
 import msal
 import requests
 
@@ -23,10 +29,31 @@ GRAPH_SCOPE = ['https://graph.microsoft.com/.default']
 GRAPH_ENDPOINT = 'https://graph.microsoft.com/v1.0'
 
 
+# Module-level MSAL app so its built-in token cache is reused across sends.
+# Previously a new ConfidentialClientApplication (and a fresh token request to
+# Microsoft) was created for EVERY email, adding 1-3 s per message.
+_msal_app = None
+_msal_lock = threading.Lock()
+
+
+def _get_msal_app():
+    global _msal_app
+    if _msal_app is None:
+        with _msal_lock:
+            if _msal_app is None:
+                _msal_app = msal.ConfidentialClientApplication(
+                    GRAPH_CLIENT_ID,
+                    authority=GRAPH_AUTHORITY,
+                    client_credential=GRAPH_CLIENT_SECRET,
+                )
+    return _msal_app
+
+
 def get_graph_access_token():
     """
     Get access token for Microsoft Graph API using client credentials flow.
-    
+    Tokens are cached by MSAL and only refreshed when near expiry.
+
     Returns:
         str: Access token or None if authentication fails
     """
@@ -35,12 +62,9 @@ def get_graph_access_token():
         return None
     
     try:
-        app = msal.ConfidentialClientApplication(
-            GRAPH_CLIENT_ID,
-            authority=GRAPH_AUTHORITY,
-            client_credential=GRAPH_CLIENT_SECRET
-        )
-        
+        app = _get_msal_app()
+        # acquire_token_silent-style behaviour: acquire_token_for_client checks
+        # the in-memory cache first and only hits the network when expired.
         result = app.acquire_token_for_client(scopes=GRAPH_SCOPE)
         
         if 'access_token' in result:
@@ -54,9 +78,73 @@ def get_graph_access_token():
         return None
 
 
+# ---------------------------------------------------------------------------
+# Async delivery queue
+# ---------------------------------------------------------------------------
+
+_EMAIL_ASYNC = os.getenv('EMAIL_ASYNC', '1').strip().lower() not in {'0', 'false', 'no', 'off'}
+_EMAIL_MAX_RETRIES = int(os.getenv('EMAIL_MAX_RETRIES', '3'))
+_email_queue: "queue.Queue" = queue.Queue()
+_email_worker_started = False
+_email_worker_lock = threading.Lock()
+
+
+def _ensure_email_worker():
+    global _email_worker_started
+    if _email_worker_started:
+        return
+    with _email_worker_lock:
+        if _email_worker_started:
+            return
+        threading.Thread(target=_email_worker, daemon=True, name='email-sender').start()
+        _email_worker_started = True
+
+
+def _email_worker():
+    import time as _time
+    while True:
+        to_email, subject, html_body, text_body, attempt = _email_queue.get()
+        try:
+            ok = _send_email_sync(to_email, subject, html_body, text_body)
+            if not ok and attempt < _EMAIL_MAX_RETRIES:
+                delay = 10 * (2 ** attempt)  # 10s, 20s, 40s
+                logger.warning("Email to %s failed (attempt %d) — retrying in %ds",
+                               to_email, attempt + 1, delay)
+                _time.sleep(delay)
+                _email_queue.put((to_email, subject, html_body, text_body, attempt + 1))
+            elif not ok:
+                logger.error("Email to %s permanently failed after %d attempts: %s",
+                             to_email, attempt + 1, subject)
+        except Exception as exc:
+            logger.error("Email worker error for %s: %s", to_email, exc)
+        finally:
+            _email_queue.task_done()
+
+
 def send_email(to_email, subject, html_body, text_body=None):
     """
-    Send an email via Microsoft Graph API
+    Send an email via Microsoft Graph API.
+
+    By default the message is queued and delivered by a background worker so
+    callers (HTTP request handlers) are not blocked. Returns True if the
+    message was accepted for delivery.
+    """
+    if not GRAPH_FROM_EMAIL:
+        logger.warning("Microsoft Graph not configured (GRAPH_FROM_EMAIL missing), skipping email")
+        return False
+
+    if _EMAIL_ASYNC:
+        _ensure_email_worker()
+        _email_queue.put((to_email, subject, html_body, text_body, 0))
+        logger.info(f"Email queued for {to_email}: {subject}")
+        return True
+
+    return _send_email_sync(to_email, subject, html_body, text_body)
+
+
+def _send_email_sync(to_email, subject, html_body, text_body=None):
+    """
+    Send an email via Microsoft Graph API (blocking).
     
     Args:
         to_email: Recipient email address

@@ -1009,81 +1009,6 @@ extern "C"
         }
     }
 
-    // Helper: query central for an unknown MAC via central_import.py.
-
-    // Returns one of: "registered", "blocked", "not_found", "disabled", "error".
-
-    // The call is synchronous but central_import.py uses a 3-second HTTP timeout,
-
-    // so the total wall time is bounded.  We validate the MAC before exec to
-
-    // prevent shell injection.
-
-    std::string query_central_for_mac(const std::string &mac_colon,
-                                      uint32_t subnet_id = 0)
-    {
-        std::cout << "DNS Hijack Hook: [DEBUG] query_central_for_mac ENTRY - "
-                  << "mac=" << mac_colon << " subnet_id=" << subnet_id << std::endl;
-
-        // Only allow hex digits and colons (aa:bb:cc:dd:ee:ff)
-        if (mac_colon.size() > 17)
-        {
-            std::cout << "DNS Hijack Hook: [DEBUG] query_central_for_mac - "
-                      << "MAC too long (" << mac_colon.size() << " chars) → error" << std::endl;
-            return "error";
-        }
-
-        for (unsigned char c : mac_colon)
-        {
-            if (!isxdigit(c) && c != ':')
-            {
-                std::cout << "DNS Hijack Hook: [DEBUG] query_central_for_mac - "
-                          << "Invalid character in MAC: '" << c << "' → error" << std::endl;
-                return "error";
-            }
-        }
-
-        // Build command
-        std::string cmd = "python3 /scripts/central_import.py '" + mac_colon + "' " + std::to_string(subnet_id) + " 2>/dev/null";
-
-        std::cout << "DNS Hijack Hook: [DEBUG] query_central_for_mac - "
-                  << "Executing: " << cmd << std::endl;
-
-        FILE *pipe = popen(cmd.c_str(), "r");
-        if (!pipe)
-        {
-            std::cerr << "DNS Hijack Hook: [DEBUG] query_central_for_mac - "
-                      << "popen failed for command: " << cmd << std::endl;
-            return "error";
-        }
-
-        char buf[32] = {};
-        bool got = (fgets(buf, sizeof(buf) - 1, pipe) != nullptr);
-        int exit_status = pclose(pipe);
-
-        if (!got)
-        {
-            std::cout << "DNS Hijack Hook: [DEBUG] query_central_for_mac - "
-                      << "No output from central_import.py (exit_status=" << exit_status << ") → error" << std::endl;
-            return "error";
-        }
-
-        std::string result(buf);
-
-        // Strip trailing whitespace / newline
-        while (!result.empty() &&
-               (result.back() == '\n' || result.back() == '\r' || result.back() == ' '))
-        {
-            result.pop_back();
-        }
-
-        std::cout << "DNS Hijack Hook: [DEBUG] query_central_for_mac - "
-                  << "Raw output: \"" << buf << "\" → Cleaned result: \"" << result << "\""
-                  << " (pclose exit=" << exit_status << ")" << std::endl;
-
-        return result;
-    }
-
     bool is_blocked_host(const ConstHostPtr &host)
     {
         if (!host)
@@ -1808,141 +1733,36 @@ extern "C"
 
             {
 
-                // No local reservation — query central before treating as unregistered.
+                // No local reservation. Registered devices flagged for sync are
 
-                std::string central_status = query_central_for_mac(mac_clean, lease->subnet_id_);
+                // replicated to every site ahead of time (sync_to_all_sites +
 
-                std::cout << "DNS Hijack Hook: Device " << mac_clean
+                // bootstrap), so an unknown MAC is simply unregistered — no
 
-                          << " not in local DB - central query returned: "
+                // central lookup is needed and DHCP stays fast.
 
-                          << central_status << std::endl;
+                std::cout << "DNS Hijack Hook: Device " << mac_address
+
+                          << " is UNREGISTERED - enabling DNS hijack" << std::endl;
 
                 std::cout.flush();
 
-                if (central_status == "registered")
+                manage_dns_hijack("hijack", ip_address, lease->subnet_id_);
+
+                // Blocked-pool IPs are already covered by blanket ACL range rules;
+
+                // a redundant per-IP rule would survive lease expiry and litter the ACL.
+
+                if (!ip_is_blocked_pool)
 
                 {
 
-                    // Device was imported from central with REGISTERED class reservation.
-
-                    // There is no separate registered-only pool, so the device will get
-
-                    // the same IP on re-DISCOVER — drop-and-rediscover is pointless and
-
-                    // races with the portal.  Grant access immediately, exactly as we
-
-                    // do for a device that already has a local REGISTERED reservation.
-
-                    manage_unregistered_lease("remove", mac_clean, ip_address, 0);
-
-                    if (is_assigned_vlan_mismatch(mac_clean, lease->subnet_id_))
-
-                    {
-
-                        std::cout << "DNS Hijack Hook: Device " << mac_clean
-
-                                  << " imported from central (registered) but on wrong VLAN (subnet "
-
-                                  << lease->subnet_id_ << ") - restricting access" << std::endl;
-
-                        std::cout.flush();
-
-                        manage_dns_hijack("hijack", ip_address, lease->subnet_id_);
-
-                        manage_acl("block", ip_address, lease->subnet_id_);
-
-                        do_hijack = true;
-                    }
-
-                    else
-
-                    {
-
-                        std::cout << "DNS Hijack Hook: Device " << mac_clean
-
-                                  << " imported from central (registered) - granting immediate access"
-
-                                  << std::endl;
-
-                        std::cout.flush();
-
-                        manage_dns_hijack("unhijack", ip_address, lease->subnet_id_);
-
-                        manage_acl("unblock", ip_address, lease->subnet_id_);
-
-                        do_hijack = false;
-                    }
+                    manage_acl("block", ip_address, lease->subnet_id_);
                 }
 
-                else if (central_status == "blocked")
+                manage_unregistered_lease("upsert", mac_clean, ip_address, lease_seconds);
 
-                {
-
-                    // Device imported from central with BLOCKED class reservation.
-
-                    // Force a NAK so the client re-DISCOVERs and Kea uses the newly-
-
-                    // created BLOCKED host reservation to assign a blocked-pool IP.
-
-                    // NEXT_STEP_DROP does not reliably prevent DHCP4_LEASE_ALLOC/DHCPACK
-
-                    // in Kea 3.0, so we explicitly delete the stale regular-pool lease
-
-                    // and set policy_force_nak so pkt4_send converts DHCPACK → DHCPNAK.
-
-                    std::cout << "DNS Hijack Hook: Device " << mac_clean
-
-                              << " imported from central (blocked) - forcing NAK for re-DISCOVER"
-
-                              << std::endl;
-
-                    std::cout.flush();
-
-                    manage_unregistered_lease("remove", mac_clean, ip_address, 0);
-
-                    // Delete the stale regular-pool lease so the next DISCOVER starts fresh.
-
-                    LeaseMgrFactory::instance().deleteLease(lease);
-
-                    // Tell pkt4_send to convert the outgoing DHCPACK to DHCPNAK.
-
-                    handle.setContext("policy_force_nak", true);
-
-                    handle.setStatus(CalloutHandle::NEXT_STEP_SKIP);
-
-                    return 0;
-                }
-
-                else
-
-                {
-
-                    // not_found / disabled / error → fail-open: treat as unregistered
-
-                    std::cout << "DNS Hijack Hook: Device " << mac_address
-
-                              << " is UNREGISTERED - enabling DNS hijack" << std::endl;
-
-                    std::cout.flush();
-
-                    manage_dns_hijack("hijack", ip_address, lease->subnet_id_);
-
-                    // Blocked-pool IPs are already covered by blanket ACL range rules;
-
-                    // a redundant per-IP rule would survive lease expiry and litter the ACL.
-
-                    if (!ip_is_blocked_pool)
-
-                    {
-
-                        manage_acl("block", ip_address, lease->subnet_id_);
-                    }
-
-                    manage_unregistered_lease("upsert", mac_clean, ip_address, lease_seconds);
-
-                    do_hijack = true;
-                }
+                do_hijack = true;
             }
 
             // Table 6 + Table 7: record this new lease in the portal DB (async).
@@ -2335,146 +2155,32 @@ extern "C"
 
             {
 
-                // No local reservation — query central before treating as unregistered.
+                // No local reservation. Registered devices flagged for sync are
 
-                std::string central_status = query_central_for_mac(mac_clean, lease->subnet_id_);
+                // replicated to every site ahead of time (sync_to_all_sites +
+
+                // bootstrap), so an unknown MAC is simply unregistered — no
+
+                // central lookup is needed and DHCP stays fast.
 
                 std::cout << "DNS Hijack Hook: Device " << mac_address
 
-                          << " not in local DB - central query returned: "
-
-                          << central_status << std::endl;
+                          << " is UNREGISTERED - enabling DNS hijack" << std::endl;
 
                 std::cout.flush();
 
-                if (central_status == "registered")
+                manage_dns_hijack("hijack", ip_address, lease->subnet_id_);
+
+                if (!ip_is_blocked_pool)
 
                 {
 
-                    manage_unregistered_lease("remove", mac_address, ip_address, 0);
-
-                    // If the device is still holding an unregistered-pool IP, NAK so it
-                    // re-DISCOVERs and Kea allocates from the correct registered pool.
-
-                    if (is_unregistered_pool_ip(ip_address))
-
-                    {
-
-                        std::cout << "DNS Hijack Hook: Device " << mac_address
-
-                                  << " imported from central (registered) but has unregistered-pool IP "
-
-                                  << ip_address << " - sending NAK to force re-DISCOVER" << std::endl;
-
-                        std::cout.flush();
-
-                        try
-                        {
-                            LeaseMgrFactory::instance().deleteLease(lease);
-                        }
-                        catch (...)
-                        {
-                        }
-
-                        handle.setContext("policy_force_nak", true);
-
-                        handle.setStatus(CalloutHandle::NEXT_STEP_SKIP);
-
-                        return 0;
-                    }
-
-                    else if (is_assigned_vlan_mismatch(mac_clean, lease->subnet_id_))
-
-                    {
-
-                        std::cout << "DNS Hijack Hook: Device " << mac_address
-
-                                  << " imported from central (registered) but on wrong VLAN (subnet "
-
-                                  << lease->subnet_id_ << ") - restricting access" << std::endl;
-
-                        std::cout.flush();
-
-                        manage_dns_hijack("hijack", ip_address, lease->subnet_id_);
-
-                        manage_acl("block", ip_address, lease->subnet_id_);
-
-                        do_hijack = true;
-                    }
-
-                    else
-
-                    {
-
-                        std::cout << "DNS Hijack Hook: Device " << mac_address
-
-                                  << " imported from central (registered) - granting access" << std::endl;
-
-                        std::cout.flush();
-
-                        manage_dns_hijack("unhijack", ip_address, lease->subnet_id_);
-
-                        manage_acl("unblock", ip_address, lease->subnet_id_);
-
-                        do_hijack = false;
-                    }
+                    manage_acl("block", ip_address, lease->subnet_id_);
                 }
 
-                else if (central_status == "blocked")
+                manage_unregistered_lease("upsert", mac_address, ip_address, lease_seconds);
 
-                {
-
-                    std::cout << "DNS Hijack Hook: Device " << mac_address
-
-                              << " imported from central (blocked) - forcing NAK for re-DISCOVER"
-
-                              << std::endl;
-
-                    std::cout.flush();
-
-                    manage_unregistered_lease("remove", mac_address, ip_address, 0);
-
-                    try
-                    {
-                        LeaseMgrFactory::instance().deleteLease(lease);
-                    }
-                    catch (...)
-                    {
-                    }
-
-                    handle.setContext("policy_force_nak", true);
-
-                    handle.setStatus(CalloutHandle::NEXT_STEP_SKIP);
-
-                    return 0;
-                }
-
-                else
-
-                {
-
-                    // not_found / disabled / error → fail-open: treat as unregistered
-
-                    std::cout << "DNS Hijack Hook: Device " << mac_address
-
-                              << " is UNREGISTERED - enabling DNS hijack" << std::endl;
-
-                    std::cout.flush();
-
-                    manage_dns_hijack("hijack", ip_address, lease->subnet_id_);
-
-                    if (!ip_is_blocked_pool)
-
-                    {
-
-                        manage_acl("block", ip_address, lease->subnet_id_);
-                    }
-
-                    manage_unregistered_lease("upsert", mac_address, ip_address, lease_seconds);
-
-                    do_hijack = true;
-
-                } // end not_found/error
+                do_hijack = true;
 
             } // end no local reservation
 

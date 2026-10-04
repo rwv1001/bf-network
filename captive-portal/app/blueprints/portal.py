@@ -465,6 +465,24 @@ def ios_captive_success():
     return redirect(build_portal_url(url_for('portal.register'))), 302
 
 
+@portal_bp.route('/success.txt')
+@portal_bp.route('/canonical.html')
+def firefox_captive_portal_detection():
+    return redirect(build_portal_url(url_for('portal.register'))), 302
+
+
+@portal_bp.route('/check_network_status.txt')
+@portal_bp.route('/nm-check.txt')
+def gnome_captive_portal_detection():
+    return redirect(build_portal_url(url_for('portal.register'))), 302
+
+
+@portal_bp.route('/mobile/status.php')
+@portal_bp.route('/generate204')
+def misc_captive_portal_detection():
+    return redirect(build_portal_url(url_for('portal.register'))), 302
+
+
 @portal_bp.route('/ncsi.txt')
 @portal_bp.route('/connecttest.txt')
 @portal_bp.route('/redirect', methods=['GET', 'POST', 'OPTIONS'])
@@ -1129,7 +1147,16 @@ def register():
 
         # Password-required VLAN handling (spec 4b.ii.1)
         if selected_vlan and vlan_requires_password(selected_vlan) and not device.ownership_validated:
-            if not user.has_network_password:
+            from domain_auth import get_provider_for_email, verify_domain_credentials
+            provider = get_provider_for_email(email)
+            auth_method = (request.form.get('auth_method') or '').strip().lower()
+            auth_options = {
+                'domain_auth_available': bool(provider),
+                'domain': provider['domain'] if provider else '',
+                'has_bf_password': user.has_network_password,
+            }
+
+            def _send_set_password_email():
                 if not user.network_password_set_token:
                     user.network_password_set_token = secrets.token_urlsafe(32)
                     user.network_password_set_token_expires = (
@@ -1142,16 +1169,57 @@ def register():
                     email, first_name or 'there', set_password_url,
                     network_name=ssid or 'Wired Network',
                 )
+
+            if provider and auth_method == 'domain':
+                # Verify against the owned domain's identity provider (same
+                # password the user uses to read their email).
+                if not password_input:
+                    if is_ajax:
+                        return jsonify({
+                            'status': 'need_password',
+                            'message': 'Please enter your email password.',
+                            'auth_options': auth_options,
+                        })
+                    return render_template(
+                        'register.html', show_password_form=True, prefill=prefill,
+                        detected_mac=mac_address, detected_ip=ip_address,
+                        wired_vlan_required=is_wired_unregistered,
+                        wired_vlan_options=wired_vlan_options,
+                    )
+                ok, err = verify_domain_credentials(email, password_input)
+                if not ok:
+                    msg = err or f"Incorrect {provider['domain']} password."
+                    if is_ajax:
+                        return jsonify({'status': 'error', 'message': msg,
+                                        'auth_options': auth_options}), 400
+                    flash(msg, 'error')
+                    return render_template(
+                        'register.html', show_password_form=True, prefill=prefill,
+                        detected_mac=mac_address, detected_ip=ip_address,
+                        wired_vlan_required=is_wired_unregistered,
+                        wired_vlan_options=wired_vlan_options,
+                    )
+                device.ownership_validated = True
+                db.session.commit()
+
+            elif auth_method == 'bfnetwork_setup' or (not user.has_network_password and not provider):
+                # No BF-Network password set — email a link to create one.
+                _send_set_password_email()
                 if is_ajax:
                     return jsonify({
                         'status': 'pending_password',
                         'message': 'A network password is required. Please check your email.',
+                        'auth_options': auth_options,
                     })
                 return redirect(url_for('portal.pending_approval'))
 
-            if not password_input:
+            elif not password_input:
                 if is_ajax:
-                    return jsonify({'status': 'need_password', 'message': 'Please enter your network password.'})
+                    return jsonify({
+                        'status': 'need_password',
+                        'message': 'Please enter your network password.',
+                        'auth_options': auth_options,
+                    })
                 return render_template(
                     'register.html', show_password_form=True, prefill=prefill,
                     detected_mac=mac_address, detected_ip=ip_address,
@@ -1159,10 +1227,22 @@ def register():
                     wired_vlan_options=wired_vlan_options,
                 )
 
-            if not user.check_network_password(password_input):
-                msg = 'Incorrect network password.'
+            elif not user.has_network_password:
+                # Password supplied for BF-Network auth but none is set yet.
+                _send_set_password_email()
                 if is_ajax:
-                    return jsonify({'status': 'error', 'message': msg}), 400
+                    return jsonify({
+                        'status': 'pending_password',
+                        'message': 'You have not set a BF-Network password yet. Please check your email for a link to set one.',
+                        'auth_options': auth_options,
+                    })
+                return redirect(url_for('portal.pending_approval'))
+
+            elif not user.check_network_password(password_input):
+                msg = 'Incorrect BF-Network password.'
+                if is_ajax:
+                    return jsonify({'status': 'error', 'message': msg,
+                                    'auth_options': auth_options}), 400
                 flash(msg, 'error')
                 return render_template(
                     'register.html', show_password_form=True, prefill=prefill,
@@ -1171,8 +1251,9 @@ def register():
                     wired_vlan_options=wired_vlan_options,
                 )
 
-            device.ownership_validated = True
-            db.session.commit()
+            else:
+                device.ownership_validated = True
+                db.session.commit()
 
         # Approval check (spec steps 4/5)
         domain_policy_map = load_domain_policy_map()

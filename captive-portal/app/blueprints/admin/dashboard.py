@@ -553,16 +553,31 @@ def domain_policies():
 
     allowed   = parse_allowed_vlans(','.join(request.form.getlist('domain_allowed_vlans')))
     adoptable = parse_allowed_vlans(','.join(request.form.getlist('domain_adoptable_vlans')))
+    sync_to_all_sites = bool(request.form.get('domain_sync_to_all_sites'))
+
+    def _push_existing_domain_users(domain_name):
+        """Queue user_updated for every existing user on the domain so central
+        flags them (and fans out their devices) — not just users who register
+        after the checkbox was ticked."""
+        users = User.query.filter(User.email.ilike(f'%@{domain_name}')).all()
+        for u in users:
+            central_client.queue_user_updated(u)
+        if users:
+            flash(f'{len(users)} existing user(s) on {domain_name} queued for sync to all sites.', 'info')
 
     if policy_id:
         policy = DomainPolicy.query.get(policy_id)
         if not policy:
             flash('Domain policy not found.', 'error')
             return redirect(url_for('admin.dashboard.index'))
+        sync_newly_enabled = sync_to_all_sites and not policy.sync_to_all_sites
         policy.domain          = domain
         policy.allowed_vlans   = format_allowed_vlans(allowed)
         policy.adoptable_vlans = format_allowed_vlans(adoptable)
+        policy.sync_to_all_sites = sync_to_all_sites
         db.session.commit()
+        if sync_newly_enabled:
+            _push_existing_domain_users(domain)
         flash(f'Domain policy for {domain} updated.', 'success')
         return redirect(url_for('admin.dashboard.index'))
 
@@ -574,9 +589,12 @@ def domain_policies():
         domain=domain,
         allowed_vlans=format_allowed_vlans(allowed),
         adoptable_vlans=format_allowed_vlans(adoptable),
+        sync_to_all_sites=sync_to_all_sites,
     )
     db.session.add(policy)
     db.session.commit()
+    if sync_to_all_sites:
+        _push_existing_domain_users(domain)
     flash(f'Domain policy for {domain} added.', 'success')
     return redirect(url_for('admin.dashboard.index'))
 

@@ -93,6 +93,7 @@ def add_user():
         begin_date = (datetime.strptime(begin_date_raw, '%Y-%m-%d').date()
                       if begin_date_raw else datetime.utcnow().date())
         require_approval_every_device = bool(request.form.get('require_approval_every_device'))
+        sync_to_all_sites = bool(request.form.get('sync_to_all_sites'))
         expiry_date_str = request.form.get('expiry_date', '').strip()
         expiry_date = (datetime.strptime(expiry_date_str, '%Y-%m-%d').date()
                        if expiry_date_str else None)
@@ -128,9 +129,13 @@ def add_user():
             adoptable_vlans_override=format_allowed_vlans(adopt_allow),
             adoptable_vlans_deny=format_allowed_vlans(adopt_deny),
             require_approval_every_device=require_approval_every_device,
+            sync_to_all_sites=sync_to_all_sites,
         )
         db.session.add(user)
         db.session.commit()
+
+        if sync_to_all_sites:
+            central_client.queue_user_updated(user)
 
         flash(f'User {email} added successfully', 'success')
         logger.info("Admin added user: %s", email)
@@ -158,6 +163,7 @@ def edit_user(user_id):
         user.begin_date   = datetime.strptime(request.form.get('begin_date'), '%Y-%m-%d').date()
         user.require_approval_every_device = bool(
             request.form.get('require_approval_every_device'))
+        user.sync_to_all_sites = bool(request.form.get('sync_to_all_sites'))
         expiry_date_str = request.form.get('expiry_date', '').strip()
         user.expiry_date = (datetime.strptime(expiry_date_str, '%Y-%m-%d').date()
                             if expiry_date_str else None)

@@ -91,6 +91,17 @@
             When enabled, this user always needs approval even if VLANs are allowed.
         </small>
     </div>
+
+    <div class="form-group">
+        <label style="display: inline-flex; align-items: center; gap: 8px;">
+            <input type="checkbox" name="sync_to_all_sites" value="1">
+            Sync this user to all sites
+        </label>
+        <small style="color: #666; display: block; margin-top: 5px;">
+            Replicates this user and their devices to every bf-central site, so they
+            get an IP immediately at any site without a central lookup.
+        </small>
+    </div>
     
     <div class="form-group">
         <label for="begin_date">Begin Date</label>

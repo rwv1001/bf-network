@@ -80,6 +80,171 @@ def init_central_client(app, db, central_event_model):
         target=_outbound_worker, daemon=True, name="central-outbound"
     ).start()
 
+    threading.Thread(
+        target=_bootstrap_sync_if_needed, daemon=True, name="central-bootstrap"
+    ).start()
+
+
+def _should_sync_all(user) -> bool:
+    """True when this user (or their email domain) is flagged for replication
+    to every site, so all sites hold the record before the device first shows up."""
+    try:
+        if getattr(user, "sync_to_all_sites", False):
+            return True
+        email = (user.email or "").lower()
+        if "@" not in email:
+            return False
+        from models import DomainPolicy
+        policy = DomainPolicy.query.filter_by(domain=email.split("@", 1)[1]).first()
+        return bool(policy and getattr(policy, "sync_to_all_sites", False))
+    except Exception as exc:
+        logger.warning("_should_sync_all failed for %s: %s", getattr(user, "email", "?"), exc)
+        return False
+
+
+# Set during bootstrap so bulk imports don't spawn one eager-send thread each;
+# the outbound worker drains the queue instead.
+_eager_suppressed = False
+
+
+def _ensure_kea_reservation(device) -> None:
+    """Create the local Kea host reservation for an imported device so the DHCP
+    hook finds a local registered host and grants an IP immediately, without
+    ever needing to consult central."""
+    try:
+        if not device.assigned_vlan:
+            return
+        from kea_integration import get_kea_client
+        kea = get_kea_client(
+            control_socket=os.getenv('KEA_CONTROL_SOCKET', '/kea/sockets/kea4-ctrl-socket')
+        )
+        if kea:
+            kea.register_mac(
+                mac=device.mac_address, vlan=device.assigned_vlan,
+                hostname=device.device_name or 'device', ip_address=None,
+            )
+    except Exception as exc:
+        logger.warning("Kea reservation failed for imported device %s: %s",
+                       device.mac_address, exc)
+
+
+def _upsert_user_from_central(data: dict):
+    """Create/update a local User from a central user payload. Returns the User
+    or None. Caller must be inside an app context; commits the session."""
+    from models import User
+    from extensions import db
+    import datetime as _dt
+
+    email = (data.get("email") or "").lower().strip()
+    if not email:
+        return None
+    user = User.query.filter_by(email=email).first()
+    if not user:
+        user = User(
+            email=email,
+            first_name=data.get("first_name") or "",
+            last_name=data.get("last_name") or "",
+            phone_number=data.get("phone_number") or "",
+            network_password_hash=data.get("network_password_hash") or None,
+            network_password_approval_mode=(
+                'first_use' if data.get("network_password_hash") else None
+            ),
+            begin_date=_dt.datetime.utcnow().date(),
+            created_by='central-sync',
+            sync_to_all_sites=bool(data.get("sync_to_all_sites")),
+        )
+        db.session.add(user)
+    else:
+        if data.get("first_name") and not user.first_name:
+            user.first_name = data["first_name"]
+        if data.get("last_name") and not user.last_name:
+            user.last_name = data["last_name"]
+        if data.get("phone_number") and not user.phone_number:
+            user.phone_number = data["phone_number"]
+        if data.get("network_password_hash"):
+            user.network_password_hash = data["network_password_hash"]
+            if not user.network_password_approval_mode:
+                user.network_password_approval_mode = 'first_use'
+        if data.get("sync_to_all_sites"):
+            user.sync_to_all_sites = True
+    if data.get("blocked") and not user.blocked:
+        user.blocked = True
+    db.session.commit()
+    return user
+
+
+def _bootstrap_sync_if_needed() -> None:
+    """One-time full import from central when this site first starts up.
+
+    Pulls every sync-flagged user and device from GET /api/v1/bootstrap so a new
+    site has the complete dataset before any of those devices connect. Marked
+    done with a `_bootstrap_done` row in central_outbound_events; on failure it
+    is retried on the next app start.
+    """
+    global _eager_suppressed
+    if not _central_enabled() or not _app or not _model:
+        return
+    time.sleep(10)  # let the app and DB finish starting
+    try:
+        with _app.app_context():
+            from extensions import db
+            if _model.query.filter_by(event_type="_bootstrap_done").first():
+                return
+            logger.info("central bootstrap: starting full sync from central")
+            try:
+                resp = requests.get(
+                    f"{_api_url()}/api/v1/bootstrap",
+                    headers=_headers(), timeout=120,
+                )
+            except Exception as exc:
+                logger.warning("central bootstrap failed (will retry on next start): %s", exc)
+                return
+            if resp.status_code == 404:
+                logger.info("central bootstrap: endpoint not available on central — skipping")
+                return
+            if resp.status_code != 200:
+                logger.warning("central bootstrap → HTTP %d (will retry on next start)",
+                               resp.status_code)
+                return
+            body = resp.json() or {}
+            users = body.get("users") or []
+            devices = body.get("devices") or []
+
+            imported_users = 0
+            for u in users:
+                if _upsert_user_from_central(u):
+                    imported_users += 1
+
+            imported_devices = 0
+            _eager_suppressed = True
+            try:
+                for d in devices:
+                    mac = (d.get("mac_address") or "").lower().strip()
+                    if not mac:
+                        continue
+                    try:
+                        device = import_device_from_central(mac, d)
+                        if device:
+                            _ensure_kea_reservation(device)
+                            imported_devices += 1
+                    except Exception as exc:
+                        db.session.rollback()
+                        logger.warning("central bootstrap: import failed for %s: %s", mac, exc)
+            finally:
+                _eager_suppressed = False
+
+            done = _model(
+                event_type="_bootstrap_done",
+                payload={"users": imported_users, "devices": imported_devices},
+                status="sent",
+            )
+            db.session.add(done)
+            db.session.commit()
+            logger.info("central bootstrap: imported %d user(s), %d device(s)",
+                        imported_users, imported_devices)
+    except Exception as exc:
+        logger.error("central bootstrap error: %s", exc)
+
 
 # ---------------------------------------------------------------------------
 # Public API — called from blueprints / app.py
@@ -106,11 +271,12 @@ def queue_device_registered(device, user) -> None:
         "device_name": device.device_name,
         "is_wired": bool(device.is_wired),
         "connection_type": device.connection_type or "unknown",
+        "sync_to_all_sites": _should_sync_all(user),
     }
     _enqueue("device_registered", payload)
     # Attempt an immediate send without waiting for the poll cycle.
     # The async worker still provides the retry path if this fails.
-    if _app and _model and _db:
+    if _app and _model and _db and not _eager_suppressed:
         threading.Thread(
             target=_eager_send_registration,
             args=(payload,),
@@ -212,6 +378,7 @@ def queue_user_updated(user) -> None:
         "allowed_vlans_deny":       user.allowed_vlans_deny       or "",
         "adoptable_vlans_override": user.adoptable_vlans_override or "",
         "adoptable_vlans_deny":     user.adoptable_vlans_deny     or "",
+        "sync_to_all_sites":        _should_sync_all(user),
     })
 
 
@@ -657,6 +824,23 @@ def _apply_inbound(event_type: str, data: dict) -> None:
             db.session.commit()
             logger.info("central: unblocked user %s (devices remain individually blocked)", email)
 
+    elif event_type == "import_user_device":
+        # Full replication push: central wants this site to hold the user+device
+        # (sync_to_all_sites). Import and create the Kea reservation so DHCP
+        # grants an IP immediately when the device first appears here.
+        mac = (data.get("mac_address") or "").lower().strip()
+        if mac:
+            device = import_device_from_central(mac, data)
+            if device:
+                _ensure_kea_reservation(device)
+                logger.info("central: imported synced device %s", mac)
+        else:
+            _upsert_user_from_central(data)
+
+    elif event_type == "import_user":
+        _upsert_user_from_central(data)
+        logger.info("central: imported synced user %s", (data.get("email") or "").lower())
+
     elif event_type == "update_user":
         email = data.get("email", "").lower()
         user = User.query.filter_by(email=email).first()
@@ -683,6 +867,11 @@ def _apply_inbound(event_type: str, data: dict) -> None:
                 user.adoptable_vlans_deny = data["adoptable_vlans_deny"] or None
             db.session.commit()
             logger.info("central: updated profile for user %s", email)
+        elif data.get("sync_to_all_sites"):
+            # Synced user not present locally yet — create them so passwords and
+            # profile details are available before their first registration here.
+            _upsert_user_from_central(data)
+            logger.info("central: created synced user %s from update_user", email)
         else:
             logger.info("central update_user: %s not found locally — skipping", email)
 

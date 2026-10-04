@@ -2,6 +2,8 @@ Flask==3.0.0
 Flask-SQLAlchemy==3.1.1
 Flask-Login==0.6.3
 psycopg2-binary==2.9.9
+# psycopg v3, for deployments whose DATABASE_URL uses postgresql+psycopg://
+psycopg[binary]>=3.1
 redis==5.0.1
 gunicorn==21.2.0
 python-dotenv==1.0.0

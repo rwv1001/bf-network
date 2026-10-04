@@ -1423,6 +1423,10 @@ function confirmFixedIpKeaWarning() {
         </div>
     </div>
     <div style="margin-top: 12px;">
+        <label style="display: inline-flex; align-items: center; gap: 6px; margin-right: 16px;">
+            <input type="checkbox" name="domain_sync_to_all_sites" value="1">
+            <span><strong>Sync users on this domain to all sites</strong></span>
+        </label>
         <button type="submit" class="btn btn-small">Add Domain Policy</button>
     </div>
 </form>
@@ -1435,6 +1439,7 @@ function confirmFixedIpKeaWarning() {
                 <th>Domain</th>
                 <th>Allowed VLANs</th>
                 <th>Adoptable VLANs</th>
+                <th>Sync All Sites</th>
                 <th>Actions</th>
             </tr>
         </thead>
@@ -1463,6 +1468,11 @@ function confirmFixedIpKeaWarning() {
                         </label>
                         {% endif %}
                     {% endfor %}
+                </td>
+                <td style="text-align: center;">
+                    <input type="checkbox" name="domain_sync_to_all_sites" value="1" form="domain-form-{{ policy.id }}"
+                           {% if policy.sync_to_all_sites %}checked{% endif %}
+                           title="Replicate all users on this domain (and their devices) to every site">
                 </td>
                 <td style="white-space: nowrap;">
                     <form id="domain-form-{{ policy.id }}" method="POST" action="{{ url_for('admin.dashboard.domain_policies') }}" style="display: inline;">

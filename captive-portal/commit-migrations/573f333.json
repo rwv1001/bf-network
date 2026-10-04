@@ -1,0 +1,52 @@
+{
+  "description": "Multi-feature update: (1) owned-domain email-password verification at registration (DOMAIN_AUTH_PROVIDERS, radio-button auth choice); (2) full cross-site replication of flagged users/domains via bf-central (sync_to_all_sites on users and domain_policies, bootstrap full-sync for new sites, import_user_device push handling); (3) asynchronous email delivery with cached Microsoft Graph token (EMAIL_ASYNC); (4) expanded captive-portal detection domains and NPM default-site redirect; (5) Kea hook no longer queries bf-central for unknown MACs — the lookup was removed from dns_hijack_hook.cc, so the kea image must be rebuilt.",
+
+  "env": {
+    "add": [
+      {
+        "key": "DOMAIN_AUTH_PROVIDERS",
+        "description": "Owned email domains whose identity provider verifies user passwords at registration via OAuth2 ROPC. Format: domain:tenant_id:client_id[;domain2:...]. The Entra app registration must have 'Allow public client flows' enabled. Leave empty to disable.",
+        "default": "",
+        "required": false,
+        "sensitive": false
+      },
+      {
+        "key": "EMAIL_ASYNC",
+        "description": "Send emails via a background worker queue instead of blocking HTTP request handlers. Strongly recommended. Set 0 to restore synchronous sending.",
+        "default": "1",
+        "required": false,
+        "sensitive": false
+      },
+      {
+        "key": "EMAIL_MAX_RETRIES",
+        "description": "Number of retry attempts for a failed email send (exponential backoff 10s/20s/40s).",
+        "default": "3",
+        "required": false,
+        "sensitive": false
+      },
+      {
+        "key": "CAPTIVE_CHECK_HOSTS",
+        "description": "UPDATED VALUE (key already exists): expanded captive-portal probe domain list covering ChromeOS, Android, Windows NCSI, Apple, Firefox, GNOME/Ubuntu and Xiaomi. New value: captive.apple.com,www.apple.com,connectivitycheck.gstatic.com,connectivitycheck.android.com,www.gstatic.com,clients3.google.com,clients1.google.com,clients4.google.com,play.googleapis.com,www.google.com,msftconnecttest.com,www.msftconnecttest.com,ipv6.msftconnecttest.com,msftncsi.com,www.msftncsi.com,detectportal.firefox.com,nmcheck.gnome.org,network-test.debian.org,connectivity-check.ubuntu.com,connect.rom.miui.com",
+        "default": "captive.apple.com,www.apple.com,connectivitycheck.gstatic.com,connectivitycheck.android.com,www.gstatic.com,clients3.google.com,clients1.google.com,clients4.google.com,play.googleapis.com,www.google.com,msftconnecttest.com,www.msftconnecttest.com,ipv6.msftconnecttest.com,msftncsi.com,www.msftncsi.com,detectportal.firefox.com,nmcheck.gnome.org,network-test.debian.org,connectivity-check.ubuntu.com,connect.rom.miui.com",
+        "required": false,
+        "sensitive": false
+      }
+    ],
+    "remove": []
+  },
+
+  "db": {
+    "up":   "migrate-sync-all-sites-up.sh",
+    "down": "migrate-sync-all-sites-down.sh",
+    "verify_up": [
+      {"type": "column", "table": "users",           "column": "sync_to_all_sites"},
+      {"type": "column", "table": "domain_policies", "column": "sync_to_all_sites"}
+    ],
+    "verify_down": [
+      {"type": "column_absent", "table": "users",           "column": "sync_to_all_sites"},
+      {"type": "column_absent", "table": "domain_policies", "column": "sync_to_all_sites"}
+    ]
+  },
+
+  "notes": "After upgrading each site: (1) run the db migration, then restart the captive-portal web container; (2) re-run npm/setup.py (or the installer's npm-setup step) so the expanded CAPTIVE_CHECK_HOSTS proxy hosts and the NPM default-site redirect are created — this is what fixes missing captive-portal popups on ChromeOS/Asus; (3) if you own email domains, set DOMAIN_AUTH_PROVIDERS in captive-portal/.env; (4) tick 'Sync to all sites' on the desired domain policies / users — their users+devices will replicate to every site; new sites pull everything automatically on first start via GET /api/v1/bootstrap; (5) on bf-central run: ALTER TABLE central_users ADD COLUMN IF NOT EXISTS sync_to_all_sites BOOLEAN NOT NULL DEFAULT FALSE; then restart central-api; (6) REBUILD the kea image (docker compose build kea && docker compose up -d kea) — dns_hijack_hook.cc no longer queries bf-central for unknown MACs, so DHCP grants IPs without any central round-trip. IMPORTANT: enable the sync flags and verify replication BEFORE rolling the new kea image out to other sites, otherwise roaming devices of synced users will be treated as unregistered at sites they have not visited yet."
+}

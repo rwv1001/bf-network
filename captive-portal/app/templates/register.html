@@ -554,7 +554,7 @@ document.addEventListener('DOMContentLoaded', function() {
             }
 
             if (status === 'password_required' || status === 'need_password') {
-                showNetworkPasswordPrompt(data.message || 'A network password is required to access this network. Please enter your password below.');
+                showNetworkPasswordPrompt(data.message || 'A password is required to access this network.', data.auth_options);
                 return;
             }
 
@@ -567,26 +567,48 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
 
-    function showNetworkPasswordPrompt(msg) {
+    function showNetworkPasswordPrompt(msg, authOptions) {
         const oldPwdDiv = document.getElementById('passwordPrompt');
         if (oldPwdDiv) oldPwdDiv.remove();
+
+        const opts = authOptions || {};
+        const domainAuth = !!opts.domain_auth_available;
+        const ownedDomain = opts.domain || '';
+        const hasBfPassword = !!opts.has_bf_password;
 
         const pwdDiv = document.createElement('div');
         pwdDiv.id = 'passwordPrompt';
         pwdDiv.style.marginTop = '12px';
+        const radioHtml = domainAuth ? `
+            <div class="form-group" style="text-align:left;">
+                <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;margin-bottom:8px;">
+                    <input type="radio" name="auth_method_choice" value="domain" checked style="margin-top:3px;">
+                    <span><strong>Use my ${ownedDomain} password</strong><br>
+                    <small style="color:#555;">The same password you use to sign in and read your ${ownedDomain} email.</small></span>
+                </label>
+                <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;">
+                    <input type="radio" name="auth_method_choice" value="bfnetwork" style="margin-top:3px;">
+                    <span><strong>Use my BF-Network password</strong><br>
+                    <small style="color:#555;">A separate password used only for this network registration system.</small></span>
+                </label>
+            </div>` : '';
         pwdDiv.innerHTML = `
-            <p style="margin:0 0 10px 0;">${msg || 'A network password is required. Please enter it below.'}</p>
-            <div class="form-group">
-                <label for="network_password"><strong>Network Password</strong></label>
+            <p style="margin:0 0 10px 0;">${msg || 'A password is required. Please verify your identity below.'}</p>
+            ${radioHtml}
+            <div id="bfNoPasswordNotice" style="display:none;background:#fff3cd;color:#856404;border:1px solid #ffeeba;border-radius:6px;padding:10px;margin-bottom:10px;text-align:left;">
+                You haven&rsquo;t set a BF-Network password yet. Click the button below and we&rsquo;ll email you a link to set one.
+            </div>
+            <div class="form-group" id="passwordFieldGroup">
+                <label for="network_password"><strong id="passwordFieldLabel">Network Password</strong></label>
                 <div style="position:relative;display:flex;align-items:center;">
-                    <input type="password" id="network_password" placeholder="Enter your network password"
+                    <input type="password" id="network_password" placeholder="Enter your password"
                            style="width:100%;padding:10px;padding-right:40px;margin-top:6px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box;">
                     <button type="button" onclick="(function(){var i=document.getElementById('network_password');var b=document.getElementById('toggleNetworkPwd');i.type=i.type==='password'?'text':'password';b.textContent=i.type==='password'?'👁️':'🙈';})()" id="toggleNetworkPwd" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;padding:0;font-size:16px;line-height:1;color:#666;" title="Show/hide password">👁️</button>
                 </div>
             </div>
             <button type="button" id="submitPasswordBtn" class="btn" style="margin-top:10px;">Submit Password</button>
-            <p style="margin:10px 0 0 0;font-size:0.9em;">
-                <a href="#" id="forgotNetworkPwdLink" style="color:#0c5460;">Forgot your password?</a>
+            <p style="margin:10px 0 0 0;font-size:0.9em;" id="forgotPwdRow">
+                <a href="#" id="forgotNetworkPwdLink" style="color:#0c5460;">Forgot your BF-Network password?</a>
             </p>
         `;
         statusMessage.textContent = '';
@@ -596,6 +618,43 @@ document.addEventListener('DOMContentLoaded', function() {
         statusMessage.style.border = '1px solid #bee5eb';
         statusMessage.appendChild(pwdDiv);
         form.style.display = 'none';
+
+        const selectedAuthMethod = () => {
+            if (!domainAuth) return 'bfnetwork';
+            const checked = pwdDiv.querySelector('input[name="auth_method_choice"]:checked');
+            return checked ? checked.value : 'domain';
+        };
+
+        function refreshAuthUi() {
+            const method = selectedAuthMethod();
+            const fieldGroup = document.getElementById('passwordFieldGroup');
+            const notice     = document.getElementById('bfNoPasswordNotice');
+            const label      = document.getElementById('passwordFieldLabel');
+            const forgotRow  = document.getElementById('forgotPwdRow');
+            const btn        = document.getElementById('submitPasswordBtn');
+            if (method === 'domain') {
+                fieldGroup.style.display = '';
+                notice.style.display = 'none';
+                label.textContent = ownedDomain + ' email password';
+                forgotRow.style.display = 'none';
+                btn.textContent = 'Submit Password';
+            } else if (!hasBfPassword) {
+                fieldGroup.style.display = 'none';
+                notice.style.display = 'block';
+                forgotRow.style.display = 'none';
+                btn.textContent = 'Email me a link to set my BF-Network password';
+            } else {
+                fieldGroup.style.display = '';
+                notice.style.display = 'none';
+                label.textContent = 'BF-Network password';
+                forgotRow.style.display = '';
+                btn.textContent = 'Submit Password';
+            }
+        }
+        pwdDiv.querySelectorAll('input[name="auth_method_choice"]').forEach((radio) => {
+            radio.addEventListener('change', refreshAuthUi);
+        });
+        refreshAuthUi();
 
         document.getElementById('forgotNetworkPwdLink').addEventListener('click', function(e) {
             e.preventDefault();
@@ -630,16 +689,25 @@ document.addEventListener('DOMContentLoaded', function() {
         });
 
         document.getElementById('submitPasswordBtn').addEventListener('click', function() {
-            const pwd = document.getElementById('network_password').value.trim();
-            if (!pwd) {
-                showStatus('Please enter your network password.', 'error');
-                statusMessage.appendChild(pwdDiv);
-                return;
-            }
+            const method = selectedAuthMethod();
             const resubmitData = new FormData(form);
-            resubmitData.set('network_password', pwd);
             resubmitData.set('registration_step', 'final');
+            if (method === 'bfnetwork' && !hasBfPassword) {
+                // No BF-Network password yet — request the set-password email.
+                resubmitData.set('auth_method', 'bfnetwork_setup');
+                resubmitData.delete('network_password');
+            } else {
+                const pwd = document.getElementById('network_password').value.trim();
+                if (!pwd) {
+                    showStatus('Please enter your password.', 'error');
+                    statusMessage.appendChild(pwdDiv);
+                    return;
+                }
+                resubmitData.set('network_password', pwd);
+                resubmitData.set('auth_method', method);
+            }
             const btn = document.getElementById('submitPasswordBtn');
+            const btnLabel = btn.textContent;
             btn.disabled = true;
             btn.textContent = 'Checking...';
 
@@ -670,21 +738,26 @@ document.addEventListener('DOMContentLoaded', function() {
                     showStatus(data.message || 'Password accepted. Your registration has been submitted for admin approval. Please wait...', 'info');
                     pollingStarted = false;
                     startPolling();
+                } else if (data.status === 'pending_password') {
+                    pwdDiv.remove();
+                    showStatus(data.message || 'We have emailed you a link to set your BF-Network password. Once it is set, return here to continue.', 'info');
+                    pollingStarted = false;
+                    startPolling();
                 } else if (data.status === 'error') {
                     btn.disabled = false;
-                    btn.textContent = 'Submit Password';
+                    btn.textContent = btnLabel;
                     showStatus(data.message || 'Incorrect password. Please try again.', 'error');
                     statusMessage.appendChild(pwdDiv);
                 } else {
                     btn.disabled = false;
-                    btn.textContent = 'Submit Password';
+                    btn.textContent = btnLabel;
                     showStatus(data.message || 'An error occurred. Please try again.', 'info');
                     statusMessage.appendChild(pwdDiv);
                 }
             })
             .catch(err => {
                 btn.disabled = false;
-                btn.textContent = 'Submit Password';
+                btn.textContent = btnLabel;
                 showStatus('Error: ' + (err.message || 'Please try again.'), 'error');
                 statusMessage.appendChild(pwdDiv);
             });

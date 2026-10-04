@@ -365,6 +365,27 @@ def _request_http01_certificate(token, domain):
     print(f"npm-setup: built-in NPM certificate issued id={cert_id}", flush=True)
     return cert_id
 
+def _set_default_site_redirect(token):
+    """Point NPM's default site (any Host header without a proxy host) at the
+    portal. The hijack dnsmasq answers EVERY domain with the portal IP, so OS
+    captive-portal probes for domains not listed in CAPTIVE_CHECK_HOSTS land on
+    NPM's default site. Without this, NPM serves its 'Congratulations' page,
+    the probe doesn't look captive, and no sign-in popup appears (seen on
+    ChromeOS and some Windows laptops)."""
+    if not PORTAL_URL:
+        return
+    try:
+        _api(
+            "PUT",
+            "/api/settings/default-site",
+            {"value": "redirect", "meta": {"redirect": PORTAL_URL}},
+            token=token,
+        )
+        print(f"npm-setup: default site set to redirect -> {PORTAL_URL}", flush=True)
+    except Exception as exc:
+        print(f"npm-setup: failed to set default-site redirect: {exc}", flush=True)
+
+
 def csv_env(name: str, default: str = "") -> list[str]:
     raw = os.environ.get(name, default)
     return [item.strip() for item in raw.split(",") if item.strip()]
@@ -429,6 +450,7 @@ def main():
 
     _wait_for_npm()
     token = _ensure_admin_token(domain)
+    _set_default_site_redirect(token)
     for host_def in CAPTIVE_HOSTS:
         domain = host_def["domain"]
         host = _create_or_get_proxy_host(
