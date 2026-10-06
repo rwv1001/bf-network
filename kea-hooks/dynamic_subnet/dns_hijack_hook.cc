@@ -516,6 +516,44 @@ extern "C"
         return static_cast<int>(c) == mgmt_vlan;
     }
 
+    bool is_infrastructure_ip(const std::string &ip_address)
+    {
+        // Exempt the portal, the hijack DNS, the management gateway, and the
+        // switches. All come from the kea service environment in
+        // docker-compose.yml (PORTAL_IP, HIJACK_DNS_IP, MGMT_GATEWAY,
+        // SWITCH_HOSTS). INFRA_PROTECT_IPS is an optional comma-separated extra.
+        if (ip_address.empty())
+            return false;
+
+        auto listed = [&](const char *env, char sep) -> bool
+        {
+            if (!env || !*env)
+                return false;
+            std::istringstream iss(env);
+            std::string token;
+            while (std::getline(iss, token, sep))
+            {
+                token.erase(0, token.find_first_not_of(" \t"));
+                token.erase(token.find_last_not_of(" \t") + 1);
+                if (!token.empty() && token == ip_address)
+                    return true;
+            }
+            return false;
+        };
+
+        if (listed(std::getenv("PORTAL_IP"), ','))
+            return true;
+        if (listed(std::getenv("HIJACK_DNS_IP"), ','))
+            return true;
+        if (listed(std::getenv("MGMT_GATEWAY"), ','))
+            return true;
+        if (listed(std::getenv("SWITCH_HOSTS"), ' '))
+            return true;
+        if (listed(std::getenv("INFRA_PROTECT_IPS"), ','))
+            return true;
+        return false;
+    }
+
     bool is_protected_policy_target(const std::string &ip_address, uint32_t vlan_id = 0)
     {
         if (is_wired_vlan_subnet(vlan_id))
@@ -532,10 +570,10 @@ extern "C"
         {
             return true;
         }
-        if (is_management_vlan_ip(ip_address))
+        if (is_infrastructure_ip(ip_address))
         {
             std::cout << "DNS Hijack Hook: treating " << ip_address
-                      << " as protected management-VLAN IP" << std::endl;
+                    << " as protected infrastructure IP" << std::endl;
             return true;
         }
 

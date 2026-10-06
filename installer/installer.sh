@@ -4414,6 +4414,7 @@ vlan $isp_vid
 name $isp_name
 description UPLINK-TO-$isp_name
 dhcp snooping binding record
+arp detection enable
 #
 "
 done
@@ -5983,6 +5984,7 @@ undo port trunk permit vlan 1
 port trunk permit vlan $vlan_number
 port trunk pvid vlan $vlan_number
 dhcp snooping trust
+arp detection trust
 #
 "
     done
@@ -6053,7 +6055,9 @@ authorization lan-access radius-scheme rad1
 accounting lan-access radius-scheme rad1
 #
 mac-authentication
-mac-authentication domain macauth
+mac-authentication domain 
+#
+stp bpdu-protection
 #
 
 dhcp snooping enable

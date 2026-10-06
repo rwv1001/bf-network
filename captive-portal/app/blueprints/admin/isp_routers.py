@@ -142,6 +142,7 @@ def _build_isp_router_switch_config(router: ISPRouter, switch_host: str) -> str:
         'system-view',
         f'vlan {router.vlan_id}',
         f' description UPLINK-TO-{name_upper}',
+        'arp detection enable',
         'quit',
         f'dhcp snooping enable vlan {router.vlan_id}',
         f'vlan {router.vlan_id}',

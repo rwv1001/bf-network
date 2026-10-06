@@ -233,6 +233,14 @@ def _bootstrap_sync_if_needed() -> None:
             finally:
                 _eager_suppressed = False
 
+            if not users and not devices:
+                # Central had nothing flagged sync_to_all_sites (yet). Don't
+                # mark done — retry on next app start so the site picks up the
+                # dataset once the domain/user sync flags are enabled on central.
+                logger.info("central bootstrap: central returned no synced users/devices — "
+                            "will retry on next app start")
+                return
+
             done = _model(
                 event_type="_bootstrap_done",
                 payload={"users": imported_users, "devices": imported_devices},
@@ -468,6 +476,20 @@ def import_device_from_central(mac_address: str, central_data: dict) -> Optional
         if is_wired_device:
             device.is_wired = True
             device.connection_type = "wired"
+
+    # Central only holds devices that were approved at some site, so reflect
+    # that locally: assigned_vlan + not blocked = registered. Don't rely on
+    # sync_registration_status() — it reports 'registered' only once the device
+    # has an active local lease, which an imported device doesn't have yet.
+    if device.internet_blocked:
+        device.registration_status = 'blocked'
+    elif device.assigned_vlan:
+        device.registration_status = 'registered'
+        if not device.registered_at:
+            device.registered_at = now
+    if not device.unregister_token:
+        import secrets as _secrets
+        device.unregister_token = _secrets.token_urlsafe(32)
 
     # Upsert ownership
     existing_ownership = DeviceOwnership.query.filter_by(

@@ -52,7 +52,8 @@ CREATE TABLE IF NOT EXISTS users (
     network_password_hash VARCHAR(255),
     network_password_set_token VARCHAR(255),
     network_password_set_token_expires TIMESTAMP,
-    network_password_approval_mode VARCHAR(20)
+    network_password_approval_mode VARCHAR(20),
+    sync_to_all_sites BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
@@ -177,6 +178,7 @@ CREATE TABLE IF NOT EXISTS domain_policies (
     domain VARCHAR(255) UNIQUE NOT NULL,
     allowed_vlans TEXT,
     adoptable_vlans TEXT,
+    sync_to_all_sites BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW()
 );
