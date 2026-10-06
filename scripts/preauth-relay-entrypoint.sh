@@ -29,16 +29,22 @@ apk add --no-cache iptables >/dev/null
 
 RULE="-p tcp -d $HIJACK_DNS_IP --dport 443 -j REDIRECT --to-ports $PROXY_PORT"
 
-remove_rule() {
-  # shellcheck disable=SC2086
-  while iptables -t nat -D PREROUTING $RULE 2>/dev/null; do :; done
+remove_rules() {
+  # Sweep ALL redirects to the relay port, including stale rules left by
+  # earlier versions that intercepted PORTAL_IP:443 (those hide the real
+  # client IP from the portal and must never survive an upgrade).
+  iptables -t nat -S PREROUTING | grep -- "--to-ports $PROXY_PORT" | sed 's/^-A //' | \
+  while read -r spec; do
+    # shellcheck disable=SC2086
+    iptables -t nat -D PREROUTING $spec 2>/dev/null || true
+  done
 }
 
-remove_rule
+remove_rules
 # shellcheck disable=SC2086
 iptables -t nat -I PREROUTING 1 $RULE
 echo "preauth-relay: nat PREROUTING redirect $HIJACK_DNS_IP:443 -> :$PROXY_PORT installed"
 
-trap 'remove_rule; echo "preauth-relay: redirect removed"' EXIT INT TERM
+trap 'remove_rules; echo "preauth-relay: redirect removed"' EXIT INT TERM
 
 exec python3 /preauth_sni_proxy.py
