@@ -573,6 +573,10 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 
     function showMfaPrompt(data) {
+        // Invalidate any poll loop from a previous prompt; duplicate pollers
+        // race on the single-use Microsoft device code.
+        window._mfaPollGen = (window._mfaPollGen || 0) + 1;
+        const pollGen = window._mfaPollGen;
         const old = document.getElementById('mfaPrompt');
         if (old) old.remove();
         const box = document.createElement('div');
@@ -600,6 +604,7 @@ document.addEventListener('DOMContentLoaded', function() {
         form.style.display = 'none';
 
         const poll = () => {
+            if (pollGen !== window._mfaPollGen) return; // superseded prompt
             const body = new FormData();
             body.set('registration_step', 'mfa_poll');
             body.set('email', data.email || (document.getElementById('email').value || ''));
@@ -611,6 +616,7 @@ document.addEventListener('DOMContentLoaded', function() {
             })
             .then(r => r.json().catch(() => ({})))
             .then(d => {
+                if (pollGen !== window._mfaPollGen) return; // superseded while in flight
                 if (d.status === 'pending') {
                     const note = document.getElementById('mfaPollStatus');
                     if (note) note.textContent = 'Waiting for that sign-in to finish…';
@@ -624,6 +630,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     return;
                 }
                 if (d.status === 'ok') {
+                    window._mfaPollGen++; // stop any sibling pollers
                     box.remove();
                     const again = new FormData(form);
                     again.set('registration_step', 'final');

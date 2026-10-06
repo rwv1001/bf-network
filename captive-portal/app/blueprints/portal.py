@@ -1027,6 +1027,11 @@ def register():
         if (request.form.get('registration_step') or '').strip() == 'mfa_poll':
             from domain_auth import poll_pending_device_login
             poll_email = (request.form.get('email') or '').strip().lower()
+            # Duplicate pollers (captive mini-browser + normal browser) race on
+            # the single-use device code; once one has redeemed it, report
+            # success to the others instead of Microsoft's invalid_grant.
+            if poll_email and session.get('domain_mfa_ok') == poll_email:
+                return jsonify({'status': 'ok'})
             handle = (session.get('domain_mfa_handle') or '').strip()
             if not poll_email or not handle or session.get('domain_mfa_email') != poll_email:
                 return jsonify({'status': 'error', 'message': 'Sign-in is no longer valid. Please try again.'})
