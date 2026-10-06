@@ -960,6 +960,15 @@ ${RADIUS_CONFIG}
 ${VLAN_IFACE_CONFIG}
 ${INTERSWITCH_CONFIG}
 ${NTP_CONFIG}
+scheduler job backup-config
+ command 1 save force
+ command 2 tftp ${PORTAL_IP:-} put flash:/startup.cfg 5130-startup-${ADD_SW_NAME}.cfg
+quit
+scheduler schedule nightly-backup
+ user-role network-admin
+ job backup-config
+ time repeating at 03:15
+#
 "
 }
 
@@ -1038,7 +1047,6 @@ New switch $ADD_SW_NAME is configured. Do this before plugging the trunk in.
     description Inter-switch link
     port link-type trunk
     port trunk permit vlan ${permit}
-    port trunk pvid vlan 1
     arp detection trust
     dhcp snooping trust
    quit
@@ -2303,6 +2311,14 @@ EOF
     pi_sudo "chmod 644 /etc/default/tftpd-hpa"
     pi_sudo "systemctl enable tftpd-hpa"
     pi_sudo "systemctl restart tftpd-hpa"
+
+    if [ -n "${PI_REPO_DIR:-}" ]; then
+        local q_repo
+        q_repo="$(shell_quote "$PI_REPO_DIR")"
+        pi_sudo "mkdir -p $q_repo/tftp-inbox"
+        pi_sudo "rm -rf $q_repo/tftp-inbox"
+        pi_sudo "ln -sfn /var/lib/tftpboot/switch-backups $q_repo/tftp-inbox"
+    fi
 }
 
 setup_pi_chrony() {
@@ -4152,7 +4168,8 @@ Redo with:  sudo ./installer.sh --forget-answer bf_repo_ref
         setup_pi_tftp_server        
         complete_step "setup_pi_tftp_server"
     else
-        echo "Skipping completed step: target host TFTP server setup"
+        echo "TFTP already marked configured; re-applying so the backup directory stays the one the switches use."
+        setup_pi_tftp_server
     fi
 
     
@@ -6405,6 +6422,46 @@ ntp-service unicast-server 162.159.200.1
     
     complete_step "switch_${j}_configured"
 done
+
+push_switch_config_backups() {
+    local j host name safe mgmt
+    [ -n "${PORTAL_IP:-}" ] || return 0
+    [ -n "${KEY_PATH:-}" ] && [ -f "$KEY_PATH" ] || return 0
+    info "Installing nightly startup.cfg backup on each switch"
+    for j in "${!IPS[@]}"; do
+        host="${LOCAL_BASE}.${MANAGEMENT_VLAN}.$(last_octet "${IPS[$j]}")"
+        name="${SAVED_ANSWERS[switch_${j}_name]:-switch$((j + 1))}"
+        safe="$(printf '%s' "$name" | tr -cd '[:alnum:]._-')"
+        [ -n "$safe" ] || safe="switch$((j + 1))"
+        echo "Backup job on $host -> 5130-startup-${safe}.cfg at $PORTAL_IP"
+        ssh -i "$KEY_PATH" -tt \
+            -o HostKeyAlgorithms=+ssh-rsa \
+            -o PubkeyAcceptedAlgorithms=+ssh-rsa \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o ConnectTimeout=10 \
+            "${NEW_USERNAME}@${host}" <<EOF || echo "WARNING: could not install backup job on $host"
+screen-length disable
+system-view
+undo scheduler schedule nightly-backup
+undo scheduler job backup-config
+scheduler job backup-config
+ command 1 save force
+ command 2 tftp ${PORTAL_IP} put flash:/startup.cfg 5130-startup-${safe}.cfg
+quit
+scheduler schedule nightly-backup
+ user-role network-admin
+ job backup-config
+ time repeating at 03:15
+quit
+quit
+save force
+quit
+EOF
+    done
+}
+
+push_switch_config_backups
 
 # =============================================================================
 # Multi-ISP firmware requirement (after switch SSH is available)

@@ -326,15 +326,17 @@ function showPushBanner(msg, type) {
                         </div>
                         <div class="form-group">
                             <label>Gateway IP *</label>
-                            <input type="text" name="gateway_ip" id="add-gateway-ip"
+                            <input type="text" name="gateway_ip" value="{{ router.gateway_ip }}"
                                 placeholder="192.168.4.254" required
-                                oninput="updateHint('add')">
+                                oninput="updateHint('edit-{{ router.id }}')">
                         </div>
                         <div class="form-group">
                             <label>Prefix length *</label>
-                            <input type="number" name="prefix_len" id="add-prefix-len"
-                                min="8" max="30" value="24" required
-                                oninput="updateHint('add')">
+                            <input type="number" name="prefix_len"
+                                min="8" max="30"
+                                value="{{ router.subnet.split('/')[1] if router.subnet and '/' in router.subnet else 24 }}"
+                                required
+                                oninput="updateHint('edit-{{ router.id }}')">
                         </div>
                         <div class="form-group">
                             <label>VLAN ID</label>
@@ -391,7 +393,7 @@ function showPushBanner(msg, type) {
                             ⚠️ <strong>Router configuration required:</strong>
                             <ul>
                                 <li>Set the router's LAN IP to <code id="hint-edit-{{ router.id }}-gw"></code></li>
-                                <li>Add a static route on the router: Target <code>{{ network_word }}.0.0</code> &nbsp;Mask <code>255.255.0.0</code> &nbsp;Gateway <code id="hint-edit-{{ router.id }}-sw"></code></li>
+                                <li>Add a static route on the router: Target <code>{{ network_word }}.0.0</code> &nbsp;Mask <code>255.255.0.0</code> &nbsp;Gateway <code id="hint-edit-{{ router.id }}-sw"></code> (this switch’s address on the ISP subnet)</li>
                             </ul>
                         </div>
                         <div class="form-footer">
@@ -463,7 +465,7 @@ function showPushBanner(msg, type) {
                 ⚠️ <strong>Router configuration required:</strong>
                 <ul>
                     <li>Set the router's LAN IP to <code id="hint-add-gw"></code></li>
-                    <li>Add a static route on the router: Target <code>{{ network_word }}.0.0</code> &nbsp;Mask <code>255.255.0.0</code> &nbsp;Gateway <code id="hint-add-sw"></code></li>
+                    <li>Add a static route on the router: Target <code>{{ network_word }}.0.0</code> &nbsp;Mask <code>255.255.0.0</code> &nbsp;Gateway <code id="hint-add-sw"></code> (the selected switch’s address on the ISP subnet)</li>
                 </ul>
             </div>
             <div class="form-footer">
@@ -480,17 +482,29 @@ function prefixFromGateway(gw, pfx) {
     return parts[0] + '.' + parts[1] + '.' + parts[2];
 }
 
+function switchLastOctet(form) {
+    const sel = form ? form.querySelector('[name=switch_port]') : null;
+    let raw = '';
+    if (sel && sel.value) {
+        raw = sel.value.split('|')[0];
+    } else if (sel && sel.selectedIndex > 0) {
+        raw = sel.options[sel.selectedIndex].text.split('—')[0];
+    }
+    const parts = raw.trim().split('.');
+    if (parts.length === 4 && /^\d+$/.test(parts[3])) return parts[3];
+    return '2';
+}
+
 function updateHint(key) {
     const hintBox = document.getElementById('hint-' + key);
     if (!hintBox) return;
-    let gwInput, pfxInput;
+    let gwInput, form;
     if (key === 'add') {
         gwInput = document.getElementById('add-gateway-ip');
-        pfxInput = document.getElementById('add-prefix-len');
+        form = gwInput ? gwInput.form : null;
     } else {
-        const form = document.querySelector('#edit-row-' + key.replace('edit-', '') + ' form');
+        form = document.querySelector('#edit-row-' + key.replace('edit-', '') + ' form');
         gwInput = form ? form.querySelector('[name=gateway_ip]') : null;
-        pfxInput = form ? form.querySelector('[name=prefix_len]') : null;
     }
     const gw = gwInput ? gwInput.value.trim() : '';
     if (!gw) { hintBox.style.display = 'none'; return; }
@@ -498,7 +512,7 @@ function updateHint(key) {
     const gwEl = document.getElementById('hint-' + key + '-gw');
     const swEl = document.getElementById('hint-' + key + '-sw');
     if (gwEl) gwEl.textContent = gw;
-    if (swEl) swEl.textContent = pref ? pref + '.2' : '—';
+    if (swEl) swEl.textContent = pref ? pref + '.' + switchLastOctet(form) : '—';
     hintBox.style.display = 'block';
 }
 

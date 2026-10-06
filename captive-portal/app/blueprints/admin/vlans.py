@@ -246,7 +246,7 @@ def vlan_config():
                 warnings.append(f"Invalid VLAN ID for {status}: {vlan_id_raw}")
                 continue
 
-            if valid_vlan_ids and vlan_id not in valid_vlan_ids:
+            if valid_vlan_ids and vlan_id not in valid_vlan_ids and vlan_id != get_management_vlan_id():
                 warnings.append(f"VLAN {vlan_id} not in VALID_VLANS; skipped {status}.")
                 continue
 
@@ -531,10 +531,26 @@ def vlan_config():
     vlan_map     = get_vlan_map()
     prefix_map   = get_vlan_prefix_map()
     mgmt_vlan_id = get_management_vlan_id()
+    # Keep the management VLAN on this page so its ISP router can be changed.
+    # wired_unregistered stays off the form; it is not an ISP-routed user VLAN.
     vlan_entries = [
         e for e in get_vlan_entries()
-        if e.status != WIRED_UNREGISTERED_STATUS and e.vlan_id != mgmt_vlan_id
+        if e.status != WIRED_UNREGISTERED_STATUS
     ]
+    if not any(e.vlan_id == mgmt_vlan_id for e in vlan_entries):
+        from types import SimpleNamespace
+        vlan_entries.append(SimpleNamespace(
+            status='management',
+            vlan_id=mgmt_vlan_id,
+            display_name='Management',
+            ssid=None,
+            wired_enabled=False,
+            require_password=False,
+            allow_doh=False,
+            isp_router_id=None,
+            visible_vlans='',
+        ))
+        vlan_entries.sort(key=lambda e: e.vlan_id or 0)
     valid_vlan_ids = parse_valid_vlan_ids()
     isp_routers  = ISPRouter.query.order_by(ISPRouter.id).all()
 
