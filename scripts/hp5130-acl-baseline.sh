@@ -267,6 +267,33 @@ for vlan in vlans:
 emit("quit")
 
 # -------------------------------------------------------------------------
+# PREAUTH ACL for the wired-unregistered VLAN (applied inbound on its SVI).
+# Owned here so fresh installs get it; previously it only existed where it
+# had been configured by hand. Permits DHCP, DNS/HTTP(S) to the portal,
+# DNS + HTTPS to the hijack-DNS IP (the pre-auth Microsoft sign-in relay
+# intercepts HIJACK_DNS_IP:443), NTP (TLS needs a sane clock), and traffic
+# to the Pi's own address on the wired VLAN. Everything else is denied.
+# -------------------------------------------------------------------------
+portal_last_octet = str(portal_ip).split(".")[-1]
+wired_portal_ip = f"{network_word}.{wired_vlan_id}.{portal_last_octet}"
+emit(f"undo acl number {wired_inbound_acl}")
+emit(f"acl number {wired_inbound_acl} name PREAUTH")
+emit(" rule 1 permit udp source-port eq bootpc destination-port eq bootps")
+emit(" rule 2 permit udp source-port eq bootps destination-port eq bootpc")
+emit(f" rule 5 permit udp destination {portal_ip} 0 destination-port eq dns")
+emit(f" rule 6 permit tcp destination {portal_ip} 0 destination-port eq dns")
+emit(f" rule 7 permit udp destination {hijack_dns_ip} 0 destination-port eq dns")
+emit(f" rule 8 permit tcp destination {hijack_dns_ip} 0 destination-port eq dns")
+emit(f" rule 9 permit icmp destination {hijack_dns_ip} 0")
+emit(f" rule 10 permit tcp destination {portal_ip} 0 destination-port eq www")
+emit(f" rule 11 permit tcp destination {portal_ip} 0 destination-port eq 443")
+emit(f" rule 12 permit ip destination {wired_portal_ip} 0")
+emit(f" rule 13 permit tcp destination {hijack_dns_ip} 0 destination-port eq 443")
+emit(f" rule 14 permit udp destination {portal_ip} 0 destination-port eq ntp")
+emit(" rule 100 deny ip")
+emit("quit")
+
+# -------------------------------------------------------------------------
 # PBR/NQA per ISP router.
 # -------------------------------------------------------------------------
 for router in routers:

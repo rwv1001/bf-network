@@ -1,13 +1,11 @@
 #!/bin/sh
 # Entrypoint for the preauth-relay container (host network, NET_ADMIN).
 #
-# Pre-registration clients have ALL DNS answered with PORTAL_IP by the hijack
-# dnsmasq, so their Microsoft-login TLS already arrives at this host on 443.
-# This entrypoint inserts one nat rule diverting portal-IP:443 into the SNI
-# relay, which forwards allow-listed Microsoft identity SNIs to the real
-# internet and passes everything else through to the local NPM listener.
-# Registered clients reaching the portal by name transit the relay to NPM
-# unchanged; no other traffic is affected.
+# The hijack dnsmasq answers Microsoft identity domains with HIJACK_DNS_IP and
+# everything else with PORTAL_IP. Only HIJACK_DNS_IP:443 is diverted into the
+# SNI relay, which forwards allow-listed Microsoft identity SNIs to the real
+# internet and closes everything else. Portal traffic (PORTAL_IP:443) goes
+# straight to NPM, so the portal always sees the real client IP.
 set -eu
 
 ENABLED="${PREAUTH_HTTPS_RELAY_ENABLED:-auto}"
@@ -24,12 +22,12 @@ case "$ENABLED" in
     ;;
 esac
 
-[ -n "${PORTAL_IP:-}" ] || { echo "preauth-relay: PORTAL_IP required" >&2; exit 1; }
+[ -n "${HIJACK_DNS_IP:-}" ] || { echo "preauth-relay: HIJACK_DNS_IP required" >&2; exit 1; }
 PROXY_PORT="${PREAUTH_PROXY_PORT:-8443}"
 
 apk add --no-cache iptables >/dev/null
 
-RULE="-p tcp -d $PORTAL_IP --dport 443 -j REDIRECT --to-ports $PROXY_PORT"
+RULE="-p tcp -d $HIJACK_DNS_IP --dport 443 -j REDIRECT --to-ports $PROXY_PORT"
 
 remove_rule() {
   # shellcheck disable=SC2086
@@ -39,7 +37,7 @@ remove_rule() {
 remove_rule
 # shellcheck disable=SC2086
 iptables -t nat -I PREROUTING 1 $RULE
-echo "preauth-relay: nat PREROUTING redirect $PORTAL_IP:443 -> :$PROXY_PORT installed"
+echo "preauth-relay: nat PREROUTING redirect $HIJACK_DNS_IP:443 -> :$PROXY_PORT installed"
 
 trap 'remove_rule; echo "preauth-relay: redirect removed"' EXIT INT TERM
 
