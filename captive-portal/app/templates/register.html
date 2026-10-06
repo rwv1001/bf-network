@@ -558,6 +558,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 return;
             }
 
+            if (status === 'mfa_required') {
+                showMfaPrompt(data);
+                return;
+            }
+
             showStatus(message, 'info');
         })
         .catch((error) => {
@@ -566,6 +571,87 @@ document.addEventListener('DOMContentLoaded', function() {
             registerBtn.textContent = registrationStep === 1 ? 'Continue' : 'Register Device';
         });
     });
+
+    function showMfaPrompt(data) {
+        const old = document.getElementById('mfaPrompt');
+        if (old) old.remove();
+        const box = document.createElement('div');
+        box.id = 'mfaPrompt';
+        box.style.marginTop = '12px';
+        box.style.textAlign = 'left';
+        const uri = data.verification_uri || 'https://microsoft.com/devicelogin';
+        const code = data.user_code || '';
+        box.innerHTML = `
+            <p style="margin:0 0 10px 0;">Your email account needs an extra verification step. You can complete it from this device — the Microsoft sign-in page is reachable even before registration.</p>
+            <ol style="margin:0 0 10px 20px;">
+                <li>Open <a href="${uri}" target="_blank" rel="noopener">${uri}</a></li>
+                <li>Enter this code: <strong style="font-size:1.3em;letter-spacing:0.08em;">${code}</strong></li>
+                <li>Sign in with your email password, then enter the 6-digit code from your authenticator app.
+                    <small style="display:block;color:#555;">(The code works even while this device is offline. An “approve sign-in” push notification only works if the phone receiving it has internet — e.g. mobile data.)</small></li>
+            </ol>
+            <p id="mfaPollStatus" style="margin:0;">Waiting for that sign-in to finish…</p>
+        `;
+        statusMessage.textContent = '';
+        statusMessage.style.display = 'block';
+        statusMessage.style.backgroundColor = '#d1ecf1';
+        statusMessage.style.color = '#0c5460';
+        statusMessage.style.border = '1px solid #bee5eb';
+        statusMessage.appendChild(box);
+        form.style.display = 'none';
+
+        const poll = () => {
+            const body = new FormData();
+            body.set('registration_step', 'mfa_poll');
+            body.set('email', data.email || (document.getElementById('email').value || ''));
+            fetch(form.action, {
+                method: 'POST',
+                body: body,
+                credentials: 'same-origin',
+                headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' }
+            })
+            .then(r => r.json().catch(() => ({})))
+            .then(d => {
+                if (d.status === 'pending') {
+                    const note = document.getElementById('mfaPollStatus');
+                    if (note) note.textContent = 'Waiting for that sign-in to finish…';
+                    setTimeout(poll, (d.interval || 5) * 1000);
+                    return;
+                }
+                if (d.status === 'registered' || d.status === 'pending' && d.registration) {
+                    box.remove();
+                    showStatus(d.message || 'Signed in. Checking access...', 'success');
+                    startAccessCheck();
+                    return;
+                }
+                if (d.status === 'ok') {
+                    box.remove();
+                    const again = new FormData(form);
+                    again.set('registration_step', 'final');
+                    again.set('auth_method', 'domain_mfa');
+                    fetch(form.action, {
+                        method: 'POST',
+                        body: again,
+                        credentials: 'same-origin',
+                        headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' }
+                    })
+                    .then(r => r.json().catch(() => ({})))
+                    .then(done => {
+                        if (done.status === 'registered') {
+                            showStatus((done.message || 'Device registered') + ' Checking access...', 'success');
+                            startAccessCheck();
+                        } else {
+                            showStatus(done.message || 'Signed in, but registration did not finish. Please try again.', 'error');
+                        }
+                    });
+                    return;
+                }
+                const note = document.getElementById('mfaPollStatus');
+                if (note) note.textContent = d.message || 'Sign-in failed. Please try again.';
+            })
+            .catch(() => setTimeout(poll, 5000));
+        };
+        setTimeout(poll, (data.interval || 5) * 1000);
+    }
 
     function showNetworkPasswordPrompt(msg, authOptions) {
         const oldPwdDiv = document.getElementById('passwordPrompt');
@@ -743,6 +829,9 @@ document.addEventListener('DOMContentLoaded', function() {
                     showStatus(data.message || 'We have emailed you a link to set your BF-Network password. Once it is set, return here to continue.', 'info');
                     pollingStarted = false;
                     startPolling();
+                } else if (data.status === 'mfa_required') {
+                    pwdDiv.remove();
+                    showMfaPrompt(data);
                 } else if (data.status === 'error') {
                     btn.disabled = false;
                     btn.textContent = btnLabel;

@@ -1,0 +1,39 @@
+{
+  "description": "Pre-registration Microsoft sign-in walled garden: devices on MFA-protected owned domains can now complete Microsoft password+Authenticator sign-in (device-code flow) BEFORE having internet access. A new preauth-relay container intercepts PORTAL_IP:443 ahead of NPM, forwards allow-listed Microsoft identity SNIs to the internet, and passes all other TLS (including the portal itself) through to NPM. The Microsoft device_code is now held server-side (sqlite) and never sent to the browser. installer.sh deploys and verifies the relay on every run.",
+
+  "env": {
+    "add": [
+      {
+        "key": "PREAUTH_HTTPS_RELAY_ENABLED",
+        "description": "Pre-auth Microsoft sign-in relay (preauth-relay container). 'auto' (default) enables it when DOMAIN_AUTH_PROVIDERS is set; 1/0 force on/off. When active it inserts a nat REDIRECT of PORTAL_IP:443 to the relay port and SNI-routes Microsoft identity hostnames upstream.",
+        "default": "auto",
+        "required": false,
+        "sensitive": false
+      },
+      {
+        "key": "PREAUTH_PROXY_PORT",
+        "description": "Local listen port for the pre-auth SNI relay.",
+        "default": "8443",
+        "required": false,
+        "sensitive": false
+      },
+      {
+        "key": "PREAUTH_ALLOWED_SNI",
+        "description": "Override the relay's built-in Microsoft identity hostname allow-list (comma-separated; '*.suffix' allowed). Leave empty to use the built-in list. Only add hostnames confirmed via DENY-SNI entries in the preauth-relay log; never add generic CDN/Azure wildcards.",
+        "default": "",
+        "required": false,
+        "sensitive": false
+      }
+    ],
+    "remove": []
+  },
+
+  "db": {
+    "up": null,
+    "down": null,
+    "verify_up": [],
+    "verify_down": []
+  },
+
+  "notes": "After upgrading each site: (1) docker compose up -d preauth-relay (or just re-run installer.sh, which now deploys and verifies it); (2) restart the captive-portal web container so the handle-based device-code store takes effect; (3) test from an UNREGISTERED device: the portal loads, https://microsoft.com/devicelogin completes password+Authenticator sign-in, https://example.com does NOT load, and raw-IP HTTPS (e.g. https://1.1.1.1) fails; (4) watch 'docker logs preauth-relay' for DENY-SNI lines — if Microsoft's flow needs an extra hostname, add only that hostname via PREAUTH_ALLOWED_SNI. No DB migration. Rollback: set PREAUTH_HTTPS_RELAY_ENABLED=0 and docker compose up -d preauth-relay (the entrypoint removes the nat redirect on shutdown)."
+}

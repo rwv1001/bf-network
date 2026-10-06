@@ -599,6 +599,31 @@ services:
       npm:
         condition: service_healthy
 
+  # ── Pre-auth Microsoft sign-in relay (TLS SNI walled garden) ─────────────────
+  # Lets unregistered devices complete Microsoft password+MFA sign-in while all
+  # other HTTPS stays blocked. See scripts/preauth-relay-entrypoint.sh.
+  preauth-relay:
+    image: python:3-alpine
+    container_name: preauth-relay
+    restart: unless-stopped
+    logging: *default-logging
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    env_file:
+      - ./.env
+    environment:
+      PREAUTH_PROXY_PORT: ${PREAUTH_PROXY_PORT:-8443}
+      PREAUTH_HTTPS_RELAY_ENABLED: ${PREAUTH_HTTPS_RELAY_ENABLED:-auto}
+    volumes:
+      - ./scripts/preauth_sni_proxy.py:/preauth_sni_proxy.py:ro
+      - ./scripts/preauth-relay-entrypoint.sh:/entrypoint.sh:ro
+      - /etc/localtime:/etc/localtime:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    depends_on:
+      npm:
+        condition: service_healthy
+
   # ── Watchdog ──────────────────────────────────────────────────────────────────
   watchdog:
     build: ./watchdog

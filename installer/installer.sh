@@ -2375,6 +2375,11 @@ write_pi_env_file() {
         write_env_line GRAPH_FROM_EMAIL "$GRAPH_FROM_EMAIL"
         write_env_line ADMIN_EMAIL "$ADMIN_EMAIL"
         write_env_line DOMAIN_AUTH_PROVIDERS "${DOMAIN_AUTH_PROVIDERS:-}"
+        # Pre-auth Microsoft sign-in relay (TLS SNI walled garden). 'auto'
+        # enables it only when DOMAIN_AUTH_PROVIDERS is set; 1/0 force on/off.
+        write_env_line PREAUTH_HTTPS_RELAY_ENABLED "${PREAUTH_HTTPS_RELAY_ENABLED:-auto}"
+        write_env_line PREAUTH_PROXY_PORT "${PREAUTH_PROXY_PORT:-8443}"
+        write_env_line PREAUTH_ALLOWED_SNI "${PREAUTH_ALLOWED_SNI:-}"
 
         write_env_line RADIUS_SECRET "$RADIUS_SECRET"
         write_env_line RADIUS_SERVER "$RADIUS_SERVER"
@@ -4279,6 +4284,10 @@ Redo with:  sudo ./installer.sh --forget-answer bf_repo_ref
         complete_step "pi_npm_certificate_attach"
     fi
 
+    # Always re-run: idempotent, and re-running the installer is the supported
+    # way to deploy the relay onto an existing site.
+    deploy_preauth_relay
+
     if ! step_done "pi_unifi_controller"; then
         install_unifi_controller
         complete_step "pi_unifi_controller"
@@ -5283,6 +5292,51 @@ done
 # =============================================================================
 # NAT logger SSH key setup (runs as a named step during the deploy phase)
 # =============================================================================
+deploy_preauth_relay() {
+    # Deploy/refresh the pre-auth Microsoft sign-in relay (TLS SNI walled
+    # garden). Idempotent: safe to run on every installer pass. With
+    # PREAUTH_HTTPS_RELAY_ENABLED=auto the container self-disables (sleeps)
+    # when DOMAIN_AUTH_PROVIDERS is empty, so starting it is always safe.
+    local q_repo
+    q_repo="$(shell_quote "$PI_REPO_DIR")"
+
+    # Existing sites may still have a pre-relay checkout of the repository.
+    if ! pi_ssh "grep -q 'preauth-relay' $q_repo/docker-compose.yml 2>/dev/null"; then
+        info "Target repository predates the preauth-relay service — updating it"
+        if ! pi_sudo "git -C $q_repo diff --quiet && git -C $q_repo pull --ff-only"; then
+            die "Could not fast-forward the repository on the target host (local changes or diverged history).
+Update it via the admin firmware page, or redo the clone with:
+    sudo ./installer.sh --forget-step pi_repo_clone"
+        fi
+    fi
+
+    info "Deploying pre-auth Microsoft sign-in relay (preauth-relay)"
+    pi_sudo "cd $q_repo && if docker compose version >/dev/null 2>&1; then docker compose up -d preauth-relay; else docker-compose up -d preauth-relay; fi"
+
+    if [ -z "${DOMAIN_AUTH_PROVIDERS:-}" ] && [ "${PREAUTH_HTTPS_RELAY_ENABLED:-auto}" = "auto" ]; then
+        echo "preauth-relay installed but inactive (no DOMAIN_AUTH_PROVIDERS configured)."
+        return 0
+    fi
+
+    info "Verifying pre-auth relay is intercepting portal HTTPS"
+    pi_sudo "cd $q_repo && for attempt in \$(seq 1 30); do
+        if docker logs preauth-relay 2>&1 | grep -q 'listening on'; then
+            exit 0
+        fi
+        sleep 2
+    done
+    echo 'preauth-relay did not report listening; recent log:' >&2
+    docker logs --tail=40 preauth-relay >&2
+    exit 1" \
+        || die "preauth-relay failed to start. Check 'docker logs preauth-relay' on the target host."
+
+    pi_sudo "iptables -t nat -S PREROUTING | grep -q 'REDIRECT --to-ports ${PREAUTH_PROXY_PORT:-8443}'" \
+        || die "preauth-relay nat redirect rule is missing on the target host."
+
+    echo "Pre-auth Microsoft sign-in relay is active: unregistered devices can"
+    echo "complete Microsoft password+MFA sign-in while other HTTPS stays blocked."
+}
+
 setup_nat_logger_keys() {
     local q_repo="$1"
     local ssh_dir="$REAL_HOME/.ssh"

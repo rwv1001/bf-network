@@ -1024,6 +1024,23 @@ def register():
                 })
             return jsonify({'status': 'need_details'})
 
+        if (request.form.get('registration_step') or '').strip() == 'mfa_poll':
+            from domain_auth import poll_pending_device_login
+            poll_email = (request.form.get('email') or '').strip().lower()
+            handle = (session.get('domain_mfa_handle') or '').strip()
+            if not poll_email or not handle or session.get('domain_mfa_email') != poll_email:
+                return jsonify({'status': 'error', 'message': 'Sign-in is no longer valid. Please try again.'})
+            status, err = poll_pending_device_login(poll_email, handle)
+            if status == 'ok':
+                session['domain_mfa_ok'] = poll_email
+                session.pop('domain_mfa_handle', None)
+                return jsonify({'status': 'ok'})
+            if status == 'pending':
+                return jsonify({'status': 'pending', 'interval': 5})
+            session.pop('domain_mfa_handle', None)
+            session.pop('domain_mfa_email', None)
+            return jsonify({'status': 'error', 'message': err or 'Sign-in failed. Please try again.'})
+
         # Full registration
         email        = (request.form.get('email')        or '').strip().lower()
         first_name   = (request.form.get('first_name')   or '').strip()
@@ -1147,7 +1164,7 @@ def register():
 
         # Password-required VLAN handling (spec 4b.ii.1)
         if selected_vlan and vlan_requires_password(selected_vlan) and not device.ownership_validated:
-            from domain_auth import get_provider_for_email, verify_domain_credentials
+            from domain_auth import get_provider_for_email, start_device_login, verify_domain_credentials
             provider = get_provider_for_email(email)
             auth_method = (request.form.get('auth_method') or '').strip().lower()
             auth_options = {
@@ -1170,7 +1187,23 @@ def register():
                     network_name=ssid or 'Wired Network',
                 )
 
-            if provider and auth_method == 'domain':
+            if provider and auth_method == 'domain_mfa':
+                if session.get('domain_mfa_ok') != email:
+                    if is_ajax:
+                        return jsonify({
+                            'status': 'error',
+                            'message': 'Microsoft sign-in has not finished. Please complete the extra check.',
+                            'auth_options': auth_options,
+                        }), 400
+                    flash('Microsoft sign-in has not finished.', 'error')
+                    return redirect(url_for('portal.register'))
+                session.pop('domain_mfa_ok', None)
+                session.pop('domain_mfa_handle', None)
+                session.pop('domain_mfa_email', None)
+                device.ownership_validated = True
+                db.session.commit()
+
+            elif provider and auth_method == 'domain':
                 # Verify against the owned domain's identity provider (same
                 # password the user uses to read their email).
                 if not password_input:
@@ -1187,6 +1220,31 @@ def register():
                         wired_vlan_options=wired_vlan_options,
                     )
                 ok, err = verify_domain_credentials(email, password_input)
+                if not ok and err and 'multi-factor authentication' in err:
+                    from domain_auth import store_pending_device_login
+                    started, start_err = start_device_login(email)
+                    if not started:
+                        msg = start_err or 'Could not start Microsoft sign-in.'
+                        if is_ajax:
+                            return jsonify({'status': 'error', 'message': msg, 'auth_options': auth_options}), 400
+                        flash(msg, 'error')
+                        return redirect(url_for('portal.register'))
+                    session['domain_mfa_email'] = email
+                    session['domain_mfa_handle'] = store_pending_device_login(
+                        email, started['device_code'], started.get('expires_in') or 900
+                    )
+                    session.pop('domain_mfa_ok', None)
+                    if is_ajax:
+                        return jsonify({
+                            'status': 'mfa_required',
+                            'email': email,
+                            'user_code': started['user_code'],
+                            'verification_uri': started['verification_uri'],
+                            'interval': started['interval'],
+                            'message': started['message'],
+                        })
+                    flash('This account needs an extra Microsoft check. Please try again from the registration page.', 'error')
+                    return redirect(url_for('portal.register'))
                 if not ok:
                     msg = err or f"Incorrect {provider['domain']} password."
                     if is_ajax:
