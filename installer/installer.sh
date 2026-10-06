@@ -60,6 +60,7 @@ FORGET_ALL_STEPS=0
 FORGET_SECRET_KEY=""
 FORGET_ALL_SECRETS=0
 SHOW_STATE_ONLY=0
+ADD_SWITCH=0
 STATE_READY=0
 STATE_PASSPHRASE=""
 STATE_FORMAT_EXPECTED="bf-network-installer-state-v1"
@@ -89,6 +90,10 @@ info() {
 parse_args() {
     while [ "$#" -gt 0 ]; do
         case "$1" in
+            --add-switch)
+                ADD_SWITCH=1
+                shift
+                ;;
             --state-file)
                 [ "$#" -ge 2 ] || die "--state-file requires a path."
                 STATE_FILE="$2"
@@ -144,6 +149,8 @@ parse_args() {
 Usage: sudo ./installer.sh [options]
 
 Options:
+  --add-switch            Configure one extra 5130 for an existing site, then exit.
+                          With --config NAME, reuse that config's SSH key, username and VLANs.
   --state-file PATH       Use a different encrypted state file.
   --reset-state           Delete the saved state and start from scratch.
   --forget-answer KEY     Forget one cached prompt answer, then continue.
@@ -824,6 +831,243 @@ get_interface() {
     else
         echo "XGE1/0/$port"
     fi
+}
+
+# VLAN and trunk stanzas shared by the full install and --add-switch.
+# SSH, the public key and sysname stay in test-switch-temp.exp.
+
+build_managed_vlan_stanza() {
+    local vlan="$1" name="$2" desc="${3:-}"
+    printf 'vlan %s\n' "$vlan"
+    [ -n "$name" ] && printf 'name %s\n' "$name"
+    [ -n "$desc" ] && printf 'description %s\n' "$desc"
+    printf '%s\n' "dhcp snooping binding record" "arp detection enable" "#"
+}
+
+build_interswitch_interface() {
+    local iface="$1" permit="$2"
+    cat <<EOF
+
+interface $iface
+description Inter-switch link
+port link-type trunk
+port trunk permit vlan $permit
+port trunk pvid vlan 1
+arp detection trust
+dhcp snooping trust
+#
+EOF
+}
+
+# Member switch: SVIs, inter-switch trunk, snooping, RADIUS, NTP.
+# No SSH (expect does that), no default route, no Kea port, no ISP uplink.
+compose_member_switch_config() {
+    local mgmt_ip="$1" isl_iface="$2" permit="$3"
+    local last radius portal secret
+    last="$(last_octet "$mgmt_ip")"
+    radius="${SAVED_ANSWERS[RADIUS_SERVER]:-${RADIUS_SERVER:-}}"
+    portal="${SAVED_ANSWERS[PORTAL_IP]:-${PORTAL_IP:-}}"
+    secret="${SAVED_ANSWERS[RADIUS_SECRET]:-${RADIUS_SECRET:-}}"
+
+    VLAN_CONFIG=""
+    local vlan
+    local -a user_vlans=()
+    read -r -a user_vlans <<< "$ADD_SW_USER_VLANS"
+    for vlan in "${user_vlans[@]}"; do
+        VLAN_CONFIG+=$(build_managed_vlan_stanza "$vlan" "")
+        VLAN_CONFIG+=$'\n'
+    done
+    VLAN_CONFIG+=$(build_managed_vlan_stanza "$ADD_SW_MGMT_VLAN" "management")
+    VLAN_CONFIG+=$'\n'
+    VLAN_CONFIG+=$(build_managed_vlan_stanza "$ADD_SW_WIRED_VLAN" "wired_unregistered")
+    VLAN_CONFIG+=$'\n'
+    for vlan in $ADD_SW_ISP_VLANS; do
+        VLAN_CONFIG+=$(build_managed_vlan_stanza "$vlan" "" "UPLINK-TO-ISP")
+        VLAN_CONFIG+=$'\n'
+    done
+
+    VLAN_IFACE_CONFIG="
+interface Vlan-interface1
+description UNUSED-NATIVE-UNTAGGED
+undo ip address
+undo packet-filter
+#
+interface Vlan-interface$ADD_SW_MGMT_VLAN
+description GW_VLAN$ADD_SW_MGMT_VLAN
+ip address $mgmt_ip 255.255.255.0
+#
+interface Vlan-interface$ADD_SW_WIRED_VLAN
+description GW_VLAN$ADD_SW_WIRED_VLAN
+ip address ${net_base}.${ADD_SW_WIRED_VLAN}.${last} 255.255.255.0
+#
+"
+    for vlan in "${user_vlans[@]}"; do
+        VLAN_IFACE_CONFIG+="
+interface Vlan-interface$vlan
+description GW_VLAN$vlan
+ip address ${net_base}.${vlan}.${last} 255.255.255.0
+#
+"
+    done
+
+    INTERSWITCH_CONFIG="$(build_interswitch_interface "$isl_iface" "$permit")"
+
+    RADIUS_CONFIG=""
+    if [ -n "$radius" ] && [ -n "$secret" ]; then
+        RADIUS_CONFIG="
+radius scheme rad1
+primary authentication ${radius}
+primary accounting ${radius}
+key authentication simple ${secret}
+key accounting simple ${secret}
+user-name-format without-domain
+nas-ip $mgmt_ip
+#
+radius dynamic-author server
+client ip ${radius} key simple ${secret}
+#
+domain macauth
+authentication lan-access radius-scheme rad1
+authorization lan-access radius-scheme rad1
+accounting lan-access radius-scheme rad1
+#
+mac-authentication
+mac-authentication domain macauth
+#
+"
+    fi
+
+    NTP_CONFIG=""
+    if [ -n "$portal" ]; then
+        NTP_CONFIG="
+ntp-service enable
+ntp-service source Vlan-interface${ADD_SW_MGMT_VLAN}
+ntp-service unicast-server ${portal}
+ntp-service unicast-server 162.159.200.1
+#
+"
+    fi
+
+    DYNAMIC_CONFIG="
+clock timezone GMT add 00:00:00
+clock summer-time BST 01:00:00 March last Sunday 02:00:00 October last Sunday 01:00:00
+#
+stp global enable
+stp bpdu-protection
+dhcp snooping enable
+dhcp snooping enable vlan $permit
+${RADIUS_CONFIG}
+${VLAN_IFACE_CONFIG}
+${INTERSWITCH_CONFIG}
+${NTP_CONFIG}
+"
+}
+
+add_switch_to_existing_network() {
+    info "Add one HP 5130 to an existing network"
+    if [ -n "$CONFIG_NAME" ]; then
+        echo "Using saved answers from config: $CONFIG_NAME"
+    else
+        echo "No --config given. Defaults are the built-in ones, not a previous install."
+    fi
+    echo "This only configures the new switch over serial."
+    echo "Plug its console cable in. Do not connect the inter-switch cable until the end."
+    echo
+
+    local default_key="${SAVED_ANSWERS[switch_key_path]:-$REAL_HOME/.ssh/id_rsa_hp5130}"
+    local default_user="${SAVED_ANSWERS[NEW_USERNAME]:-robert}"
+    local default_mgmt="${SAVED_ANSWERS[MANAGEMENT_VLAN]:-99}"
+    local default_wired="${SAVED_ANSWERS[WIRED_VLAN]:-250}"
+    local default_vlans="${SAVED_ANSWERS[vlan_input]:-11 21 31 41 51}"
+
+    prompt_required ADD_SW_NAME "Sysname for the new switch" "add_switch_name"
+    prompt_required ADD_SW_IP "Management IP on the management VLAN (for example 10.7.99.32)" "add_switch_mgmt_ip"
+    prompt_secret_required ADD_SW_PASSWORD "Current console/admin password on the new switch" "add_switch_password"
+    prompt_default ADD_SW_USER "Existing SSH username to install" "$default_user" "NEW_USERNAME"
+    prompt_default ADD_SW_KEY "Path to the existing HP5130 private key" "$default_key" "switch_key_path"
+    prompt_default ADD_SW_MGMT_VLAN "Management VLAN" "$default_mgmt" "MANAGEMENT_VLAN"
+    prompt_default ADD_SW_WIRED_VLAN "Wired unregistered VLAN" "$default_wired" "WIRED_VLAN"
+    prompt_default ADD_SW_USER_VLANS "User VLAN IDs already in use (space separated)" "$default_vlans" "vlan_input"
+    prompt_default ADD_SW_ISP_VLANS "ISP uplink VLAN IDs to carry on the trunk (space separated)" "2 3" "add_switch_isp_vlans"
+    prompt_default ADD_SW_MAX_1G "Highest 1Gbps port number on this switch" "48" "add_switch_max_1g"
+    prompt_required ADD_SW_ISL "Inter-switch port number on the NEW switch" "add_switch_isl_port"
+    prompt_default ADD_SW_EXISTING_ISL "Inter-switch port on the EXISTING switch (for the manual step, e.g. GE1/0/46)" "GE1/0/46" "add_switch_existing_isl"
+
+    [ -f "$ADD_SW_KEY" ] && [ -f "${ADD_SW_KEY}.pub" ] || die "Existing switch key not found at $ADD_SW_KEY (.pub required)."
+    [[ "$ADD_SW_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "Management IP must be a dotted quad."
+    [[ "$ADD_SW_ISL" =~ ^[0-9]+$ ]] || die "Inter-switch port must be a port number."
+
+    local octet permit isl_iface
+    octet="$(last_octet "$ADD_SW_IP")"
+    net_base="$(echo "$ADD_SW_IP" | awk -F. '{print $1"."$2}')"
+    permit="$ADD_SW_ISP_VLANS $ADD_SW_USER_VLANS $ADD_SW_MGMT_VLAN $ADD_SW_WIRED_VLAN"
+    isl_iface="$(get_interface "$ADD_SW_ISL" "$ADD_SW_MAX_1G")"
+    compose_member_switch_config "$ADD_SW_IP" "$isl_iface" "$permit"
+
+    PUBKEY_PEM="$(ssh-keygen -f "${ADD_SW_KEY}.pub" -e -m pem)"
+    RAW_KEY="$(printf '%s\n' "$PUBKEY_PEM" | openssl pkey -pubin -inform PEM -outform DER 2>/dev/null | xxd -p -c 256 | tr -d '\n' | tr '[:lower:]' '[:upper:]')"
+    [ -n "$RAW_KEY" ] || die "Failed to convert $ADD_SW_KEY.pub to HP 5130 format."
+    PUBLIC_KEY="$(echo "$RAW_KEY" | fold -w 64)"
+
+    info "Serial configure $ADD_SW_NAME ($ADD_SW_IP)"
+    echo "Connect the USB serial cable to the NEW switch only."
+    prompt_ack "add_switch_serial_ready" "Press Enter when the console cable is connected..."
+
+    if ! detect_switch_serial_port; then
+        die "Could not find the new switch on a serial port."
+    fi
+    free_serial_port "$DETECTED_PORT"
+
+    # No -ip: expect would address Vlan-interface 1. Management SVI is in the
+    # shared member config. SSH user, key and ssh server enable stay in expect.
+    local cmd=("$EXPECT_SCRIPT" -port "$DETECTED_PORT" -cp "$ADD_SW_PASSWORD" -user "$ADD_SW_USER" -pubkey "$PUBLIC_KEY" -name "$ADD_SW_NAME" -vlan-config "$VLAN_CONFIG" -dynamic-config "$DYNAMIC_CONFIG" -debug)
+    echo "Calling Expect for $ADD_SW_IP on $DETECTED_PORT (password redacted)."
+    "${cmd[@]}"
+
+    cat <<EOF
+
+============================================================================
+New switch $ADD_SW_NAME is configured. Do this before plugging the trunk in.
+============================================================================
+
+1. On the EXISTING switch, permit the same VLANs on ${ADD_SW_EXISTING_ISL}.
+   This is the same stanza build_interswitch_interface() writes on the new switch:
+
+   system-view
+   interface ${ADD_SW_EXISTING_ISL}
+    description Inter-switch link
+    port link-type trunk
+    port trunk permit vlan ${permit}
+    port trunk pvid vlan 1
+    arp detection trust
+    dhcp snooping trust
+   quit
+   quit
+   save force
+
+2. Plug ${isl_iface} on ${ADD_SW_NAME} into ${ADD_SW_EXISTING_ISL}.
+
+3. On the Pi, edit the site .env. SWITCH_HOSTS_BYTES is what the portal uses
+   (last octet on ${net_base}.${ADD_SW_MGMT_VLAN}.x). Append ${octet}.
+
+   SWITCH_HOSTS_BYTES=<existing>,${octet}
+   SWITCH_HOSTS=<existing> ${ADD_SW_IP}
+   WATCHDOG_SWITCH_HOSTS=<existing> ${ADD_SW_IP}
+
+   cd /home/admin/bf-network
+   docker compose up -d kea web --force-recreate --no-deps
+
+4. In the admin UI, refresh switch ports. ${isl_iface} should show as
+   inter_switch. Leave the other ports unknown until you assign roles.
+
+SSH check, from a host that can reach the management VLAN:
+
+  ssh -i ${ADD_SW_KEY} \\
+    -o HostKeyAlgorithms=+ssh-rsa \\
+    -o PubkeyAcceptedAlgorithms=+ssh-rsa \\
+    ${ADD_SW_USER}@${ADD_SW_IP}
+
+EOF
 }
 
 validate_private_base() {
@@ -4103,6 +4347,11 @@ else
 fi
 REAL_HOME="$(eval echo "~$REAL_USER")"
 
+if [ "$ADD_SWITCH" -eq 1 ]; then
+    add_switch_to_existing_network
+    exit 0
+fi
+
 # =============================================================================
 # Auto-detect current subnet
 # =============================================================================
@@ -4432,13 +4681,8 @@ VLAN_CONFIG=""
 for idx in "${!VLAN_LIST[@]}"; do
     vlan="${VLAN_LIST[$idx]}"
     name="${VLAN_NAMES[$idx]}"
-    VLAN_CONFIG+="
-vlan $vlan
-name $name
-dhcp snooping binding record
-arp detection enable
-#
-"
+    VLAN_CONFIG+="$(build_managed_vlan_stanza "$vlan" "$name")"
+    VLAN_CONFIG+=$'\n'
 done
 
 VLAN_CONFIG+="
@@ -5997,16 +6241,7 @@ arp detection trust
     INTERSWITCH_CONFIG=""
     for port in "${INTERSWITCH_PORTS[@]}"; do
         iface="$(get_interface "$port" "${MAX_1GBS_PORT[$j]}")"
-        INTERSWITCH_CONFIG+="
-interface $iface
-description Inter-switch link
-port link-type trunk
-port trunk permit vlan $(isp_trunk_vlan_span) ${VLAN_LIST[*]} $MANAGEMENT_VLAN $WIRED_VLAN $EXT_VLAN_SPACE
-port trunk pvid vlan 1
-arp detection trust
-dhcp snooping trust
-#
-"
+        INTERSWITCH_CONFIG+="$(build_interswitch_interface "$iface" "$(isp_trunk_vlan_span) ${VLAN_LIST[*]} $MANAGEMENT_VLAN $WIRED_VLAN $EXT_VLAN_SPACE")"
     done
 
     KEA_CONFIG=""
