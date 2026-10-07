@@ -207,25 +207,28 @@ process_queue_once() {
   : > "$failed"
 
   # Last action per IP wins, preserving the order of each IP's final occurrence.
+  # Field 4 (optional) carries the retry count for requeued failures.
   awk -F'|' '
     NF>=3 {
-      action=$2; ip=$3
+      action=$2; ip=$3; att=(NF>=4 ? $4 : 0)
       if (ip != "") {
         last[ip]=action
+        attempts[ip]=att
         last_order[ip]=NR
       }
     }
     END {
-      for (ip in last) print last_order[ip] "|" last[ip] "|" ip
+      for (ip in last) print last_order[ip] "|" last[ip] "|" ip "|" attempts[ip]
     }
-  ' "$tmp" | sort -n | awk -F'|' '{print $2 "|" $3}' > "$dedup"
+  ' "$tmp" | sort -n | awk -F'|' '{print $2 "|" $3 "|" $4}' > "$dedup"
 
-  while IFS='|' read -r action ip; do
+  while IFS='|' read -r action ip attempts; do
     [ -z "$action" ] && continue
     [ -z "$ip" ] && continue
+    case "$attempts" in ''|*[!0-9]*) attempts=0 ;; esac
 
     apply_start=$(date +%s)
-    log "DISPATCH action=$action ip=$ip host=$SWITCH_HOST"
+    log "DISPATCH action=$action ip=$ip host=$SWITCH_HOST attempt=$((attempts + 1))"
 
     set +e
     SWITCH_HOSTS="$SWITCH_HOST" \
@@ -248,7 +251,12 @@ process_queue_once() {
     log "DISPATCH_END action=$action ip=$ip status=$apply_status duration_sec=$((apply_end - apply_start))"
 
     if [ "$apply_status" -ne 0 ]; then
-      printf '%s|%s|%s\n' "$(timestamp)" "$action" "$ip" >> "$failed"
+      attempts=$((attempts + 1))
+      if [ "$attempts" -ge "${ACL_MAX_ATTEMPTS:-5}" ]; then
+        log "DROPPED action=$action ip=$ip after=$attempts attempts — giving up (will be re-applied by the next baseline/block sweep)"
+      else
+        printf '%s|%s|%s|%s\n' "$(timestamp)" "$action" "$ip" "$attempts" >> "$failed"
+      fi
     fi
   done < "$dedup"
 
@@ -659,6 +667,9 @@ SSH_TTY_FLAG="${SSH_TTY_FLAG:--tt}"  # Changed: Default to -tt for Comware
 SSH_TTY_FALLBACK="${SSH_TTY_FALLBACK:-0}"  # Changed: Disable fallback
 SSH_HOSTKEY_OPTS="${SSH_HOSTKEY_OPTS:--o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa}"
 SSH_OPTS="-i $SWITCH_KEY_PATH -p $SWITCH_SSH_PORT $SSH_HOSTKEY_OPTS -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3"
+# Hard cap per SSH session. Without it, a session left at the switch prompt
+# hangs until the vty idle-timeout (15 min) and wedges the whole queue.
+SSH_TIMEOUT="${ACL_SSH_TIMEOUT:-90}"
 
 run_ssh() {
   phase="$1"
@@ -668,10 +679,13 @@ run_ssh() {
   temp_err=$(mktemp /tmp/ssh_err.XXXXXX)
 
   set +e
-  printf "%s\n" "$cmds" | ssh $tty_flag $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}" > "$temp_out" 2> "$temp_err"
+  printf "%s\n" "$cmds" | timeout "$SSH_TIMEOUT" ssh $tty_flag $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}" > "$temp_out" 2> "$temp_err"
   status=$?
   set -e
 
+  if [ $status -eq 124 ]; then
+    log "ERROR action=$ACTION phase=$phase status=timeout after ${SSH_TIMEOUT}s"
+  fi
   if [ $status -ne 0 ]; then
     log "ERROR action=$ACTION phase=$phase status=$status"
     log "       stdout: $(cat "$temp_out")"
@@ -697,7 +711,9 @@ acl_show() {
   acl="$1"
   show_out=$(mktemp /tmp/acl_show.XXXXXX)
   set +e
-  printf '%s\n' "screen-length disable" "display acl advanced ${acl}" | ssh $SSH_TTY_FLAG $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}" > "$show_out" 2>/dev/null
+  # Trailing quit is required: without it the session sits at the prompt
+  # until the switch vty idle-timeout (15 min) kills it.
+  printf '%s\n' "screen-length disable" "display acl advanced ${acl}" "quit" | timeout "$SSH_TIMEOUT" ssh $SSH_TTY_FLAG $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}" > "$show_out" 2>/dev/null
   set -e
   printf '%s\n' "$show_out"
 }
