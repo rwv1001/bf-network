@@ -591,8 +591,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 <li>Open <a href="${uri}" target="_blank" rel="noopener">${uri}</a></li>
                 <li>Enter this code: <strong style="font-size:1.3em;letter-spacing:0.08em;">${code}</strong></li>
                 <li>Sign in with your email password, then enter the 6-digit code from your authenticator app.
-                    <small style="display:block;color:#555;">(The code works even while this device is offline. An “approve sign-in” push notification only works if the phone receiving it has internet — e.g. mobile data.)</small></li>
+                    <small style="display:block;color:#555;">(If Microsoft asks for a passkey or security key, choose &ldquo;Other ways to sign in&rdquo; &rarr; &ldquo;Use my password instead&rdquo;. An &ldquo;approve sign-in&rdquo; push only works if the phone receiving it has internet.)</small></li>
             </ol>
+            <p style="margin:0 0 10px 0;background:#fff3cd;color:#856404;border:1px solid #ffeeba;border-radius:6px;padding:8px;">
+                <strong>Tip:</strong> if this page gets replaced by the Microsoft sign-in page, just reopen the Wi-Fi sign-in page afterwards &mdash; your registration will continue automatically.
+            </p>
             <p id="mfaPollStatus" style="margin:0;">Waiting for that sign-in to finish…</p>
         `;
         statusMessage.textContent = '';
@@ -1306,6 +1309,13 @@ document.addEventListener('DOMContentLoaded', function() {
                 .catch(() => {});
         }, 3000);
     }
+
+    {% if resume_mfa %}
+    // A Microsoft sign-in was already started in this session; the captive
+    // browser replaced this page with Microsoft's, so restore the prompt and
+    // resume polling (first poll succeeds immediately if MFA is done).
+    showMfaPrompt({{ resume_mfa | tojson }});
+    {% endif %}
 });
 </script>
 {% endif %}

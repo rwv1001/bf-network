@@ -95,6 +95,19 @@ def delete_pending_device_login(handle: str) -> None:
         conn.execute('DELETE FROM pending_device_login WHERE handle = ?', (handle,))
 
 
+def has_pending_device_login(handle: str) -> bool:
+    """Cheap local check (no Microsoft call) that a stored flow is still live."""
+    handle = (handle or '').strip()
+    if not handle:
+        return False
+    with _pending_db() as conn:
+        row = conn.execute(
+            'SELECT expires_at FROM pending_device_login WHERE handle = ?',
+            (handle,),
+        ).fetchone()
+    return bool(row and int(row[0]) > int(time.time()))
+
+
 def poll_pending_device_login(email: str, handle: str):
     """Poll a stored device-code flow without exposing device_code to the browser."""
     email = (email or '').strip().lower()
@@ -326,5 +339,14 @@ def poll_device_login(email: str, device_code: str):
         return 'error', 'The sign-in code expired. Please start again.'
     if err == 'authorization_declined':
         return 'error', 'Sign-in was cancelled.'
+    if err == 'invalid_client':
+        # AADSTS7000218: token redemption rejected because the Entra app
+        # registration does not allow public client flows.
+        logger.error("domain auth: device-code redemption rejected for %s "
+                     "(enable 'Allow public client flows' on the Entra app registration)",
+                     provider['domain'])
+        return 'error', ('Email sign-in is misconfigured (the administrator must enable '
+                         '"Allow public client flows" on the sign-in app). '
+                         'Please use a BF-Network password for now.')
     logger.info("domain auth: device-code poll failed for %s: %s", email, err)
     return 'error', 'Email sign-in failed. Please try again or use a BF-Network password.'

@@ -961,31 +961,37 @@ def register():
                     mac_address=mac_address,
                     admin_email=os.getenv('ADMIN_EMAIL', 'admin@example.com'),
                 )
-            if ip_address:
-                vlan_id = device.current_vlan or device.assigned_vlan
-                manage_dns_hijack('unhijack', ip_address)
-                if vlan_id:
-                    manage_switch_acl('unblock', ip_address, vlan_id)
-            _user_pf = device.user
-            prefill_data = {
-                'email':        _user_pf.email or '' if _user_pf else '',
-                'first_name':   _user_pf.first_name or '' if _user_pf else '',
-                'last_name':    _user_pf.last_name or '' if _user_pf else '',
-                'phone_number': _user_pf.phone_number or '' if _user_pf else '',
-                'device_type':  device.device_name or '',
-            } if _user_pf else {}
-            return render_template(
-                'register.html',
-                show_status=True,
-                device=device,
-                prefill=prefill_data,
-                detected_mac=mac_address,
-                detected_ip=ip_address,
-                wired_vlan_required=False,
-                wired_vlan_options=wired_vlan_options,
-                user_home_url=build_portal_url(url_for('portal.user_home')),
-                confirm_timeout_minutes=wifi_confirm_timeout_minutes(),
-            )
+            # Only fully-registered devices get re-granted access here. A bare
+            # ownership row (e.g. left open by a device deletion, or a pending
+            # re-registration) must NOT unblock an unapproved device.
+            if device.registration_status == 'registered':
+                if ip_address:
+                    vlan_id = device.current_vlan or device.assigned_vlan
+                    manage_dns_hijack('unhijack', ip_address)
+                    if vlan_id:
+                        manage_switch_acl('unblock', ip_address, vlan_id)
+                _user_pf = device.user
+                prefill_data = {
+                    'email':        _user_pf.email or '' if _user_pf else '',
+                    'first_name':   _user_pf.first_name or '' if _user_pf else '',
+                    'last_name':    _user_pf.last_name or '' if _user_pf else '',
+                    'phone_number': _user_pf.phone_number or '' if _user_pf else '',
+                    'device_type':  device.device_name or '',
+                } if _user_pf else {}
+                return render_template(
+                    'register.html',
+                    show_status=True,
+                    device=device,
+                    prefill=prefill_data,
+                    detected_mac=mac_address,
+                    detected_ip=ip_address,
+                    wired_vlan_required=False,
+                    wired_vlan_options=wired_vlan_options,
+                    user_home_url=build_portal_url(url_for('portal.user_home')),
+                    confirm_timeout_minutes=wifi_confirm_timeout_minutes(),
+                )
+            # Pending / unvalidated device: fall through to the normal
+            # registration form so authentication and approval must complete.
 
     prefill = _build_prefill_from_request()
 
@@ -1044,6 +1050,8 @@ def register():
                 return jsonify({'status': 'pending', 'interval': 5})
             session.pop('domain_mfa_handle', None)
             session.pop('domain_mfa_email', None)
+            session.pop('domain_mfa_ui', None)
+            session.pop('domain_mfa_form', None)
             return jsonify({'status': 'error', 'message': err or 'Sign-in failed. Please try again.'})
 
         # Full registration
@@ -1205,6 +1213,8 @@ def register():
                 session.pop('domain_mfa_ok', None)
                 session.pop('domain_mfa_handle', None)
                 session.pop('domain_mfa_email', None)
+                session.pop('domain_mfa_ui', None)
+                session.pop('domain_mfa_form', None)
                 device.ownership_validated = True
                 db.session.commit()
 
@@ -1239,6 +1249,21 @@ def register():
                         email, started['device_code'], started.get('expires_in') or 900
                     )
                     session.pop('domain_mfa_ok', None)
+                    # Resume data: captive mini-browsers REPLACE this page with
+                    # Microsoft's (no tabs on phones), killing the poller.
+                    # GET /register uses this to restore the prompt and resume.
+                    session['domain_mfa_ui'] = {
+                        'status': 'mfa_required',
+                        'email': email,
+                        'user_code': started['user_code'],
+                        'verification_uri': started['verification_uri'],
+                        'interval': started['interval'],
+                        'message': started['message'],
+                    }
+                    session['domain_mfa_form'] = {
+                        'first_name': first_name, 'last_name': last_name,
+                        'phone_number': phone_number, 'device_type': device_type,
+                    }
                     if is_ajax:
                         return jsonify({
                             'status': 'mfa_required',
@@ -1462,10 +1487,27 @@ def register():
             return jsonify(_resp)
         return redirect(url_for('portal.registered_success'))
 
-    # GET — show registration form
+    # GET — show registration form. If a Microsoft device-code sign-in is
+    # still pending in this session, restore the prompt and resume polling —
+    # phones' captive browsers replace this page with Microsoft's sign-in page.
+    resume_mfa = None
+    if request.method == 'GET':
+        try:
+            from domain_auth import has_pending_device_login
+            _handle = (session.get('domain_mfa_handle') or '').strip()
+            _ui = session.get('domain_mfa_ui')
+            if _handle and _ui and has_pending_device_login(_handle):
+                resume_mfa = _ui
+                _stash = session.get('domain_mfa_form') or {}
+                prefill = {**prefill, **{k: v for k, v in _stash.items() if v}}
+                if _ui.get('email'):
+                    prefill['email'] = _ui['email']
+        except Exception:
+            resume_mfa = None
     return render_template(
         'register.html',
         prefill=prefill,
+        resume_mfa=resume_mfa,
         detected_mac=mac_address,
         detected_ip=ip_address,
         wired_vlan_required=is_wired_unregistered,
