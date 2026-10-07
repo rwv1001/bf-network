@@ -518,7 +518,12 @@ services:
       - |
         if [ -n "$${PORTAL_URL:-}" ]; then
           PORTAL_DOMAIN=$$(printf '%s' "$$PORTAL_URL" | sed 's|https\?://||' | cut -d/ -f1 | cut -d: -f1)
-          mkdir -p /etc/pihole
+          mkdir -p /etc/pihole/hosts
+          # Pi-hole v6 (FTL) reads /etc/pihole/hosts/*; the old v5 file
+          # /etc/pihole/custom.list is ignored. Without this, LAN clients
+          # resolve the portal domain to the public VPS IP and the portal
+          # treats them as remote. Kept in the legacy path too for humans.
+          printf '%s %s\n' "$${PORTAL_IP}" "$$PORTAL_DOMAIN" > /etc/pihole/hosts/captive-portal.list
           printf '%s %s\n' "$${PORTAL_IP}" "$$PORTAL_DOMAIN" > /etc/pihole/custom.list
         fi
         mkdir -p /etc/dnsmasq.d
