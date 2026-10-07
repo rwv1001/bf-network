@@ -143,7 +143,9 @@ enqueue_and_start_worker() {
       exit 0
     fi
 
-    nohup "$SELF_SCRIPT" --worker >/dev/null 2>&1 &
+    # 9>&- is essential: the worker must not inherit the enqueue flock fd,
+    # or a stuck worker blocks every future enqueue on this lock.
+    nohup "$SELF_SCRIPT" --worker >/dev/null 2>&1 </dev/null 9>&- &
     echo $! > "$QUEUE_PID_FILE" 2>/dev/null || true
     log "QUEUE_WORKER_STARTED pid=$(cat "$QUEUE_PID_FILE" 2>/dev/null) interval_sec=$QUEUE_INTERVAL"
   ) 9>"$QUEUE_FILE.lock"
