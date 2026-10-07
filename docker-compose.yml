@@ -389,7 +389,7 @@ services:
     volumes:
       - ./syslog-container/logs:/logs:ro
       - ./kea/leases:/kea/leases:ro
-      - /home/admin/.ssh:/config:ro
+      - /home/rwv1001/.ssh:/config:ro
       - ./scripts:/scripts:ro
       - ./captive-portal/data/nat-parser:/state
       - /etc/localtime:/etc/localtime:ro

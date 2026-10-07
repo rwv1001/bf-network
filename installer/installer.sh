@@ -3034,7 +3034,7 @@ patch_repo_for_install() {
 
     info "1"
 
-    pi_sudo "set -x; cd $q_repo && if [ -f docker-compose.yml ]; then sed -i -E 's#[^[:space:]]+(/[.]ssh:/keys:ro)#/home/${PI_USER}\1#g' docker-compose.yml; else echo 'Skipping compose key-mount patch; docker-compose.yml missing'; fi"
+    pi_sudo "set -x; cd $q_repo && if [ -f docker-compose.yml ]; then sed -i -E 's#[^[:space:]]+(/[.]ssh:/(keys|config):ro)#/home/${PI_USER}\1#g' docker-compose.yml; else echo 'Skipping compose key-mount patch; docker-compose.yml missing'; fi"
     info "2"
     pi_sudo "set -x; cd $q_repo && if [ -f docker-compose.yml ]; then sed -i \"s|SWITCH_KEY_PATH: /keys/id_rsa|SWITCH_KEY_PATH: \\\${SWITCH_KEY_PATH:-/keys/id_rsa}|g\" docker-compose.yml; fi"
     info "3"

@@ -571,8 +571,21 @@ class NATParser:
                 self._check_opnsense_router(router)
             self.router_last_check[rid] = datetime.now()
 
+    def _nat_logs_silent(self) -> bool:
+        """True when no parsed NAT-Logger line has arrived within the stale window.
+
+        A running nat_logger.sh is not evidence of working logging: the process
+        can be stuck, pointed at the wrong host, or filtered out before the file
+        is created. Missing the log file leaves last_log_timestamp unset, which
+        must count as silent rather than as "not yet checked".
+        """
+        if self.last_log_timestamp is None:
+            return True
+        silent = (datetime.now() - self.last_log_timestamp).total_seconds()
+        return silent > STALE_LOG_THRESHOLD_SECONDS
+
     def _check_udm_router(self, router: dict):
-        """Check if NAT logger is running on a UDM router, reinstall if not."""
+        """Reinstall unless the logger process is up and NAT lines are arriving."""
         host = router['gateway_ip']
         name = router['name']
         if not os.path.exists(UDM_SSH_KEY):
@@ -586,12 +599,19 @@ class NATParser:
                 "-o", "ConnectTimeout=10",
                 f"root@{host}", "pgrep -f nat_logger.sh"
             ], capture_output=True, timeout=10)
-            if result.returncode == 0:
+            running = result.returncode == 0 and bool(result.stdout.strip())
+            if running and not self._nat_logs_silent():
                 pids = result.stdout.decode().strip().split('\n')
                 logger.info(f"NAT logger running on {name} (PIDs: {', '.join(pids)})")
+                return
+            if running:
+                logger.warning(
+                    "NAT logger process is up on %s but no NAT-Logger lines are arriving; reinstalling",
+                    name,
+                )
             else:
                 logger.warning(f"NAT logger NOT running on {name} - attempting reinstall...")
-                self._reinstall_udm_router(router)
+            self._reinstall_udm_router(router)
         except subprocess.TimeoutExpired:
             logger.error(f"{name} connection timed out")
         except Exception as e:
@@ -779,23 +799,19 @@ class NATParser:
             logger.error("%s reinstall failed: %s", name, e)
 
     def check_log_freshness(self):
-        """Check if logs are stale and attempt reinstall if needed"""
+        """Check if logs are stale and attempt reinstall if needed."""
+        if not self._nat_logs_silent():
+            return
+        if self.last_reinstall_attempt:
+            time_since_reinstall = (datetime.now() - self.last_reinstall_attempt).total_seconds()
+            if time_since_reinstall < REINSTALL_COOLDOWN_SECONDS:
+                return
         if self.last_log_timestamp is None:
-            return  # No logs seen yet
-        
-        time_since_last_log = (datetime.now() - self.last_log_timestamp).total_seconds()
-        
-        if time_since_last_log > STALE_LOG_THRESHOLD_SECONDS:
+            logger.warning("No NAT-Logger lines received yet")
+        else:
+            time_since_last_log = (datetime.now() - self.last_log_timestamp).total_seconds()
             logger.warning(f"No NAT logs for {time_since_last_log/60:.1f} minutes")
-            
-            # Check if we can attempt reinstall (cooldown period)
-            if self.last_reinstall_attempt:
-                time_since_reinstall = (datetime.now() - self.last_reinstall_attempt).total_seconds()
-                if time_since_reinstall < REINSTALL_COOLDOWN_SECONDS:
-                    logger.info(f"Reinstall cooldown active ({REINSTALL_COOLDOWN_SECONDS - time_since_reinstall:.0f}s remaining)")
-                    return
-            
-            self.attempt_udm_reinstall()
+        self.attempt_udm_reinstall()
     
     def attempt_udm_reinstall(self):
         """Stale-log triggered reinstall: find the UDM router from cache and reinstall."""
