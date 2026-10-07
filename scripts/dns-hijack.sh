@@ -50,10 +50,19 @@ if [ -z "$CONFIG_PATH" ]; then
     fi
 fi
 
-mgmt="${MANAGEMENT_VLAN:-99}"
-third=$(echo "$IP_ADDRESS" | cut -d. -f3)
-if [ "$third" = "$mgmt" ]; then
-  echo "dns-hijack: refusing $ACTION for management VLAN IP $IP_ADDRESS" >&2
+# Do not exempt the whole management VLAN. An AP port uses that VLAN as its
+# PVID, so a laptop plugged in there must be hijacked. Only the portal, hijack
+# DNS, management gateway and switches are protected.
+is_infra_ip() {
+    ip="$1"
+    [ -n "$ip" ] || return 1
+    for candidate in "$PORTAL_IP" "$HIJACK_DNS_IP" "${MGMT_GATEWAY:-}" ${SWITCH_HOSTS:-} ${INFRA_PROTECT_IPS:-}; do
+        [ "$candidate" = "$ip" ] && return 0
+    done
+    return 1
+}
+if is_infra_ip "$IP_ADDRESS"; then
+  echo "dns-hijack: refusing $ACTION for infrastructure IP $IP_ADDRESS" >&2
   exit 0
 fi
 

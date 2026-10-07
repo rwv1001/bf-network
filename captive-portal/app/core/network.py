@@ -878,7 +878,13 @@ def reapply_all_ip_blocks() -> tuple:
         vlan_id = lease.vlan_id or device.current_vlan
         if not vlan_id or not lease.ip_address:
             continue
-        if vlan_id == wired_vlan or vlan_id == mgmt_vlan:
+        if vlan_id == wired_vlan:
+            continue
+        if vlan_id == mgmt_vlan and lease.ip_address in {
+            os.getenv('PORTAL_IP', ''),
+            os.getenv('HIJACK_DNS_IP', ''),
+            os.getenv('MGMT_GATEWAY', ''),
+        }:
             continue
         ok = manage_switch_acl('block', lease.ip_address, vlan_id)
         if ok:
