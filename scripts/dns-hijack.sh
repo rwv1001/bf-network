@@ -235,66 +235,39 @@ case "$ACTION" in
         ;;
 
     hijack)
-        # Redirect DNS requests from this IP to hijacking DNSmasq ($HIJACK_DNS_IP)
-        # When device queries $PORTAL_IP:53, redirect to $HIJACK_DNS_IP:53
-        $SUDO iptables -t nat -C PREROUTING -s "$IP_ADDRESS" -p udp --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null
-        if [ $? -ne 0 ]; then
-            $SUDO iptables -t nat -A PREROUTING -s "$IP_ADDRESS" -p udp --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53
-            echo "DNS hijack enabled for $IP_ADDRESS (UDP)"
-        fi
-
-        $SUDO iptables -t nat -C PREROUTING -s "$IP_ADDRESS" -p tcp --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null
-        if [ $? -ne 0 ]; then
-            $SUDO iptables -t nat -A PREROUTING -s "$IP_ADDRESS" -p tcp --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53
-            echo "DNS hijack enabled for $IP_ADDRESS (TCP)"
-        fi
+        # Redirect every DNS query from this host, not only queries aimed at
+        # the portal. A laptop on an AP port uses whatever resolver it likes.
+        for proto in udp tcp; do
+            $SUDO iptables -t nat -C PREROUTING -s "$IP_ADDRESS" -p "$proto" --dport 53 -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null || \
+                $SUDO iptables -t nat -A PREROUTING -s "$IP_ADDRESS" -p "$proto" --dport 53 -j DNAT --to-destination "$HIJACK_DNS_IP":53
+            # Drop the old portal-only form so it cannot be the sole match.
+            $SUDO iptables -t nat -D PREROUTING -s "$IP_ADDRESS" -p "$proto" --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null || true
+        done
+        echo "DNS hijack enabled for $IP_ADDRESS (any resolver)"
         ;;
 
     unhijack)
-        # Remove DNS redirect rules for this IP
-        $SUDO iptables -t nat -D PREROUTING -s "$IP_ADDRESS" -p udp --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null
-        if [ $? -eq 0 ]; then
-            echo "DNS hijack removed for $IP_ADDRESS (UDP)"
-        fi
-
-        $SUDO iptables -t nat -D PREROUTING -s "$IP_ADDRESS" -p tcp --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null
-        if [ $? -eq 0 ]; then
-            echo "DNS hijack removed for $IP_ADDRESS (TCP)"
-        fi
+        for proto in udp tcp; do
+            $SUDO iptables -t nat -D PREROUTING -s "$IP_ADDRESS" -p "$proto" --dport 53 -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null || true
+            $SUDO iptables -t nat -D PREROUTING -s "$IP_ADDRESS" -p "$proto" --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null || true
+        done
+        echo "DNS hijack removed for $IP_ADDRESS"
         ;;
 
     block)
-        # DNS HIJACKING ONLY - Internet blocking happens via VLAN on HP5130
-        # This just hijacks DNS to trigger captive portal detection
-
-        $SUDO iptables -t nat -C PREROUTING -s "$IP_ADDRESS" -p udp --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null
-        if [ $? -ne 0 ]; then
-            $SUDO iptables -t nat -A PREROUTING -s "$IP_ADDRESS" -p udp --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53
-            echo "DNS hijack enabled for $IP_ADDRESS (UDP)"
-        fi
-
-        $SUDO iptables -t nat -C PREROUTING -s "$IP_ADDRESS" -p tcp --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null
-        if [ $? -ne 0 ]; then
-            $SUDO iptables -t nat -A PREROUTING -s "$IP_ADDRESS" -p tcp --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53
-            echo "DNS hijack enabled for $IP_ADDRESS (TCP)"
-        fi
-
-        echo "Device $IP_ADDRESS DNS hijacked - actual blocking via VLAN 90 on HP5130"
+        for proto in udp tcp; do
+            $SUDO iptables -t nat -C PREROUTING -s "$IP_ADDRESS" -p "$proto" --dport 53 -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null || \
+                $SUDO iptables -t nat -A PREROUTING -s "$IP_ADDRESS" -p "$proto" --dport 53 -j DNAT --to-destination "$HIJACK_DNS_IP":53
+            $SUDO iptables -t nat -D PREROUTING -s "$IP_ADDRESS" -p "$proto" --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null || true
+        done
+        echo "Device $IP_ADDRESS DNS hijacked for any resolver; other traffic is blocked on the switch"
         ;;
 
     unblock)
-        # Remove DNS hijacking only (VLAN change handled by Kea/RADIUS)
-
-        $SUDO iptables -t nat -D PREROUTING -s "$IP_ADDRESS" -p udp --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null
-        if [ $? -eq 0 ]; then
-            echo "DNS hijack removed for $IP_ADDRESS (UDP)"
-        fi
-
-        $SUDO iptables -t nat -D PREROUTING -s "$IP_ADDRESS" -p tcp --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null
-        if [ $? -eq 0 ]; then
-            echo "DNS hijack removed for $IP_ADDRESS (TCP)"
-        fi
-
+        for proto in udp tcp; do
+            $SUDO iptables -t nat -D PREROUTING -s "$IP_ADDRESS" -p "$proto" --dport 53 -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null || true
+            $SUDO iptables -t nat -D PREROUTING -s "$IP_ADDRESS" -p "$proto" --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null || true
+        done
         echo "Device $IP_ADDRESS DNS unhijacked"
         ;;
 
