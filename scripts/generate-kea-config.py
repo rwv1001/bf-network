@@ -357,7 +357,11 @@ def main():
         "reservations": infra_ghost_reservations(network_word, wired_vlan, switch_hosts_raw),
     })
 
-    # Management VLAN — lower range reserved for static infra, public DNS
+    # Management VLAN — lower range reserved for static infra. DHCP clients get
+    # the portal as DNS (like user VLANs) so an unregistered device plugged
+    # into an AP port can be DNS-hijacked into the captive portal; with public
+    # DNS here its queries bypassed the Pi entirely and just died against the
+    # ACL block (no popup, "no internet"). Static infra keeps its own DNS.
     subnet4.append({
         "subnet": f"{network_word}.{management_vlan}.0/24",
         "id": management_vlan,
@@ -367,7 +371,7 @@ def main():
         "interface": f"{wan_iface}.{management_vlan}",
         "option-data": [
             {"name": "routers",             "data": mgmt_gateway},
-            {"name": "domain-name-servers", "data": "8.8.8.8, 8.8.4.4"},
+            {"name": "domain-name-servers", "data": portal_ip},
         ],
         "reservations": infra_ghost_reservations(network_word, management_vlan, switch_hosts_raw),
     })
