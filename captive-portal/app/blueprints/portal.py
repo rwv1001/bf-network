@@ -119,36 +119,16 @@ def _effective_device_ip(mac_address, request_ip):
 
 
 def _hydrate_user_from_central(email, user=None):
+    # On-demand central lookups are retired: sync_to_all_sites replication and
+    # the bootstrap import deliver users/devices proactively, so blocking page
+    # loads on a central round-trip (seconds when central is slow/down) only
+    # added latency. Non-synced users simply register locally.
     email = (email or '').strip().lower()
     if not email:
         return user, None
-    central_user = central_client.lookup_user_at_central(email)
-    if not central_user:
-        return user, None
     if user is None:
         user = User.query.filter_by(email=email).first()
-    if user:
-        changed = False
-        if central_user.get('first_name') and not user.first_name:
-            user.first_name = central_user['first_name']
-            changed = True
-        if central_user.get('last_name') and not user.last_name:
-            user.last_name = central_user['last_name']
-            changed = True
-        if central_user.get('phone_number') and not user.phone_number:
-            user.phone_number = central_user['phone_number']
-            changed = True
-        if central_user.get('network_password_hash') and not user.network_password_hash:
-            user.network_password_hash = central_user['network_password_hash']
-            if not user.network_password_approval_mode:
-                user.network_password_approval_mode = 'first_use'
-            changed = True
-        if central_user.get('blocked') and not user.blocked:
-            user.blocked = True
-            changed = True
-        if changed:
-            db.session.commit()
-    return user, central_user
+    return user, None
 
 from ipaddress import ip_address as parse_ip, ip_network as parse_net
 
@@ -944,13 +924,8 @@ def register():
     if request.method == 'GET' and mac_address:
         device = Device.query.filter_by(mac_address=mac_address).first()
         ownership = get_active_ownership(mac_address) if device else None
-
-        if not ownership and central_client._central_enabled():
-            central_data = central_client.lookup_device_at_central(mac_address)
-            if central_data:
-                device = central_client.import_device_from_central(mac_address, central_data)
-                if device:
-                    ownership = get_active_ownership(mac_address)
+        # No central fallback here: synced devices are replicated to this site
+        # ahead of time (import_user_device / bootstrap); unknown MAC = new device.
 
         if device and ownership:
             device = normalize_device_status(device)
