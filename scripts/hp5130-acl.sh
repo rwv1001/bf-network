@@ -613,10 +613,12 @@ EOSQL
   fi
 fi
 
-# Formula fallback (VLAN_ID * 150 + HOST_OFFSET is unique for the standard
-# VLAN set but may collide when VLAN IDs exceed ~133 or subnets are large).
+# Formula number is always computed. Older blocks used it before the
+# allocation table existed, and an unblock must remove that rule too.
+FORMULA_NUM=$((VLAN_ID * 150 + HOST_OFFSET))
 if [ -z "$RULE_NUM" ]; then
-  RULE_NUM=$((VLAN_ID * 150 + HOST_OFFSET))
+  RULE_NUM="$FORMULA_NUM"
+  log "WARN action=$ACTION ip=$IP_ADDRESS reason=using_formula_rule rule=$RULE_NUM"
 fi
 
 # Safety: never add a per-IP rule for an IP already covered by a blanket
@@ -686,7 +688,66 @@ run_ssh() {
   return $status
 }
 
-log "APPLY action=$ACTION ip=$IP_ADDRESS vlan=$VLAN_ID acl=${ACL_NUM} rule=$RULE_NUM host=$SWITCH_HOST"
+# Every per-host deny for this IP, plus the allocated number and the old
+# formula number. "undo rule" of a missing id is harmless; leaving any of
+# them in place is what stranded 10.7.11.7 on rule 1657.
+# screen-length disable is required. A paged display stops at --More-- and
+# the host deny, often a high rule id, is then invisible to the sweep.
+acl_show() {
+  acl="$1"
+  show_out=$(mktemp /tmp/acl_show.XXXXXX)
+  set +e
+  printf '%s\n' "screen-length disable" "display acl advanced ${acl}" | ssh $SSH_TTY_FLAG $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}" > "$show_out" 2>/dev/null
+  set -e
+  printf '%s\n' "$show_out"
+}
+
+policy_acl_nums() {
+  printf '%s\n' "$ACL_NUM"
+  [ -n "$PYTHON_BIN" ] && [ -f "$POLICY_JSON" ] || return 0
+  "$PYTHON_BIN" - "$POLICY_JSON" <<'PY'
+import json, sys
+policy = json.load(open(sys.argv[1]))
+seen = set()
+for router in policy.get("routers", []):
+    acl = router.get("uplink_acl")
+    if acl is None:
+        continue
+    acl = str(acl).strip()
+    if acl.isdigit() and acl not in seen:
+        seen.add(acl)
+        print(acl)
+PY
+}
+
+discover_deny_rules() {
+  for acl in $(policy_acl_nums | awk 'NF && !seen[$1]++'); do
+    show_out=$(acl_show "$acl")
+    awk -v ip="$IP_ADDRESS" -v acl="$acl" '
+      $1 == "rule" && $3 == "deny" && index($0, "source " ip " ") {
+        print acl, $2
+      }
+    ' "$show_out"
+    rm -f "$show_out"
+  done
+}
+
+ip_still_denied() {
+  for acl in $(policy_acl_nums | awk 'NF && !seen[$1]++'); do
+    show_out=$(acl_show "$acl")
+    if awk -v ip="$IP_ADDRESS" '
+      $1 == "rule" && $3 == "deny" && index($0, "source " ip " ") { found=1 }
+      END { exit found ? 0 : 1 }
+    ' "$show_out"; then
+      rm -f "$show_out"
+      return 0
+    fi
+    rm -f "$show_out"
+  done
+  return 1
+}
+
+log "APPLY action=$ACTION ip=$IP_ADDRESS vlan=$VLAN_ID acl=${ACL_NUM} rule=$RULE_NUM formula=$FORMULA_NUM host=$SWITCH_HOST"
 
 if [ "$ACTION" = "block" ]; then
   CMDS=$(cat <<EOF
@@ -700,16 +761,33 @@ quit
 EOF
 )
 elif [ "$ACTION" = "unblock" ]; then
-  CMDS=$(cat <<EOF
-system-view
-acl advanced ${ACL_NUM}
-undo rule $RULE_NUM
+  # One system-view session, every uplink ACL. The policy ACL also loses the
+  # allocated id and the old formula id even when display did not list them.
+  CMDS="system-view
+"
+  seen=" "
+  add_undo() {
+    acl="$1"; n="$2"
+    case "$n" in ''|*[!0-9]*) return 0 ;; esac
+    case "$seen" in *" $acl:$n "*) return 0 ;; esac
+    seen="$seen$acl:$n "
+    CMDS="${CMDS}acl advanced ${acl}
+undo rule ${n}
 quit
-quit
+"
+    log "UNBLOCK_UNDO ip=$IP_ADDRESS acl=$acl rule=$n"
+  }
+  add_undo "$ACL_NUM" "$RULE_NUM"
+  add_undo "$ACL_NUM" "$FORMULA_NUM"
+  discover_deny_rules > /tmp/hp5130-undo.$$
+  while IFS=' ' read -r acl n; do
+    add_undo "$acl" "$n"
+  done < /tmp/hp5130-undo.$$
+  rm -f /tmp/hp5130-undo.$$
+  CMDS="${CMDS}quit
 save force
 quit
-EOF
-)
+"
 else
   echo "Invalid action: $ACTION" >&2
   exit 1
@@ -738,12 +816,28 @@ if [ "$QUEUE_DISABLE" = "1" ]; then
   apply_duration=$((apply_end - apply_start))
   log "END action=$ACTION phase=apply_save ip=$IP_ADDRESS status=$ssh_status duration_sec=$apply_duration"
 
-  # Free the rule number allocation after a successful unblock.
+  # Comware prints "The rule does not exist" and still exits 0. Do not treat
+  # that as done, and do not drop the allocation, until a display shows the
+  # per-host deny is gone. A remaining formula rule must fail the queue.
+  if [ "$ssh_status" = "0" ] && [ "$ACTION" = "unblock" ]; then
+    if ip_still_denied; then
+      log "ERROR action=unblock ip=$IP_ADDRESS acl=$ACL_NUM reason=deny_still_present"
+      ssh_status=1
+    fi
+  fi
+  if [ "$ssh_status" = "0" ] && [ "$ACTION" = "block" ]; then
+    if ! ip_still_denied; then
+      log "ERROR action=block ip=$IP_ADDRESS acl=$ACL_NUM rule=$RULE_NUM reason=deny_not_installed"
+      ssh_status=1
+    fi
+  fi
+
   if [ "$ACTION" = "unblock" ] && [ "$ssh_status" = "0" ] \
      && [ -n "${PSQL_BIN:-}" ] && [ -n "${DB_URL:-}" ]; then
     "$PSQL_BIN" "$DB_URL" -c \
       "DELETE FROM acl_rule_allocations WHERE ip_address = '${IP_ADDRESS}';" \
       2>/dev/null || true
+    log "ALLOC_RELEASED ip=$IP_ADDRESS"
   fi
 
   exit $ssh_status

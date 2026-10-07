@@ -269,68 +269,40 @@ def manage_switch_acl(action: str, ip_address: str, vlan_id) -> bool:
     else:
         switch_hosts = all_switch_hosts
 
-    # Calculate rule number
-    try:
-        host_octet = int(ip_address.split('.')[3])
-    except (IndexError, ValueError):
-        logger.error("manage_switch_acl: Unable to determine host octet for %s", ip_address)
-        return False
-
-    rule_num = vlan_id * 150 + host_octet
+    # Rule numbers belong to hp5130-acl.sh and acl_rule_allocations. Do not
+    # invent vlan*150+host here: that is how rule 1657 was left behind while
+    # the allocation table tracked rule 10000. The script also resolves the
+    # uplink ACL itself, so call it once per switch, not once per ACL.
     acl_script = os.getenv('ACL_QUEUE_SCRIPT', '/scripts/hp5130-acl.sh')
     use_acl_script = os.getenv('USE_ACL_QUEUE', '1') != '0'
+    if not (use_acl_script and os.path.isfile(acl_script)):
+        logger.error(
+            "manage_switch_acl: %s missing; refusing formula-rule SSH fallback for %s",
+            acl_script, ip_address,
+        )
+        return False
 
     all_ok = True
-
     for switch_host in switch_hosts:
-        for acl_num in target_acls:
-            if use_acl_script and os.path.isfile(acl_script):
-                try:
-                    env = _make_script_env(switch_host)
-                    result = subprocess.run(
-                        [acl_script, action, ip_address],
-                        capture_output=True, text=True, timeout=15, env=env,
-                    )
-                    if result.returncode == 0:
-                        logger.info("ACL %s queued for %s on %s (acl=%s) via queue script",
-                                    action, ip_address, switch_host, acl_num)
-                        continue
-                    logger.warning("ACL queue script failed for %s on %s: %s",
-                                   ip_address, switch_host,
-                                   (result.stderr or result.stdout).strip())
-                except Exception as exc:
-                    logger.warning("ACL queue script error for %s on %s: %s",
-                                   ip_address, switch_host, exc)
-
-            # Direct SSH fallback
-            if action == 'block':
-                commands = [
-                    "system-view",
-                    f"acl advanced {acl_num}",
-                    f"rule {rule_num} deny ip source {ip_address} 0",
-                    "quit",
-                    "quit",
-                    "save force",
-                ]
-            elif action == 'unblock':
-                commands = [
-                    "system-view",
-                    f"acl advanced {acl_num}",
-                    f"undo rule {rule_num}",
-                    "quit",
-                    "quit",
-                    "save force",
-                ]
-            else:
-                logger.error("manage_switch_acl: Invalid action: %s", action)
-                return False
-
-            output = run_switch_command(switch_host, '\n'.join(commands))
-            if output is None:
-                logger.error("manage_switch_acl: Switch ACL %s failed for %s on %s (acl=%s)",
-                             action, ip_address, switch_host, acl_num)
-                all_ok = False
-
+        try:
+            env = _make_script_env(switch_host)
+            result = subprocess.run(
+                [acl_script, action, ip_address],
+                capture_output=True, text=True, timeout=20, env=env,
+            )
+        except Exception as exc:
+            logger.warning("ACL queue script error for %s on %s: %s",
+                           ip_address, switch_host, exc)
+            all_ok = False
+            continue
+        if result.returncode != 0:
+            logger.warning("ACL queue script failed for %s on %s: %s",
+                           ip_address, switch_host,
+                           (result.stderr or result.stdout).strip())
+            all_ok = False
+            continue
+        logger.info("ACL %s queued for %s on %s (acls=%s) via queue script",
+                    action, ip_address, switch_host, target_acls)
     return all_ok
 
 def parse_switch_isp_routers(config_text: str) -> dict:
