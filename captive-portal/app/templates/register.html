@@ -228,7 +228,7 @@
       </p>
     </div>
 
-    <div id="validationBox" class="validation-box">
+    <div id="validationBox" class="validation-box hidden">
         <strong>Please complete the following:</strong>
         <ul id="validationList"></ul>
     </div>
@@ -301,6 +301,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // false (default): a domain password that Microsoft did not reject is enough.
     // true: keep the device-code + authenticator step (DOMAIN_AUTH_REQUIRE_MFA).
     const domainAuthRequireMfa = {{ domain_auth_require_mfa|default(false)|tojson }};
+    let registrationStep = 1;
     // Set before the initial status poll. After Microsoft replaces the captive
     // page, that poll otherwise returns enter_password / need_password and
     // flashes the BF-Network prompt until the device-code poll finishes.
