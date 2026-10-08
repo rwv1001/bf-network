@@ -1228,7 +1228,22 @@ def register():
                         wired_vlan_options=wired_vlan_options,
                     )
                 ok, err = verify_domain_credentials(email, password_input)
-                if not ok and err and 'multi-factor authentication' in err:
+                # Microsoft refused a token because more proof is required.
+                # That means the password itself was not wrong. Unless
+                # DOMAIN_AUTH_REQUIRE_MFA is set, accept it and continue to
+                # admin approval — do not send the captive browser to
+                # login.microsoft.com.
+                _mfa_needed = bool(err) and 'multi-factor authentication' in err.lower()
+                _require_mfa = os.getenv('DOMAIN_AUTH_REQUIRE_MFA', 'false').strip().lower() in {
+                    '1', 'true', 'yes', 'on',
+                }
+                if _mfa_needed and not _require_mfa:
+                    logger.info(
+                        "Domain password accepted without device-code MFA for %s (%s)",
+                        email, err,
+                    )
+                    ok, err = True, None
+                if not ok and _mfa_needed and _require_mfa:
                     from domain_auth import store_pending_device_login
                     started, start_err = start_device_login(email)
                     if not started:
@@ -1484,7 +1499,10 @@ def register():
     # still pending in this session, restore the prompt and resume polling —
     # phones' captive browsers replace this page with Microsoft's sign-in page.
     resume_mfa = None
-    if request.method == 'GET':
+    _require_mfa = os.getenv('DOMAIN_AUTH_REQUIRE_MFA', 'false').strip().lower() in {
+        '1', 'true', 'yes', 'on',
+    }
+    if request.method == 'GET' and _require_mfa:
         try:
             from domain_auth import has_pending_device_login
             _handle = (session.get('domain_mfa_handle') or '').strip()
@@ -1501,6 +1519,7 @@ def register():
         'register.html',
         prefill=prefill,
         resume_mfa=resume_mfa,
+        domain_auth_require_mfa=_require_mfa,
         detected_mac=mac_address,
         detected_ip=ip_address,
         wired_vlan_required=is_wired_unregistered,
