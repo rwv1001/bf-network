@@ -303,6 +303,21 @@ document.addEventListener('DOMContentLoaded', function() {
     // page, that poll otherwise returns enter_password / need_password and
     // flashes the BF-Network prompt until the device-code poll finishes.
     let mfaFlowActive = {{ 'true' if resume_mfa else 'false' }};
+    // iOS captive browser often replaces this page with Microsoft's, then the
+    // user reopens the SSID sheet. sessionStorage survives that reload; without
+    // it the status poll returns need_password and draws the BF-Network
+    // set-password prompt even though domain sign-in already succeeded.
+    try {
+        const mfaMark = sessionStorage.getItem('portalMfaFlow');
+        if (mfaMark) {
+            const parsed = JSON.parse(mfaMark);
+            if (parsed && Date.now() - (parsed.ts || 0) < 30 * 60 * 1000) {
+                mfaFlowActive = true;
+            } else {
+                sessionStorage.removeItem('portalMfaFlow');
+            }
+        }
+    } catch (e) {}
 
     function passwordPromptSuppressed() {
         return mfaFlowActive || !!document.getElementById('mfaPrompt');
@@ -584,6 +599,12 @@ document.addEventListener('DOMContentLoaded', function() {
         // Invalidate any poll loop from a previous prompt; duplicate pollers
         // race on the single-use Microsoft device code.
         mfaFlowActive = true;
+        try {
+            sessionStorage.setItem('portalMfaFlow', JSON.stringify({
+                ts: Date.now(),
+                email: data.email || (document.getElementById('email')?.value || '')
+            }));
+        } catch (e) {}
         window._mfaPollGen = (window._mfaPollGen || 0) + 1;
         const pollGen = window._mfaPollGen;
         const old = document.getElementById('mfaPrompt');
@@ -637,6 +658,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
                 if (d.status === 'registered' || d.status === 'pending' && d.registration) {
                     mfaFlowActive = false;
+                    try { sessionStorage.removeItem('portalMfaFlow'); } catch (e) {}
                     box.remove();
                     showStatus(d.message || 'Signed in. Checking access...', 'success');
                     startAccessCheck();
@@ -658,15 +680,24 @@ document.addEventListener('DOMContentLoaded', function() {
                     })
                     .then(r => r.json().catch(() => ({})))
                     .then(done => {
-                        mfaFlowActive = false;
                         if (done.status === 'registered') {
+                            mfaFlowActive = false;
+                            try { sessionStorage.removeItem('portalMfaFlow'); } catch (e) {}
                             showStatus((done.message || 'Device registered') + ' Checking access...', 'success');
                             startAccessCheck();
                         } else if (done.status === 'pending' || done.status === 'pending_password') {
+                            // Keep the MFA mark so a captive-portal reload (iOS
+                            // SSID sheet) does not replace this with the
+                            // BF-Network set-password prompt.
+                            mfaFlowActive = true;
+                            try {
+                                sessionStorage.setItem('portalMfaFlow', JSON.stringify({ ts: Date.now(), email: data.email || '' }));
+                            } catch (e) {}
                             showStatus(done.message || 'Your registration has been submitted for admin approval. Please wait...', 'info');
                             pollingStarted = false;
                             startPolling();
                         } else {
+                            mfaFlowActive = false;
                             showStatus(done.message || 'Signed in, but registration did not finish. Please try again.', 'error');
                         }
                     });
@@ -883,6 +914,16 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
+    function awaitingAdminAfterDomainSignIn() {
+        return mfaFlowActive || passwordPromptSuppressed();
+    }
+
+    function showAwaitingAdminApproval(extra) {
+        const base = 'Signed in with your email account. Please wait for the administrator to approve this device.';
+        showStatus(extra ? base + ' ' + extra : base, 'info');
+        form.style.display = 'none';
+    }
+
     function startPolling() {
         if (accessConfirmed) return;
         if (pollingStarted) return;
@@ -893,6 +934,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 .then(response => response.json())
                 .then(data => {
                     if (passwordPromptSuppressed() && (data.status === 'enter_password' || data.status === 'pending_password' || data.status === 'need_password' || data.status === 'mfa_pending')) {
+                        showAwaitingAdminApproval();
                         return;
                     }
                     if (data.status === 'registered') {
@@ -921,9 +963,16 @@ document.addEventListener('DOMContentLoaded', function() {
                         const resubmitBtn = document.getElementById('resubmitBtn');
                         if (resubmitBtn) resubmitBtn.style.display = 'block';
                     } else if (data.status === 'enter_password') {
+                        if (awaitingAdminAfterDomainSignIn()) {
+                            showAwaitingAdminApproval();
+                            return;
+                        }
                         clearInterval(pollInterval);
                         pollingStarted = false;
-                        showNetworkPasswordPrompt(data.message || 'Your administrator has set a password. Please enter it to continue.');
+                        showNetworkPasswordPrompt(
+                            data.message || 'Your administrator has set a password. Please enter it to continue.',
+                            data.auth_options
+                        );
                     } else if (data.status === 'wrong_vlan') {
                         clearInterval(pollInterval);
                         pollInterval = null;
@@ -1089,6 +1138,9 @@ document.addEventListener('DOMContentLoaded', function() {
                     return;
                 }
                 if (passwordPromptSuppressed() && (data.status === 'enter_password' || data.status === 'pending_password' || data.status === 'need_password' || data.status === 'password_required' || data.status === 'mfa_pending')) {
+                    showAwaitingAdminApproval(data.message && data.status === 'pending_password' ? data.message : '');
+                    form.style.display = 'none';
+                    startPolling();
                     return;
                 }
                 if (data.status === 'registered') {
@@ -1110,7 +1162,15 @@ document.addEventListener('DOMContentLoaded', function() {
                     showStatus('Awaiting approval...', 'info');
                     startPolling();
                 } else if (data.status === 'enter_password') {
-                    showNetworkPasswordPrompt(data.message || 'Your administrator has set a password. Please enter it to continue.');
+                    if (awaitingAdminAfterDomainSignIn()) {
+                        showAwaitingAdminApproval();
+                        startPolling();
+                    } else {
+                        showNetworkPasswordPrompt(
+                            data.message || 'Your administrator has set a password. Please enter it to continue.',
+                            data.auth_options
+                        );
+                    }
                 } else if (data.status === 'pending_password') {
                     showStatus(data.message || 'A network password is required. Please check your email for a link to set your password.', 'info');
                     form.style.display = 'none';
@@ -1185,13 +1245,29 @@ document.addEventListener('DOMContentLoaded', function() {
 
             if (passwordPromptSuppressed() && (data.status === 'need_password' || data.status === 'enter_password' || data.status === 'pending_password' || data.status === 'mfa_pending')) {
                 if (loadingEl) loadingEl.style.display = 'none';
+                showAwaitingAdminApproval();
                 return;
             }
             switch (data.status) {
                 case 'need_password':
                     console.log('[DevicePoll] Status: need_password');
+                    // After email + authenticator, a captive-portal reload must
+                    // not offer the BF-Network set-password flow. That status
+                    // means admin approval (or a real BF password) — not a new
+                    // account setup.
+                    if (awaitingAdminAfterDomainSignIn() || data.pending_approval || data.needs_admin_approval) {
+                        showAwaitingAdminApproval();
+                        break;
+                    }
                     if (data.has_password) {
-                        showNetworkPasswordPrompt('Please enter your network password to continue.');
+                        showNetworkPasswordPrompt(
+                            data.message || 'Please enter your network password to continue.',
+                            data.auth_options || {
+                                has_bf_password: true,
+                                domain_auth_available: !!data.domain_auth_available,
+                                domain: data.domain || ''
+                            }
+                        );
                         stopDevicePoll();
                     } else {
                         showStatus(
