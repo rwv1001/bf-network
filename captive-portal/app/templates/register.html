@@ -299,6 +299,14 @@ document.addEventListener('DOMContentLoaded', function() {
     let accessConfirmed = false;
     let deviceStatusPollingStarted = false;
     let registrationStep = 1;
+    // Set before the initial status poll. After Microsoft replaces the captive
+    // page, that poll otherwise returns enter_password / need_password and
+    // flashes the BF-Network prompt until the device-code poll finishes.
+    let mfaFlowActive = {{ 'true' if resume_mfa else 'false' }};
+
+    function passwordPromptSuppressed() {
+        return mfaFlowActive || !!document.getElementById('mfaPrompt');
+    }
 
     const fieldValidators = [
         {
@@ -575,6 +583,7 @@ document.addEventListener('DOMContentLoaded', function() {
     function showMfaPrompt(data) {
         // Invalidate any poll loop from a previous prompt; duplicate pollers
         // race on the single-use Microsoft device code.
+        mfaFlowActive = true;
         window._mfaPollGen = (window._mfaPollGen || 0) + 1;
         const pollGen = window._mfaPollGen;
         const old = document.getElementById('mfaPrompt');
@@ -627,6 +636,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     return;
                 }
                 if (d.status === 'registered' || d.status === 'pending' && d.registration) {
+                    mfaFlowActive = false;
                     box.remove();
                     showStatus(d.message || 'Signed in. Checking access...', 'success');
                     startAccessCheck();
@@ -635,6 +645,8 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (d.status === 'ok') {
                     window._mfaPollGen++; // stop any sibling pollers
                     box.remove();
+                    // Keep mfaFlowActive until the resubmit returns, so a
+                    // status poll cannot flash the BF-Network password box.
                     const again = new FormData(form);
                     again.set('registration_step', 'final');
                     again.set('auth_method', 'domain_mfa');
@@ -646,9 +658,14 @@ document.addEventListener('DOMContentLoaded', function() {
                     })
                     .then(r => r.json().catch(() => ({})))
                     .then(done => {
+                        mfaFlowActive = false;
                         if (done.status === 'registered') {
                             showStatus((done.message || 'Device registered') + ' Checking access...', 'success');
                             startAccessCheck();
+                        } else if (done.status === 'pending' || done.status === 'pending_password') {
+                            showStatus(done.message || 'Your registration has been submitted for admin approval. Please wait...', 'info');
+                            pollingStarted = false;
+                            startPolling();
                         } else {
                             showStatus(done.message || 'Signed in, but registration did not finish. Please try again.', 'error');
                         }
@@ -664,6 +681,9 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     function showNetworkPasswordPrompt(msg, authOptions) {
+        if (passwordPromptSuppressed()) {
+            return;
+        }
         const oldPwdDiv = document.getElementById('passwordPrompt');
         if (oldPwdDiv) oldPwdDiv.remove();
 
@@ -872,6 +892,9 @@ document.addEventListener('DOMContentLoaded', function() {
             fetch(apiUrlWithDevice('{{ url_for("portal.registration_status") }}'))
                 .then(response => response.json())
                 .then(data => {
+                    if (passwordPromptSuppressed() && (data.status === 'enter_password' || data.status === 'pending_password' || data.status === 'need_password' || data.status === 'mfa_pending')) {
+                        return;
+                    }
                     if (data.status === 'registered') {
                         clearInterval(pollInterval);
                         if (data.network_mismatch && data.current_ssid && data.expected_ssid) {
@@ -1065,6 +1088,9 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (accessConfirmed) {
                     return;
                 }
+                if (passwordPromptSuppressed() && (data.status === 'enter_password' || data.status === 'pending_password' || data.status === 'need_password' || data.status === 'password_required' || data.status === 'mfa_pending')) {
+                    return;
+                }
                 if (data.status === 'registered') {
                     if (data.network_mismatch && data.current_ssid && data.expected_ssid) {
                         showStatus(
@@ -1157,6 +1183,10 @@ document.addEventListener('DOMContentLoaded', function() {
 
             if (loadingEl) loadingEl.style.display = 'none';
 
+            if (passwordPromptSuppressed() && (data.status === 'need_password' || data.status === 'enter_password' || data.status === 'pending_password' || data.status === 'mfa_pending')) {
+                if (loadingEl) loadingEl.style.display = 'none';
+                return;
+            }
             switch (data.status) {
                 case 'need_password':
                     console.log('[DevicePoll] Status: need_password');

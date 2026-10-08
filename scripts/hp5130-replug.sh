@@ -19,6 +19,8 @@ elif [ -f "$BASE_DIR/keys/hp5130_id_rsa" ]; then
 fi
 
 SWITCH_HOSTS="${SWITCH_HOSTS:?SWITCH_HOSTS required}"
+# yes unless SWITCH_POE is explicitly disabled. Missing .env entry means yes.
+SWITCH_POE="${SWITCH_POE:-yes}"
 SWITCH_HOST="$(printf '%s' "${SWITCH_HOSTS}" | awk '{print $1}')"
 SWITCH_USER="${SWITCH_USER:-robert}"
 SWITCH_SSH_PORT="${SWITCH_SSH_PORT:-22}"
@@ -438,7 +440,14 @@ if [ -z "$CACHE_IFACE" ] && command -v docker >/dev/null 2>&1; then
   log "CACHE_UPDATED mac=$MAC_NORM iface=$IFACE host=$REPLUG_TARGET_HOST"
 fi
 
-if [ "${IS_AP_PORT}" = "1" ]; then
+poe_supported() {
+  case "$(printf '%s' "$SWITCH_POE" | tr '[:upper:]' '[:lower:]')" in
+    0|no|n|false|off|disabled) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+if [ "${IS_AP_PORT}" = "1" ] && poe_supported; then
   log "AP_POE_CYCLE iface=$IFACE delay=${DELAY_SEC}s – PoE off then on; AP reboots independently"
   CMDS_DOWN=$(cat <<EOF
 system-view
@@ -459,6 +468,9 @@ quit
 EOF
 )
 else
+  if [ "${IS_AP_PORT}" = "1" ]; then
+    log "AP_LINK_BOUNCE iface=$IFACE delay=${DELAY_SEC}s – SWITCH_POE=$SWITCH_POE, shutdown instead of PoE"
+  fi
   CMDS_DOWN=$(cat <<EOF
 system-view
 interface $IFACE

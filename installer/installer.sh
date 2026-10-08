@@ -2490,6 +2490,7 @@ write_pi_env_file() {
 
         write_env_line SWITCH_REPLUG_ENABLED "$SWITCH_REPLUG_ENABLED"
         write_env_line SWITCH_REPLUG_DELAY_SEC "$SWITCH_REPLUG_DELAY_SEC"
+        write_env_line SWITCH_POE "$SWITCH_POE"
         write_env_line SWITCH_REPLUG_ALLOWED_PREFIXES "GigabitEthernet,GE"
         write_env_line SWITCH_REPLUG_DENY_PATTERN ""
         write_env_line SWITCH_REPLUG_SCRIPT "/scripts/hp5130-replug.sh"
@@ -5978,6 +5979,12 @@ prompt_default DOCKER_LOG_MAX_SIZE "Docker per-container log max size before rot
 prompt_default DOCKER_LOG_MAX_FILE "Docker rotated log files kept per container" "3"
 prompt_default SWITCH_REPLUG_ENABLED "Enable automatic switch replug after wired approval?" "true"
 prompt_default SWITCH_REPLUG_DELAY_SEC "Switch replug delay seconds" "3"
+prompt_default SWITCH_POE "Do the HP 5130 switches support PoE? (yes/no)" "yes" "switch_poe"
+case "$(printf '%s' "$SWITCH_POE" | tr '[:upper:]' '[:lower:]')" in
+    y|yes|true|1) SWITCH_POE=yes ;;
+    *) SWITCH_POE=no ;;
+esac
+save_answer "switch_poe" "$SWITCH_POE"
 
 info "UniFi Network Controller (Docker)"
 prompt_default INSTALL_UNIFI_CONTROLLER "Install UniFi controller on the target host?" "y" "install_unifi_controller"

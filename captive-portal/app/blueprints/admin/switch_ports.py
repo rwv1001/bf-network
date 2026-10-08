@@ -20,6 +20,7 @@ from extensions import db
 from core.auth import permission_required
 from core.switch import (
     COMMON_PORT_UNDO_COMMANDS,
+    common_port_undo_commands,
     expand_switch_iface_name, find_switch_port_for_mac,
     get_switch_hosts, normalize_switch_mac, persist_switch_port,
     run_switch_command, switch_port_allowed,
@@ -35,13 +36,177 @@ PORT_ROLES = {
     'cheapap':         'Cheap AP',
     'migration_ap':    'Migration AP',
     'wired':           'Wired Device',
-    'migration_wired': 'Migration Wired',
     'pi':              'Pi / Kea',
     'inter_switch':    'Inter-Switch Link',
     'uplink_udm':      'Uplink to Router',
     'fixed_ip':        'Fixed IP device',
     'unknown':         'Unclassified (VLAN 1, no auth)',
 }
+
+# Legacy single button. Kept so existing rows still push a VLAN 2 access port.
+LEGACY_MIGRATION_WIRED = 'migration_wired'
+
+
+def _isp_wired_vlan_ids():
+    """ISP VLAN ids that get their own 'wired VLAN N' port button."""
+    from models import ISPRouter
+    ids = []
+    seen = set()
+    try:
+        rows = ISPRouter.query.order_by(ISPRouter.vlan_id).all()
+    except Exception as exc:
+        logger.warning("Could not load ISP VLANs for wired-VLAN port roles: %s", exc)
+        return []
+    for row in rows:
+        if row.vlan_id is None:
+            continue
+        try:
+            vlan_id = int(row.vlan_id)
+        except (TypeError, ValueError):
+            continue
+        if vlan_id in seen:
+            continue
+        seen.add(vlan_id)
+        ids.append(vlan_id)
+    return ids
+
+
+def wired_vlan_role_key(vlan_id) -> str:
+    return f'wired_vlan_{int(vlan_id)}'
+
+
+def parse_wired_vlan_role(role):
+    """Return the access VLAN for a per-ISP wired role, else None.
+
+    migration_wired is the old single button and always meant VLAN 2.
+    """
+    if role == LEGACY_MIGRATION_WIRED:
+        return 2
+    match = re.fullmatch(r'wired_vlan_(\d+)', role or '')
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def wired_vlan_description(vlan_id) -> str:
+    return f'Migration wired VLAN {int(vlan_id)}'
+
+
+def _isp_wired_roles():
+    """(role_key, button label) for each ISP VLAN, in VLAN order."""
+    return [
+        (wired_vlan_role_key(vlan_id), f'wired VLAN {vlan_id}')
+        for vlan_id in _isp_wired_vlan_ids()
+    ]
+
+
+def port_roles_for_ui():
+    """Static roles with one wired-VLAN button per ISP VLAN after Wired Device."""
+    roles = {}
+    for key, label in PORT_ROLES.items():
+        roles[key] = label
+        if key == 'wired':
+            for role_key, role_label in _isp_wired_roles():
+                roles[role_key] = role_label
+    return roles
+
+
+def _role_allowed(role: str) -> bool:
+    if role in PORT_ROLES:
+        return True
+    vlan_id = parse_wired_vlan_role(role)
+    return vlan_id is not None and vlan_id in set(_isp_wired_vlan_ids())
+
+
+def switch_poe_supported() -> bool:
+    """True unless SWITCH_POE is explicitly disabled. A missing entry means yes."""
+    raw = (os.getenv('SWITCH_POE') or 'yes').strip().lower()
+    return raw not in {'0', 'no', 'n', 'false', 'off', 'disabled'}
+
+
+ROLE_PURPOSES = {
+    'ap': (
+        'UniFi AP uplink. User and ISP VLANs are tagged; the management VLAN '
+        'is the untagged native VLAN. MAC authentication and IP source guard '
+        'are off, so the AP can bridge every SSID. ' + ('PoE is enabled.' if switch_poe_supported() else 'PoE commands are omitted (SWITCH_POE=no).')
+    ),
+    'cheapap': (
+        'Cheap AP that does not tag VLANs. VLAN 2, the user VLANs, management '
+        'and the wired VLAN are all untagged, with the wired VLAN as PVID. '
+        'MAC authentication (up to 256 clients) and IP source guard are on. ' + ('PoE is enabled.' if switch_poe_supported() else 'PoE commands are omitted (SWITCH_POE=no).')
+    ),
+    'migration_ap': (
+        'Migration AP. Native VLAN is 2, so a UniFi SSID on VLAN 2 leaves the '
+        'port untagged; every other SSID stays tagged. MAC authentication and '
+        'IP source guard are off so PVID 2 is not overridden. ' + ('PoE is enabled.' if switch_poe_supported() else 'PoE commands are omitted (SWITCH_POE=no).')
+    ),
+    'wired': (
+        'Normal wired device. Hybrid port with the user VLANs untagged and the '
+        'wired unregistered VLAN as PVID and MAC-auth guest VLAN. MAC '
+        'authentication (16 clients) and IP source guard are on.'
+    ),
+    'pi': (
+        'Trunk to the Pi running Kea. ISP, user, management and wired VLANs '
+        'are tagged. The native VLAN is an unused VLAN so every Pi '
+        'subinterface stays tagged. DHCP snooping and ARP detection trust this port.'
+    ),
+    'inter_switch': (
+        'Link to another switch. Trunk carrying the user, management, wired '
+        'and ISP VLANs, native VLAN 2. DHCP snooping and ARP detection trust this port.'
+    ),
+    'uplink_udm': (
+        'Uplink toward the router. Trunk permitting VLAN 2 and any external '
+        'VLANs; DHCP snooping trusts the port. This role is set on the ISP '
+        'routers page, not from here.'
+    ),
+    'fixed_ip': (
+        'Port reserved for a device with a fixed IP. The role and port config '
+        'are applied from the Fixed IPs section of the dashboard, not from here.'
+    ),
+    'unknown': (
+        'Unclassified. Clears authentication, VLAN membership and the other '
+        'role-specific commands (the common undo block) and leaves the port '
+        'on the default VLAN with no MAC authentication.'
+    ),
+}
+
+
+def role_purpose(role: str) -> str:
+    vlan_id = parse_wired_vlan_role(role)
+    if vlan_id is not None:
+        return (
+            f'Wired access port on ISP VLAN {vlan_id}, with no MAC authentication '
+            f'or IP source guard. For a host that is still on that ISP LAN. '
+            f'This is what the old Migration Wired button did, for VLAN {vlan_id} '
+            f'instead of only VLAN 2.'
+        )
+    return ROLE_PURPOSES.get(role, role)
+
+
+def interface_config_preview(role: str) -> str:
+    """Interface commands update-single would push for this role.
+
+    Drops the system-view / quit / save force wrapper. Uses GE1/0/x as the
+    sample interface name; the real port name is substituted on apply.
+    """
+    raw = _build_port_config('GE1/0/x', role, '')
+    kept = [
+        line for line in raw.splitlines()
+        if line not in ('system-view', 'quit', 'save force')
+    ]
+    return '\n'.join(kept)
+
+
+def role_hints_for_ui(roles):
+    hints = {}
+    for role in roles:
+        try:
+            config = interface_config_preview(role)
+        except Exception as exc:
+            logger.warning('Role preview failed for %s: %s', role, exc)
+            config = '(config preview unavailable)'
+        hints[role] = {'purpose': role_purpose(role), 'config': config}
+    return hints
 
 
 # ---------------------------------------------------------------------------
@@ -56,7 +221,10 @@ def _detect_port_role(port_name: str, description: str) -> str:
     if 'migration' in desc and 'ap' in desc:
         return 'migration_ap'
     if 'migration' in desc and 'wired' in desc:
-        return 'migration_wired'
+        vlan_match = re.search(r'vlan\s*(\d+)', desc)
+        if vlan_match:
+            return wired_vlan_role_key(int(vlan_match.group(1)))
+        return wired_vlan_role_key(2)
     if ('unifi' in desc and 'ap' in desc) or \
        desc.endswith(' ap') or ' ap ' in desc or \
        '-ap' in desc or desc.startswith('ap'):
@@ -278,20 +446,23 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
         'cheapap':         'Cheap AP',
         'migration_ap':    'Migration AP (VLAN 2 native)',
         'wired':           'wired port',
-        'migration_wired': 'Migration wired VLAN 2',
         'pi':              'TRUNK-TO-PI-Kea',
         'inter_switch':    'Inter-switch link',
         'uplink_udm':      'TRUNK-TO-UDM',
         'unknown':         '',
     }
+    wired_vlan_id = parse_wired_vlan_role(role)
+    if wired_vlan_id is not None:
+        CANONICAL_DESC[role] = wired_vlan_description(wired_vlan_id)
     # Role-specific canonical takes priority; only unknown falls back to existing desc.
     canonical = CANONICAL_DESC.get(role, '')
     desc = canonical if canonical else (description or '').strip()
 
     head = ['system-view', f'interface {expanded}']
 
-    # Start with common cleanup commands for all roles
-    body = list(COMMON_PORT_UNDO_COMMANDS)
+    # Common cleanup. PoE undo is omitted when SWITCH_POE=no — Comware
+    # rejects 'undo poe enable' on a switch with no PoE.
+    body = common_port_undo_commands()
 
     if role == 'wired':
         wired_untagged = vlans_list
@@ -355,7 +526,7 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
             'dhcp snooping binding record',
             'dhcp snooping check mac-address',
             'stp edged-port',
-            'poe enable',
+            *(['poe enable'] if switch_poe_supported() else []),
         ])
 
     elif role == 'migration_ap':
@@ -393,7 +564,7 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
             'undo ip verify source',
             'dhcp snooping binding record',
             'dhcp snooping check mac-address',
-            'poe enable',
+            *(['poe enable'] if switch_poe_supported() else []),
         ])
 
     elif role == 'cheapap':
@@ -412,15 +583,17 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
             'mac-authentication host-mode multi-vlan',
             'dhcp snooping binding record',
             'dhcp snooping check mac-address',
-            'poe enable',
+            *(['poe enable'] if switch_poe_supported() else []),
         ])
 
-    elif role == 'migration_wired':
-        # Access VLAN 2, no MAC-auth. For hosts still on the old LAN.
+    elif parse_wired_vlan_role(role) is not None:
+        # Access port on one ISP VLAN, no MAC-auth. Same as the old
+        # migration_wired role, which was hardcoded to VLAN 2.
+        access_vlan = parse_wired_vlan_role(role)
         body.extend([
             f'interface {expanded}',
             'port link-type access',
-            'port access vlan 2',
+            f'port access vlan {access_vlan}',
             'undo mac-authentication',
             'undo ip verify source',
             'undo mac-vlan',
@@ -565,7 +738,8 @@ def list_switch_ports():
         'admin_switch_ports.html',
         ports_by_switch=ports_by_switch,
         switch_hosts=switch_hosts,
-        port_roles=PORT_ROLES,
+        port_roles=port_roles_for_ui(),
+        role_hints=role_hints_for_ui(port_roles_for_ui()),
         locked_ports=_get_locked_ports(),
     )
 
@@ -596,7 +770,7 @@ def update():
         if not m:
             continue
         host, port = m.group(1), m.group(2)
-        if role in PORT_ROLES:
+        if _role_allowed(role):
             updates[(host, port)] = role
 
     if not updates:
@@ -608,12 +782,14 @@ def update():
         'cheapap':         'Cheap AP',
         'migration_ap':    'Migration AP (VLAN 2 native)',
         'wired':           'wired port',
-        'migration_wired': 'Migration wired VLAN 2',
         'pi':              'TRUNK-TO-PI-Kea',
         'inter_switch':    'Inter-switch link',
         'uplink_udm':      'TRUNK-TO-UDM',
         'unknown':         None,
     }
+    for vlan_id in _isp_wired_vlan_ids():
+        ROLE_DESC[wired_vlan_role_key(vlan_id)] = wired_vlan_description(vlan_id)
+    ROLE_DESC[LEGACY_MIGRATION_WIRED] = wired_vlan_description(2)
 
     changed = 0
     for (host, port_name), role in updates.items():
@@ -677,7 +853,7 @@ def update_single():
     port_name = (data.get('port', '') or '').strip()
     role      = (data.get('role', '') or '').strip()
 
-    if not host or not port_name or role not in PORT_ROLES:
+    if not host or not port_name or not _role_allowed(role):
         return jsonify({'success': False, 'error': 'Invalid request'})
 
     locked = _get_locked_ports()
@@ -718,10 +894,13 @@ def update_single():
     _CANONICAL_DESC = {
         'ap': 'Uplink to UniFi AP', 'cheapap': 'Cheap AP',
         'migration_ap': 'Migration AP (VLAN 2 native)',
-        'wired': 'wired port', 'migration_wired': 'Migration wired VLAN 2',
+        'wired': 'wired port',
         'pi': 'TRUNK-TO-PI-Kea', 'inter_switch': 'Inter-switch link',
         'uplink_udm': 'TRUNK-TO-UDM',
     }
+    wired_vlan_id = parse_wired_vlan_role(role)
+    if wired_vlan_id is not None:
+        _CANONICAL_DESC[role] = wired_vlan_description(wired_vlan_id)
     new_desc = _CANONICAL_DESC.get(role) or existing_desc or ''
 
     db.session.execute(

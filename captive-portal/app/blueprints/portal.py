@@ -635,6 +635,13 @@ def api_device_status():
                  f"selected_vlan={selected_vlan}, password_required={password_required}")
 
     if password_required and not device.ownership_validated:
+        if session.get('domain_mfa_handle') or session.get('domain_mfa_ok') or session.get('domain_mfa_email'):
+            logger.debug(f"Device {mac_address} waiting on domain MFA; suppressing password prompt")
+            return jsonify({
+                'status': 'mfa_pending',
+                'message': 'Waiting for Microsoft sign-in to finish.',
+                'selected_vlan': selected_vlan,
+            })
         if device.user and not device.user.has_network_password:
             _hydrate_user_from_central(device.user.email, device.user)
         logger.debug(f"Device {mac_address} requires password")
@@ -791,6 +798,17 @@ def registration_status():
 
         _sel_vlan = device.assigned_vlan or current_vlan
         _pw_req = vlan_requires_password(_sel_vlan) if _sel_vlan else False
+        # Domain (email) sign-in, including the Microsoft device-code step,
+        # is still in this browser session. Do not ask for a BF-Network
+        # password while that finishes — the page polls this endpoint and
+        # would flash the wrong prompt before admin review.
+        if session.get('domain_mfa_handle') or session.get('domain_mfa_ok') or session.get('domain_mfa_email'):
+            resp = jsonify({
+                'status': 'mfa_pending',
+                'message': 'Waiting for Microsoft sign-in to finish.',
+            })
+            resp.headers['Access-Control-Allow-Origin'] = '*'
+            return resp
         if _pw_req and not device.ownership_validated:
             if device.user and not device.user.has_network_password:
                 _hydrate_user_from_central(device.user.email, device.user)

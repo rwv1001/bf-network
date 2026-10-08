@@ -26,6 +26,12 @@ from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
 
+def switch_poe_supported() -> bool:
+    """True unless SWITCH_POE is explicitly disabled. A missing .env entry means yes."""
+    raw = (os.getenv('SWITCH_POE') or 'yes').strip().lower()
+    return raw not in {'0', 'no', 'n', 'false', 'off', 'disabled'}
+
+
 COMMON_PORT_UNDO_COMMANDS = [
     ' undo description',
     ' undo ip verify source',
@@ -50,6 +56,13 @@ COMMON_PORT_UNDO_COMMANDS = [
     ' undo port-security enable',
     ' undo poe enable',
 ]
+
+
+def common_port_undo_commands():
+    """Undo block for a role push. Omits PoE when SWITCH_POE is no."""
+    if switch_poe_supported():
+        return list(COMMON_PORT_UNDO_COMMANDS)
+    return [cmd for cmd in COMMON_PORT_UNDO_COMMANDS if 'poe' not in cmd.lower()]
 
 
 # ---------------------------------------------------------------------------

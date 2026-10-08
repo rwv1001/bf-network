@@ -55,6 +55,7 @@ services:
       SWITCH_USER: ${SWITCH_USER:-robert}
       SWITCH_SSH_PORT: ${SWITCH_SSH_PORT:-22}
       SWITCH_KEY_PATH: ${SWITCH_KEY_PATH:-/keys/id_rsa}
+      SWITCH_POE: ${SWITCH_POE:-yes}
       # Set to "1" to enable async switch port lookup on every DHCP lease/renew
       SWITCH_PORT_LOOKUP_ENABLED: ${SWITCH_PORT_LOOKUP_ENABLED:-1}
       # How long (seconds) a cached port entry is considered fresh (skip SSH re-query)
@@ -300,6 +301,8 @@ services:
       USER_DEVICE_INTERFACES: ${USER_DEVICE_INTERFACES:-15}
       SWITCH_REPLUG_ENABLED: ${SWITCH_REPLUG_ENABLED:-false}
       SWITCH_REPLUG_DELAY_SEC: ${SWITCH_REPLUG_DELAY_SEC:-3}
+      # yes unless .env sets SWITCH_POE=no. Missing entry means the switch has PoE.
+      SWITCH_POE: ${SWITCH_POE:-yes}
       SWITCH_REPLUG_ALLOWED_PREFIXES: ${SWITCH_REPLUG_ALLOWED_PREFIXES:-GigabitEthernet,GE}
       SWITCH_REPLUG_DENY_PATTERN: ${SWITCH_REPLUG_DENY_PATTERN:-}
       ACL_QUEUE_DISABLE: "0"

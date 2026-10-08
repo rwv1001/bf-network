@@ -40,7 +40,7 @@
         border-radius: 8px;
         box-shadow: 0 2px 6px rgba(0,0,0,0.1);
         margin-bottom: 30px;
-        overflow: hidden;
+        overflow: visible;
     }
 
     .switch-section-header {
@@ -127,6 +127,50 @@
         background: #f0f4f0;
         color: #495057;
         border-color: #d4e0d4;
+        position: relative;
+    }
+
+    .role-hint {
+        display: none;
+        position: absolute;
+        left: 0;
+        bottom: calc(100% + 8px);
+        z-index: 30;
+        width: 420px;
+        max-width: 70vw;
+        padding: 10px 12px;
+        background: #1e2a1e;
+        color: #f4f7f4;
+        border-radius: 8px;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.28);
+        white-space: normal;
+        text-align: left;
+        font-weight: 400;
+        line-height: 1.35;
+        pointer-events: none;
+    }
+    .role-hint strong {
+        display: block;
+        margin-bottom: 8px;
+        font-size: 12px;
+        font-weight: 600;
+        color: #fff;
+    }
+    .role-hint pre {
+        margin: 0;
+        padding: 8px;
+        background: #111;
+        color: #d5f5e3;
+        border-radius: 4px;
+        font-family: 'Courier New', monospace;
+        font-size: 11px;
+        line-height: 1.4;
+        white-space: pre-wrap;
+        overflow-x: auto;
+    }
+    .role-group label:hover .role-hint,
+    .role-group label:focus-within .role-hint {
+        display: block;
     }
 
     .role-group input[type=radio] { display: none; }
@@ -136,6 +180,7 @@
     .role-group label.selected-migration_ap { background: #e8f8f0; color: #0e6655; border-color: #16a085; border-width: 3px; font-weight: 700; }
     .role-group label.selected-wired        { background: #d6eaf8; color: #1a5276; border-color: #2980b9; }
     .role-group label.selected-migration_wired { background: #fef5e7; color: #7d6608; border-color: #f4d03f; border-width: 3px; font-weight: 700; }
+    .role-group label[class*="selected-wired_vlan_"] { background: #fef5e7; color: #7d6608; border-color: #f4d03f; border-width: 3px; font-weight: 700; }
     .role-group label.selected-pi           { background: #fdebd0; color: #784212; border-color: #e67e22; }
     .role-group label.selected-inter_switch { background: #f4ecf7; color: #6c3483; border-color: #8e44ad; }
     .role-group label.selected-uplink_udm   { background: #fdedec; color: #7b241c; border-color: #e74c3c; }
@@ -257,16 +302,23 @@
                 {% for role_key, role_label in port_roles.items() %}
                     {% set is_uplink_udm = role_key == 'uplink_udm' %}
                     {% set is_fixed_ip = role_key == 'fixed_ip' %}
+                    {% set is_selected = port.port_role == role_key or (port.port_role == 'migration_wired' and role_key == 'wired_vlan_2') %}
                     <label id="lbl_{{ host }}_{{ port.port_name | replace('/', '_') | replace('.', '_') }}_{{ role_key }}"
-                           class="{% if port.port_role == role_key %}selected-{{ role_key }}{% endif %}{% if is_locked %} role-locked-label{% endif %}{% if is_uplink_udm or is_fixed_ip %} role-locked-label{% endif %}"
+                           class="{% if is_selected %}selected-{{ role_key }}{% endif %}{% if is_locked %} role-locked-label{% endif %}{% if is_uplink_udm or is_fixed_ip %} role-locked-label{% endif %}"
                            {% if is_uplink_udm %}title="Uplinks to Router ports are set on the ISP routers page"{% endif %}
                            {% if is_fixed_ip %}title="This is set in the Fixed IPs section of the dashboard"{% endif %}>
                         <input type="radio"
                                name="role_{{ host }}_{{ port.port_name }}"
                                value="{{ role_key }}"
-                               {% if port.port_role == role_key %}checked{% endif %}
+                               {% if is_selected %}checked{% endif %}
                                {% if is_locked or is_uplink_udm or is_fixed_ip %}disabled{% endif %}>
                         <span>{{ role_label }}</span>
+                        {% if role_hints and role_hints.get(role_key) %}
+                        <span class="role-hint">
+                            <strong>{{ role_hints[role_key].purpose }}</strong>
+                            <pre>{{ role_hints[role_key].config }}</pre>
+                        </span>
+                        {% endif %}
                     </label>
                 {% endfor %}
                 </div>
