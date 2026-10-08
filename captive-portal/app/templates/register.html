@@ -298,7 +298,9 @@ document.addEventListener('DOMContentLoaded', function() {
     let mismatchInterval = null;
     let accessConfirmed = false;
     let deviceStatusPollingStarted = false;
-    let registrationStep = 1;
+    // false (default): a domain password that Microsoft did not reject is enough.
+    // true: keep the device-code + authenticator step (DOMAIN_AUTH_REQUIRE_MFA).
+    const domainAuthRequireMfa = {{ domain_auth_require_mfa|default(false)|tojson }};
     // Set before the initial status poll. After Microsoft replaces the captive
     // page, that poll otherwise returns enter_password / need_password and
     // flashes the BF-Network prompt until the device-code poll finishes.
@@ -582,6 +584,12 @@ document.addEventListener('DOMContentLoaded', function() {
             }
 
             if (status === 'mfa_required') {
+                if (!domainAuthRequireMfa) {
+                    showStatus(data.message || 'Email password accepted. Please wait for the administrator to approve this device.', 'info');
+                    form.style.display = 'none';
+                    startPolling();
+                    return;
+                }
                 showMfaPrompt(data);
                 return;
             }
@@ -891,6 +899,13 @@ document.addEventListener('DOMContentLoaded', function() {
                     pollingStarted = false;
                     startPolling();
                 } else if (data.status === 'mfa_required') {
+                    if (!domainAuthRequireMfa) {
+                        pwdDiv.remove();
+                        showStatus(data.message || 'Email password accepted. Please wait for the administrator to approve this device.', 'info');
+                        pollingStarted = false;
+                        startPolling();
+                        return;
+                    }
                     pwdDiv.remove();
                     showMfaPrompt(data);
                 } else if (data.status === 'error') {
@@ -1417,10 +1432,16 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     {% if resume_mfa %}
-    // A Microsoft sign-in was already started in this session; the captive
-    // browser replaced this page with Microsoft's, so restore the prompt and
-    // resume polling (first poll succeeds immediately if MFA is done).
-    showMfaPrompt({{ resume_mfa | tojson }});
+    if (domainAuthRequireMfa) {
+        // A Microsoft sign-in was already started in this session; the captive
+        // browser replaced this page with Microsoft's, so restore the prompt and
+        // resume polling (first poll succeeds immediately if MFA is done).
+        showMfaPrompt({{ resume_mfa | tojson }});
+    } else {
+        showStatus('Email password accepted. Please wait for the administrator to approve this device.', 'info');
+        form.style.display = 'none';
+        startPolling();
+    }
     {% endif %}
 });
 </script>

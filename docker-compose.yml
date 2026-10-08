@@ -253,6 +253,13 @@ services:
       GRAPH_FROM_EMAIL: ${GRAPH_FROM_EMAIL}
       ADMIN_EMAIL: ${ADMIN_EMAIL}
       DOMAIN_AUTH_PROVIDERS: ${DOMAIN_AUTH_PROVIDERS:-}
+      # Domain password check. Default is the simple check: Microsoft returned
+      # "password incorrect" → reject; success or "MFA required" → accept.
+      # The confirmation email still goes to the address used to register.
+      # Set DOMAIN_AUTH_REQUIRE_MFA=true only if impersonation with a known
+      # password (but no authenticator) becomes a real problem — that restores
+      # the device-code + authenticator step.
+      DOMAIN_AUTH_REQUIRE_MFA: ${DOMAIN_AUTH_REQUIRE_MFA:-false}
       EMAIL_ASYNC: ${EMAIL_ASYNC:-1}
       EMAIL_MAX_RETRIES: ${EMAIL_MAX_RETRIES:-3}
       RADIUS_SECRET: ${RADIUS_SECRET:?RADIUS_SECRET is required – set it in .env}
