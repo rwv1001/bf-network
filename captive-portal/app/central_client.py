@@ -273,7 +273,7 @@ def _bootstrap_sync_if_needed() -> None:
 # Public API — called from blueprints / app.py
 # ---------------------------------------------------------------------------
 
-def queue_device_registered(device, user) -> None:
+def queue_device_registered(device, user, force_fanout: bool = False) -> None:
     """Queue a device_registered event to central after successful local registration.
 
     Also kicks off an immediate eager send in a background thread so central has
@@ -296,6 +296,7 @@ def queue_device_registered(device, user) -> None:
         "is_wired": bool(device.is_wired),
         "connection_type": device.connection_type or "unknown",
         "sync_to_all_sites": _should_sync_all(user),
+        "force_fanout": bool(force_fanout),
     }
     _enqueue("device_registered", payload)
     # Attempt an immediate send without waiting for the poll cycle.
@@ -384,6 +385,25 @@ def queue_user_unblocked(user) -> None:
     if not _central_enabled():
         return
     _enqueue("user_unblocked", {"email": user.email})
+
+
+def queue_user_full_sync(user) -> None:
+    """Push this user and every device this site currently holds for them.
+
+    Used when an admin turns on "Sync this user to all sites". A profile-only
+    user_updated does not recreate a device that was registered while the
+    flag was off.
+    """
+    queue_user_updated(user)
+    if not _should_sync_all(user):
+        return
+    from models import Device, DeviceOwnership
+    rows = DeviceOwnership.query.filter_by(user_id=user.id, end_datetime=None).all()
+    macs = [row.mac_address for row in rows if row.mac_address]
+    if not macs:
+        return
+    for device in Device.query.filter(Device.mac_address.in_(macs)).all():
+        queue_device_registered(device, user, force_fanout=True)
 
 
 def queue_user_updated(user) -> None:

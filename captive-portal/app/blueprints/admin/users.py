@@ -135,7 +135,7 @@ def add_user():
         db.session.commit()
 
         if sync_to_all_sites:
-            central_client.queue_user_updated(user)
+            central_client.queue_user_full_sync(user)
 
         flash(f'User {email} added successfully', 'success')
         logger.info("Admin added user: %s", email)
@@ -196,7 +196,10 @@ def edit_user(user_id):
         user.adoptable_vlans_deny     = format_allowed_vlans(adopt_deny)
 
         db.session.commit()
-        central_client.queue_user_updated(user)
+        if user.sync_to_all_sites:
+            central_client.queue_user_full_sync(user)
+        else:
+            central_client.queue_user_updated(user)
 
         flash(f'User {user.email} updated successfully', 'success')
         logger.info("Admin updated user: %s", user.email)
