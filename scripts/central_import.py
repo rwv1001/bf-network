@@ -162,7 +162,7 @@ is_wired         = data.get("is_wired")  # None | True | False
 if is_wired is not None:
     is_wired = bool(is_wired)
 connection_type  = "wired" if is_wired else (data.get("connection_type") or "unknown")
-device_name      = (data.get("device_name") or "")
+device_name      = (data.get("device_type") or data.get("device_name") or "")
 ssid             = (data.get("ssid") or "")
 first_name       = (data.get("first_name") or "")
 last_name        = (data.get("last_name") or "")
@@ -278,6 +278,7 @@ ON CONFLICT (mac_address) DO UPDATE SET
     ownership_validated = true,
     is_wired            = CASE WHEN {is_wired_val} THEN true ELSE devices.is_wired END,
     connection_type     = CASE WHEN {is_wired_val} THEN '{conn_type_escaped}' ELSE devices.connection_type END,
+    device_name         = CASE WHEN '{q(device_name)}' <> '' THEN '{q(device_name)}' ELSE devices.device_name END,
     ssid                = CASE WHEN '{ssid_escaped}' <> '' THEN '{ssid_escaped}' ELSE devices.ssid END;
 """)
 _dbg("devices upsert done")

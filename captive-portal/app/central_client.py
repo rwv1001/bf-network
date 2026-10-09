@@ -277,6 +277,7 @@ def queue_device_registered(device, user) -> None:
         "network_password_hash": user.network_password_hash or "",
         "assigned_vlan": device.assigned_vlan,
         "device_name": device.device_name,
+        "device_type": device.device_name,
         "is_wired": bool(device.is_wired),
         "connection_type": device.connection_type or "unknown",
         "sync_to_all_sites": _should_sync_all(user),
@@ -458,7 +459,7 @@ def import_device_from_central(mac_address: str, central_data: dict) -> Optional
         device = Device(
             mac_address=mac,
             assigned_vlan=central_vlan,
-            device_name=central_data.get("device_name"),
+            device_name=central_data.get("device_type") or central_data.get("device_name"),
             internet_blocked=device_blocked,
             first_seen=now,
             is_wired=is_wired_device,
@@ -471,8 +472,11 @@ def import_device_from_central(mac_address: str, central_data: dict) -> Optional
         if device_blocked and not device.internet_blocked:
             device.internet_blocked = True
             logger.info("import_device_from_central: device %s marked blocked (from central)", mac)
-        if not device.assigned_vlan and central_vlan:
+        if central_vlan:
             device.assigned_vlan = central_vlan
+        incoming_name = central_data.get("device_type") or central_data.get("device_name")
+        if incoming_name:
+            device.device_name = incoming_name
         if is_wired_device:
             device.is_wired = True
             device.connection_type = "wired"
