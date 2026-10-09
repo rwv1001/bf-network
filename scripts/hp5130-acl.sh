@@ -726,10 +726,13 @@ acl_show() {
   {
     printf '%s\n' "screen-length disable"
     printf '%s\n' "screen-length 0 temporary"
+    # This Comware build rejects "display acl advanced N | include".
+    # "display acl N | include" returns the rule line.
     if [ -n "$needle" ]; then
-      printf '%s\n' "display acl advanced ${acl} | include ${needle}"
+      printf '%s\n' "display acl ${acl} | include ${needle}"
+    else
+      printf '%s\n' "display acl ${acl}"
     fi
-    printf '%s\n' "display acl advanced ${acl}"
     # Space is Comware's "next page". Send enough to walk a long ACL if
     # screen-length did not take, then quit so the vty cannot idle out.
     i=0
@@ -918,8 +921,10 @@ if [ "$QUEUE_DISABLE" = "1" ]; then
   # and must not release an allocation while the deny is still installed.
   # ip_deny_state: 0 present, 1 absent on a complete display, 2 unverifiable.
   if [ "$ssh_status" = "0" ]; then
+    set +e
     ip_deny_state
     deny_state=$?
+    set -e
     if [ "$ACTION" = "unblock" ]; then
       if [ "$deny_state" -eq 0 ]; then
         log "ERROR action=unblock ip=$IP_ADDRESS acl=$ACL_NUM reason=deny_still_present"
