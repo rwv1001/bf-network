@@ -813,15 +813,25 @@ def registration_status():
             if device.user and not device.user.has_network_password:
                 _hydrate_user_from_central(device.user.email, device.user)
             _has_pwd = device.user.has_network_password if device.user else False
+            from domain_auth import get_provider_for_email
+            _email = device.user.email if device.user else ''
+            _provider = get_provider_for_email(_email) if _email else None
+            _auth = {
+                'domain_auth_available': bool(_provider),
+                'domain': _provider['domain'] if _provider else '',
+                'has_bf_password': bool(_has_pwd),
+            }
             if not _has_pwd:
                 pw_resp = jsonify({
                     'status': 'pending_password',
                     'message': 'A network password is required. An email has been sent to set it.',
+                    'auth_options': _auth,
                 })
             else:
                 pw_resp = jsonify({
                     'status': 'enter_password',
                     'message': 'Please enter your network password to continue.',
+                    'auth_options': _auth,
                 })
             pw_resp.headers['Access-Control-Allow-Origin'] = '*'
             return pw_resp

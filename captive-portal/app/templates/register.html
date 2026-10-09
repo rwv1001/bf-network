@@ -730,7 +730,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const opts = authOptions || {};
         const domainAuth = !!opts.domain_auth_available;
         const ownedDomain = opts.domain || '';
-        const hasBfPassword = !!opts.has_bf_password;
+        const hasBfPassword = opts.has_bf_password === undefined ? true : !!opts.has_bf_password;
 
         const pwdDiv = document.createElement('div');
         pwdDiv.id = 'passwordPrompt';

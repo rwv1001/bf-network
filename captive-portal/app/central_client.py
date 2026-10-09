@@ -85,15 +85,30 @@ def init_central_client(app, db, central_event_model):
     ).start()
 
 
+def _domain_allows_email_password(email: str) -> bool:
+    """True for domains in DOMAIN_AUTH_PROVIDERS (owned email-password sign-in)."""
+    try:
+        from domain_auth import get_provider_for_email
+        return bool(get_provider_for_email(email))
+    except Exception:
+        return False
+
+
 def _should_sync_all(user) -> bool:
-    """True when this user (or their email domain) is flagged for replication
-    to every site, so all sites hold the record before the device first shows up."""
+    """True when this user should be replicated to every site.
+
+    Default is on for an owned email-password domain (DOMAIN_AUTH_PROVIDERS)
+    and for a domain policy flagged sync_to_all_sites. Users outside those
+    domains stay local unless an admin sets user.sync_to_all_sites.
+    """
     try:
         if getattr(user, "sync_to_all_sites", False):
             return True
         email = (user.email or "").lower()
         if "@" not in email:
             return False
+        if _domain_allows_email_password(email):
+            return True
         from models import DomainPolicy
         policy = DomainPolicy.query.filter_by(domain=email.split("@", 1)[1]).first()
         return bool(policy and getattr(policy, "sync_to_all_sites", False))
@@ -440,10 +455,12 @@ def import_device_from_central(mac_address: str, central_data: dict) -> Optional
             user.first_name = central_data["first_name"]
         if not user.last_name and central_data.get("last_name"):
             user.last_name = central_data["last_name"]
-        if not user.network_password_hash and central_data.get("network_password_hash"):
+        if central_data.get("network_password_hash"):
             user.network_password_hash = central_data["network_password_hash"]
             if not user.network_password_approval_mode:
                 user.network_password_approval_mode = 'first_use'
+        if central_data.get("sync_to_all_sites"):
+            user.sync_to_all_sites = True
 
     # Apply user-level block from central
     if central_data.get("user_blocked") and not getattr(user, "blocked", False):
