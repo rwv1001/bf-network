@@ -1,16 +1,16 @@
 {
-  "192.168.99.2": {
+  "10.7.99.31": {
     "pbr_names": [
-      "PBR-TELO",
-      "PBR-UDM"
+      "PBR-O2",
+      "PBR-SCG"
     ],
     "nqa_names": [
-      "pbrtelo",
-      "pbrudm"
+      "pbro2",
+      "pbrscg"
     ],
     "uplink_vlans": {
-      "2": "TELO"
+      "3": "SCG"
     },
-    "timestamp": "2026-07-21T21:23:41.413308Z"
+    "timestamp": "2026-10-09T10:19:12.543885Z"
   }
 }

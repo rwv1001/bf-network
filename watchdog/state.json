@@ -25,7 +25,7 @@
       "alerting": false
     },
     "freeradius": {
-      "restart_count": 1,
+      "restart_count": 0,
       "alerting": false
     },
     "pihole": {
@@ -82,6 +82,14 @@
     "consecutive_failures": 0
   },
   "switch_reachable_192.168.99.3": {
+    "alerting": false,
+    "consecutive_failures": 0
+  },
+  "switch_reachable_10.7.99.31": {
+    "alerting": false,
+    "consecutive_failures": 0
+  },
+  "switch_health_10.7.99.31": {
     "alerting": false,
     "consecutive_failures": 0
   }
