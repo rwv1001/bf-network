@@ -254,8 +254,12 @@ process_queue_once() {
 
     if [ "$apply_status" -ne 0 ]; then
       attempts=$((attempts + 1))
-      if [ "$attempts" -ge "${ACL_MAX_ATTEMPTS:-5}" ]; then
-        log "DROPPED action=$action ip=$ip after=$attempts attempts — giving up (will be re-applied by the next baseline/block sweep)"
+      # Keep retrying, but back off so a switch that is saving slowly cannot
+      # pin the worker. Cap the counter so a permanently broken host does
+      # not spin forever; the next lease/block sweep enqueues a fresh job
+      # (attempt 0) and will converge once display or SSH recovers.
+      if [ "$attempts" -ge "${ACL_MAX_ATTEMPTS:-8}" ]; then
+        log "DEFERRED action=$action ip=$ip after=$attempts attempts — requeue on next sweep"
       else
         printf '%s|%s|%s|%s\n' "$(timestamp)" "$action" "$ip" "$attempts" >> "$failed"
       fi
@@ -707,17 +711,57 @@ run_ssh() {
 # Every per-host deny for this IP, plus the allocated number and the old
 # formula number. "undo rule" of a missing id is harmless; leaving any of
 # them in place is what stranded 10.7.11.7 on rule 1657.
-# screen-length disable is required. A paged display stops at --More-- and
-# the host deny, often a high rule id, is then invisible to the sweep.
+#
+# screen-length disable alone is not enough. On a piped -tt session Comware
+# often starts paging before that command takes effect, stops at --More--,
+# and swallows the following quit. Rule 10000+ is then invisible, every
+# block is reported deny_not_installed, and the queue drops a rule the
+# switch has already saved. Walk the pager, and also ask for an include
+# filter so a long ACL cannot hide the host.
 acl_show() {
   acl="$1"
+  needle="${2:-}"
   show_out=$(mktemp /tmp/acl_show.XXXXXX)
   set +e
-  # Trailing quit is required: without it the session sits at the prompt
-  # until the switch vty idle-timeout (15 min) kills it.
-  printf '%s\n' "screen-length disable" "display acl advanced ${acl}" "quit" | timeout "$SSH_TIMEOUT" ssh $SSH_TTY_FLAG $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}" > "$show_out" 2>/dev/null
+  {
+    printf '%s\n' "screen-length disable"
+    printf '%s\n' "screen-length 0 temporary"
+    if [ -n "$needle" ]; then
+      printf '%s\n' "display acl advanced ${acl} | include ${needle}"
+    fi
+    printf '%s\n' "display acl advanced ${acl}"
+    # Space is Comware's "next page". Send enough to walk a long ACL if
+    # screen-length did not take, then quit so the vty cannot idle out.
+    i=0
+    while [ "$i" -lt 40 ]; do
+      printf ' \n'
+      i=$((i + 1))
+    done
+    printf '%s\n' "quit"
+  } | timeout "$SSH_TIMEOUT" ssh $SSH_TTY_FLAG $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}" > "$show_out" 2>/dev/null
   set -e
   printf '%s\n' "$show_out"
+}
+
+# True when a display capture is complete enough to trust a negative result.
+# A pager remnant or a session that never reached the ACL header is not.
+display_is_complete() {
+  f="$1"
+  [ -s "$f" ] || return 1
+  if grep -q -- '--More--' "$f" 2>/dev/null; then
+    return 1
+  fi
+  grep -E -q 'Advanced IPv4 ACL|acl-ipv4-adv|rule [0-9]+' "$f" 2>/dev/null
+}
+
+log_display_sample() {
+  f="$1"
+  why="$2"
+  [ -f "$f" ] || return 0
+  log "VERIFY_DISPLAY ${why} bytes=$(wc -c < "$f" 2>/dev/null | tr -d '[:space:]')"
+  # One line, capped, so a paged or empty capture is visible in the queue log.
+  sample=$(tr '\n' ' ' < "$f" 2>/dev/null | cut -c1-500)
+  log "VERIFY_DISPLAY_SAMPLE ${sample}"
 }
 
 policy_acl_nums() {
@@ -738,31 +782,63 @@ for router in policy.get("routers", []):
 PY
 }
 
+# Match a per-host deny however Comware wraps the line (leading spaces,
+# hit counters, include-filter output). Do not require a trailing space
+# after the IP; "source 10.7.11.7 0" and "source 10.7.11.7 0 (0 times matched)"
+# both have to count.
+deny_line_matches() {
+  f="$1"
+  awk -v ip="$IP_ADDRESS" '
+    {
+      line=$0
+      if (index(line, ip) == 0) next
+      if (line ~ /deny/ && line ~ /source/) { found=1 }
+    }
+    END { exit found ? 0 : 1 }
+  ' "$f"
+}
+
 discover_deny_rules() {
   for acl in $(policy_acl_nums | awk 'NF && !seen[$1]++'); do
-    show_out=$(acl_show "$acl")
-    awk -v ip="$IP_ADDRESS" -v acl="$acl" '
-      $1 == "rule" && $3 == "deny" && index($0, "source " ip " ") {
-        print acl, $2
-      }
-    ' "$show_out"
-    rm -f "$show_out"
+    show_out=$(acl_show "$acl" "$IP_ADDRESS")
+    if [ -f "$show_out" ]; then
+      awk -v ip="$IP_ADDRESS" -v acl="$acl" '
+        $1 == "rule" && index($0, ip) && $0 ~ /deny/ && $0 ~ /source/ {
+          print acl, $2
+        }
+      ' "$show_out"
+      rm -f "$show_out"
+    fi
   done
 }
 
-ip_still_denied() {
+# Returns 0 if a per-host deny is visible, 1 if a complete display proves it
+# is absent, 2 if the display cannot be trusted (pager, empty, no ACL header).
+ip_deny_state() {
+  state=1
   for acl in $(policy_acl_nums | awk 'NF && !seen[$1]++'); do
-    show_out=$(acl_show "$acl")
-    if awk -v ip="$IP_ADDRESS" '
-      $1 == "rule" && $3 == "deny" && index($0, "source " ip " ") { found=1 }
-      END { exit found ? 0 : 1 }
-    ' "$show_out"; then
+    show_out=$(acl_show "$acl" "$IP_ADDRESS")
+    if [ ! -f "$show_out" ]; then
+      state=2
+      continue
+    fi
+    if deny_line_matches "$show_out"; then
       rm -f "$show_out"
       return 0
     fi
+    if ! display_is_complete "$show_out"; then
+      log_display_sample "$show_out" "incomplete acl=$acl ip=$IP_ADDRESS"
+      state=2
+    fi
     rm -f "$show_out"
   done
-  return 1
+  return $state
+}
+
+ip_still_denied() {
+  ip_deny_state
+  rc=$?
+  [ "$rc" -eq 0 ]
 }
 
 log "APPLY action=$ACTION ip=$IP_ADDRESS vlan=$VLAN_ID acl=${ACL_NUM} rule=$RULE_NUM formula=$FORMULA_NUM host=$SWITCH_HOST"
@@ -837,16 +913,33 @@ if [ "$QUEUE_DISABLE" = "1" ]; then
   # Comware prints "The rule does not exist" and still exits 0. Do not treat
   # that as done, and do not drop the allocation, until a display shows the
   # per-host deny is gone. A remaining formula rule must fail the queue.
-  if [ "$ssh_status" = "0" ] && [ "$ACTION" = "unblock" ]; then
-    if ip_still_denied; then
-      log "ERROR action=unblock ip=$IP_ADDRESS acl=$ACL_NUM reason=deny_still_present"
-      ssh_status=1
-    fi
-  fi
-  if [ "$ssh_status" = "0" ] && [ "$ACTION" = "block" ]; then
-    if ! ip_still_denied; then
-      log "ERROR action=block ip=$IP_ADDRESS acl=$ACL_NUM rule=$RULE_NUM reason=deny_not_installed"
-      ssh_status=1
+  #
+  # A paged or empty display must not fail a block the switch just accepted,
+  # and must not release an allocation while the deny is still installed.
+  # ip_deny_state: 0 present, 1 absent on a complete display, 2 unverifiable.
+  if [ "$ssh_status" = "0" ]; then
+    ip_deny_state
+    deny_state=$?
+    if [ "$ACTION" = "unblock" ]; then
+      if [ "$deny_state" -eq 0 ]; then
+        log "ERROR action=unblock ip=$IP_ADDRESS acl=$ACL_NUM reason=deny_still_present"
+        ssh_status=1
+      elif [ "$deny_state" -eq 2 ]; then
+        log "ERROR action=unblock ip=$IP_ADDRESS acl=$ACL_NUM reason=verify_inconclusive"
+        ssh_status=1
+      fi
+    elif [ "$ACTION" = "block" ]; then
+      if [ "$deny_state" -eq 0 ]; then
+        log "VERIFY_OK action=block ip=$IP_ADDRESS acl=$ACL_NUM rule=$RULE_NUM"
+      elif [ "$deny_state" -eq 2 ]; then
+        # Switch already echoed the rule and save force returned 0. Do not
+        # burn the attempt budget on a display we could not read; the next
+        # unblock still removes RULE_NUM and FORMULA_NUM without display.
+        log "VERIFY_INCONCLUSIVE action=block ip=$IP_ADDRESS acl=$ACL_NUM rule=$RULE_NUM — accepting saved rule"
+      else
+        log "ERROR action=block ip=$IP_ADDRESS acl=$ACL_NUM rule=$RULE_NUM reason=deny_not_installed"
+        ssh_status=1
+      fi
     fi
   fi
 
