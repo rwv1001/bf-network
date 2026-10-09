@@ -160,7 +160,11 @@ def create_app():
         try:
             central_client._apply_inbound(event_type, data)
         except Exception as exc:
-            logger.error('central push apply error: %s', exc)
+            logger.exception('central push apply error event=%s: %s', event_type, exc)
+            try:
+                db.session.rollback()
+            except Exception:
+                pass
             return jsonify({'error': 'internal error'}), 500
         return jsonify({'status': 'ok'})
 

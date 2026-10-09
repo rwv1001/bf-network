@@ -561,19 +561,27 @@ def import_device_from_central(mac_address: str, central_data: dict) -> Optional
     # goes out on whatever VLAN the switch port is currently on, not the target.
     needs_bounce = False
     if is_wired_device and central_vlan and not device_blocked:
-        from app import _get_wired_unregistered_vlan_id
-        wired_unreg_vlan = _get_wired_unregistered_vlan_id()
+        # Never let a missing local helper fail the whole import. A 500 here
+        # makes central retry the same push forever and the device never appears.
+        try:
+            from core.vlan_utils import get_wired_unregistered_vlan_id
+            wired_unreg_vlan = get_wired_unregistered_vlan_id()
+        except Exception as exc:
+            logger.warning("import_device_from_central: wired VLAN lookup failed for %s: %s", mac, exc)
+            wired_unreg_vlan = None
         current_vlan = getattr(device, 'current_vlan', None)
         if current_vlan in (None, wired_unreg_vlan) or current_vlan != central_vlan:
             device.registration_status = "wrong_vlan"
             device.wired_target_vlan = central_vlan
-            needs_bounce = True
+            # Only bounce a port that is actually on this site. An imported
+            # device has no local lease yet, so a bounce would 500 or no-op.
+            needs_bounce = current_vlan not in (None,)
 
     app_db.session.commit()
 
     if needs_bounce:
         try:
-            from app import replug_switch_port_for_mac
+            from core.network import replug_switch_port_for_mac
             replug_switch_port_for_mac(mac)
             logger.info(
                 "import_device_from_central: wired device %s on wrong VLAN — port bounce queued",
@@ -945,7 +953,7 @@ def _apply_inbound(event_type: str, data: dict) -> None:
             logger.info("central update_user: %s not found locally — skipping", email)
 
     elif event_type == "update_device_vlan":
-        from app import replug_switch_port_for_mac
+        from core.network import replug_switch_port_for_mac
         mac = data.get("mac_address", "").lower()
         new_vlan = data.get("assigned_vlan")
         device = Device.query.filter_by(mac_address=mac).first()
