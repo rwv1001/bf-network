@@ -750,7 +750,9 @@ document.getElementById('reassignDeviceForm').addEventListener('submit', functio
             var typeCell = row.querySelector('.dev-type');
             if (typeCell) typeCell.textContent = data.device_name || '-';
             var vlanCell = row.querySelector('.dev-vlan');
-            if (vlanCell && data.vlan) vlanCell.textContent = 'VLAN ' + data.vlan;
+            if (vlanCell && data.vlan) {
+                vlanCell.innerHTML = '<div>Current: ' + data.vlan + '</div><div>Assigned: ' + data.vlan + '</div>';
+            }
             var ownerCell = row.querySelector('.dev-owner');
             if (ownerCell && data.owner_name) ownerCell.textContent = data.owner_name;
             var emailCell = row.querySelector('.dev-email');
@@ -1065,7 +1067,7 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
                 </a>
             </th>
             <th class="sortable {% if devices_sort == 'current_vlan' %}active{% endif %}">
-                <a href="javascript:void(0)" onclick="return sortTable('devices', 'current_vlan');">
+                <a href="javascript:void(0)" onclick="return sortTable('devices', 'current_vlan');" title="Sort by the VLAN the device is on now">
                     VLAN
                     <span class="sort-arrow">{% if devices_sort == 'current_vlan' %}{{ '▼' if devices_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
                 </a>
@@ -1148,7 +1150,14 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
                     <em style="color: #999;">-</em>
                 {% endif %}
             </td>
-            <td class="dev-vlan">VLAN {{ device.current_vlan }}</td>
+            <td class="dev-vlan" style="font-size:12px; line-height:1.35; white-space:nowrap;">
+                {% set _cur = device.current_vlan %}
+                {% set _asn = device.assigned_vlan %}
+                <div>Current: {% if _cur %}{{ _cur }}{% else %}<em style="color:#999;">—</em>{% endif %}</div>
+                <div{% if _asn and _cur and _asn != _cur %} style="color:#856404; font-weight:600;"{% endif %}>
+                    Assigned: {% if _asn %}{{ _asn }}{% else %}<em style="color:#999;">—</em>{% endif %}
+                </div>
+            </td>
             <td style="font-size: 12px; max-width: 150px;">
                 {% if user and user.notes %}
                     <span title="{{ user.notes }}" style="cursor: help;">
