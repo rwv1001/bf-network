@@ -139,16 +139,19 @@ enqueue_and_start_worker() {
     flock -x 9 || exit 1
     printf '%s|%s|%s\n' "$(timestamp)" "$ACTION" "$IP_ADDRESS" >> "$QUEUE_FILE"
 
-    if [ -f "$QUEUE_PID_FILE" ] && kill -0 "$(cat "$QUEUE_PID_FILE" 2>/dev/null)" 2>/dev/null; then
+    # PID checks are namespace-local, so kea and web each started a worker.
+    # The lock file is on the shared queue volume; flock is host-wide.
+    if ! flock -n 7; then
+      log "QUEUE_WORKER_EXISTS action=$ACTION ip=$IP_ADDRESS"
       exit 0
     fi
 
     # 9>&- is essential: the worker must not inherit the enqueue flock fd,
     # or a stuck worker blocks every future enqueue on this lock.
-    nohup "$SELF_SCRIPT" --worker >/dev/null 2>&1 </dev/null 9>&- &
+    nohup "$SELF_SCRIPT" --worker >/dev/null 2>&1 </dev/null 7>&- 9>&- &
     echo $! > "$QUEUE_PID_FILE" 2>/dev/null || true
     log "QUEUE_WORKER_STARTED pid=$(cat "$QUEUE_PID_FILE" 2>/dev/null) interval_sec=$QUEUE_INTERVAL"
-  ) 9>"$QUEUE_FILE.lock"
+  ) 7>"$QUEUE_BASE/hp5130-acl-${SAFE_HOST}.worker.lock" 9>"$QUEUE_FILE.lock"
 }
 
 cleanup_worker_pid() {
@@ -276,7 +279,10 @@ process_queue_once() {
 }
 
 run_worker() {
+  exec 7>"$QUEUE_BASE/hp5130-acl-${SAFE_HOST}.worker.lock"
+  flock -n 7 || { log "QUEUE_WORKER_EXIT reason=lock_held"; exit 0; }
   trap 'release_queue_lock; cleanup_worker_pid' EXIT INT TERM
+  echo "$$" > "$QUEUE_PID_FILE" 2>/dev/null || true
   log "QUEUE_WORKER_RUNNING pid=$$ interval_sec=$QUEUE_INTERVAL"
 
   idle_count=0
@@ -710,10 +716,13 @@ run_ssh() {
 # session is authoritative: the rule command is echoed from system-view and
 # "save force" reports the save.
 apply_accepted() {
-  out="$1"
-  printf '%s' "$out" | grep -q "Saved the current configuration" || return 1
-  printf '%s' "$out" | grep -E -q 'Wrong parameter|% (Too many|Incomplete|Unrecognized|Ambiguous)|Permission denied' && return 1
-  return 0
+  # $1 is the capture file. Grep the file, not the path string.
+  f="$1"
+  if grep -q "Saved the current configuration" "$f"; then
+    return 0
+  fi
+  log "ERROR action=$ACTION reason=save_line_missing file=$f"
+  return 1
 }
 
 log "APPLY action=$ACTION ip=$IP_ADDRESS vlan=$VLAN_ID acl=${ACL_NUM} rule=$RULE_NUM host=$SWITCH_HOST"
