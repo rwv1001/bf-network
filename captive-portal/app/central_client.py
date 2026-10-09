@@ -364,6 +364,8 @@ def queue_device_vlan_changed(device) -> None:
     _enqueue("device_vlan_changed", {
         "mac_address": device.mac_address,
         "assigned_vlan": device.assigned_vlan,
+        "device_name": device.device_name,
+        "device_type": device.device_name,
         "is_wired": bool(device.is_wired),
         "connection_type": device.connection_type or "wired",
     })
@@ -472,11 +474,16 @@ def import_device_from_central(mac_address: str, central_data: dict) -> Optional
     device_blocked = bool(central_data.get("device_blocked") or central_data.get("user_blocked"))
     is_wired_device = bool(central_data.get("is_wired"))
     central_vlan = central_data.get("assigned_vlan")
+    try:
+        central_vlan = int(central_vlan) if central_vlan not in (None, "") else None
+    except (TypeError, ValueError):
+        central_vlan = None
+    incoming_name = central_data.get("device_type") or central_data.get("device_name") or None
     if not device:
         device = Device(
             mac_address=mac,
             assigned_vlan=central_vlan,
-            device_name=central_data.get("device_type") or central_data.get("device_name"),
+            device_name=incoming_name,
             internet_blocked=device_blocked,
             first_seen=now,
             is_wired=is_wired_device,
@@ -491,7 +498,6 @@ def import_device_from_central(mac_address: str, central_data: dict) -> Optional
             logger.info("import_device_from_central: device %s marked blocked (from central)", mac)
         if central_vlan:
             device.assigned_vlan = central_vlan
-        incoming_name = central_data.get("device_type") or central_data.get("device_name")
         if incoming_name:
             device.device_name = incoming_name
         if is_wired_device:
@@ -939,6 +945,9 @@ def _apply_inbound(event_type: str, data: dict) -> None:
             return
         old_vlan = device.current_vlan
         device.assigned_vlan = new_vlan
+        incoming_name = data.get("device_type") or data.get("device_name")
+        if incoming_name:
+            device.device_name = incoming_name
         device.wired_target_vlan = new_vlan
         device.is_wired = True
         device.connection_type = "wired"
