@@ -106,7 +106,7 @@
 </div>
 
 {# ── Password change ─────────────────────────────────────────────────────── #}
-{% if user.has_network_password %}
+{% if can_change_local_password %}
 <h2 style="font-size: 1.1em; margin: 24px 0 12px; color: #3a4a3a;">Change Password</h2>
 <div class="info-box">
   <form method="POST" action="{{ url_for('portal.user_home') }}">

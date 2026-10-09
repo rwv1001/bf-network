@@ -1805,6 +1805,7 @@ def reject_device(token):
 def user_login():
     if not client_is_on_site():
         session.pop('portal_user_id', None)
+        session.pop('portal_auth', None)
         if request.method == 'POST':
             flash('Sign-in is only available on the Blackfriars network.', 'error')
         return render_template('user_login.html', off_site=True)
@@ -1815,6 +1816,7 @@ def user_login():
         user = User.query.filter_by(email=email).first()
         if user and user.check_network_password(password):
             session['portal_user_id'] = user.id
+            session['portal_auth'] = 'local_password'
             return redirect(url_for('portal.user_home'))
         flash('Invalid email or password.', 'error')
         return render_template('user_login.html', prefill_email=email)
@@ -1828,12 +1830,14 @@ def user_login():
                 _u = User.query.get(_own.user_id)
                 if _u:
                     session['portal_user_id'] = _u.id
+                    session.pop('portal_auth', None)
                     return redirect(url_for('portal.user_home'))
     return render_template('user_login.html')
 
 @portal_bp.route('/logout')
 def logout():
     session.pop('portal_user_id', None)
+    session.pop('portal_auth', None)
     flash('You have been logged out.', 'info')
     return redirect(url_for('portal.index'))
 
@@ -1841,6 +1845,7 @@ def logout():
 def user_home():
     if not client_is_on_site():
         session.pop('portal_user_id', None)
+        session.pop('portal_auth', None)
         flash('Device management is only available on the Blackfriars network.', 'error')
         return redirect(url_for('portal.user_login'))
     portal_user_id = session.get('portal_user_id')
@@ -1956,6 +1961,9 @@ def user_home():
             flash('Profile updated.', 'success')
 
         elif action == 'change_password':
+            if session.get('portal_auth') != 'local_password' or not user.has_network_password:
+                flash('Password changes are only available after signing in with your network password.', 'error')
+                return redirect(url_for('portal.user_home'))
             current_pw = (request.form.get('current_password') or '').strip()
             new_pw     = (request.form.get('new_password')     or '').strip()
             if not user.check_network_password(current_pw):
@@ -2085,6 +2093,9 @@ def user_home():
         calling_device=calling_device,
         target_vlan_options=target_vlan_options,
         wired_unregistered_vlan=wired_unregistered_vlan,
+        can_change_local_password=(
+            session.get('portal_auth') == 'local_password' and user.has_network_password
+        ),
     )
 
 
