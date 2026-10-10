@@ -6,6 +6,7 @@ Routes:
   POST /admin/switch-ports/refresh        re-discover ports from all switches
   POST /admin/switch-ports/update         bulk role update + push to switch
   POST /admin/switch-ports/update-single  AJAX single-port role update
+  POST /admin/switch-ports/update-batch   AJAX multi-port role update, one SSH save per switch
 """
 
 import logging
@@ -838,6 +839,117 @@ def update():
         flash('No changes (selected roles already matched).', 'info')
 
     return redirect(url_for('admin.switch_ports.list_switch_ports'))
+
+
+
+def _canonical_description(role: str, existing_desc: str = '') -> str:
+    canonical = {
+        'ap': 'Uplink to UniFi AP',
+        'cheapap': 'Cheap AP',
+        'migration_ap': 'Migration AP (VLAN 2 native)',
+        'wired': 'wired port',
+        'pi': 'TRUNK-TO-PI-Kea',
+        'inter_switch': 'Inter-switch link',
+        'uplink_udm': 'TRUNK-TO-UDM',
+    }
+    wired_vlan_id = parse_wired_vlan_role(role)
+    if wired_vlan_id is not None:
+        canonical[role] = wired_vlan_description(wired_vlan_id)
+    return canonical.get(role) or existing_desc or ''
+
+
+def _interface_block(port_name: str, role: str, description: str = '') -> str:
+    """Interface commands for one port, without the system-view / save wrapper."""
+    lines = _build_port_config(port_name, role, description).splitlines()
+    if lines and lines[0] == 'system-view':
+        lines = lines[1:]
+    while lines and lines[-1] in ('quit', 'save force'):
+        lines.pop()
+    lines.append('quit')
+    return '\n'.join(lines)
+
+
+@switch_ports_bp.route('/switch-ports/update-batch', methods=['POST'])
+@login_required
+@permission_required('manage_switch_ports')
+def update_batch():
+    """Apply several staged role changes, one SSH session and save per switch."""
+    data = request.get_json(silent=True) or {}
+    changes = data.get('changes') or []
+    if not isinstance(changes, list) or not changes:
+        return jsonify({'success': False, 'error': 'No changes', 'results': []})
+
+    locked = _get_locked_ports()
+    prepared = []
+    results = []
+    for item in changes:
+        if not isinstance(item, dict):
+            continue
+        host = (item.get('host') or '').strip()
+        port_name = (item.get('port') or '').strip()
+        role = (item.get('role') or '').strip()
+        base = {'host': host, 'port': port_name, 'role': role}
+        if not host or not port_name or not _role_allowed(role):
+            results.append({**base, 'success': False, 'error': 'Invalid request'})
+            continue
+        if port_name in locked or role == 'fixed_ip':
+            results.append({**base, 'success': False, 'error': 'Port is locked'})
+            continue
+        row = db.session.execute(
+            text("SELECT port_description, port_role FROM switch_ports "
+                 "WHERE switch_host=:h AND port_name=:p"),
+            {'h': host, 'p': port_name}
+        ).fetchone()
+        if not row:
+            results.append({**base, 'success': False, 'error': 'Port not found in DB'})
+            continue
+        existing_desc, existing_role = row
+        if existing_role == role:
+            results.append({**base, 'success': True, 'description': existing_desc or '', 'message': 'No change'})
+            continue
+        prepared.append({
+            'host': host,
+            'port': port_name,
+            'role': role,
+            'existing_desc': existing_desc or '',
+        })
+
+    by_host = {}
+    for item in prepared:
+        by_host.setdefault(item['host'], []).append(item)
+
+    for host, items in by_host.items():
+        blocks = [
+            _interface_block(item['port'], item['role'], item['existing_desc'])
+            for item in items
+        ]
+        cmds = '\n'.join(['system-view', *blocks, 'quit', 'save force'])
+        pushed = run_switch_command(host, cmds)
+        for item in items:
+            new_desc = _canonical_description(item['role'], item['existing_desc'])
+            if pushed is None:
+                results.append({
+                    'host': host, 'port': item['port'], 'role': item['role'],
+                    'success': False, 'error': f'SSH to {host} failed',
+                })
+                continue
+            db.session.execute(
+                text("""
+                    UPDATE switch_ports
+                    SET port_role = :role, port_description = :desc, last_updated = NOW()
+                    WHERE switch_host = :host AND port_name = :name
+                """),
+                {'role': item['role'], 'desc': new_desc, 'host': host, 'name': item['port']}
+            )
+            results.append({
+                'host': host, 'port': item['port'], 'role': item['role'],
+                'success': True, 'description': new_desc,
+            })
+            logger.info("Admin set %s %s → %s (batch)", host, item['port'], item['role'])
+        if pushed is not None:
+            db.session.commit()
+
+    return jsonify({'success': all(r.get('success') for r in results), 'results': results})
 
 
 @switch_ports_bp.route('/switch-ports/update-single', methods=['POST'])

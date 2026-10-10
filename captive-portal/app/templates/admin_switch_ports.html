@@ -211,8 +211,31 @@
     }
 
     .role-group.role-updating {
-        opacity: 0.45;
         pointer-events: none;
+    }
+    .role-group label.pending {
+        opacity: 0.55;
+    }
+    .role-group label.committed-fading {
+        filter: grayscale(1);
+        opacity: 0.4;
+    }
+    .update-ports-btn[disabled] {
+        opacity: 0.45;
+        cursor: not-allowed;
+    }
+    .update-ports-bar {
+        position: sticky;
+        top: 8px;
+        z-index: 20;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin: 8px 0 16px;
+        padding: 10px 12px;
+        background: #fff;
+        border: 1px solid #d4e0d4;
+        border-radius: 8px;
     }
     .role-group.role-locked {
         pointer-events: none;
@@ -257,6 +280,10 @@
 <div class="page-header">
     <h2>Switch Port Roles</h2>
 </div>
+<div class="update-ports-bar">
+    <button type="button" id="updatePortsBtn" class="btn update-ports-btn" disabled>Update ports</button>
+    <span id="updatePortsStatus" style="color:#555;font-size:13px;">Select role changes, then update the switch once.</span>
+</div>
 
 {% if not switch_hosts %}
 <div class="empty-state">
@@ -298,6 +325,7 @@
                      id="rg_{{ host }}_{{ port.port_name | replace('/', '_') | replace('.', '_') }}"
                      data-host="{{ host }}"
                      data-port="{{ port.port_name }}"
+                     data-current-role="{{ port.port_role or 'unknown' }}"
                      {% if is_locked %}title="{{ locked_ports[port.port_name] }}"{% endif %} >
                 {% for role_key, role_label in port_roles.items() %}
                     {% set is_uplink_udm = role_key == 'uplink_udm' %}
@@ -380,53 +408,135 @@ function updateRoleStyle(group, value) {
     if (checked) checked.parentElement.classList.add('selected-' + value);
 }
 
+const pendingChanges = new Map();
+const updatePortsBtn = document.getElementById('updatePortsBtn');
+const updatePortsStatus = document.getElementById('updatePortsStatus');
+
+function changeKey(host, port) {
+    return host + '|' + port;
+}
+
+function refreshUpdateButton() {
+    const count = pendingChanges.size;
+    if (updatePortsBtn) updatePortsBtn.disabled = count === 0;
+    if (updatePortsStatus) {
+        updatePortsStatus.textContent = count
+            ? count + ' port' + (count === 1 ? '' : 's') + ' staged. Click Update ports to push them together.'
+            : 'Select role changes, then update the switch once.';
+    }
+}
+
+function markPending(group, role) {
+    group.querySelectorAll('label').forEach(lbl => lbl.classList.remove('pending'));
+    const next = group.querySelector('input[value="' + role + '"]');
+    if (next && next.parentElement) {
+        next.parentElement.classList.add('selected-' + role);
+        next.parentElement.classList.add('pending');
+    }
+}
+
+function clearPendingMark(group) {
+    group.querySelectorAll('label').forEach(lbl => lbl.classList.remove('pending', 'committed-fading'));
+}
+
 document.querySelectorAll('.role-group').forEach(group => {
+    if (group.classList.contains('role-locked')) return;
     group.addEventListener('change', function(e) {
         const radio = e.target;
         if (!radio.matches('input[type=radio]')) return;
-
-        const host     = group.dataset.host;
-        const port     = group.dataset.port;
-        const newRole  = radio.value;
+        const host = group.dataset.host;
+        const port = group.dataset.port;
+        const current = group.dataset.currentRole || 'unknown';
+        const next = radio.value;
+        const key = changeKey(host, port);
         const statusId = 'status_' + host + '_' + port.replace(/\//g, '_').replace(/\./g, '_');
         const statusEl = document.getElementById(statusId);
-        const row      = group.closest('tr');
+        if (next === current) {
+            pendingChanges.delete(key);
+            clearPendingMark(group);
+            updateRoleStyle(group, current);
+            if (statusEl) statusEl.innerHTML = '';
+        } else {
+            pendingChanges.set(key, {host, port, role: next, group});
+            updateRoleStyle(group, current);
+            markPending(group, next);
+            if (statusEl) statusEl.innerHTML = '<span class="status-pending">Staged</span>';
+        }
+        refreshUpdateButton();
+    });
+});
 
-        updateRoleStyle(group, newRole);
-        if (statusEl) statusEl.innerHTML = '<span class="status-pending">⏳ Updating…</span>';
-        setAllGroupsDisabled(true);
-
-        fetch('/admin/switch-ports/update-single', {
+if (updatePortsBtn) {
+    updatePortsBtn.addEventListener('click', function() {
+        if (!pendingChanges.size) return;
+        const changes = Array.from(pendingChanges.values()).map(item => ({
+            host: item.host, port: item.port, role: item.role
+        }));
+        updatePortsBtn.disabled = true;
+        updatePortsBtn.textContent = 'Updating…';
+        pendingChanges.forEach(item => {
+            item.group.classList.add('role-updating');
+            item.group.querySelectorAll('label').forEach(lbl => {
+                if (lbl.className.indexOf('selected-') !== -1) lbl.classList.add('committed-fading');
+            });
+            const statusId = 'status_' + item.host + '_' + item.port.replace(/\//g, '_').replace(/\./g, '_');
+            const statusEl = document.getElementById(statusId);
+            if (statusEl) statusEl.innerHTML = '<span class="status-pending">⏳ Updating…</span>';
+        });
+        fetch('/admin/switch-ports/update-batch', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({host, port, role: newRole})
+            body: JSON.stringify({changes})
         })
         .then(r => r.json())
         .then(data => {
-            setAllGroupsDisabled(false);
-            if (data.success) {
-                if (statusEl) {
-                    statusEl.innerHTML = '<span class="status-ok">✓ Saved</span>';
-                    setTimeout(() => statusEl.innerHTML = '', 3000);
-                }
-                if (row) {
-                    row.classList.toggle('row-unclassified', newRole === 'unknown');
-                    const descEl = row.querySelector('.port-desc');
-                    if (descEl && data.description !== undefined) {
-                        const text = data.description || '—';
-                        descEl.textContent = text;
-                        descEl.setAttribute('title', data.description || '');
+            const results = (data && data.results) || [];
+            results.forEach(result => {
+                const key = changeKey(result.host, result.port);
+                const item = pendingChanges.get(key);
+                if (!item) return;
+                const statusId = 'status_' + item.host + '_' + item.port.replace(/\//g, '_').replace(/\./g, '_');
+                const statusEl = document.getElementById(statusId);
+                item.group.classList.remove('role-updating');
+                if (result.success) {
+                    item.group.dataset.currentRole = item.role;
+                    clearPendingMark(item.group);
+                    updateRoleStyle(item.group, item.role);
+                    pendingChanges.delete(key);
+                    const row = item.group.closest('tr');
+                    if (row) {
+                        row.classList.toggle('row-unclassified', item.role === 'unknown');
+                        const descEl = row.querySelector('.port-desc');
+                        if (descEl && result.description !== undefined) {
+                            descEl.textContent = result.description || '—';
+                            descEl.setAttribute('title', result.description || '');
+                        }
                     }
+                    if (statusEl) {
+                        statusEl.innerHTML = '<span class="status-ok">✓ Saved</span>';
+                        setTimeout(() => { if (statusEl) statusEl.innerHTML = ''; }, 3000);
+                    }
+                } else {
+                    item.group.querySelectorAll('label').forEach(lbl => lbl.classList.remove('committed-fading'));
+                    if (statusEl) statusEl.innerHTML = '<span class="status-err">✗ ' + (result.error || 'Failed') + '</span>';
                 }
-            } else {
-                if (statusEl) statusEl.innerHTML = '<span class="status-err">✗ ' + (data.error || 'Failed') + '</span>';
-            }
+            });
+            updatePortsBtn.textContent = 'Update ports';
+            refreshUpdateButton();
         })
         .catch(() => {
-            setAllGroupsDisabled(false);
-            if (statusEl) statusEl.innerHTML = '<span class="status-err">✗ Network error</span>';
+            pendingChanges.forEach(item => {
+                item.group.classList.remove('role-updating');
+                item.group.querySelectorAll('label').forEach(lbl => lbl.classList.remove('committed-fading'));
+                const statusId = 'status_' + item.host + '_' + item.port.replace(/\//g, '_').replace(/\./g, '_');
+                const statusEl = document.getElementById(statusId);
+                if (statusEl) statusEl.innerHTML = '<span class="status-err">✗ Network error</span>';
+            });
+            updatePortsBtn.textContent = 'Update ports';
+            refreshUpdateButton();
         });
     });
-});
+}
+refreshUpdateButton();
 </script>
 {% endblock %}
