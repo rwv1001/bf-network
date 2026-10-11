@@ -1,0 +1,14 @@
+{
+  "description": "Adds an admin notes column to switch_ports",
+  "db": {
+    "up": "commit-migrations/b633afb-up.sh",
+    "down": "commit-migrations/b633afb-down.sh",
+    "verify_up": [
+      {"type": "column", "table": "switch_ports", "column": "notes"}
+    ],
+    "verify_down": [
+      {"type": "column_absent", "table": "switch_ports", "column": "notes"}
+    ]
+  },
+  "notes": "Notes are stored in the portal only and are not pushed to the switch."
+}

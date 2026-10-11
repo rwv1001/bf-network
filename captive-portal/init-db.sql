@@ -170,6 +170,7 @@ CREATE TABLE IF NOT EXISTS switch_ports (
     link_status      VARCHAR(32)  NOT NULL DEFAULT 'unknown',
     last_discovered  TIMESTAMP,
     last_updated     TIMESTAMP,
+    notes            VARCHAR(200) NOT NULL DEFAULT '',
     UNIQUE (switch_host, port_name)
 );
 

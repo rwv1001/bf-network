@@ -717,7 +717,7 @@ def list_switch_ports():
     for host in switch_hosts:
         rows = db.session.execute(
             text("""
-                SELECT port_name, port_description, port_role, link_status, last_discovered
+                SELECT port_name, port_description, port_role, link_status, last_discovered, notes
                 FROM switch_ports
                 WHERE switch_host = :host
                 ORDER BY
@@ -735,6 +735,7 @@ def list_switch_ports():
                 'port_role':        r[2] or 'unknown',
                 'link_status':      r[3] or 'unknown',
                 'last_discovered':  r[4],
+                'notes':            r[5] or '',
             }
             for r in rows
         ]
@@ -893,11 +894,14 @@ def update_batch():
         port_name = (item.get('port') or '').strip()
         role = (item.get('role') or '').strip()
         base = {'host': host, 'port': port_name, 'role': role}
-        if not host or not port_name or not _role_allowed(role):
+        if not host or not port_name or (role and not _role_allowed(role)):
             results.append({**base, 'success': False, 'error': 'Invalid request'})
             continue
-        if f"{host}|{port_name}" in locked or role == 'fixed_ip':
+        if role and (f"{host}|{port_name}" in locked or role == 'fixed_ip'):
             results.append({**base, 'success': False, 'error': 'Port is locked'})
+            continue
+        if not role and 'notes' not in item:
+            results.append({**base, 'success': False, 'error': 'Invalid request'})
             continue
         row = db.session.execute(
             text("SELECT port_description, port_role FROM switch_ports "
@@ -908,10 +912,14 @@ def update_batch():
             results.append({**base, 'success': False, 'error': 'Port not found in DB'})
             continue
         existing_desc, existing_role = row
-        if existing_role == role:
+        notes = item.get('notes')
+        if notes is not None:
+            notes = str(notes)[:200]
+        if (not role or existing_role == role) and notes is None:
             results.append({**base, 'success': True, 'description': existing_desc or '', 'message': 'No change'})
             continue
         prepared.append({
+            'notes': notes,
             'host': host,
             'port': port_name,
             'role': role,
@@ -923,34 +931,49 @@ def update_batch():
         by_host.setdefault(item['host'], []).append(item)
 
     for host, items in by_host.items():
-        blocks = [
-            _interface_block(item['port'], item['role'], item['existing_desc'])
-            for item in items
-        ]
-        cmds = '\n'.join(['system-view', *blocks, 'quit', 'save force'])
-        pushed = run_switch_command(host, cmds)
+        role_items = [item for item in items if item.get('role')]
+        pushed = True
+        if role_items:
+            blocks = [
+                _interface_block(item['port'], item['role'], item['existing_desc'])
+                for item in role_items
+            ]
+            cmds = '\n'.join(['system-view', *blocks, 'quit', 'save force'])
+            pushed = run_switch_command(host, cmds)
         for item in items:
-            new_desc = _canonical_description(item['role'], item['existing_desc'])
-            if pushed is None:
+            new_desc = item['existing_desc']
+            if item.get('role'):
+                new_desc = _canonical_description(item['role'], item['existing_desc'])
+            if item.get('role') and pushed is None:
                 results.append({
                     'host': host, 'port': item['port'], 'role': item['role'],
                     'success': False, 'error': f'SSH to {host} failed',
                 })
                 continue
+            sets = ['last_updated = NOW()']
+            params = {'host': host, 'name': item['port']}
+            if item.get('role'):
+                sets.append('port_role = :role')
+                sets.append('port_description = :desc')
+                params['role'] = item['role']
+                params['desc'] = new_desc
+            if item.get('notes') is not None:
+                sets.append('notes = :notes')
+                params['notes'] = item['notes']
             db.session.execute(
-                text("""
+                text(f"""
                     UPDATE switch_ports
-                    SET port_role = :role, port_description = :desc, last_updated = NOW()
+                    SET {', '.join(sets)}
                     WHERE switch_host = :host AND port_name = :name
                 """),
-                {'role': item['role'], 'desc': new_desc, 'host': host, 'name': item['port']}
+                params,
             )
             results.append({
-                'host': host, 'port': item['port'], 'role': item['role'],
-                'success': True, 'description': new_desc,
+                'host': host, 'port': item['port'], 'role': item.get('role') or '',
+                'success': True, 'description': new_desc, 'notes': item.get('notes'),
             })
-            logger.info("Admin set %s %s → %s (batch)", host, item['port'], item['role'])
-        if pushed is not None:
+            logger.info("Admin set %s %s role=%s notes=%s (batch)", host, item['port'], item.get('role'), item.get('notes'))
+        if pushed is not None or any(item.get('notes') is not None for item in items):
             db.session.commit()
 
     return jsonify({'success': all(r.get('success') for r in results), 'results': results})

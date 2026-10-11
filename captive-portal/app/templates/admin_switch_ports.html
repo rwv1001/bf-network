@@ -108,8 +108,9 @@
 
     .role-group {
         display: flex;
-        flex-wrap: wrap;
+        flex-wrap: nowrap;
         gap: 6px;
+        width: max-content;
     }
 
     .role-group label {
@@ -263,6 +264,9 @@
         min-height: 14px;
     }
     .status-pending { color: #888; }
+    .port-note { width: 110px; box-sizing: border-box; padding: 4px 6px; border: 1px solid #ccc; border-radius: 4px; }
+    .port-note.pending { border-color: #b8860b; background: #fff8e8; }
+    .switch-section { overflow-x: auto; }
     .status-ok      { color: #27ae60; font-weight: 600; }
     .status-err     { color: #c0392b; font-weight: 600; }
 </style>
@@ -310,6 +314,7 @@
                 <th style="width:120px">Port</th>
                 <th style="width:180px">Description (on switch)</th>
                 <th>Role</th>
+                <th style="width:120px">Notes</th>
                 <th style="width:60px">Link</th>
                 <th style="width:120px">Last Seen</th>
             </tr>
@@ -354,6 +359,14 @@
                 <div class="role-locked-badge">🔒{{ locked_ports[lock_key] }}</div>
                 {% endif %}
                 <div class="role-status" id="status_{{ host }}_{{ port.port_name | replace('/', '_') | replace('.', '_') }}"></div>
+            </td>
+            <td>
+                <input type="text" class="port-note" maxlength="200"
+                       data-host="{{ host }}" data-port="{{ port.port_name }}"
+                       data-current-note="{{ port.notes or '' }}"
+                       value="{{ port.notes or '' }}"
+                       title="{{ port.notes or '' }}"
+                       placeholder="Note">
             </td>
             <td>
                 {% if port.link_status == 'UP' %}
@@ -451,13 +464,21 @@ document.querySelectorAll('.role-group').forEach(group => {
         const key = changeKey(host, port);
         const statusId = 'status_' + host + '_' + port.replace(/\//g, '_').replace(/\./g, '_');
         const statusEl = document.getElementById(statusId);
+        const existing = pendingChanges.get(key) || {host, port, group};
         if (next === current) {
-            pendingChanges.delete(key);
+            delete existing.role;
             clearPendingMark(group);
             updateRoleStyle(group, current);
-            if (statusEl) statusEl.innerHTML = '';
+            if (existing.notes === undefined) {
+                pendingChanges.delete(key);
+                if (statusEl) statusEl.innerHTML = '';
+            } else {
+                pendingChanges.set(key, existing);
+            }
         } else {
-            pendingChanges.set(key, {host, port, role: next, group});
+            existing.role = next;
+            existing.group = group;
+            pendingChanges.set(key, existing);
             updateRoleStyle(group, current);
             markPending(group, next);
             if (statusEl) statusEl.innerHTML = '<span class="status-pending">Staged</span>';
@@ -469,9 +490,12 @@ document.querySelectorAll('.role-group').forEach(group => {
 if (updatePortsBtn) {
     updatePortsBtn.addEventListener('click', function() {
         if (!pendingChanges.size) return;
-        const changes = Array.from(pendingChanges.values()).map(item => ({
-            host: item.host, port: item.port, role: item.role
-        }));
+        const changes = Array.from(pendingChanges.values()).map(item => {
+            const change = {host: item.host, port: item.port};
+            if (item.role) change.role = item.role;
+            if (item.notes !== undefined) change.notes = item.notes;
+            return change;
+        });
         updatePortsBtn.disabled = true;
         updatePortsBtn.textContent = 'Updating…';
         pendingChanges.forEach(item => {
@@ -499,11 +523,17 @@ if (updatePortsBtn) {
                 const statusEl = document.getElementById(statusId);
                 item.group.classList.remove('role-updating');
                 if (result.success) {
-                    item.group.dataset.currentRole = item.role;
+                    if (item.role) item.group.dataset.currentRole = item.role;
                     clearPendingMark(item.group);
                     updateRoleStyle(item.group, item.role);
                     pendingChanges.delete(key);
-                    const row = item.group.closest('tr');
+                    const row = item.group ? item.group.closest('tr') : null;
+                    const noteInput = row ? row.querySelector('.port-note') : null;
+                    if (noteInput && result.notes !== undefined && result.notes !== null) {
+                        noteInput.dataset.currentNote = result.notes;
+                        noteInput.value = result.notes;
+                        noteInput.classList.remove('pending');
+                    }
                     if (row) {
                         row.classList.toggle('row-unclassified', item.role === 'unknown');
                         const descEl = row.querySelector('.port-desc');
@@ -537,6 +567,39 @@ if (updatePortsBtn) {
         });
     });
 }
+
+document.querySelectorAll('.port-note').forEach(input => {
+    input.addEventListener('input', function() {
+        const host = input.dataset.host;
+        const port = input.dataset.port;
+        const current = input.dataset.currentNote || '';
+        const next = input.value;
+        const key = changeKey(host, port);
+        const group = document.querySelector('.role-group[data-host="' + host + '"][data-port="' + port + '"]');
+        const statusId = 'status_' + host + '_' + port.replace(/\//g, '_').replace(/\./g, '_');
+        const statusEl = document.getElementById(statusId);
+        const existing = pendingChanges.get(key) || {host, port, group};
+        if (next === current) {
+            delete existing.notes;
+            input.classList.remove('pending');
+            if (existing.role === undefined) {
+                pendingChanges.delete(key);
+                if (statusEl) statusEl.innerHTML = '';
+            } else {
+                pendingChanges.set(key, existing);
+            }
+        } else {
+            existing.notes = next;
+            existing.group = group;
+            pendingChanges.set(key, existing);
+            input.classList.add('pending');
+            input.title = next;
+            if (statusEl) statusEl.innerHTML = '<span class="status-pending">Staged</span>';
+        }
+        refreshUpdateButton();
+    });
+});
+
 refreshUpdateButton();
 </script>
 {% endblock %}

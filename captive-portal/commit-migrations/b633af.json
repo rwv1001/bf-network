@@ -1,0 +1,16 @@
+{
+  "commit": "b633af",
+  "description": "Add an admin notes column to the existing switch_ports table.",
+  "up": "b633af-up.sh",
+  "down": "b633af-down.sh",
+  "changes": [
+    {
+      "action": "add_column",
+      "table": "switch_ports",
+      "column": "notes",
+      "type": "VARCHAR(200)",
+      "nullable": false,
+      "default": ""
+    }
+  ]
+}
