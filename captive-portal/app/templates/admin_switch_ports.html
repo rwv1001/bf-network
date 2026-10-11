@@ -133,10 +133,8 @@
 
     .role-hint {
         display: none;
-        position: absolute;
-        left: 0;
-        bottom: calc(100% + 8px);
-        z-index: 30;
+        position: fixed;
+        z-index: 100;
         width: 420px;
         max-width: 70vw;
         padding: 10px 12px;
@@ -525,7 +523,7 @@ if (updatePortsBtn) {
                 if (result.success) {
                     if (item.role) item.group.dataset.currentRole = item.role;
                     clearPendingMark(item.group);
-                    updateRoleStyle(item.group, item.role);
+                    updateRoleStyle(item.group, item.role || item.group.dataset.currentRole || 'unknown');
                     pendingChanges.delete(key);
                     const row = item.group ? item.group.closest('tr') : null;
                     const noteInput = row ? row.querySelector('.port-note') : null;
@@ -535,7 +533,7 @@ if (updatePortsBtn) {
                         noteInput.classList.remove('pending');
                     }
                     if (row) {
-                        row.classList.toggle('row-unclassified', item.role === 'unknown');
+                        if (item.role) row.classList.toggle('row-unclassified', item.role === 'unknown');
                         const descEl = row.querySelector('.port-desc');
                         if (descEl && result.description !== undefined) {
                             descEl.textContent = result.description || '—';
@@ -598,6 +596,23 @@ document.querySelectorAll('.port-note').forEach(input => {
         }
         refreshUpdateButton();
     });
+});
+
+
+document.querySelectorAll('.role-group label').forEach(label => {
+    const hint = label.querySelector('.role-hint');
+    if (!hint) return;
+    const place = () => {
+        const r = label.getBoundingClientRect();
+        const width = Math.min(420, window.innerWidth - 16);
+        let left = r.left;
+        if (left + width > window.innerWidth - 8) left = window.innerWidth - width - 8;
+        hint.style.left = Math.max(8, left) + 'px';
+        hint.style.width = width + 'px';
+        hint.style.top = (r.bottom + 8) + 'px';
+    };
+    label.addEventListener('mouseenter', place);
+    label.addEventListener('focusin', place);
 });
 
 refreshUpdateButton();
