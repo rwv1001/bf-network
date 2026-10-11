@@ -55,6 +55,7 @@ isp_trunk_vlan_span() {
 STATE_FILE="${BF_INSTALL_STATE_FILE:-/var/lib/bf-network-installer/state.gpg}"
 RESET_STATE=0
 FORGET_ANSWER_KEY=""
+FORGET_ADD_SWITCH=0
 FORGET_STEP_KEY=""
 FORGET_ALL_STEPS=0
 FORGET_SECRET_KEY=""
@@ -108,6 +109,10 @@ parse_args() {
                 FORGET_ANSWER_KEY="$2"
                 shift 2
                 ;;
+            --forget-add-switch)
+                FORGET_ADD_SWITCH=1
+                shift
+                ;;
             --forget-step)
                 [ "$#" -ge 2 ] || die "--forget-step requires a completed-step key."
                 FORGET_STEP_KEY="$2"
@@ -154,6 +159,9 @@ Options:
   --state-file PATH       Use a different encrypted state file.
   --reset-state           Delete the saved state and start from scratch.
   --forget-answer KEY     Forget one cached prompt answer, then continue.
+  --forget-add-switch      Forget cached --add-switch answers (name, IP, ports,
+                          password). Site config is kept. With --add-switch,
+                          forgets then prompts for the next switch.
   --forget-step KEY       Forget one completed checkpoint, then exit.
   --forget-steps          Forget all completed checkpoints (keep answers/secrets), then exit.
   --forget-secret NAME    Forget one generated secret (e.g. DB_PASSWORD), then exit.
@@ -387,6 +395,32 @@ state_init() {
 
         state_progress
         exit 0
+    fi
+
+    if [ "$FORGET_ADD_SWITCH" -eq 1 ]; then
+        local forgotten=0 key
+        local -a add_switch_keys=()
+        for key in "${!SAVED_ANSWERS[@]}"; do
+            case "$key" in
+                add_switch_*) add_switch_keys+=("$key") ;;
+            esac
+        done
+        for key in "${add_switch_keys[@]}"; do
+            unset "SAVED_ANSWERS[$key]"
+            echo "Forgot saved answer: $key"
+            forgotten=$((forgotten + 1))
+        done
+        if [ "$forgotten" -eq 0 ]; then
+            echo "No saved --add-switch answers to forget."
+        else
+            state_save
+            echo "Forgot $forgotten --add-switch answer(s). Site config was kept."
+        fi
+        if [ "$ADD_SWITCH" -ne 1 ]; then
+            state_progress
+            exit 0
+        fi
+        echo "Continuing into --add-switch for the next switch."
     fi
     
     if [ -n "$FORGET_STEP_KEY" ]; then
@@ -859,8 +893,52 @@ dhcp snooping trust
 EOF
 }
 
-# Member switch: SVIs, inter-switch trunk, snooping, RADIUS, NTP.
-# No SSH (expect does that), no default route, no Kea port, no ISP uplink.
+# Comware public-key-code body (hex, 64 chars/line) from an OpenSSH .pub file.
+comware_public_key_body() {
+    local pubfile="$1"
+    local pem raw
+    pem="$(ssh-keygen -f "$pubfile" -e -m pem)"
+    raw="$(printf '%s\n' "$pem" | openssl pkey -pubin -inform PEM -outform DER 2>/dev/null | xxd -p -c 256 | tr -d '\n' | tr '[:lower:]' '[:upper:]')"
+    [ -n "$raw" ] || return 1
+    printf '%s\n' "$raw" | fold -w 64
+}
+
+# local-user, public-key peer, ssh user bind, and vty lines for the switch SSH user.
+build_switch_ssh_user_config() {
+    local user="$1" key_body="$2"
+    [ -n "$user" ] && [ -n "$key_body" ] || return 0
+    cat <<EOF
+local-user ${user} class manage
+service-type ssh
+authorization-attribute user-role network-admin
+authorization-attribute user-role network-operator
+#
+public-key peer ${user}_KEY
+public-key-code begin
+${key_body}
+public-key-code end
+peer-public-key end
+#
+ssh server enable
+ssh user ${user} service-type stelnet authentication-type publickey assign publickey ${user}_KEY
+#
+line vty 0 4
+authentication-mode scheme
+user-role network-admin
+user-role network-operator
+protocol inbound ssh
+idle-timeout 15 0
+#
+line vty 5 63
+authentication-mode scheme
+user-role network-admin
+user-role network-operator
+#
+EOF
+}
+
+# Member switch: SVIs, inter-switch trunk, snooping, RADIUS, NTP, SSH user.
+# No default route, no Kea port, no ISP uplink.
 compose_member_switch_config() {
     local mgmt_ip="$1" isl_iface="$2" permit="$3"
     local last radius portal secret
@@ -948,6 +1026,7 @@ ntp-service unicast-server 162.159.200.1
 "
     fi
 
+    SSH_USER_CONFIG="$(build_switch_ssh_user_config "$ADD_SW_USER" "${PUBLIC_KEY:-}")"
     DYNAMIC_CONFIG="
 clock timezone GMT add 00:00:00
 clock summer-time BST 01:00:00 March last Sunday 02:00:00 October last Sunday 01:00:00
@@ -960,6 +1039,7 @@ ${RADIUS_CONFIG}
 ${VLAN_IFACE_CONFIG}
 ${INTERSWITCH_CONFIG}
 ${NTP_CONFIG}
+${SSH_USER_CONFIG}
 scheduler job backup-config
  command 1 save force
  command 2 tftp ${PORTAL_IP:-} put flash:/startup.cfg 5130-startup-${ADD_SW_NAME}.cfg
@@ -1011,12 +1091,9 @@ add_switch_to_existing_network() {
     net_base="$(echo "$ADD_SW_IP" | awk -F. '{print $1"."$2}')"
     permit="$ADD_SW_ISP_VLANS $ADD_SW_USER_VLANS $ADD_SW_MGMT_VLAN $ADD_SW_WIRED_VLAN"
     isl_iface="$(get_interface "$ADD_SW_ISL" "$ADD_SW_MAX_1G")"
+    PUBLIC_KEY="$(comware_public_key_body "${ADD_SW_KEY}.pub")" \
+        || die "Failed to convert ${ADD_SW_KEY}.pub to HP 5130 format."
     compose_member_switch_config "$ADD_SW_IP" "$isl_iface" "$permit"
-
-    PUBKEY_PEM="$(ssh-keygen -f "${ADD_SW_KEY}.pub" -e -m pem)"
-    RAW_KEY="$(printf '%s\n' "$PUBKEY_PEM" | openssl pkey -pubin -inform PEM -outform DER 2>/dev/null | xxd -p -c 256 | tr -d '\n' | tr '[:lower:]' '[:upper:]')"
-    [ -n "$RAW_KEY" ] || die "Failed to convert $ADD_SW_KEY.pub to HP 5130 format."
-    PUBLIC_KEY="$(echo "$RAW_KEY" | fold -w 64)"
 
     info "Serial configure $ADD_SW_NAME ($ADD_SW_IP)"
     echo "Connect the USB serial cable to the NEW switch only."

@@ -709,6 +709,16 @@ if {[info exists dynamic_config] && $dynamic_config ne ""} {
 
 if {$username ne "" && $pubkey ne ""} {
 
+    # Dynamic config may have left user view. Get back into system-view.
+    send "system-view\r"
+    expect {
+        -re {\[[^\]]+\]} {}
+        timeout {
+            puts "ERROR: no system-view before SSH user setup"
+            exit 1
+        }
+    }
+
     expect "]"
     send "local-user $username class manage\r"
 
@@ -719,18 +729,25 @@ if {$username ne "" && $pubkey ne ""} {
     send "authorization-attribute user-role network-admin\r"
 
     expect "]"
+    send "authorization-attribute user-role network-operator\r"
+
+    expect "]"
     send "quit\r"
 
-    # Create public key
+    # Create public key. Send the Comware hex body one line at a time.
     expect "]"
     send "public-key peer ${username}_KEY\r"
 
     expect "]"
     send "public-key-code begin\r"
 
-    send "$pubkey\r"
+    foreach keyline [split $pubkey "\n"] {
+        set keyline [string trim $keyline]
+        if {$keyline eq ""} { continue }
+        send "$keyline\r"
+        expect "]"
+    }
 
-    expect "]"
     send "public-key-code end\r"
 
     expect "]"
@@ -778,6 +795,8 @@ if {$username ne "" && $pubkey ne ""} {
     send "authentication-mode scheme\r"
     expect "]"
     send "user-role network-admin\r"
+    expect "]"
+    send "user-role network-operator\r"
     expect "]"
     send "quit\r"
 }
