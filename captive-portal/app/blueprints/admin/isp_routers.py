@@ -121,6 +121,40 @@ def _push_job_read(job_id: str):
 # Switch config builders
 # ---------------------------------------------------------------------------
 
+
+def _pbr_local_acl_lines() -> list:
+    """ACL 3001: traffic that must use normal routing, not PBR.
+
+    Covers internal-to-internal, internal-to-ISP-LAN, and ISP-LAN-to-internal.
+    A host on 192.168.1.0/24 reaching 10.7.99.31 arrives on a PBR VLAN with a
+    source outside 10.7.0.0/16; without the reverse rules, PBR sends it back
+    to the ISP gateway and it loops.
+    """
+    net = f"{_net_word()}.0.0 0.0.255.255"
+    lines = [
+        'undo acl advanced 3001',
+        'acl advanced 3001',
+        ' description PBR-local-traffic-normal-routing',
+        f' rule 10 permit ip source {net} destination {net}',
+    ]
+    rule = 20
+    isp_subnets = []
+    for router in ISPRouter.query.order_by(ISPRouter.id).all():
+        try:
+            network = ipaddress.ip_network(router.subnet, strict=False)
+        except (TypeError, ValueError):
+            continue
+        isp_subnets.append(f"{network.network_address} {network.hostmask}")
+    for subnet in isp_subnets:
+        lines.append(f' rule {rule} permit ip source {net} destination {subnet}')
+        rule += 10
+    for subnet in isp_subnets:
+        lines.append(f' rule {rule} permit ip source {subnet} destination {net}')
+        rule += 10
+    lines.append('quit')
+    return lines
+
+
 def _build_isp_router_switch_config(router: ISPRouter, switch_host: str) -> str:
     last_octet = int(switch_host.split('.')[-1])
     net = ipaddress.IPv4Network(router.subnet, strict=False)
@@ -152,10 +186,7 @@ def _build_isp_router_switch_config(router: ISPRouter, switch_host: str) -> str:
         f' description UPLINK-TO-{name_upper}',
         f' ip address {host_ip} {netmask}',
         'quit',
-        'acl advanced 3001',
-        ' description PBR-local-traffic-normal-routing',
-        f' rule 10 permit ip destination {_net_word()}.0.0 0.0.255.255',
-        'quit',
+        *_pbr_local_acl_lines(),
         *[cmd for vlan_id in assigned_vlans for cmd in (
             f'interface Vlan-interface{vlan_id}',
             ' undo ip policy-based-route',

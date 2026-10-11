@@ -241,28 +241,27 @@ emit("undo acl advanced 3001")
 emit("acl advanced 3001")
 emit(" description PBR-local-traffic-normal-routing")
 
-rule = 10
-lan_src, lan_wc, _ = wildcard(str(lan_net))
-for vlan in vlans:
-    if int(vlan["vlan_id"]) == int(wired_vlan_id):
+# Destination-independent of which user VLAN originated the packet. PBR must
+# not catch internal-to-internal traffic, internal-to-ISP-LAN traffic, or the
+# reverse (a host on an ISP LAN reaching a switch or portal). VLAN isolation
+# ACLs still decide what is allowed after normal routing.
+lan_dst = f"{lan_net.network_address} {lan_net.hostmask}"
+lan_src = f"{lan_net.network_address} {lan_net.hostmask}"
+emit(f" rule 10 permit ip source {lan_src} destination {lan_dst}")
+rule = 20
+isp_subnets = []
+for router in routers:
+    rnet = router.get("subnet")
+    if not rnet:
         continue
-    src, src_wc, _ = wildcard(vlan["subnet"])
-    emit(f" rule {rule} permit ip source {src} {src_wc} destination {lan_net.network_address} {lan_net.hostmask}")
+    dst, dst_wc, _ = wildcard(rnet)
+    isp_subnets.append(f"{dst} {dst_wc}")
+for subnet in isp_subnets:
+    emit(f" rule {rule} permit ip source {lan_src} destination {subnet}")
     rule += 10
-
-    own = routers_by_id.get(int(vlan["resolved_isp_router_id"]))
-    visible = set(int(v) for v in vlan.get("visible_vlans", []))
-    for router in routers:
-        rnet = router.get("subnet")
-        if not rnet:
-            continue
-        is_own = own is not None and int(router["id"]) == int(own["id"])
-        is_visible = int(router["vlan_id"]) in visible
-        if not (is_own or is_visible):
-            continue
-        dst, dst_wc, _ = wildcard(rnet)
-        emit(f" rule {rule} permit ip source {src} {src_wc} destination {dst} {dst_wc}")
-        rule += 10
+for subnet in isp_subnets:
+    emit(f" rule {rule} permit ip source {subnet} destination {lan_dst}")
+    rule += 10
 
 emit("quit")
 
