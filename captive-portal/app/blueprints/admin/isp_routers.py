@@ -561,7 +561,10 @@ def admin_isp_routers():
             if new_nat in ('none', 'udm', 'openwrt', 'opnsense'):
                 router.nat_logger_type = new_nat
             vlan_changed = old_vlan_id != router.vlan_id
-            port_changed = old_port != new_port
+            host_changed = (old_switch_host or '') != (new_switch_host_f or '')
+            # Same port name on a different switch is still a move. GE1/0/47 on
+            # 10.7.99.31 and GE1/0/47 on 10.7.99.32 are different ports.
+            port_changed = old_port != new_port or host_changed
             new_host     = get_switch_host_for_isp_router(router)
 
             # DB: update switch_ports port roles before sending switch commands
