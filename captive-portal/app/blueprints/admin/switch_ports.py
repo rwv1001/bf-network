@@ -411,16 +411,20 @@ def refresh_switch_ports() -> dict:
 
 
 def _get_locked_ports() -> dict:
-    """port_name -> lock label. Roles set elsewhere cannot be changed here."""
+    """'switch_host|port_name' -> lock label.
+
+    Roles set on another page cannot be changed here. The host is part of the
+    key: GE1/0/47 on switch A is not the ISP uplink just because GE1/0/47 on
+    switch B is.
+    """
     from models import ISPRouter, Device
-    locked = {
-        r.switch_port: f"ISP {r.name}"
-        for r in ISPRouter.query.filter(ISPRouter.switch_port.isnot(None)).all()
-        if r.switch_port
-    }
+    locked = {}
+    for r in ISPRouter.query.filter(ISPRouter.switch_port.isnot(None)).all():
+        if r.switch_port and r.switch_host:
+            locked[f"{r.switch_host}|{r.switch_port}"] = f"ISP {r.name}"
     for d in Device.query.filter(Device.fixed_ip.isnot(None), Device.fixed_ip != '').all():
-        if d.switch_iface:
-            locked[d.switch_iface] = f"Fixed IP {d.mac_address}"
+        if d.switch_iface and d.switch_host:
+            locked[f"{d.switch_host}|{d.switch_iface}"] = f"Fixed IP {d.mac_address}"
     return locked
 
 
@@ -892,7 +896,7 @@ def update_batch():
         if not host or not port_name or not _role_allowed(role):
             results.append({**base, 'success': False, 'error': 'Invalid request'})
             continue
-        if port_name in locked or role == 'fixed_ip':
+        if f"{host}|{port_name}" in locked or role == 'fixed_ip':
             results.append({**base, 'success': False, 'error': 'Port is locked'})
             continue
         row = db.session.execute(
@@ -969,8 +973,9 @@ def update_single():
         return jsonify({'success': False, 'error': 'Invalid request'})
 
     locked = _get_locked_ports()
-    if port_name in locked:
-        label = locked[port_name]
+    lock_key = f"{host}|{port_name}"
+    if lock_key in locked:
+        label = locked[lock_key]
         if label.startswith('Fixed IP'):
             hint = 'Change it in the dashboard Fixed IPs section.'
         else:

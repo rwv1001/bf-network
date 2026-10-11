@@ -320,13 +320,13 @@
             <td><span class="port-name">{{ port.port_name }}</span></td>
             <td><span class="port-desc" title="{{ port.port_description }}">{{ port.port_description or '—' }}</span></td>
             <td>
-                {% set is_locked = port.port_name in locked_ports %}
+                {% set lock_key = host ~ '|' ~ port.port_name %}{% set is_locked = lock_key in locked_ports %}
                 <div class="role-group{% if is_locked %} role-locked{% endif %}"
                      id="rg_{{ host }}_{{ port.port_name | replace('/', '_') | replace('.', '_') }}"
                      data-host="{{ host }}"
                      data-port="{{ port.port_name }}"
                      data-current-role="{{ port.port_role or 'unknown' }}"
-                     {% if is_locked %}title="{{ locked_ports[port.port_name] }}"{% endif %} >
+                     {% if is_locked %}title="{{ locked_ports[lock_key] }}"{% endif %} >
                 {% for role_key, role_label in port_roles.items() %}
                     {% set is_uplink_udm = role_key == 'uplink_udm' %}
                     {% set is_fixed_ip = role_key == 'fixed_ip' %}
@@ -351,7 +351,7 @@
                 {% endfor %}
                 </div>
                 {% if is_locked %}
-                <div class="role-locked-badge">🔒{{ locked_ports[port.port_name] }}</div>
+                <div class="role-locked-badge">🔒{{ locked_ports[lock_key] }}</div>
                 {% endif %}
                 <div class="role-status" id="status_{{ host }}_{{ port.port_name | replace('/', '_') | replace('.', '_') }}"></div>
             </td>
