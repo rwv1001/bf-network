@@ -1383,6 +1383,113 @@ extern "C"
 
     // Latency: ~10-50 ms on a local PostgreSQL instance.
 
+
+    // Portal DB is the source of truth for registration. A device can be
+    // registered there while Kea has no hosts row (failed reservation-add,
+    // Kea restart before hosts were written, or a cross-site import that
+    // created the device without a local reservation). Returns the assigned
+    // VLAN if the device is registered and not admin-blocked, else 0.
+    int portal_registered_vlan(const std::string &mac_colon)
+    {
+        if (mac_colon.size() > 17)
+            return 0;
+        for (char c : mac_colon)
+        {
+            if (!isxdigit(static_cast<unsigned char>(c)) && c != ':')
+                return 0;
+        }
+
+        const char *db_host = std::getenv("DB_HOST");
+        const char *db_port = std::getenv("DB_PORT");
+        const char *db_name = std::getenv("DB_NAME");
+        const char *db_user = std::getenv("DB_USER");
+        const char *db_pass = std::getenv("DB_PASSWORD");
+        if (!db_host || !db_name || !db_user || !db_pass)
+            return 0;
+
+        setenv("PGPASSWORD", db_pass, 1);
+        std::stringstream cmd;
+        cmd << "psql -h " << db_host
+            << " -p " << (db_port ? db_port : "5432")
+            << " -U " << db_user
+            << " -d " << db_name
+            << " -t -A -q -F '|'"
+            << " -c \"SELECT COALESCE(assigned_vlan::text,''), COALESCE(internet_blocked::text,'f')"
+            << " FROM devices WHERE mac_address='" << mac_colon << "' LIMIT 1\""
+            << " 2>/dev/null";
+
+        FILE *pipe = popen(cmd.str().c_str(), "r");
+        if (!pipe)
+            return 0;
+        char buf[64] = {};
+        bool got = (fgets(buf, sizeof(buf) - 1, pipe) != nullptr);
+        pclose(pipe);
+        if (!got)
+            return 0;
+
+        std::string result(buf);
+        while (!result.empty() && (result.back() == '\n' || result.back() == '\r' || result.back() == ' '))
+            result.pop_back();
+        if (result.empty())
+            return 0;
+
+        auto bar = result.find('|');
+        std::string vlan_s = bar == std::string::npos ? result : result.substr(0, bar);
+        std::string blocked_s = bar == std::string::npos ? "f" : result.substr(bar + 1);
+        if (blocked_s == "t" || blocked_s == "true" || blocked_s == "1")
+            return 0;
+        try
+        {
+            int vlan = std::stoi(vlan_s);
+            return vlan > 0 ? vlan : 0;
+        }
+        catch (...)
+        {
+            return 0;
+        }
+    }
+
+    // Insert the missing Kea hosts row directly. reservation-add from inside a
+    // callout deadlocks on the control socket, same as central_import.py.
+    bool heal_kea_reservation(const std::string &mac_colon, uint32_t subnet_id)
+    {
+        std::string mac_hex;
+        for (char c : mac_colon)
+        {
+            if (c != ':')
+                mac_hex.push_back(c);
+        }
+        if (mac_hex.size() != 12)
+            return false;
+
+        const char *db_host = std::getenv("DB_HOST");
+        const char *db_port = std::getenv("DB_PORT");
+        const char *db_name = std::getenv("DB_NAME");
+        const char *db_user = std::getenv("DB_USER");
+        const char *db_pass = std::getenv("DB_PASSWORD");
+        if (!db_host || !db_name || !db_user || !db_pass)
+            return false;
+
+        setenv("PGPASSWORD", db_pass, 1);
+        std::stringstream cmd;
+        cmd << "psql -h " << db_host
+            << " -p " << (db_port ? db_port : "5432")
+            << " -U " << db_user
+            << " -d " << db_name
+            << " -q -c \"INSERT INTO hosts (dhcp_identifier, dhcp_identifier_type, dhcp4_subnet_id, dhcp4_client_classes, user_context)"
+            << " VALUES (decode('" << mac_hex << "', 'hex'), 0, " << subnet_id
+            << ", 'REGISTERED', '{\\\"registered\\\": true}')"
+            << " ON CONFLICT (dhcp_identifier, dhcp_identifier_type, dhcp4_subnet_id)"
+            << " WHERE dhcp4_subnet_id IS NOT NULL"
+            << " DO UPDATE SET dhcp4_client_classes = EXCLUDED.dhcp4_client_classes,"
+            << " user_context = EXCLUDED.user_context\""
+            << " 2>/dev/null";
+        int status = run_script(cmd.str());
+        std::cout << "DNS Hijack Hook: healed missing Kea reservation for " << mac_colon
+                  << " subnet " << subnet_id << " (psql status " << status << ")" << std::endl;
+        return status == 0;
+    }
+
     bool is_assigned_vlan_mismatch(const std::string &mac_colon, uint32_t lease_vlan_id)
 
     {
@@ -1767,17 +1874,35 @@ extern "C"
                 }
             }
 
+            else if (portal_registered_vlan(mac_clean) > 0)
+
+            {
+
+                int assigned = portal_registered_vlan(mac_clean);
+
+                std::cout << "DNS Hijack Hook: Device " << mac_clean
+
+                          << " is registered in the portal (VLAN " << assigned
+
+                          << ") but has no Kea reservation - healing" << std::endl;
+
+                heal_kea_reservation(mac_clean, static_cast<uint32_t>(assigned));
+
+                manage_dns_hijack("unhijack", ip_address, lease->subnet_id_);
+
+                manage_acl("unblock", ip_address, lease->subnet_id_);
+
+                manage_unregistered_lease("remove", mac_clean, ip_address, 0);
+
+                do_hijack = false;
+
+            }
+
             else
 
             {
 
-                // No local reservation. Registered devices flagged for sync are
-
-                // replicated to every site ahead of time (sync_to_all_sites +
-
-                // bootstrap), so an unknown MAC is simply unregistered — no
-
-                // central lookup is needed and DHCP stays fast.
+                // No local reservation and the portal does not know this MAC.
 
                 std::cout << "DNS Hijack Hook: Device " << mac_address
 
@@ -2189,17 +2314,35 @@ extern "C"
                 }
             }
 
+            else if (portal_registered_vlan(mac_clean) > 0)
+
+            {
+
+                int assigned = portal_registered_vlan(mac_clean);
+
+                std::cout << "DNS Hijack Hook: Device " << mac_clean
+
+                          << " is registered in the portal (VLAN " << assigned
+
+                          << ") but has no Kea reservation - healing" << std::endl;
+
+                heal_kea_reservation(mac_clean, static_cast<uint32_t>(assigned));
+
+                manage_dns_hijack("unhijack", ip_address, lease->subnet_id_);
+
+                manage_acl("unblock", ip_address, lease->subnet_id_);
+
+                manage_unregistered_lease("remove", mac_clean, ip_address, 0);
+
+                do_hijack = false;
+
+            }
+
             else
 
             {
 
-                // No local reservation. Registered devices flagged for sync are
-
-                // replicated to every site ahead of time (sync_to_all_sites +
-
-                // bootstrap), so an unknown MAC is simply unregistered — no
-
-                // central lookup is needed and DHCP stays fast.
+                // No local reservation and the portal does not know this MAC.
 
                 std::cout << "DNS Hijack Hook: Device " << mac_address
 
