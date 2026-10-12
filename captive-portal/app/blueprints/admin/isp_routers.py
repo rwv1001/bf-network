@@ -385,6 +385,39 @@ def _parse_port_value(raw: str) -> tuple:
     return switch_host_for_port(raw), raw
 
 
+def _port_role(host: str, port: str) -> str:
+    row = db.session.execute(
+        text("SELECT port_role FROM switch_ports WHERE switch_host=:h AND port_name=:p"),
+        {'h': host, 'p': port},
+    ).fetchone()
+    return (row[0] if row else '') or ''
+
+
+def _mark_uplink(host: str, port: str, router_name: str) -> None:
+    db.session.execute(text("""
+        UPDATE switch_ports
+        SET port_role = 'uplink_udm',
+            port_description = :desc,
+            last_updated = NOW()
+        WHERE switch_host = :host AND port_name = :port
+    """), {
+        'host': host,
+        'port': port,
+        'desc': f'UPLINK-TO-{router_name.upper()}',
+    })
+
+
+def _clear_uplink(host: str, port: str) -> None:
+    """Unclassify the previous ISP port, whatever role it currently has."""
+    if not host or not port:
+        return
+    db.session.execute(text("""
+        UPDATE switch_ports
+        SET port_role = 'unknown', last_updated = NOW()
+        WHERE switch_host = :host AND port_name = :port
+    """), {'host': host, 'port': port})
+
+
 
 def push_pbr_nqa_to_switches() -> bool:
     """
@@ -484,6 +517,12 @@ def admin_isp_routers():
             if ISPRouter.query.filter_by(name=name).first():
                 flash(f'A router named "{name}" already exists.', 'error')
                 return redirect(url_for('admin.isp_routers.admin_isp_routers'))
+            if switch_port and not switch_host_f:
+                flash('Choose the switch as well as the port. The same port name exists on more than one switch.', 'error')
+                return redirect(url_for('admin.isp_routers.admin_isp_routers'))
+            if switch_port and switch_host_f and _port_role(switch_host_f, switch_port) == 'inter_switch':
+                flash(f'{switch_host_f} {switch_port} is an inter-switch link. Choose another port.', 'error')
+                return redirect(url_for('admin.isp_routers.admin_isp_routers'))
             nat_logger_type = request.form.get('nat_logger_type', 'none').strip()
             if nat_logger_type not in ('none', 'udm', 'openwrt', 'opnsense'):
                 nat_logger_type = 'none'
@@ -510,10 +549,7 @@ def admin_isp_routers():
                 )
 
             if switch_port and switch_host_f:
-                db.session.execute(text("""
-                    UPDATE switch_ports SET port_role = 'uplink_udm', last_updated = NOW()
-                    WHERE switch_host = :host AND port_name = :port
-                """), {'host': switch_host_f, 'port': switch_port})
+                _mark_uplink(switch_host_f, switch_port, router.name)
                 db.session.commit()
                 host_cmds.setdefault(switch_host_f, []).append(
                     _build_isp_router_port_config(switch_port, router)
@@ -598,19 +634,21 @@ def admin_isp_routers():
             port_changed = old_port != new_port or host_changed
             new_host     = get_switch_host_for_isp_router(router)
 
+            if new_port and not new_host:
+                db.session.rollback()
+                flash('Choose the switch as well as the port. The same port name exists on more than one switch.', 'error')
+                return redirect(url_for('admin.isp_routers.admin_isp_routers'))
+            if new_port and new_host and _port_role(new_host, new_port) == 'inter_switch' and port_changed:
+                db.session.rollback()
+                flash(f'{new_host} {new_port} is an inter-switch link. Choose another port.', 'error')
+                return redirect(url_for('admin.isp_routers.admin_isp_routers'))
+
             # DB: update switch_ports port roles before sending switch commands
             if old_port and port_changed:
-                _old_host = old_switch_host or (get_switch_hosts()[0] if get_switch_hosts() else '')
-                if _old_host:
-                    db.session.execute(text("""
-                        UPDATE switch_ports SET port_role = 'unknown', last_updated = NOW()
-                        WHERE switch_host = :host AND port_name = :port AND port_role = 'uplink_udm'
-                    """), {'host': _old_host, 'port': old_port})
+                _old_host = old_switch_host or ''
+                _clear_uplink(_old_host, old_port)
             if new_port and new_host:
-                db.session.execute(text("""
-                    UPDATE switch_ports SET port_role = 'uplink_udm', last_updated = NOW()
-                    WHERE switch_host = :host AND port_name = :port
-                """), {'host': new_host, 'port': new_port})
+                _mark_uplink(new_host, new_port, router.name)
             db.session.commit()
 
             policy_ok = _write_hp5130_policy_or_warn('updating ISP router')
@@ -681,10 +719,7 @@ def admin_isp_routers():
             if router.switch_port:
                 port_host = router.switch_host or (get_switch_hosts()[0] if get_switch_hosts() else '')
                 if port_host:
-                    db.session.execute(text("""
-                        UPDATE switch_ports SET port_role = 'unknown', last_updated = NOW()
-                        WHERE switch_host = :host AND port_name = :port AND port_role = 'uplink_udm'
-                    """), {'host': port_host, 'port': router.switch_port})
+                    _clear_uplink(port_host, router.switch_port)
                     host_cmds.setdefault(port_host, []).append(_build_reset_port_config(router.switch_port))
 
             for host in get_switch_hosts():

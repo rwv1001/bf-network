@@ -170,17 +170,21 @@ def get_switch_hosts() -> list:
 
 def switch_host_for_port(port_name: str) -> str:
     """
-    Return the switch_host for the given port by looking it up in switch_ports.
-    Falls back to the first switch host if the port is not found.
+    Return the switch_host for a port name only when it is unambiguous.
+
+    The same port name exists on every switch. LIMIT 1 would silently pick
+    one of them. Return '' unless exactly one switch has that port, so the
+    caller must supply host|port.
     """
     from extensions import db as _db
     if port_name:
-        row = _db.session.execute(
-            text("SELECT switch_host FROM switch_ports WHERE port_name = :p LIMIT 1"),
+        rows = _db.session.execute(
+            text("SELECT DISTINCT switch_host FROM switch_ports WHERE port_name = :p"),
             {'p': port_name},
-        ).fetchone()
-        if row:
-            return row[0]
+        ).fetchall()
+        if len(rows) == 1:
+            return rows[0][0]
+        return ''
     hosts = get_switch_hosts()
     return hosts[0] if hosts else ''
 
