@@ -795,37 +795,84 @@ install_gpg() {
 # Switch serial detection and interface helpers
 # =============================================================================
 
+probe_serial_port() {
+    # One process holds the port open. Separate cat/printf opens drop DTR on
+    # close and lose an already-displayed <Cam-03> prompt.
+    python3 - "$1" <<'PY'
+import os, select, sys, termios, time
+port = sys.argv[1]
+fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+attrs = termios.tcgetattr(fd)
+attrs[0] = 0
+attrs[1] = 0
+attrs[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
+attrs[3] = 0
+attrs[4] = attrs[5] = termios.B9600
+termios.tcsetattr(fd, termios.TCSANOW, attrs)
+buf = b""
+end = time.time() + 1.5
+while time.time() < end:
+    r, _, _ = select.select([fd], [], [], 0.2)
+    if r:
+        try:
+            buf += os.read(fd, 4096)
+        except BlockingIOError:
+            pass
+os.write(fd, b"\r\r")
+end = time.time() + 4
+while time.time() < end:
+    r, _, _ = select.select([fd], [], [], 0.3)
+    if r:
+        try:
+            buf += os.read(fd, 4096)
+        except BlockingIOError:
+            pass
+os.close(fd)
+sys.stdout.buffer.write(buf)
+PY
+}
+
 detect_switch_serial_port() {
     echo "Scanning for HP 5130 switches on serial ports..."
 
+    local -a present_ports=()
     local -a detected_ports=()
 
     for port in /dev/ttyUSB{0..7}; do
         [ -e "$port" ] || continue
+        present_ports+=("$port")
+    done
 
+    if [ "${#present_ports[@]}" -eq 0 ]; then
+        echo "No /dev/ttyUSB serial ports found."
+        return 1
+    fi
+
+    for port in "${present_ports[@]}"; do
         echo "Testing $port ..."
-
+        local attempt response
         for attempt in 1 2 3 4; do
             if [ "$attempt" -gt 1 ]; then
                 echo "  Retrying $port (attempt $attempt/4)..."
-                sleep 5
+                sleep 2
             fi
-
-            stty -F "$port" 9600 cs8 -cstopb -parenb raw -echo 2>/dev/null || continue
-            timeout 0.5 cat < "$port" > /dev/null 2>&1 || true
-            printf '\r\r' > "$port"
-            sleep 1
-
-            response="$(timeout 6 cat < "$port" 2>/dev/null || true)"
-
-            if echo "$response" | grep -qiE 'Press|ENTER|Line|aux|Automatic|configuration|CTRL_C|CTRL_D|Login|Password|User|Access|Verification|Comware|H3C|^[[:space:]]*[<\[]|^[[:space:]]*<'; then
+            response="$(probe_serial_port "$port" 2>/dev/null || true)"
+            if echo "$response" | grep -qiE 'Press|ENTER|Line|aux|Automatic|configuration|CTRL_C|CTRL_D|Login|Password|User|Access|Verification|Comware|H3C|<[A-Za-z0-9_.-]+>|\[[A-Za-z0-9_.-]+\]'; then
                 echo "  ? HP switch detected on $port"
                 DETECTED_PORT="$port"
                 detected_ports+=("$port")
-                break 2
+                break
             fi
         done
     done
+
+    # One console cable and a quiet already-logged-in switch: use it.
+    # test-switch-temp.exp accepts <Cam-03> as already logged in.
+    if [ "${#detected_ports[@]}" -eq 0 ] && [ "${#present_ports[@]}" -eq 1 ]; then
+        echo "  No banner seen, but only ${present_ports[0]} is present. Using it."
+        DETECTED_PORT="${present_ports[0]}"
+        detected_ports+=("$DETECTED_PORT")
+    fi
 
     if [ "${#detected_ports[@]}" -eq 0 ]; then
         echo "No HP switch detected on any serial port."
@@ -838,7 +885,6 @@ detect_switch_serial_port() {
         return 0
     fi
 
-    # Multiple ports found — let user choose
     echo
     echo "Multiple serial ports detected:"
     for i in "${!detected_ports[@]}"; do

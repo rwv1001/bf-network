@@ -127,6 +127,14 @@ for {set wake 1} {$wake <= $max_wake} {incr wake} {
         -re {[Pp]assword:} {
             set woke 2
         }
+        -re {<[A-Za-z0-9_.-]+>} {
+            set woke 3
+            puts "Already at CLI prompt."
+        }
+        -re {\[[A-Za-z0-9_.-]+\]} {
+            set woke 3
+            puts "Already at system-view prompt."
+        }
         -re {[<\[][^>\]]+[>\]]} {
             set woke 3
             puts "Already at CLI prompt."
