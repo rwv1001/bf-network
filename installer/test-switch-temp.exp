@@ -228,6 +228,12 @@ while {$attempt <= $max_attempts} {
             puts "Login successful (prompt+log on same line)."
             break
         }
+        -re {<[^>\r\n]+>} {
+            # Comware often prints the SHELL_LOGIN syslog and copyright banner
+            # before the prompt, so <HPE> arrives alone. That is a successful login.
+            puts "Login successful (CLI prompt)."
+            break
+        }
         timeout {
             puts "ERROR: Login timed out"
             puts "Last buffer: $expect_out(buffer)"

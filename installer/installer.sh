@@ -988,6 +988,24 @@ ip address ${net_base}.${vlan}.${last} 255.255.255.0
 "
     done
 
+    # ISP uplink SVIs use the site network portions, not the 10.7 VLAN id.
+    # VLAN 2 + isp_0_network_portion=192.168.3 -> 192.168.3.<last>
+    local isp_base="${SAVED_ANSWERS[isp_vlan_base]:-${ISP_VLAN_BASE:-2}}"
+    for vlan in $ADD_SW_ISP_VLANS; do
+        local isp_idx=$((vlan - isp_base))
+        local portion="${SAVED_ANSWERS[isp_${isp_idx}_network_portion]:-}"
+        if [ -z "$portion" ]; then
+            die "No network portion saved for ISP VLAN $vlan (isp_${isp_idx}_network_portion). Re-run the site install, or set it in the installer state."
+        fi
+        local isp_name="${SAVED_ANSWERS[isp_${isp_idx}_name]:-ISP}"
+        VLAN_IFACE_CONFIG+="
+interface Vlan-interface$vlan
+description UPLINK-TO-${isp_name}
+ip address ${portion}.${last} 255.255.255.0
+#
+"
+    done
+
     INTERSWITCH_CONFIG="$(build_interswitch_interface "$isl_iface" "$permit")"
 
     RADIUS_CONFIG=""
@@ -1077,7 +1095,28 @@ add_switch_to_existing_network() {
     prompt_default ADD_SW_MGMT_VLAN "Management VLAN" "$default_mgmt" "MANAGEMENT_VLAN"
     prompt_default ADD_SW_WIRED_VLAN "Wired unregistered VLAN" "$default_wired" "WIRED_VLAN"
     prompt_default ADD_SW_USER_VLANS "User VLAN IDs already in use (space separated)" "$default_vlans" "vlan_input"
-    prompt_default ADD_SW_ISP_VLANS "ISP uplink VLAN IDs to carry on the trunk (space separated)" "2 3" "add_switch_isp_vlans"
+    # ISP uplink VLANs are site-wide. Once the site config has them, every
+    # additional switch uses the same list. Do not store this as an
+    # add_switch_* answer: --forget-add-switch would ask again.
+    local isp_base="${SAVED_ANSWERS[isp_vlan_base]:-${ISP_VLAN_BASE:-2}}"
+    local n_isps="${SAVED_ANSWERS[num_isps]:-}"
+    if [ -z "$n_isps" ]; then
+        n_isps=0
+        while answer_exists "isp_${n_isps}_network_portion"; do
+            n_isps=$((n_isps + 1))
+        done
+    fi
+    if [ "$n_isps" -gt 0 ]; then
+        ADD_SW_ISP_VLANS=""
+        local i
+        for ((i=0; i<n_isps; i++)); do
+            ADD_SW_ISP_VLANS+="$((isp_base + i)) "
+        done
+        ADD_SW_ISP_VLANS="${ADD_SW_ISP_VLANS% }"
+        echo "ISP uplink VLANs from site config: $ADD_SW_ISP_VLANS"
+    else
+        prompt_default ADD_SW_ISP_VLANS "ISP uplink VLAN IDs to carry on the trunk (space separated)" "2 3" "add_switch_isp_vlans"
+    fi
     prompt_default ADD_SW_MAX_1G "Highest 1Gbps port number on this switch" "48" "add_switch_max_1g"
     prompt_required ADD_SW_ISL "Inter-switch port number on the NEW switch" "add_switch_isl_port"
     prompt_default ADD_SW_EXISTING_ISL "Inter-switch port on the EXISTING switch (for the manual step, e.g. GE1/0/46)" "GE1/0/46" "add_switch_existing_isl"
