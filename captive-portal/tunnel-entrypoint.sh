@@ -13,14 +13,31 @@ fi
 
 apk add --no-cache autossh openssh-client >/dev/null 2>&1
 
-echo "tunnel: connecting to ${ORACLE_VPS_USER:-ubuntu}@${ORACLE_VPS_HOST} ..."
+# A dead session is noticed in 20s (10 x 2). A connect to an unreachable
+# VPS fails in 10s instead of the kernel's ~2 minute TCP timeout, then the
+# loop tries again 5s later. Once the switch path is back, the tunnel is up
+# within about 15s.
+export AUTOSSH_GATETIME=0
+export AUTOSSH_POLL=10
 
-exec autossh -M 0 -N \
-    -o ServerAliveInterval=30 \
-    -o ServerAliveCountMax=3 \
-    -o ExitOnForwardFailure=yes \
-    -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    -i ${ORACLE_VPS_SSH_KEY_PATH:-/keys/oracle_rsa} \
-    -R "127.0.0.1:${ORACLE_VPS_HTTPS_PORT}:127.0.0.1:443" \
-    "${ORACLE_VPS_USER:-ubuntu}@${ORACLE_VPS_HOST}"
+USER_HOST="${ORACLE_VPS_USER:-ubuntu}@${ORACLE_VPS_HOST}"
+REMOTE_PORT="${ORACLE_VPS_HTTPS_PORT:-9443}"
+KEY="${ORACLE_VPS_SSH_KEY_PATH:-/keys/oracle_rsa}"
+
+while true; do
+    echo "tunnel: connecting to ${USER_HOST} ..."
+    autossh -M 0 -N \
+        -o ConnectTimeout=10 \
+        -o ServerAliveInterval=10 \
+        -o ServerAliveCountMax=2 \
+        -o ExitOnForwardFailure=yes \
+        -o TCPKeepAlive=yes \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -i "$KEY" \
+        -R "127.0.0.1:${REMOTE_PORT}:127.0.0.1:443" \
+        "$USER_HOST" \
+        || echo "tunnel: connection failed or dropped"
+    echo "tunnel: retrying in 5s"
+    sleep 5
+done
