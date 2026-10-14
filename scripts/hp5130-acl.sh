@@ -331,7 +331,173 @@ if [ "$MODE" = "worker" ]; then
   exit 0
 fi
 
-if ! is_valid_ip "$IP_ADDRESS"; then
+# ------------------------------------------------------------------
+# Batch apply mode: process many action|ip|attempts lines in one SSH session
+# ------------------------------------------------------------------
+if [ "$MODE" = "apply-batch" ]; then
+  if [ -z "${BATCH_FILE:-}" ] || [ ! -f "$BATCH_FILE" ]; then
+    log "ERROR apply-batch missing or invalid batch file"
+    exit 1
+  fi
+
+  # Collect only the items that need a real per-IP rule 
+  work="/tmp/hp5130-acl.work.$$"
+  : > "$work"
+  while IFS='|' read -r action ip attempts; do
+    [ -z "$action" ] && continue
+    [ -z "$ip" ] && continue
+    third=$(echo "$ip" | cut -d. -f3)
+  
+    printf '%s|%s\n' "$action" "$ip" >> "$work"
+  done < "$BATCH_FILE"
+
+  if [ ! -s "$work" ]; then
+    log "BATCH_EMPTY_OR_ALL_SKIPPED"
+    rm -f "$work"
+    exit 0
+  fi
+
+  CMDS="system-view
+"
+  any=0
+  while IFS='|' read -r action ip; do
+    VLAN_ID=""
+    ACL_NUM=""
+    RULE_NUM=""
+
+    if [ -n "$PYTHON_BIN" ] && [ -f "$KEA_CONFIG_PATH" ]; then
+      MAP_OUT=$("$PYTHON_BIN" - "$KEA_CONFIG_PATH" "$ip" 2>/dev/null <<'PY'
+import ipaddress, json, sys
+cfg, ip_str = sys.argv[1], sys.argv[2]
+ip = ipaddress.ip_address(ip_str)
+try:
+    data = json.load(open(cfg))
+except Exception:
+    sys.exit(0)
+for entry in data.get('Dhcp4', {}).get('subnet4', []):
+    try:
+        net = ipaddress.ip_network(entry.get('subnet'), strict=False)
+        if ip in net:
+            print(f"VLAN_ID={entry.get('id')}")
+            break
+    except Exception:
+        continue
+PY
+)
+      VLAN_ID=$(printf '%s\n' "$MAP_OUT" | awk -F= '/^VLAN_ID=/{print $2}')
+    fi
+    [ -z "$VLAN_ID" ] && VLAN_ID=$(echo "$ip" | cut -d. -f3)
+
+    POLICY_JSON="${HP5130_POLICY_PATH:-/scripts/scriptdata/hp5130-policy.json}"
+    if [ -n "$PYTHON_BIN" ] && [ -f "$POLICY_JSON" ] && [ -n "$VLAN_ID" ]; then
+      ACL_NUM=$("$PYTHON_BIN" - "$POLICY_JSON" "$VLAN_ID" 2>/dev/null <<'PY'
+import json, sys
+pol, vlan = sys.argv[1], int(sys.argv[2])
+try:
+    p = json.load(open(pol))
+except Exception:
+    print(''); sys.exit(0)
+for v in p.get('vlans', []):
+    if int(v.get('vlan_id', 0)) == vlan:
+        rid = int(v.get('isp_router_id') or v.get('resolved_isp_router_id') or 1)
+        for r in p.get('routers', []):
+            if int(r.get('id', 0)) == rid:
+                print(r.get('uplink_acl') or '')
+                sys.exit(0)
+print('')
+PY
+)
+      ACL_NUM=$(printf '%s' "$ACL_NUM" | tr -d '[:space:]')
+    fi
+    [ -z "$ACL_NUM" ] && ACL_NUM=3953
+
+    PSQL_BIN="$(command -v psql 2>/dev/null || true)"
+    DB_URL="${DATABASE_URL:-}"
+    if [ -n "$PSQL_BIN" ] && [ -n "$DB_URL" ]; then
+      if [ "$action" = "block" ]; then
+        RULE_NUM=$("$PSQL_BIN" "$DB_URL" -t -A -c "
+BEGIN;
+SELECT pg_advisory_xact_lock(88001);
+INSERT INTO acl_rule_allocations (ip_address, rule_num)
+SELECT '${ip}', COALESCE(
+  (SELECT MIN(n) FROM generate_series(${RULE_BASE}, 19999) n
+   WHERE n NOT IN (SELECT rule_num FROM acl_rule_allocations)), -1)
+ON CONFLICT (ip_address) DO UPDATE SET allocated_at = NOW()
+RETURNING rule_num;
+COMMIT;" 2>/dev/null | grep -E '^[0-9]+$' | tail -1)
+      else
+        RULE_NUM=$("$PSQL_BIN" "$DB_URL" -t -A -c \
+          "SELECT rule_num FROM acl_rule_allocations WHERE ip_address = '${ip}';" \
+          2>/dev/null | grep -E '^[0-9]+$' | tail -1)
+      fi
+    fi
+
+    if [ -z "$RULE_NUM" ] || [ "$RULE_NUM" = "-1" ]; then
+      log "WARN batch skip action=$action ip=$ip reason=no_rule_num"
+      continue
+    fi
+
+    if [ "$action" = "block" ]; then
+      CMDS="${CMDS}acl advanced ${ACL_NUM}
+rule ${RULE_NUM} deny ip source ${ip} 0
+quit
+"
+      log "BATCH_ADD block ip=$ip acl=$ACL_NUM rule=$RULE_NUM"
+    else
+      CMDS="${CMDS}acl advanced ${ACL_NUM}
+undo rule ${RULE_NUM}
+quit
+"
+      log "BATCH_ADD unblock ip=$ip acl=$ACL_NUM rule=$RULE_NUM"
+    fi
+    any=1
+  done < "$work"
+
+  if [ "$any" -eq 0 ]; then
+    log "BATCH_NOTHING_TO_APPLY"
+    rm -f "$work"
+    exit 0
+  fi
+
+  CMDS="${CMDS}quit
+save force
+quit
+"
+
+  log "BATCH_APPLYING host=$SWITCH_HOST"
+  apply_out=$(mktemp /tmp/ssh_batch.XXXXXX)
+  set +e
+  printf '%s\n' "$CMDS" | timeout "${ACL_SSH_TIMEOUT:-90}" ssh ${SSH_TTY_FLAG:--tt} \
+    -i "$SWITCH_KEY_PATH" -p "$SWITCH_SSH_PORT" \
+    -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 \
+    "${SWITCH_USER}@${SWITCH_HOST}" > "$apply_out" 2>/tmp/ssh_batch.err
+  ssh_status=$?
+  set -e
+
+  if [ "$ssh_status" -eq 0 ] && grep -q "Saved the current configuration" "$apply_out"; then
+    log "BATCH_SUCCESS host=$SWITCH_HOST"
+    if [ -n "${PSQL_BIN:-}" ] && [ -n "${DB_URL:-}" ]; then
+      while IFS='|' read -r action ip; do
+        if [ "$action" = "unblock" ]; then
+          "$PSQL_BIN" "$DB_URL" -c "DELETE FROM acl_rule_allocations WHERE ip_address = '${ip}';" >/dev/null 2>&1 || true
+        fi
+      done < "$work"
+    fi
+    rm -f "$apply_out" /tmp/ssh_batch.err "$work"
+    exit 0
+  else
+    log "BATCH_FAILED status=$ssh_status"
+    log "       stdout: $(cat "$apply_out" 2>/dev/null)"
+    log "       stderr: $(cat /tmp/ssh_batch.err 2>/dev/null)"
+    rm -f "$apply_out" /tmp/ssh_batch.err "$work"
+    exit 1
+  fi
+fi
+
+
+if [ "$MODE" != "apply-batch" ] && ! is_valid_ip "$IP_ADDRESS"; then
   log "SKIP_INVALID action=$ACTION ip=$IP_ADDRESS"
   exit 0
 fi
@@ -830,172 +996,6 @@ if [ "$QUEUE_DISABLE" = "1" ]; then
   fi
 
   exit $ssh_status
-fi
-
-
-# ------------------------------------------------------------------
-# Batch apply mode: process many action|ip|attempts lines in one SSH session
-# ------------------------------------------------------------------
-if [ "$MODE" = "apply-batch" ]; then
-  if [ -z "${BATCH_FILE:-}" ] || [ ! -f "$BATCH_FILE" ]; then
-    log "ERROR apply-batch missing or invalid batch file"
-    exit 1
-  fi
-
-  # Collect only the items that need a real per-IP rule 
-  work="/tmp/hp5130-acl.work.$$"
-  : > "$work"
-  while IFS='|' read -r action ip attempts; do
-    [ -z "$action" ] && continue
-    [ -z "$ip" ] && continue
-    third=$(echo "$ip" | cut -d. -f3)
-  
-    printf '%s|%s\n' "$action" "$ip" >> "$work"
-  done < "$BATCH_FILE"
-
-  if [ ! -s "$work" ]; then
-    log "BATCH_EMPTY_OR_ALL_SKIPPED"
-    rm -f "$work"
-    exit 0
-  fi
-
-  CMDS="system-view
-"
-  any=0
-  while IFS='|' read -r action ip; do
-    VLAN_ID=""
-    ACL_NUM=""
-    RULE_NUM=""
-
-    if [ -n "$PYTHON_BIN" ] && [ -f "$KEA_CONFIG_PATH" ]; then
-      MAP_OUT=$("$PYTHON_BIN" - "$KEA_CONFIG_PATH" "$ip" 2>/dev/null <<'PY'
-import ipaddress, json, sys
-cfg, ip_str = sys.argv[1], sys.argv[2]
-ip = ipaddress.ip_address(ip_str)
-try:
-    data = json.load(open(cfg))
-except Exception:
-    sys.exit(0)
-for entry in data.get('Dhcp4', {}).get('subnet4', []):
-    try:
-        net = ipaddress.ip_network(entry.get('subnet'), strict=False)
-        if ip in net:
-            print(f"VLAN_ID={entry.get('id')}")
-            break
-    except Exception:
-        continue
-PY
-)
-      VLAN_ID=$(printf '%s\n' "$MAP_OUT" | awk -F= '/^VLAN_ID=/{print $2}')
-    fi
-    [ -z "$VLAN_ID" ] && VLAN_ID=$(echo "$ip" | cut -d. -f3)
-
-    POLICY_JSON="${HP5130_POLICY_PATH:-/scripts/scriptdata/hp5130-policy.json}"
-    if [ -n "$PYTHON_BIN" ] && [ -f "$POLICY_JSON" ] && [ -n "$VLAN_ID" ]; then
-      ACL_NUM=$("$PYTHON_BIN" - "$POLICY_JSON" "$VLAN_ID" 2>/dev/null <<'PY'
-import json, sys
-pol, vlan = sys.argv[1], int(sys.argv[2])
-try:
-    p = json.load(open(pol))
-except Exception:
-    print(''); sys.exit(0)
-for v in p.get('vlans', []):
-    if int(v.get('vlan_id', 0)) == vlan:
-        rid = int(v.get('isp_router_id') or v.get('resolved_isp_router_id') or 1)
-        for r in p.get('routers', []):
-            if int(r.get('id', 0)) == rid:
-                print(r.get('uplink_acl') or '')
-                sys.exit(0)
-print('')
-PY
-)
-      ACL_NUM=$(printf '%s' "$ACL_NUM" | tr -d '[:space:]')
-    fi
-    [ -z "$ACL_NUM" ] && ACL_NUM=3953
-
-    PSQL_BIN="$(command -v psql 2>/dev/null || true)"
-    DB_URL="${DATABASE_URL:-}"
-    if [ -n "$PSQL_BIN" ] && [ -n "$DB_URL" ]; then
-      if [ "$action" = "block" ]; then
-        RULE_NUM=$("$PSQL_BIN" "$DB_URL" -t -A -c "
-BEGIN;
-SELECT pg_advisory_xact_lock(88001);
-INSERT INTO acl_rule_allocations (ip_address, rule_num)
-SELECT '${ip}', COALESCE(
-  (SELECT MIN(n) FROM generate_series(${RULE_BASE}, 19999) n
-   WHERE n NOT IN (SELECT rule_num FROM acl_rule_allocations)), -1)
-ON CONFLICT (ip_address) DO UPDATE SET allocated_at = NOW()
-RETURNING rule_num;
-COMMIT;" 2>/dev/null | grep -E '^[0-9]+$' | tail -1)
-      else
-        RULE_NUM=$("$PSQL_BIN" "$DB_URL" -t -A -c \
-          "SELECT rule_num FROM acl_rule_allocations WHERE ip_address = '${ip}';" \
-          2>/dev/null | grep -E '^[0-9]+$' | tail -1)
-      fi
-    fi
-
-    if [ -z "$RULE_NUM" ] || [ "$RULE_NUM" = "-1" ]; then
-      log "WARN batch skip action=$action ip=$ip reason=no_rule_num"
-      continue
-    fi
-
-    if [ "$action" = "block" ]; then
-      CMDS="${CMDS}acl advanced ${ACL_NUM}
-rule ${RULE_NUM} deny ip source ${ip} 0
-quit
-"
-      log "BATCH_ADD block ip=$ip acl=$ACL_NUM rule=$RULE_NUM"
-    else
-      CMDS="${CMDS}acl advanced ${ACL_NUM}
-undo rule ${RULE_NUM}
-quit
-"
-      log "BATCH_ADD unblock ip=$ip acl=$ACL_NUM rule=$RULE_NUM"
-    fi
-    any=1
-  done < "$work"
-
-  if [ "$any" -eq 0 ]; then
-    log "BATCH_NOTHING_TO_APPLY"
-    rm -f "$work"
-    exit 0
-  fi
-
-  CMDS="${CMDS}quit
-save force
-quit
-"
-
-  log "BATCH_APPLYING host=$SWITCH_HOST"
-  apply_out=$(mktemp /tmp/ssh_batch.XXXXXX)
-  set +e
-  printf '%s\n' "$CMDS" | timeout "${ACL_SSH_TIMEOUT:-90}" ssh ${SSH_TTY_FLAG:--tt} \
-    -i "$SWITCH_KEY_PATH" -p "$SWITCH_SSH_PORT" \
-    -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa \
-    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 \
-    "${SWITCH_USER}@${SWITCH_HOST}" > "$apply_out" 2>/tmp/ssh_batch.err
-  ssh_status=$?
-  set -e
-
-  if [ "$ssh_status" -eq 0 ] && grep -q "Saved the current configuration" "$apply_out"; then
-    log "BATCH_SUCCESS host=$SWITCH_HOST"
-    if [ -n "${PSQL_BIN:-}" ] && [ -n "${DB_URL:-}" ]; then
-      while IFS='|' read -r action ip; do
-        if [ "$action" = "unblock" ]; then
-          "$PSQL_BIN" "$DB_URL" -c "DELETE FROM acl_rule_allocations WHERE ip_address = '${ip}';" >/dev/null 2>&1 || true
-        fi
-      done < "$work"
-    fi
-    rm -f "$apply_out" /tmp/ssh_batch.err "$work"
-    exit 0
-  else
-    log "BATCH_FAILED status=$ssh_status"
-    log "       stdout: $(cat "$apply_out" 2>/dev/null)"
-    log "       stderr: $(cat /tmp/ssh_batch.err 2>/dev/null)"
-    rm -f "$apply_out" /tmp/ssh_batch.err "$work"
-    exit 1
-  fi
 fi
 
 
