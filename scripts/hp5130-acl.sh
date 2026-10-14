@@ -628,12 +628,18 @@ EOSQL
         2>/dev/null | grep -E '^[0-9]+$' | tail -1
     )
     if [ -z "$RULE_NUM" ]; then
-      log "WARN action=$ACTION ip=$IP_ADDRESS reason=no_rule_alloc_found fallback=formula"
+      # No per-IP rule was ever allocated for this IP.
+      # For unblock this is normal (device was only covered by a range/pool ACL
+      # or never explicitly blocked). Treat as success — nothing to undo.
+      log "SUCCESS action=$ACTION ip=$IP_ADDRESS reason=no_rule_alloc_found nothing_to_undo"
+      exit 0
     fi
   fi
 fi
 
 if [ -z "$RULE_NUM" ]; then
+  # Only reachable for block (or when psql/DATABASE_URL is unavailable).
+  # Keep the hard failure for block so we never silently skip a deny rule.
   log "ERROR action=$ACTION ip=$IP_ADDRESS reason=no_rule_allocation"
   exit 1
 fi
