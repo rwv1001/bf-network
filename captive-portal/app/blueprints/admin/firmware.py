@@ -31,6 +31,8 @@ firmware_bp = Blueprint('firmware', __name__)
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+def _env_path():
+    return os.path.join(os.environ['GIT_REPO_DIR'], '.env')
 
 def _run_firmware_script(action, extra_args=None):
     git_repo_dir = os.environ['GIT_REPO_DIR']
@@ -99,7 +101,7 @@ def _materialize_migration_script(git_repo_dir, rel_path):
 
 def _read_env_file() -> dict:
     git_repo_dir = os.environ['GIT_REPO_DIR']
-    env_path = os.path.join(git_repo_dir, 'captive-portal', '.env')
+    env_path = _env_path()
     result = {}
     if not os.path.exists(env_path):
         return result
@@ -116,7 +118,7 @@ def _write_env_vars(new_vars: dict) -> None:
     if not new_vars:
         return
     git_repo_dir = os.environ['GIT_REPO_DIR']
-    env_path = os.path.join(git_repo_dir, 'captive-portal', '.env')
+    env_path = _env_path()
     lines = []
     if os.path.exists(env_path):
         with open(env_path) as f:
@@ -144,7 +146,7 @@ def _remove_env_vars(keys) -> None:
     if not keys:
         return
     git_repo_dir = os.environ['GIT_REPO_DIR']
-    env_path = os.path.join(git_repo_dir, 'captive-portal', '.env')
+    env_path = _env_path()
     if not os.path.exists(env_path):
         return
     with open(env_path) as f:
