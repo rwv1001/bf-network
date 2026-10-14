@@ -288,9 +288,12 @@ def unregister_device(device: Device, commit: bool = True) -> None:
         kea = get_kea_client(control_socket=kea_socket)
         if kea:
             kea.delete_all_reservations_for_mac(mac_address)
-            lease = kea.get_lease_by_mac(mac_address)
-            if not lease and vlan_id:
+            lease = None
+            if vlan_id:
                 lease = kea.get_lease_by_mac(mac_address, subnet_id=vlan_id)
+            if not lease:
+                # optional fallback – only if you have a default subnet you trust
+                lease = kea.get_lease_by_mac(mac_address, subnet_id=0)  # or omit entirely
             if lease and lease.get("ip-address"):
                 kea.force_lease_renewal(mac_address, ip_address=lease["ip-address"])
     except Exception as exc:
