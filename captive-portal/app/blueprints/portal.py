@@ -419,11 +419,13 @@ def _build_prefill_from_request():
 
 @portal_bp.route('/generate_204')
 @portal_bp.route('/gen_204')
+@limiter.exempt
 def android_captive_portal_detection():
     return redirect(build_portal_url(url_for('portal.register'))), 302
 
 
 @portal_bp.route('/access-check')
+@limiter.exempt
 def access_check():
     mac_address = get_client_mac()
     if not mac_address:
@@ -436,29 +438,34 @@ def access_check():
 
 
 @portal_bp.route('/hotspot-detect.html')
+@limiter.exempt
 def ios_captive_portal_detection():
     return redirect(build_portal_url(url_for('portal.register'))), 302
 
 
 @portal_bp.route('/library/test/success.html')
+@limiter.exempt
 def ios_captive_success():
     return redirect(build_portal_url(url_for('portal.register'))), 302
 
 
 @portal_bp.route('/success.txt')
 @portal_bp.route('/canonical.html')
+@limiter.exempt
 def firefox_captive_portal_detection():
     return redirect(build_portal_url(url_for('portal.register'))), 302
 
 
 @portal_bp.route('/check_network_status.txt')
 @portal_bp.route('/nm-check.txt')
+@limiter.exempt
 def gnome_captive_portal_detection():
     return redirect(build_portal_url(url_for('portal.register'))), 302
 
 
 @portal_bp.route('/mobile/status.php')
 @portal_bp.route('/generate204')
+@limiter.exempt
 def misc_captive_portal_detection():
     return redirect(build_portal_url(url_for('portal.register'))), 302
 
@@ -466,6 +473,7 @@ def misc_captive_portal_detection():
 @portal_bp.route('/ncsi.txt')
 @portal_bp.route('/connecttest.txt')
 @portal_bp.route('/redirect', methods=['GET', 'POST', 'OPTIONS'])
+@limiter.exempt
 def windows_captive_portal_detection():
     if request.method == 'OPTIONS':
         resp = portal_bp.make_response('')
@@ -477,6 +485,7 @@ def windows_captive_portal_detection():
 
 
 @portal_bp.route('/.well-known/captive-portal')
+@limiter.exempt
 def rfc8908_captive_portal():
     mac_address = get_client_mac()
     portal_url = build_portal_url(url_for('portal.register'))
@@ -498,6 +507,7 @@ def rfc8908_captive_portal():
 
 @portal_bp.route('/portal')
 @portal_bp.route('/', methods=['GET', 'POST', 'OPTIONS'])
+@limiter.exempt
 def index():
     if request.method == 'OPTIONS':
         resp = portal_bp.make_response('')
