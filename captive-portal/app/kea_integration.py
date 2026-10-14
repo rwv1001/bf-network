@@ -204,27 +204,18 @@ class KeaIntegration:
     ) -> bool:
         """
         Register a MAC address in Kea for the registered IP pool.
-        
+
         Creates a host reservation with user-context marking it as registered.
-        Client class expressions in Kea config will evaluate this and assign
-        the device to the registered pool with public DNS.
-        
-        Args:
-            mac: MAC address (format: aa:bb:cc:dd:ee:ff)
-            vlan: VLAN number (e.g., 40 for 192.168.40.0/24)
-            hostname: Optional hostname for the device
-            ip_address: Optional specific IP to reserve (must be in registered pool)
-            
-        Returns:
-            True if successful, False otherwise
+        If the reservation already exists, falls back to reservation-update
+        so the operation is idempotent and Kea does not log a duplicate error.
         """
         try:
             # Normalize MAC address
             mac = mac.lower().replace('-', ':')
-            
+
             # Build subnet identifier
             subnet_id = self._resolve_subnet_id(vlan)
-            
+
             # Build reservation with user-context for client class evaluation
             reservation = {
                 "subnet-id": subnet_id,
@@ -234,19 +225,15 @@ class KeaIntegration:
                     "registered-at": datetime.utcnow().isoformat()
                 }
             }
-            
+
             if hostname:
                 # Sanitize hostname: remove special chars, replace with dash
                 import re
                 sanitized = re.sub(r'[^a-z0-9-]', '-', hostname.lower())
-                sanitized = re.sub(r'-+', '-', sanitized).strip('-')  # Remove multiple dashes
+                sanitized = re.sub(r'-+', '-', sanitized).strip('-')
                 reservation["hostname"] = sanitized if sanitized else "device"
-            
-            # Don't assign a specific IP - let the hook select the correct subnet
-            # and Kea will assign any available IP from that subnet's pool.
-            # This avoids NAK issues when switching from unregistered to registered subnet.
+
             if ip_address:
-                # Only set IP if explicitly provided (for manual assignments)
                 prefix = _prefix_for_vlan(vlan)
                 bounds = _pool_bounds_for_prefix(prefix)
                 network = ipaddress.IPv4Network(f"{_net_word()}.{vlan}.0/{prefix}", strict=False)
@@ -267,7 +254,9 @@ class KeaIntegration:
                 logger.info(f"Assigning specific IP {ip_address} to MAC {mac}")
             else:
                 logger.info(f"Creating reservation for MAC {mac} without specific IP - Kea will assign from pool")
-            
+
+            # If a specific IP was requested, delete any existing reservation first
+            # so the IP assignment can take effect.
             if ip_address:
                 del_cmd = {
                     "command": "reservation-del",
@@ -283,7 +272,7 @@ class KeaIntegration:
                 except Exception as exc:
                     logger.warning("Reservation delete failed for %s in VLAN %s: %s", mac, vlan, exc)
 
-            # Build command
+            # Try add first
             command = {
                 "command": "reservation-add",
                 "service": ["dhcp4"],
@@ -291,23 +280,35 @@ class KeaIntegration:
                     "reservation": reservation
                 }
             }
-            
+
             response = self._send_command(command)
-            
-            # Check response
+
             if response.get("result") == 0:
                 logger.info(f"Successfully registered MAC {mac} in VLAN {vlan} (registered pool)")
                 return True
-            else:
-                error_text = response.get('text', '')
-                # Treat duplicate entry as success - reservation already exists
-                if 'duplicate' in error_text.lower() or 'already exists' in error_text.lower():
-                    logger.info(f"MAC {mac} already registered in VLAN {vlan} (duplicate is OK)")
+
+            error_text = response.get('text', '')
+            # Duplicate → fall back to reservation-update (preferred idempotent path)
+            if 'duplicate' in error_text.lower() or 'already exists' in error_text.lower():
+                logger.info(f"MAC {mac} already registered in VLAN {vlan}; falling back to reservation-update")
+                update_cmd = {
+                    "command": "reservation-update",
+                    "service": ["dhcp4"],
+                    "arguments": {
+                        "reservation": reservation
+                    }
+                }
+                update_resp = self._send_command(update_cmd)
+                if update_resp.get("result") == 0:
+                    logger.info(f"Successfully updated reservation for MAC {mac} in VLAN {vlan}")
                     return True
                 else:
-                    logger.error(f"Failed to register MAC {mac}: {error_text}")
+                    logger.error(f"reservation-update failed for MAC {mac}: {update_resp.get('text', '')}")
                     return False
-        
+            else:
+                logger.error(f"Failed to register MAC {mac}: {error_text}")
+                return False
+
         except Exception as e:
             logger.error(f"Error registering MAC {mac}: {e}")
             return False
