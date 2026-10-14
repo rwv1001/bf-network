@@ -554,6 +554,7 @@ def blocked_page():
 
 
 @portal_bp.route('/api/request-unblock', methods=['POST', 'OPTIONS'])
+@limiter.exempt
 def api_request_unblock():
     if request.method == 'OPTIONS':
         resp = portal_bp.make_response('')
@@ -608,6 +609,7 @@ def _access_enforcement_cleared(mac_address: str) -> bool:
 
 
 @portal_bp.route('/api/device-status')
+@limiter.exempt
 def api_device_status():
     logger.debug("=== /api/device-status called ===")
 
@@ -741,6 +743,7 @@ def api_device_status():
 
 
 @portal_bp.route('/api/registration-status', methods=['GET', 'OPTIONS'])
+@limiter.exempt
 def registration_status():
     origin = request.headers.get('Origin', '')
     allowed_origins = [
@@ -904,6 +907,7 @@ def registration_status():
 
 
 @portal_bp.route('/api/block-status')
+@limiter.exempt
 def api_block_status():
     mac_address = get_client_mac()
     if not mac_address:
