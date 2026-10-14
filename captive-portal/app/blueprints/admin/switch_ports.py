@@ -274,6 +274,9 @@ def _discover_switch_ports(switch_host: str) -> list:
 
     max_slot = int(os.getenv('SWITCH_MAX_SLOT', '8'))
     ge_max   = int(os.getenv('SWITCH_GE_MAX',   '52'))
+    # Ten-Gig ports are few. Probing them up to GE_MAX produces
+    # "Wrong parameter" errors on the switch for non-existent ports.
+    xge_max  = int(os.getenv('SWITCH_XGE_MAX',  '4'))
 
     # Phase 1 — slot detection
     slot_cmds = '\n'.join(
@@ -298,7 +301,7 @@ def _discover_switch_ports(switch_host: str) -> list:
     for s in sorted(detected_slots):
         for n in range(1, ge_max + 1):
             candidates.append(f'GigabitEthernet{s}/0/{n}')
-        for n in range(1, ge_max + 1):
+        for n in range(1, xge_max + 1):
             candidates.append(f'Ten-GigabitEthernet{s}/0/{n}')
 
     state_cmds = '\n'.join(

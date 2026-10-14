@@ -1,0 +1,23 @@
+{
+  "description": "Add SWITCH_GE_MAX / SWITCH_XGE_MAX so switch-port discovery does not probe non-existent Ten-GigabitEthernet ports",
+  "env": {
+    "add": [
+      {
+        "key": "SWITCH_GE_MAX",
+        "description": "Highest 1G port number to probe during switch-port discovery (default 48)",
+        "default": "48",
+        "required": false,
+        "sensitive": false
+      },
+      {
+        "key": "SWITCH_XGE_MAX",
+        "description": "Highest Ten-GigabitEthernet port number to probe (keep small; default 4)",
+        "default": "4",
+        "required": false,
+        "sensitive": false
+      }
+    ],
+    "remove": []
+  },
+  "notes": "Set SWITCH_GE_MAX to the highest 1G port across your switches. Keep SWITCH_XGE_MAX low (typically 4) so discovery does not generate 'Wrong parameter' errors on non-existent XGE ports. Both are passed through docker-compose to the web and kea containers."
+}

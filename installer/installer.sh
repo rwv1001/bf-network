@@ -1219,10 +1219,14 @@ New switch $ADD_SW_NAME is configured. Do this before plugging the trunk in.
 
 3. On the Pi, edit the site .env. SWITCH_HOSTS_BYTES is what the portal uses
    (last octet on ${net_base}.${ADD_SW_MGMT_VLAN}.x). Append ${octet}.
+   If this switch has more 1G ports than the current SWITCH_GE_MAX, raise it
+   (and keep SWITCH_XGE_MAX small — Ten-Gig ports are few).
 
    SWITCH_HOSTS_BYTES=<existing>,${octet}
    SWITCH_HOSTS=<existing> ${ADD_SW_IP}
    WATCHDOG_SWITCH_HOSTS=<existing> ${ADD_SW_IP}
+   SWITCH_GE_MAX=<highest 1G port across all switches>
+   SWITCH_XGE_MAX=4
 
    cd /home/admin/bf-network
    docker compose up -d kea web --force-recreate --no-deps
@@ -2589,6 +2593,18 @@ write_pi_env_file() {
         write_env_line SWITCH_HOSTS "$SWITCH_HOSTS"
         write_env_line WIRED_VLAN "$WIRED_VLAN"
         write_env_line SWITCH_HOSTS_BYTES "$SWITCH_HOSTS_BYTES"
+        # Highest 1G port the installer was told about. Discovery uses this
+        # for GE probes; Ten-Gig probes use the much smaller SWITCH_XGE_MAX.
+        _ge_max=48
+        if [ "${#MAX_1GBS_PORT[@]}" -gt 0 ]; then
+            for _v in "${MAX_1GBS_PORT[@]}"; do
+                [ "$_v" -gt "$_ge_max" ] 2>/dev/null && _ge_max="$_v"
+            done
+        elif [ -n "${ADD_SW_MAX_1G:-}" ]; then
+            _ge_max="$ADD_SW_MAX_1G"
+        fi
+        write_env_line SWITCH_GE_MAX "$_ge_max"
+        write_env_line SWITCH_XGE_MAX "${SWITCH_XGE_MAX:-4}"
         write_env_line UNREGISTERED_GW_BYTE "$UNREGISTERED_GW_BYTE"
         write_env_line UNREGISTERED_GW "$UNREGISTERED_GW"
         write_env_line MANAGEMENT_VLAN "$MANAGEMENT_VLAN"
