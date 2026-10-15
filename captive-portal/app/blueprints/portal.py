@@ -851,10 +851,18 @@ def registration_status():
 
         if device.registration_status == 'registered' and not network_mismatch and current_ip:
             if not is_blocked_pool_ip(current_ip):
-                if _should_hijack_vlan(current_vlan):
-                    manage_dns_hijack('unhijack', current_ip)
-                if current_vlan:
-                    manage_switch_acl('unblock', current_ip, current_vlan)
+                # Only touch enforcement while it is still pending. Once the
+                # device is marked accessible and the ACL row is gone, further
+                # polls must not re-enqueue unblock (the switch has nothing to do).
+                still_pending = (
+                    device.internet_accessible is not True
+                    or not _access_enforcement_cleared(device.mac_address)
+                )
+                if still_pending:
+                    if _should_hijack_vlan(current_vlan):
+                        manage_dns_hijack('unhijack', current_ip)
+                    if current_vlan:
+                        manage_switch_acl('unblock', current_ip, current_vlan)
                 clear_unregistered_lease(device.mac_address)
 
         payload = {
