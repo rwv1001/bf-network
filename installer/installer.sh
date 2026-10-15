@@ -2516,23 +2516,32 @@ setup_pi_chrony() {
     local remote_sh
     remote_sh="$(mktemp)"
 
-    # Expand NETWORK_WORD here on the installer host
+    # Always rewrite the bf-network block so a previous partial run is corrected.
     cat > "$remote_sh" <<EOF
 set -e
 CONF=/etc/chrony/chrony.conf
-if grep -q "bf-network chrony" "\$CONF" 2>/dev/null; then
-  echo "chrony already configured for bf-network"
-else
-  printf '%s\n' \\
-    "" \\
-    "# bf-network chrony" \\
-    "allow ${NETWORK_WORD}.0.0/16" \\
-    "local stratum 10" \\
-    >> "\$CONF"
-  echo "Appended bf-network chrony allow rules"
-fi
+tmp="\$(mktemp)"
+# Drop any earlier bf-network block, then append a fresh one.
+awk '
+  /^# bf-network chrony/ { skip=1; next }
+  skip && /^# / { skip=0 }
+  skip && /^allow / { next }
+  skip && /^local stratum / { next }
+  skip && /^bindaddress / { next }
+  { print }
+' "\$CONF" > "\$tmp"
+cat >> "\$tmp" <<'BLOCK'
+# bf-network chrony
+allow ${NETWORK_WORD}.0.0/16
+local stratum 10
+bindaddress 0.0.0.0
+BLOCK
+mv "\$tmp" "\$CONF"
 systemctl enable chrony
 systemctl restart chrony
+sleep 1
+chronyc tracking || true
+chronyc clients || true
 EOF
 
     pi_scp_to "$remote_sh" /tmp/bf-setup-chrony.sh
@@ -4361,12 +4370,10 @@ Redo with:  sudo ./installer.sh --forget-answer bf_repo_ref
     #    echo "Skipping completed step: NIC watchdog setup"
     # fi
 
-    if ! step_done "setup_pi_chrony"; then
-        setup_pi_chrony        
-        complete_step "setup_pi_chrony"
-    else
-        echo "Skipping completed step: target host chrony setup"
-    fi
+    # Always re-apply: switches depend on the Pi answering NTP, and a prior
+    # run may have completed the checkpoint before the allow rule was correct.
+    setup_pi_chrony
+    complete_step "setup_pi_chrony"
 
     if ! step_done "setup_pi_tftp_server"; then
         setup_pi_tftp_server        
