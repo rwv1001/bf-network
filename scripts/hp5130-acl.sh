@@ -460,7 +460,7 @@ quit
   fi
 
   CMDS="${CMDS}quit
-save force
+
 quit
 "
 
@@ -476,7 +476,7 @@ quit
   ssh_status=$?
   set -e
 
-  if [ "$ssh_status" -eq 0 ] && grep -q "Saved the current configuration" "$apply_out"; then
+  if [ "$ssh_status" -eq 0 ] && ! grep -qE "% (Wrong parameter|Incomplete command|Too many parameters|Unrecognized command)|Error:" "$apply_out"; then
     log "BATCH_SUCCESS host=$SWITCH_HOST"
     if [ -n "${PSQL_BIN:-}" ] && [ -n "${DB_URL:-}" ]; then
       while IFS='|' read -r action ip; do
@@ -895,18 +895,17 @@ run_ssh() {
   return $status
 }
 
-# A piped SSH session on this switch echoes "display acl N | include"
-# and returns no rule line, so a second session cannot verify. The apply
-# session is authoritative: the rule command is echoed from system-view and
-# "save force" reports the save.
+# A piped SSH session on this switch echoes the commands it accepted.
+# Without a per-operation "save force", success is: SSH exit 0 and no
+# Comware error lines in the capture.
 apply_accepted() {
   # $1 is the capture file. Grep the file, not the path string.
   f="$1"
-  if grep -q "Saved the current configuration" "$f"; then
-    return 0
+  if grep -qE "% (Wrong parameter|Incomplete command|Too many parameters|Unrecognized command)|Error:" "$f"; then
+    log "ERROR action=$ACTION reason=switch_error_in_output file=$f"
+    return 1
   fi
-  log "ERROR action=$ACTION reason=save_line_missing file=$f"
-  return 1
+  return 0
 }
 
 log "APPLY action=$ACTION ip=$IP_ADDRESS vlan=$VLAN_ID acl=${ACL_NUM} rule=$RULE_NUM host=$SWITCH_HOST"
@@ -918,7 +917,7 @@ acl advanced ${ACL_NUM}
 rule $RULE_NUM deny ip source $IP_ADDRESS 0
 quit
 quit
-save force
+
 quit
 EOF
 )
@@ -941,7 +940,7 @@ quit
   }
   add_undo "$ACL_NUM" "$RULE_NUM"
   CMDS="${CMDS}quit
-save force
+
 quit
 "
 else
@@ -974,7 +973,7 @@ if [ "$QUEUE_DISABLE" = "1" ]; then
   apply_end=$(date +%s)
   apply_duration=$((apply_end - apply_start))
   if [ "$ssh_status" -eq 0 ] && ! apply_accepted "$apply_out"; then
-    log "ERROR action=$ACTION phase=apply_save ip=$IP_ADDRESS reason=save_not_confirmed"
+    log "ERROR action=$ACTION phase=apply_save ip=$IP_ADDRESS reason=switch_rejected_commands"
     ssh_status=1
   fi
   if [ "$ssh_status" -ne 0 ]; then
