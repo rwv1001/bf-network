@@ -1054,6 +1054,25 @@ ip address ${portion}.${last} 255.255.255.0
 
     INTERSWITCH_CONFIG="$(build_interswitch_interface "$isl_iface" "$permit")"
 
+    # --add-switch does not set the globals. Resolve from saved answers,
+    # then fall back to deriving the portal address from the management base.
+    if [ -z "$portal" ]; then
+        portal="${SAVED_ANSWERS[PORTAL_IP]:-}"
+    fi
+    if [ -z "$portal" ]; then
+        local base vlan byte
+        base="$(echo "$mgmt_ip" | awk -F. '{print $1"."$2}')"
+        vlan="${ADD_SW_MGMT_VLAN:-${SAVED_ANSWERS[MANAGEMENT_VLAN]:-99}}"
+        byte="${SAVED_ANSWERS[PORTAL_IP_BYTE]:-4}"
+        portal="${base}.${vlan}.${byte}"
+    fi
+    if [ -z "$radius" ]; then
+        radius="${SAVED_ANSWERS[RADIUS_SERVER]:-${portal}}"
+    fi
+    if [ -z "$secret" ]; then
+        secret="${SAVED_ANSWERS[RADIUS_SECRET]:-}"
+    fi
+
     RADIUS_CONFIG=""
     if [ -n "$radius" ] && [ -n "$secret" ]; then
         RADIUS_CONFIG="
@@ -1077,6 +1096,8 @@ mac-authentication
 mac-authentication domain macauth
 #
 "
+    else
+        echo "WARNING: RADIUS server or secret missing; mac-authentication will not be configured on ${ADD_SW_NAME}."
     fi
 
     NTP_CONFIG=""
@@ -1106,9 +1127,10 @@ ${NTP_CONFIG}
 ${SSH_USER_CONFIG}
 scheduler job backup-config
  command 1 save force
- command 2 tftp ${PORTAL_IP:-} put flash:/startup.cfg 5130-startup-${ADD_SW_NAME}.cfg
+ command 2 tftp ${portal} put flash:/startup.cfg 5130-startup-${ADD_SW_NAME}.cfg
 quit
 scheduler schedule nightly-backup
+ user-role network-operator
  user-role network-admin
  job backup-config
  time repeating at 03:15
@@ -2481,8 +2503,6 @@ EOF
     if [ -n "${PI_REPO_DIR:-}" ]; then
         local q_repo
         q_repo="$(shell_quote "$PI_REPO_DIR")"
-        pi_sudo "mkdir -p $q_repo/tftp-inbox"
-        pi_sudo "rm -rf $q_repo/tftp-inbox"
         pi_sudo "ln -sfn /var/lib/tftpboot/switch-backups $q_repo/tftp-inbox"
     fi
 }
