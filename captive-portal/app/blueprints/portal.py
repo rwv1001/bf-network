@@ -585,16 +585,13 @@ def api_request_unblock():
 # ---------------------------------------------------------------------------
 
 def _access_enforcement_cleared(mac_address: str) -> bool:
-    """True once the DNS hijack is removed and no per-IP switch ACL rule remains.
+    """Only confirm access after the active lease's DNS and switch rules clear.
 
-    lease.dns_hijacked mirrors the synchronous iptables step; the
-    acl_rule_allocations row is deleted only after the switch confirms the
-    unblock over SSH, so its absence means the async queue has finished.
+    The allocation row is removed by the ACL worker after the switch confirms
+    its change. A missing lease or failed DB query is *not* proof of access.
     """
     lease = get_active_iplease(mac_address)
-    if lease is None:
-        return True
-    if lease.dns_hijacked:
+    if lease is None or not lease.ip_address or lease.dns_hijacked:
         return False
     try:
         from sqlalchemy import text as _sql_text
@@ -604,8 +601,8 @@ def _access_enforcement_cleared(mac_address: str) -> bool:
         ).first()
         return row is None
     except Exception as exc:
-        logger.debug("access enforcement check failed (fail-open): %s", exc)
-        return True
+        logger.warning("Access enforcement check failed (fail closed): %s", exc)
+        return False
 
 
 @portal_bp.route('/api/device-status')
@@ -680,11 +677,14 @@ def api_device_status():
         })
 
     if device.internet_accessible is True:
-        logger.debug(f"Device {mac_address} has full access (internet_accessible=True)")
+        # internet_accessible is set as soon as provisioning is requested;
+        # it does not by itself mean the asynchronous switch ACL has cleared.
+        verified = _access_enforcement_cleared(mac_address)
+        logger.debug("Device %s access flag is true; enforcement cleared=%s", mac_address, verified)
         return jsonify({
-            'status': 'accessible',
-            'access_verified': _access_enforcement_cleared(mac_address),
-            'user_home_url': build_portal_url(url_for('portal.user_home')),
+            'status': 'accessible' if verified else 'pending',
+            'access_verified': verified,
+            'user_home_url': build_portal_url(url_for('portal.user_home')) if verified else None,
             'ownership_validated': bool(device.ownership_validated),
         })
 
@@ -728,10 +728,11 @@ def api_device_status():
                     registration_details={},
                 )
 
+            verified = _access_enforcement_cleared(mac_address)
             resp_data = {
-                'status': 'accessible',
-                'access_verified': _access_enforcement_cleared(mac_address),
-                'user_home_url': build_portal_url(url_for('portal.user_home')),
+                'status': 'accessible' if verified else 'pending',
+                'access_verified': verified,
+                'user_home_url': build_portal_url(url_for('portal.user_home')) if verified else None,
                 'ownership_validated': bool(device.ownership_validated),
             }
             if not device.ownership_validated:
@@ -854,10 +855,9 @@ def registration_status():
                 # Only touch enforcement while it is still pending. Once the
                 # device is marked accessible and the ACL row is gone, further
                 # polls must not re-enqueue unblock (the switch has nothing to do).
-                still_pending = (
-                    device.internet_accessible is not True
-                    or not _access_enforcement_cleared(device.mac_address)
-                )
+                # Do not enqueue unblock again on every status request while
+                # the worker is still applying an already-queued change.
+                still_pending = device.internet_accessible is not True
                 if still_pending:
                     if _should_hijack_vlan(current_vlan):
                         manage_dns_hijack('unhijack', current_ip)
@@ -931,6 +931,9 @@ def api_block_status():
 # ---------------------------------------------------------------------------
 
 @portal_bp.route('/register', methods=['GET', 'POST', 'OPTIONS'])
+# Captive-portal OS detectors can open /register dozens of times in seconds.
+# Limit only active POST submissions; ordinary page views must stay reachable.
+@limiter.limit("30 per minute", methods=["POST"], override_defaults=True)
 def register():
     if request.method == 'GET' and portal_host_mismatch():
         qs = request.query_string.decode('utf-8', errors='ignore')
@@ -990,11 +993,9 @@ def register():
             # ownership row (e.g. left open by a device deletion, or a pending
             # re-registration) must NOT unblock an unapproved device.
             if device.registration_status == 'registered':
-                if ip_address:
-                    vlan_id = device.current_vlan or device.assigned_vlan
-                    manage_dns_hijack('unhijack', ip_address)
-                    if vlan_id:
-                        manage_switch_acl('unblock', ip_address, vlan_id)
+                # Rendering /register must be side-effect-free. The registration
+                # POST and the provisioning worker already queue unblock; the
+                # old GET handler caused repeated SSH jobs for simple refreshes.
                 _user_pf = device.user
                 prefill_data = {
                     'email':        _user_pf.email or '' if _user_pf else '',

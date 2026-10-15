@@ -52,6 +52,10 @@ fi
 
 SWITCH_HOST="$(printf '%s' "${SWITCH_HOSTS:-}" | awk '{print $1}')"
 [ -n "$SWITCH_HOST" ] || { echo "SWITCH_HOSTS required" >&2; exit 1; }
+# All workers for the same site MUST receive the full switch list. When each
+# call receives SWITCH_HOSTS=one_host, configure ACL_EXPECTED_SWITCH_HOSTS on
+# all workers, e.g. "10.7.99.31 10.7.99.32 10.7.99.33".
+ACL_EXPECTED_SWITCH_HOSTS="${ACL_EXPECTED_SWITCH_HOSTS:-${SWITCH_HOSTS:-}}"
 SAFE_HOST="$(echo "${SWITCH_HOST}" | tr '.:' '__')"
 SWITCH_USER="${SWITCH_USER:-robert}"
 SWITCH_SSH_PORT="${SWITCH_SSH_PORT:-22}"
@@ -258,6 +262,7 @@ process_queue_once() {
     ACL_LOG_FILE="$LOG_FILE" \
     ACL_QUEUE_DISABLE=1 \
     QUEUE_DISABLE=1 \
+    ACL_EXPECTED_SWITCH_HOSTS="$ACL_EXPECTED_SWITCH_HOSTS" \
       "$SELF_SCRIPT" --apply-batch "$batch"
     apply_status=$?
     set -e
@@ -342,7 +347,10 @@ if [ "$MODE" = "apply-batch" ]; then
 
   # Collect only the items that need a real per-IP rule 
   work="/tmp/hp5130-acl.work.$$"
+  # Record only commands actually included in this SSH batch.
+  applied="/tmp/hp5130-acl.applied.$$"
   : > "$work"
+  : > "$applied"
   while IFS='|' read -r action ip attempts; do
     [ -z "$action" ] && continue
     [ -z "$ip" ] && continue
@@ -353,7 +361,7 @@ if [ "$MODE" = "apply-batch" ]; then
 
   if [ ! -s "$work" ]; then
     log "BATCH_EMPTY_OR_ALL_SKIPPED"
-    rm -f "$work"
+    rm -f "$work" "$applied"
     exit 0
   fi
 
@@ -450,12 +458,13 @@ quit
 "
       log "BATCH_ADD unblock ip=$ip acl=$ACL_NUM rule=$RULE_NUM"
     fi
+    printf '%s|%s\n' "$action" "$ip" >> "$applied"
     any=1
   done < "$work"
 
   if [ "$any" -eq 0 ]; then
     log "BATCH_NOTHING_TO_APPLY"
-    rm -f "$work"
+    rm -f "$work" "$applied"
     exit 0
   fi
 
@@ -479,19 +488,49 @@ quit
   if [ "$ssh_status" -eq 0 ] && ! grep -qE "% (Wrong parameter|Incomplete command|Too many parameters|Unrecognized command)|Error:" "$apply_out"; then
     log "BATCH_SUCCESS host=$SWITCH_HOST"
     if [ -n "${PSQL_BIN:-}" ] && [ -n "${DB_URL:-}" ]; then
-      while IFS='|' read -r action ip; do
-        if [ "$action" = "unblock" ]; then
-          "$PSQL_BIN" "$DB_URL" -c "DELETE FROM acl_rule_allocations WHERE ip_address = '${ip}';" >/dev/null 2>&1 || true
-        fi
-      done < "$work"
+      # A rule number is shared by ALL switches. Do not release it after the
+      # first SSH success: subsequent workers still need it to undo their rules.
+      # Confirm each successful host in the shared queue directory, and only
+      # release the allocation when all expected hosts have confirmed.
+      (
+        flock -x 6 || exit 1
+        while IFS='|' read -r action ip; do
+          safe_ip=$(printf '%s' "$ip" | tr '.' '_')
+          ack_prefix="$QUEUE_BASE/.acl-unblock-confirmed-${safe_ip}-"
+          if [ "$action" = "block" ]; then
+            rm -f "${ack_prefix}"* 2>/dev/null || true
+            continue
+          fi
+          [ "$action" = "unblock" ] || continue
+          printf '%s\n' "$(date +%s)" > "${ack_prefix}${SAFE_HOST}"
+          all_confirmed=1
+          for host in $(printf '%s' "$ACL_EXPECTED_SWITCH_HOSTS" | tr ',;' '  '); do
+            safe_expected=$(printf '%s' "$host" | tr '.:' '__')
+            if [ ! -f "${ack_prefix}${safe_expected}" ]; then
+              all_confirmed=0
+              break
+            fi
+          done
+          if [ "$all_confirmed" -eq 1 ]; then
+            if "$PSQL_BIN" "$DB_URL" -c "DELETE FROM acl_rule_allocations WHERE ip_address = '${ip}';" >/dev/null 2>&1; then
+              log "UNBLOCK_CONFIRMED_ALL ip=$ip hosts=$ACL_EXPECTED_SWITCH_HOSTS"
+              rm -f "${ack_prefix}"* 2>/dev/null || true
+            else
+              log "ERROR acl allocation cleanup failed ip=$ip"
+            fi
+          else
+            log "UNBLOCK_CONFIRMED_HOST ip=$ip host=$SWITCH_HOST awaiting=$ACL_EXPECTED_SWITCH_HOSTS"
+          fi
+        done < "$applied"
+      ) 6>"$QUEUE_BASE/.acl-unblock-confirmations.lock"
     fi
-    rm -f "$apply_out" /tmp/ssh_batch.err "$work"
+    rm -f "$apply_out" /tmp/ssh_batch.err "$work" "$applied"
     exit 0
   else
     log "BATCH_FAILED status=$ssh_status"
     log "       stdout: $(cat "$apply_out" 2>/dev/null)"
     log "       stderr: $(cat /tmp/ssh_batch.err 2>/dev/null)"
-    rm -f "$apply_out" /tmp/ssh_batch.err "$work"
+    rm -f "$apply_out" /tmp/ssh_batch.err "$work" "$applied"
     exit 1
   fi
 fi
@@ -508,6 +547,13 @@ fi
 # Deduplication with detailed debug logging
 # ------------------------------------------------------------------
 SAFE_IP="$(echo "$IP_ADDRESS" | tr '.' '_')"
+# A fresh block invalidates any confirmations from the prior unblock cycle.
+if [ "$ACTION" = "block" ] && [ "$QUEUE_DISABLE" != "1" ]; then
+  (
+    flock -x 6 || exit 1
+    rm -f "$QUEUE_BASE/.acl-unblock-confirmed-${SAFE_IP}-"* 2>/dev/null || true
+  ) 6>"$QUEUE_BASE/.acl-unblock-confirmations.lock"
+fi
 DEDUP_FILE="$QUEUE_BASE/.dedup-${ACTION}-${SAFE_IP}-${SAFE_HOST}"
 now=$(date +%s)
 

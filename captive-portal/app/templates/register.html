@@ -77,64 +77,48 @@
         const separator = url.includes('?') ? '&' : '?';
         return `${url}${separator}mac=${encodeURIComponent(knownMac)}`;
     };
-    const internetCheckUrls = [
-        ...(institutionUrl ? [institutionUrl] : []),
-        'https://www.msftconnecttest.com/connecttest.txt',
-        'https://www.gstatic.com/generate_204',
-        'https://captive.apple.com/hotspot-detect.html'
-    ];
 
+
+    let completed = false;
     let attempts = 0;
-    const maxAttempts = 60;
-
     const updateWait = (text) => {
-        if (waitStatus) {
-            waitStatus.textContent = text;
-        }
+        if (waitStatus) waitStatus.textContent = text;
     };
 
-    const checkInternet = () => {
+    // Ask the portal whether the DNS hijack and switch ACL are actually clear.
+    // An opaque no-cors fetch can succeed on a captive redirect and must not
+    // be treated as proof that the internet is reachable.
+    const checkInternet = async () => {
+        if (completed) return;
         attempts += 1;
-        let index = 0;
-
-        const tryNext = () => {
-            const url = internetCheckUrls[index];
-            index += 1;
-            if (!url) {
-                throw new Error('All checks failed');
-            }
-            const busted = url + (url.includes('?') ? '&' : '?') + 't=' + Date.now();
-            return fetch(busted, {
-                method: 'GET',
-                mode: 'no-cors',
-                cache: 'no-store'
-            }).catch(() => tryNext());
-        };
-
-        fetch(apiUrlWithDevice('{{ url_for("portal.api_device_status") }}'))
-            .then(r => r.json())
-            .then(d => {
-                // wait until the server confirms hijack + switch ACL removal
-                if (d && d.status === 'accessible' && d.access_verified === false) {
-                    throw new Error('enforcement pending');
-                }
-                return tryNext();
-            })
-            .then(() => {
-                if (waitStatus) {
-                    waitStatus.style.display = 'none';
-                }
-                if (fullAccess) {
-                    fullAccess.style.display = 'block';
-                }
-            })
-            .catch(() => {
-                if (attempts >= maxAttempts) {
-                    updateWait('Still connecting. Please wait or reconnect if this persists.');
-                    return;
-                }
-                setTimeout(checkInternet, 2000);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 8000);
+        try {
+            const response = await fetch(apiUrlWithDevice('{{ url_for("portal.api_device_status") }}'), {
+                cache: 'no-store', credentials: 'same-origin', signal: controller.signal
             });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const data = await response.json();
+            if (data.status === 'accessible' && data.access_verified === true) {
+                completed = true;
+                if (waitStatus) waitStatus.style.display = 'none';
+                if (fullAccess) fullAccess.style.display = 'block';
+                return;
+            }
+            if (data.status === 'blocked' || data.status === 'access_refused') {
+                completed = true;
+                updateWait('Network access is blocked. Please contact the administrator.');
+                return;
+            }
+        } catch (err) {
+            console.debug('Waiting for access confirmation:', err);
+        } finally {
+            clearTimeout(timeoutId);
+        }
+        // No arbitrary two-minute cutoff: approval and switch operations can
+        // take longer. Run a single request at a time, even when the server is slow.
+        if (attempts === 20) updateWait('Still connecting. Waiting for network access to be enabled...');
+        if (!completed) setTimeout(checkInternet, 3000);
     };
 
     checkInternet();
@@ -265,12 +249,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const portalUrl = "{{ portal_url|e }}";
     const portalPollUrl = "{{ portal_poll_url|e }}";
     const portalBase = portalUrl ? portalUrl.replace(/\/$/, '') : window.location.origin;
-    const internetCheckUrls = [
-        ...(institutionUrl ? [institutionUrl] : []),
-        'https://www.msftconnecttest.com/connecttest.txt',
-        'https://www.gstatic.com/generate_204',
-        'https://captive.apple.com/hotspot-detect.html'
-    ];
+
     const pollBase = (() => {
         const preferred = portalPollUrl ? portalPollUrl.replace(/\/$/, '') : window.location.origin;
         if (window.location.protocol === 'https:' && preferred.startsWith('http:')) {
@@ -291,6 +270,7 @@ document.addEventListener('DOMContentLoaded', function() {
     };
     let pollInterval = null;
     let accessInterval = null;
+    let accessCheckRunning = false;
     let registrationSubmitted = false;
     let pollingStarted = false;
     let currentPrefill = null;
@@ -445,6 +425,14 @@ document.addEventListener('DOMContentLoaded', function() {
             })
             .then(async r => {
                 const d = await r.json().catch(() => ({}));
+                if (!r.ok) {
+                    const retry = r.headers.get('Retry-After');
+                    if (r.status === 429) {
+                        throw new Error('Too many registration attempts. Please wait' +
+                            (retry ? ` ${retry} seconds` : ' a minute') + ' and try again.');
+                    }
+                    throw new Error(d.message || `Email check failed (HTTP ${r.status}). Please try again.`);
+                }
                 if (d.status === 'user_found') {
                     document.getElementById('first_name').value   = d.prefill.first_name   || '';
                     document.getElementById('last_name').value    = d.prefill.last_name    || '';
@@ -456,7 +444,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     switchToStep2();
                     registerBtn.disabled = false;
                 } else {
-                    showStatus(d.message || 'Could not verify email. Please try again.', 'error');
+                    showStatus(d.message || 'Unexpected email-check response. Please try again.', 'error');
                     registerBtn.disabled = false;
                     registerBtn.textContent = 'Continue';
                 }
@@ -1003,47 +991,29 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     function startAccessCheck() {
-        if (accessConfirmed) {
-            return;
-        }
-        if (accessInterval) {
-            return;
-        }
+        if (accessConfirmed || accessInterval || accessCheckRunning) return;
 
         let attempts = 0;
-        const maxAttempts = 60;
-
-        const checkAccess = () => {
+        let stopped = false;
+        const checkAccess = async () => {
+            accessInterval = null;
+            if (accessConfirmed || stopped || accessCheckRunning) return;
+            accessCheckRunning = true;
             attempts += 1;
-            let index = 0;
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 8000);
+            try {
+                const response = await fetch(apiUrlWithDevice('{{ url_for("portal.api_device_status") }}'), {
+                    cache: 'no-store', credentials: 'same-origin', signal: controller.signal
+                });
+                if (!response.ok) throw new Error(`Status HTTP ${response.status}`);
+                const data = await response.json();
 
-            const tryNext = () => {
-                const url = internetCheckUrls[index];
-                index += 1;
-                if (!url) {
-                    throw new Error('All checks failed');
-                }
-                const busted = url + (url.includes('?') ? '&' : '?') + 't=' + Date.now();
-                return fetch(busted, {
-                    method: 'GET',
-                    mode: 'no-cors',
-                    cache: 'no-store'
-                }).catch(() => tryNext());
-            };
-
-            fetch(apiUrlWithDevice('{{ url_for("portal.api_device_status") }}'))
-                .then(r => r.json())
-                .then(d => {
-                    // wait until the server confirms hijack + switch ACL removal
-                    if (d && d.status === 'accessible' && d.access_verified === false) {
-                        throw new Error('enforcement pending');
-                    }
-                    return tryNext();
-                })
-                .then(() => {
-                    clearInterval(accessInterval);
-                    accessInterval = null;
+                // Only an explicit positive acknowledgement is success. The
+                // registration flag is set BEFORE asynchronous switch work ends.
+                if (data.status === 'accessible' && data.access_verified === true) {
                     accessConfirmed = true;
+                    stopped = true;
                     if (pollInterval) {
                         clearInterval(pollInterval);
                         pollInterval = null;
@@ -1053,33 +1023,49 @@ document.addEventListener('DOMContentLoaded', function() {
                         mismatchInterval = null;
                     }
                     showStatus('You now have full internet access.', 'success');
-                    if (userHomeLink && !userHomeLink.querySelector('a')) {
-                        fetch(apiUrlWithDevice('{{ url_for("portal.api_device_status") }}'))
-                            .then(r => r.json())
-                            .then(d => {
-                                const url = (d && d.user_home_url) || (portalBase + '/user_home');
-                                const note = (d && d.ownership_validated === false)
-                                    ? '<p style="margin-top:8px;font-size:0.9em;color:#555;">(You will be asked to enter your password)</p>'
-                                    : '';
-                                userHomeLink.innerHTML = `<a href="${url}" class="btn" style="display:inline-block;">Go to your home page</a>${note}`;
-                                userHomeLink.style.display = 'block';
-                            })
-                            .catch(() => {
-                                userHomeLink.innerHTML = `<a href="${portalBase}/user_home" class="btn" style="display:inline-block;">Go to your home page</a>`;
-                                userHomeLink.style.display = 'block';
-                            });
+                    if (userHomeLink) {
+                        const url = data.user_home_url || (portalBase + '/user_home');
+                        const link = document.createElement('a');
+                        link.href = url;
+                        link.className = 'btn';
+                        link.style.display = 'inline-block';
+                        link.textContent = 'Go to your home page';
+                        userHomeLink.replaceChildren(link);
+                        userHomeLink.style.display = 'block';
                     }
-                })
-                .catch(() => {
-                    if (attempts >= maxAttempts) {
-                        clearInterval(accessInterval);
-                        accessInterval = null;
+                    if (data.ownership_validated === false) {
+                        showConfirmWarning(data.confirm_timeout_minutes);
                     }
-                });
+                    return;
+                }
+                if (data.status === 'blocked' || data.status === 'access_refused') {
+                    stopped = true;
+                    showStatus('Network access has been blocked or refused. Please contact the administrator.', 'error');
+                    return;
+                }
+                if (data.status === 'wrong_vlan' || data.status === 'blocked_pool') {
+                    stopped = true;
+                    startDeviceStatusPolling();
+                    return;
+                }
+                if (attempts === 20) {
+                    showStatus('Still connecting. Waiting for the network to finish enabling access...', 'info');
+                }
+            } catch (err) {
+                console.debug('Access status request failed; will retry:', err);
+            } finally {
+                clearTimeout(timeoutId);
+                accessCheckRunning = false;
+                // Re-schedule only after the previous request has completed.
+                if (!stopped && !accessConfirmed) {
+                    accessInterval = setTimeout(checkAccess, 3000);
+                }
+            }
         };
 
-        accessInterval = setInterval(checkAccess, 2000);
-        checkAccess();
+        // Reserve this slot immediately so another path cannot start a second
+        // status checker before the initial async fetch has completed.
+        accessInterval = setTimeout(checkAccess, 0);
     }
 
     function showStatus(message, type) {
@@ -1329,14 +1315,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 case 'approved':
                 case 'accessible': {
                     console.log('[DevicePoll] Status: accessible/registered');
-                    showStatus('Your device now has full internet access.', 'success');
-                    if (data.ownership_validated === false) {
-                        showConfirmWarning(data.confirm_timeout_minutes);
-                    }
-                    if (data.user_home_url) {
-                        userHomeLink.innerHTML = `<a href="${data.user_home_url}" class="btn" style="display:inline-block;">Go to your home page</a>`;
-                        userHomeLink.style.display = 'block';
-                    }
+                    showStatus('Registration approved. Checking network access...', 'info');
                     stopDevicePoll();
                     startAccessCheck();
                     break;
