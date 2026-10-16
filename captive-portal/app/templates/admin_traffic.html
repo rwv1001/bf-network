@@ -456,7 +456,7 @@
 
 <div class="pagination-controls">
     <div class="pagination-info">
-        Showing {{ ((page - 1) * per_page) + 1 if total > 0 else 0 }} - {{ [page * per_page, total]|min }} of {{ total }} sessions
+        Showing {{ ((page - 1) * per_page) + 1 if total and total > 0 else 0 }} - {{ [page * per_page, total]|min if total else (page * per_page) }} of {{ total if total is not none else 'many' }} sessions
     </div>
     <div class="pagination-buttons">
         {% if page > 1 %}
@@ -552,7 +552,7 @@
 {% if rows %}
 <div class="pagination-controls">
     <div class="pagination-info">
-        Showing {{ ((page - 1) * per_page) + 1 if total > 0 else 0 }} - {{ [page * per_page, total]|min }} of {{ total }} sessions
+        Showing {{ ((page - 1) * per_page) + 1 if total and total > 0 else 0 }} - {{ [page * per_page, total]|min if total else (page * per_page) }} of {{ total if total is not none else 'many' }} sessions
     </div>
     <div class="pagination-buttons">
         {% if page > 1 %}
