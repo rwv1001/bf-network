@@ -322,7 +322,69 @@ def traffic():
         select_cols_sql = ', '.join(c for c, _ in ALL_COLUMNS)
         effective_sort = sort_col if sort_col in {c for c, _ in ALL_COLUMNS} else 'lookup_timestamp'
 
-    count_sql = f"SELECT COUNT(*) FROM {source_view} WHERE {where_clause}"
+    # Fast path: unfiltered first page. The traffic_combined view does a
+    # DISTINCT ON plus three lateral joins per row, so even LIMIT 50 scans
+    # a large fraction of the table. Pull the newest rows from dns_lookups
+    # (indexed on lookup_timestamp) and enrich only those.
+    if not has_query_params and not using_dns_fallback and page == 1 and sort_col == 'lookup_timestamp' and sort_order == 'desc':
+        fast_sql = """
+            SELECT l.id AS lookup_id,
+                   l.lookup_timestamp,
+                   host(l.client_ip) AS client_ip,
+                   l.client_port AS lan_src_port,
+                   l.domain_name,
+                   host(l.resolved_ip) AS domain_ip,
+                   lse.mac_address AS src_mac,
+                   u.email AS user_email,
+                   u.first_name AS user_first_name,
+                   u.last_name AS user_last_name,
+                   NULL::integer AS wan_src_port,
+                   NULL::integer AS dst_port,
+                   'dns'::text AS traffic_source
+            FROM (
+                SELECT id, lookup_timestamp, client_ip, client_port, domain_name, resolved_ip
+                FROM dns_lookups
+                ORDER BY lookup_timestamp DESC
+                LIMIT :limit
+            ) l
+            LEFT JOIN LATERAL (
+                SELECT mac_address FROM ip_leases
+                WHERE host(ip_address::inet) = host(l.client_ip)
+                  AND lease_start <= l.lookup_timestamp
+                  AND lease_expiry > l.lookup_timestamp
+                ORDER BY lease_start DESC LIMIT 1
+            ) lse ON true
+            LEFT JOIN LATERAL (
+                SELECT o.user_id FROM device_ownership o
+                WHERE o.mac_address = lse.mac_address
+                  AND o.start_datetime <= l.lookup_timestamp
+                  AND (o.end_datetime IS NULL OR o.end_datetime > l.lookup_timestamp)
+                ORDER BY o.start_datetime DESC LIMIT 1
+            ) own ON lse.mac_address IS NOT NULL
+            LEFT JOIN users u ON u.id = own.user_id
+        """
+        result = db.session.execute(_text(fast_sql), {'limit': per_page})
+        rows = [dict(r._mapping) for r in result]
+        # Drop the Pi / infrastructure addresses in Python (tiny set).
+        self_set = set(self_ips)
+        rows = [r for r in rows if r.get('client_ip') not in self_set]
+        logger.info("FAST path: %d rows", len(rows))
+        return render_template(
+            'admin_traffic.html',
+            all_columns=ALL_COLUMNS,
+            selected_columns=selected_columns,
+            filters=filters,
+            rows=rows,
+            page=page,
+            per_page=per_page,
+            total=None,
+            total_pages=0,
+            sort_col=sort_col,
+            sort_order=sort_order,
+            using_dns_fallback=using_dns_fallback,
+        )
+
+        count_sql = f"SELECT COUNT(*) FROM {source_view} WHERE {where_clause}"
     logger.info("COUNT SQL:")
     logger.info(count_sql)
     logger.info(f"PARAMS: {params}")
