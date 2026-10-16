@@ -453,6 +453,25 @@ def main():
         }
     }
 
+    # BF_CAPPORT_DNS_V1: RFC 8910 captive portal discovery on access VLANs only.
+    # The HTTPS URL must reach the portal directly from pre-auth networks;
+    # Pi-hole supplies the existing split-horizon DNS record for PORTAL_URL.
+    from urllib.parse import urlsplit
+    capport_url = (os.environ.get("CAPPORT_API_URL") or "").strip()
+    if not capport_url and os.environ.get("PORTAL_URL", "").strip():
+        capport_url = os.environ["PORTAL_URL"].strip().rstrip("/") + "/.well-known/captive-portal"
+    if capport_url:
+        u = urlsplit(capport_url)
+        if (u.scheme != "https" or not u.hostname or u.username or u.password
+                or u.fragment or len(capport_url.encode("utf-8")) > 255):
+            raise ValueError("CAPPORT_API_URL must be an HTTPS URL, max 255 bytes, no credentials/fragment")
+        for subnet in config["Dhcp4"]["subnet4"]:
+            if int(subnet["id"]) == management_vlan:
+                continue
+            opts = subnet.setdefault("option-data", [])
+            opts[:] = [opt for opt in opts
+                       if opt.get("code") != 114 and opt.get("name") not in ("v4-captive-portal", "captive-portal")]
+            opts.append({"name": "v4-captive-portal", "data": capport_url})
     print(json.dumps(config, indent=2))
 
 

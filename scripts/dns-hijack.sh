@@ -221,6 +221,19 @@ refresh_blocked_pool_rules() {
     add_blocked_pool_rules
 }
 
+# BF_CAPPORT_DNS_V1: changing a DNAT rule does not clear tracked DNS flows.
+# Operates only on the MAC's current IP and UDP/TCP port 53, never globally.
+clear_dns_conntrack_for_client() {
+    client_ip="$1"
+    ct_bin="$(command -v conntrack 2>/dev/null || true)"
+    [ -n "$ct_bin" ] || { echo "WARNING: conntrack unavailable in this worker; skipping per-client cleanup" >&2; return 0; }
+    # conntrack -D returns nonzero when no matching entries exist; that's normal.
+    # The Docker image and sudo permissions are installed by this migration.
+    for proto in udp tcp; do
+        $SUDO "$ct_bin" -D -p "$proto" --orig-src "$client_ip" --orig-port-dst 53 2>/dev/null || true
+    done
+}
+
 case "$ACTION" in
     hijack-blocked-pools)
         add_blocked_pool_rules
@@ -251,6 +264,18 @@ case "$ACTION" in
             $SUDO iptables -t nat -D PREROUTING -s "$IP_ADDRESS" -p "$proto" --dport 53 -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null || true
             $SUDO iptables -t nat -D PREROUTING -s "$IP_ADDRESS" -p "$proto" --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null || true
         done
+        # BF_CAPPORT_DNS_V1: fail closed if any per-device DNAT rule remains.
+        for proto in udp tcp; do
+            if $SUDO iptables -t nat -C PREROUTING -s "$IP_ADDRESS" -p "$proto" --dport 53 -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null; then
+                echo "ERROR: DNS DNAT still active for $IP_ADDRESS ($proto)" >&2
+                exit 1
+            fi
+            if $SUDO iptables -t nat -C PREROUTING -s "$IP_ADDRESS" -p "$proto" --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null; then
+                echo "ERROR: legacy DNS DNAT still active for $IP_ADDRESS ($proto)" >&2
+                exit 1
+            fi
+        done
+        clear_dns_conntrack_for_client "$IP_ADDRESS" || exit 1
         echo "DNS hijack removed for $IP_ADDRESS"
         ;;
 
@@ -268,6 +293,18 @@ case "$ACTION" in
             $SUDO iptables -t nat -D PREROUTING -s "$IP_ADDRESS" -p "$proto" --dport 53 -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null || true
             $SUDO iptables -t nat -D PREROUTING -s "$IP_ADDRESS" -p "$proto" --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null || true
         done
+        # BF_CAPPORT_DNS_V1: fail closed if any per-device DNAT rule remains.
+        for proto in udp tcp; do
+            if $SUDO iptables -t nat -C PREROUTING -s "$IP_ADDRESS" -p "$proto" --dport 53 -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null; then
+                echo "ERROR: DNS DNAT still active for $IP_ADDRESS ($proto)" >&2
+                exit 1
+            fi
+            if $SUDO iptables -t nat -C PREROUTING -s "$IP_ADDRESS" -p "$proto" --dport 53 -d "$PORTAL_IP" -j DNAT --to-destination "$HIJACK_DNS_IP":53 2>/dev/null; then
+                echo "ERROR: legacy DNS DNAT still active for $IP_ADDRESS ($proto)" >&2
+                exit 1
+            fi
+        done
+        clear_dns_conntrack_for_client "$IP_ADDRESS" || exit 1
         echo "Device $IP_ADDRESS DNS unhijacked"
         ;;
 

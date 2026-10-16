@@ -487,20 +487,31 @@ def windows_captive_portal_detection():
 @portal_bp.route('/.well-known/captive-portal')
 @limiter.exempt
 def rfc8908_captive_portal():
-    mac_address = get_client_mac()
+    """RFC 8908 JSON endpoint, advertised by DHCP option 114.
+
+    This reflects provisioning completion, not an external HTTPS probe.
+    Fail closed on unknown devices, stale leases or DB errors.
+    """
+    # BF_CAPPORT_DNS_V1
     portal_url = build_portal_url(url_for('portal.register'))
     captive = True
-    if mac_address:
-        device = Device.query.filter_by(mac_address=mac_address).first()
-        if device:
-            if not device.internet_blocked and device.internet_accessible:
+    try:
+        # Operating systems do not send a MAC parameter. get_client_mac() must
+        # determine it from the on-site source IP and Kea/portal lease records.
+        mac_address = get_client_mac()
+        if mac_address:
+            device = Device.query.filter_by(mac_address=mac_address).first()
+            ownership = get_active_ownership(mac_address) if device else None
+            if (device and ownership and not device.internet_blocked
+                    and device.internet_accessible is True
+                    and _access_enforcement_cleared(mac_address)):
                 captive = False
+    except Exception as exc:
+        logger.warning('CAPPORT status check failed (fail closed): %s', exc)
     resp = jsonify({'captive': captive, 'user-portal-url': portal_url})
     resp.headers['Content-Type'] = 'application/captive+json'
     resp.headers['Cache-Control'] = 'no-store'
     return resp
-
-
 # ---------------------------------------------------------------------------
 # Root / portal entry point
 # ---------------------------------------------------------------------------

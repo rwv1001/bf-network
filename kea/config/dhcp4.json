@@ -106,6 +106,10 @@
           {
             "name": "routers",
             "data": "10.7.11.31"
+          },
+          {
+            "name": "v4-captive-portal",
+            "data": "https://lon.english.op.org/.well-known/captive-portal"
           }
         ],
         "reservations": [
@@ -175,6 +179,10 @@
           {
             "name": "routers",
             "data": "10.7.21.31"
+          },
+          {
+            "name": "v4-captive-portal",
+            "data": "https://lon.english.op.org/.well-known/captive-portal"
           }
         ],
         "reservations": [
@@ -244,6 +252,10 @@
           {
             "name": "routers",
             "data": "10.7.31.31"
+          },
+          {
+            "name": "v4-captive-portal",
+            "data": "https://lon.english.op.org/.well-known/captive-portal"
           }
         ],
         "reservations": [
@@ -313,6 +325,10 @@
           {
             "name": "routers",
             "data": "10.7.41.31"
+          },
+          {
+            "name": "v4-captive-portal",
+            "data": "https://lon.english.op.org/.well-known/captive-portal"
           }
         ],
         "reservations": [
@@ -382,6 +398,10 @@
           {
             "name": "routers",
             "data": "10.7.51.31"
+          },
+          {
+            "name": "v4-captive-portal",
+            "data": "https://lon.english.op.org/.well-known/captive-portal"
           }
         ],
         "reservations": [
@@ -446,6 +466,10 @@
           {
             "name": "domain-name-servers",
             "data": "10.7.99.5"
+          },
+          {
+            "name": "v4-captive-portal",
+            "data": "https://lon.english.op.org/.well-known/captive-portal"
           }
         ],
         "reservations": [

@@ -2581,6 +2581,9 @@ write_pi_env_file() {
         
 
         write_env_line PORTAL_URL "$PORTAL_URL"
+        # BF_CAPPORT_DNS_V1: RFC 8910 DHCP option 114, same HTTPS origin as portal.
+        # Do not include /register here: option 114 points to the JSON API.
+        write_env_line CAPPORT_API_URL "${PORTAL_URL%/}/.well-known/captive-portal"
         write_env_line PORTAL_POLL_URL "$PORTAL_POLL_URL"
 
         write_env_line WAN_IFACE "$WAN_IFACE"

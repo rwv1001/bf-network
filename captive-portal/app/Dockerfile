@@ -5,12 +5,14 @@ ARG PORTAL_GID=1000
 
 WORKDIR /app
 
+# BF_CAPPORT_DNS_V1: include conntrack for precise DNS NAT cleanup
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     gcc \
     postgresql-client \
     curl \
     iptables \
+    conntrack \
     iproute2 \
     openssh-client \
     docker.io \
@@ -44,7 +46,7 @@ RUN set -eux; \
     chown -R ${PORTAL_UID}:${PORTAL_GID} /app ./scripts/scriptdata 2>/dev/null || true; \
     \
     # Sudo rights
-    echo "portal ALL=(ALL) NOPASSWD: /usr/sbin/iptables, /usr/bin/docker, /usr/local/bin/python3, /usr/bin/python3, /sbin/ip, /usr/sbin/ip" >> /etc/sudoers
+    echo "portal ALL=(ALL) NOPASSWD: /usr/sbin/iptables, /usr/sbin/conntrack, /usr/bin/docker, /usr/local/bin/python3, /usr/bin/python3, /sbin/ip, /usr/sbin/ip" >> /etc/sudoers
 
 # Default; override at runtime via Compose environment
 ENV PORTAL_FORWARD_PORT=8081
