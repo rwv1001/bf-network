@@ -454,33 +454,6 @@
 
 <!-- Results -->
 
-{% if split_view %}
-<h3 style="margin-top:2em;">NAT sessions</h3>
-<div class="table-responsive">
-    <table>
-        <thead><tr>
-            <th>Time</th><th>Client IP</th><th>Src port</th><th>Domain</th>
-            <th>Dest IP</th><th>Dest port</th><th>MAC</th><th>User</th>
-        </tr></thead>
-        <tbody>
-        {% for row in nat_rows %}
-            <tr>
-                <td>{{ row.lookup_timestamp.strftime('%Y-%m-%d %H:%M:%S') if row.lookup_timestamp else '—' }}</td>
-                <td>{{ row.client_ip or '—' }}</td>
-                <td>{{ row.lan_src_port or '—' }}</td>
-                <td>{{ row.domain_name or '—' }}</td>
-                <td>{{ row.domain_ip or '—' }}</td>
-                <td>{{ row.dst_port or '—' }}</td>
-                <td>{{ row.src_mac or '—' }}</td>
-                <td>{{ row.user_email or '—' }}</td>
-            </tr>
-        {% else %}
-            <tr><td colspan="8">No NAT sessions</td></tr>
-        {% endfor %}
-        </tbody>
-    </table>
-</div>
-{% endif %}
 
 <div class="pagination-controls">
     <div class="pagination-info">
@@ -508,6 +481,7 @@
 </div>
 
 
+{% if split_view %}<h3>DNS lookups</h3>{% endif %}
 <div class="table-responsive">
     <table>
         <thead>
@@ -552,6 +526,35 @@
 </div>
 
 <!-- Mobile cards -->
+
+{% if split_view %}
+<h3 style="margin-top:2em;">NAT sessions</h3>
+<div class="table-responsive">
+    <table>
+        <thead><tr>
+            <th>Time</th><th>Client IP</th><th>Src port</th><th>Domain</th>
+            <th>Dest IP</th><th>Dest port</th><th>MAC</th><th>User</th>
+        </tr></thead>
+        <tbody>
+        {% for row in nat_rows %}
+            <tr>
+                <td>{{ row.lookup_timestamp.strftime('%Y-%m-%d %H:%M:%S') if row.lookup_timestamp else '—' }}</td>
+                <td>{{ row.client_ip or '—' }}</td>
+                <td>{{ row.lan_src_port or '—' }}</td>
+                <td>{{ row.domain_name or '—' }}</td>
+                <td>{{ row.domain_ip or '—' }}</td>
+                <td>{{ row.dst_port or '—' }}</td>
+                <td>{{ row.src_mac or '—' }}</td>
+                <td>{{ row.user_email or '—' }}</td>
+            </tr>
+        {% else %}
+            <tr><td colspan="8">No NAT sessions</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
 <div class="mobile-cards">
     {% if rows %}
     {% for row in rows %}
