@@ -1,0 +1,18 @@
+{
+  "description": "Add indexes on the tables behind traffic_combined so the admin traffic viewer no longer full-scans on load",
+  "env": {
+    "add": [],
+    "remove": []
+  },
+  "db": {
+    "up": "commit-migrations/2239483-up.sh",
+    "down": "commit-migrations/2239483-down.sh",
+    "verify_up": [
+      {"type": "index", "name": "idx_dl_timestamp"},
+      {"type": "index", "name": "idx_dl_client_ip"},
+      {"type": "index", "name": "idx_nat_sessions_time"}
+    ],
+    "verify_down": []
+  },
+  "notes": "traffic_combined is a VIEW (dns_traffic_view UNION ALL nat_sessions_enriched), so it cannot be indexed directly. These indexes are on the base tables the view reads. All statements use IF NOT EXISTS / IF EXISTS so the migration is safe on installs that already have them. The accompanying traffic.py change (no CAST, statement_timeout on the count) is what stops the 504; these indexes make the remaining scan cheaper."
+}

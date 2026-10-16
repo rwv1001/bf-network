@@ -276,14 +276,13 @@ def traffic():
         ip_col = 'src_ip'
     else:
         ip_col = 'client_ip'
+    # Exclude the Pi and infrastructure addresses without casting the column.
+    # CAST(client_ip AS TEXT) NOT IN (...) forces a sequential scan of the
+    # whole traffic table and is what was producing the 504.
     self_ips = sorted(_pi_self_ips() | _infra_ips())
-    self_params = {}
-    placeholders = []
-    for i, ip in enumerate(self_ips):
-        self_params[f'self_ip_{i}'] = ip
-        placeholders.append(f':self_ip_{i}')
-    where_clause += f" AND CAST({ip_col} AS TEXT) NOT IN ({', '.join(placeholders)})"
-    params.update(self_params)
+    if self_ips:
+        params['self_ips'] = self_ips
+        where_clause += f" AND {ip_col}::text <> ALL(:self_ips)"
 
     # ====================== DEBUG: SQL Queries ======================
     logger.info("=" * 80)
@@ -328,10 +327,16 @@ def traffic():
     logger.info(count_sql)
     logger.info(f"PARAMS: {params}")
 
-    total = db.session.execute(
-        _text(f"SELECT COUNT(*) FROM {source_view} WHERE {where_clause}"),
-        params,
-    ).scalar()
+    # Cap the count so a large table cannot hold the request past the proxy
+    # timeout. On timeout, page with an unknown total rather than 504.
+    total = None
+    try:
+        db.session.execute(_text("SET LOCAL statement_timeout = '12s'"))
+        total = db.session.execute(_text(count_sql), params).scalar()
+    except Exception as exc:
+        logger.warning("traffic count timed out or failed: %s", exc)
+        db.session.rollback()
+        total = None
 
     offset = (page - 1) * per_page
     order_clause = f"{sort_col} {sort_order.upper()}"
@@ -356,7 +361,7 @@ def traffic():
     logger.info(f"Results: total={total}, rows returned={len(rows)}")
     logger.info("=" * 80)
 
-    total_pages = (total + per_page - 1) // per_page if per_page > 0 else 0
+    total_pages = ((total + per_page - 1) // per_page if per_page > 0 else 0) if total is not None else 0
 
     return render_template(
         'admin_traffic.html',
