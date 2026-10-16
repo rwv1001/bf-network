@@ -411,6 +411,70 @@ def traffic():
             split_view=True,
         )
 
+    # Filtered domain search: hit dns_lookups directly (indexed on domain_name)
+    # instead of the traffic_combined view.
+    if has_query_params and not using_dns_fallback and filters.get('domain_name') and len(filters) == 1:
+        like = filters['domain_name']
+        if '%' not in like:
+            like = f'%{like}%'
+        filt_sql = """
+            SELECT l.id AS lookup_id,
+                   l.lookup_timestamp,
+                   host(l.client_ip) AS client_ip,
+                   l.client_port AS lan_src_port,
+                   l.domain_name,
+                   host(l.resolved_ip) AS domain_ip,
+                   lse.mac_address AS src_mac,
+                   u.email AS user_email,
+                   u.first_name AS user_first_name,
+                   u.last_name AS user_last_name
+            FROM (
+                SELECT id, lookup_timestamp, client_ip, client_port, domain_name, resolved_ip
+                FROM dns_lookups
+                WHERE domain_name ILIKE :like
+                ORDER BY lookup_timestamp DESC
+                LIMIT :limit OFFSET :offset
+            ) l
+            LEFT JOIN LATERAL (
+                SELECT mac_address FROM ip_leases
+                WHERE host(ip_address::inet) = host(l.client_ip)
+                  AND lease_start <= l.lookup_timestamp
+                  AND lease_expiry > l.lookup_timestamp
+                ORDER BY lease_start DESC LIMIT 1
+            ) lse ON true
+            LEFT JOIN LATERAL (
+                SELECT o.user_id FROM device_ownership o
+                WHERE o.mac_address = lse.mac_address
+                  AND o.start_datetime <= l.lookup_timestamp
+                  AND (o.end_datetime IS NULL OR o.end_datetime > l.lookup_timestamp)
+                ORDER BY o.start_datetime DESC LIMIT 1
+            ) own ON lse.mac_address IS NOT NULL
+            LEFT JOIN users u ON u.id = own.user_id
+        """
+        rows = [dict(r._mapping) for r in db.session.execute(
+            _text(filt_sql), {'like': like, 'limit': per_page, 'offset': (page-1)*per_page}
+        )]
+        self_set = set(self_ips)
+        rows = [r for r in rows if r.get('client_ip') not in self_set]
+        logger.info("FILTER path domain=%s rows=%d", like, len(rows))
+        return render_template(
+            'admin_traffic.html',
+            all_columns=ALL_COLUMNS,
+            selected_columns=selected_columns,
+            filters=filters,
+            rows=rows,
+            dns_rows=rows,
+            nat_rows=[],
+            page=page,
+            per_page=per_page,
+            total=None,
+            total_pages=0,
+            sort_col=sort_col,
+            sort_order=sort_order,
+            using_dns_fallback=using_dns_fallback,
+            split_view=False,
+        )
+
         count_sql = f"SELECT COUNT(*) FROM {source_view} WHERE {where_clause}"
     logger.info("COUNT SQL:")
     logger.info(count_sql)
