@@ -413,11 +413,23 @@ def traffic():
 
     # Filtered domain search: hit dns_lookups directly (indexed on domain_name)
     # instead of the traffic_combined view.
-    if has_query_params and not using_dns_fallback and filters.get('domain_name') and len(filters) == 1:
-        like = filters['domain_name']
-        if '%' not in like:
-            like = f'%{like}%'
-        filt_sql = """
+    if has_query_params and not using_dns_fallback and set(filters) <= {'domain_name', 'domain_ip', 'client_ip'}:
+        wheres = []
+        fparams = {'limit': per_page, 'offset': (page-1)*per_page}
+        if filters.get('domain_name'):
+            v = filters['domain_name']
+            fparams['dn'] = v if '%' in v else f'%{v}%'
+            wheres.append('domain_name ILIKE :dn')
+        if filters.get('domain_ip'):
+            v = filters['domain_ip']
+            fparams['dip'] = v if '%' in v else f'%{v}%'
+            wheres.append('host(resolved_ip) ILIKE :dip')
+        if filters.get('client_ip'):
+            v = filters['client_ip']
+            fparams['cip'] = v if '%' in v else f'%{v}%'
+            wheres.append('host(client_ip) ILIKE :cip')
+        where_sql = ' AND '.join(wheres) if wheres else 'TRUE'
+        filt_sql = f"""
             SELECT l.id AS lookup_id,
                    l.lookup_timestamp,
                    host(l.client_ip) AS client_ip,
@@ -431,7 +443,7 @@ def traffic():
             FROM (
                 SELECT id, lookup_timestamp, client_ip, client_port, domain_name, resolved_ip
                 FROM dns_lookups
-                WHERE domain_name ILIKE :like
+                WHERE {where_sql}
                 ORDER BY lookup_timestamp DESC
                 LIMIT :limit OFFSET :offset
             ) l
@@ -452,11 +464,11 @@ def traffic():
             LEFT JOIN users u ON u.id = own.user_id
         """
         rows = [dict(r._mapping) for r in db.session.execute(
-            _text(filt_sql), {'like': like, 'limit': per_page, 'offset': (page-1)*per_page}
+            _text(filt_sql), fparams
         )]
         self_set = set(self_ips)
         rows = [r for r in rows if r.get('client_ip') not in self_set]
-        logger.info("FILTER path domain=%s rows=%d", like, len(rows))
+        logger.info("FILTER path filters=%s rows=%d", filters, len(rows))
         return render_template(
             'admin_traffic.html',
             all_columns=ALL_COLUMNS,
@@ -475,7 +487,7 @@ def traffic():
             split_view=False,
         )
 
-        count_sql = f"SELECT COUNT(*) FROM {source_view} WHERE {where_clause}"
+    count_sql = f"SELECT COUNT(*) FROM {source_view} WHERE {where_clause}"
     logger.info("COUNT SQL:")
     logger.info(count_sql)
     logger.info(f"PARAMS: {params}")
