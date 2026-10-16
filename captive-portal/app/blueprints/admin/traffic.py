@@ -322,12 +322,11 @@ def traffic():
         select_cols_sql = ', '.join(c for c, _ in ALL_COLUMNS)
         effective_sort = sort_col if sort_col in {c for c, _ in ALL_COLUMNS} else 'lookup_timestamp'
 
-    # Fast path: unfiltered first page. The traffic_combined view does a
-    # DISTINCT ON plus three lateral joins per row, so even LIMIT 50 scans
-    # a large fraction of the table. Pull the newest rows from dns_lookups
-    # (indexed on lookup_timestamp) and enrich only those.
+    # Fast path: two independent tables. DNS lookups enriched with device
+    # ownership only (no NAT join). NAT sessions enriched with ownership only
+    # (no anti-join against DNS). Both use the timestamp indexes and LIMIT.
     if not has_query_params and not using_dns_fallback and page == 1 and sort_col == 'lookup_timestamp' and sort_order == 'desc':
-        fast_sql = """
+        dns_sql = """
             SELECT l.id AS lookup_id,
                    l.lookup_timestamp,
                    host(l.client_ip) AS client_ip,
@@ -337,10 +336,7 @@ def traffic():
                    lse.mac_address AS src_mac,
                    u.email AS user_email,
                    u.first_name AS user_first_name,
-                   u.last_name AS user_last_name,
-                   NULL::integer AS wan_src_port,
-                   NULL::integer AS dst_port,
-                   'dns'::text AS traffic_source
+                   u.last_name AS user_last_name
             FROM (
                 SELECT id, lookup_timestamp, client_ip, client_port, domain_name, resolved_ip
                 FROM dns_lookups
@@ -363,18 +359,48 @@ def traffic():
             ) own ON lse.mac_address IS NOT NULL
             LEFT JOIN users u ON u.id = own.user_id
         """
-        result = db.session.execute(_text(fast_sql), {'limit': per_page})
-        rows = [dict(r._mapping) for r in result]
-        # Drop the Pi / infrastructure addresses in Python (tiny set).
+        nat_sql = """
+            SELECT n.session_id AS lookup_id,
+                   n.session_start AS lookup_timestamp,
+                   host(n.src_ip::inet) AS client_ip,
+                   n.src_port AS lan_src_port,
+                   n.domain_name,
+                   host(n.dst_ip::inet) AS domain_ip,
+                   n.src_mac,
+                   u.email AS user_email,
+                   u.first_name AS user_first_name,
+                   u.last_name AS user_last_name,
+                   n.dst_port
+            FROM (
+                SELECT session_id, session_start, src_ip, src_port, dst_ip, dst_port,
+                       domain_name, src_mac
+                FROM nat_sessions_enriched
+                ORDER BY session_start DESC
+                LIMIT :limit
+            ) n
+            LEFT JOIN LATERAL (
+                SELECT o.user_id FROM device_ownership o
+                WHERE o.mac_address = n.src_mac
+                  AND o.start_datetime <= n.session_start
+                  AND (o.end_datetime IS NULL OR o.end_datetime > n.session_start)
+                ORDER BY o.start_datetime DESC LIMIT 1
+            ) own ON n.src_mac IS NOT NULL
+            LEFT JOIN users u ON u.id = own.user_id
+        """
+        dns_rows = [dict(r._mapping) for r in db.session.execute(_text(dns_sql), {'limit': per_page})]
+        nat_rows = [dict(r._mapping) for r in db.session.execute(_text(nat_sql), {'limit': per_page})]
         self_set = set(self_ips)
-        rows = [r for r in rows if r.get('client_ip') not in self_set]
-        logger.info("FAST path: %d rows", len(rows))
+        dns_rows = [r for r in dns_rows if r.get('client_ip') not in self_set]
+        nat_rows = [r for r in nat_rows if r.get('client_ip') not in self_set]
+        logger.info("FAST path: dns=%d nat=%d", len(dns_rows), len(nat_rows))
         return render_template(
             'admin_traffic.html',
             all_columns=ALL_COLUMNS,
             selected_columns=selected_columns,
             filters=filters,
-            rows=rows,
+            rows=dns_rows,
+            dns_rows=dns_rows,
+            nat_rows=nat_rows,
             page=page,
             per_page=per_page,
             total=None,
@@ -382,6 +408,7 @@ def traffic():
             sort_col=sort_col,
             sort_order=sort_order,
             using_dns_fallback=using_dns_fallback,
+            split_view=True,
         )
 
         count_sql = f"SELECT COUNT(*) FROM {source_view} WHERE {where_clause}"
