@@ -376,373 +376,248 @@
 {% block content %}
 {% if using_dns_fallback %}
 <div style="background:#fff3cd;border:1px solid #ffc107;border-radius:6px;padding:12px 16px;margin-bottom:16px;color:#856404;">
-  <strong>&#9888; DNS lookup data not yet available</strong> — showing Pi-hole blocked queries as a temporary fallback.
-  DNS lookup data will appear once the dns-parser has processed at least one dnsmasq log line with client IP information.
+  <strong>DNS lookup data not yet available.</strong> Showing Pi-hole blocked queries as a temporary fallback.
 </div>
 {% endif %}
+
 <div class="filter-section">
-    <h3>Column Selection & Filters</h3>
-
+    <h3>Column Selection &amp; Filters</h3>
     <form method="get" action="{{ url_for('admin.traffic.traffic') }}" id="filterForm">
-        <!-- Column Selector -->
-        <div style="margin-bottom: 20px;">
-            <label style="font-weight: 600; margin-bottom: 10px; display: block;">Select Columns to Display:</label>
-            <div class="column-selector">
-                {% for col_name, col_label in all_columns %}
-                <label>
-                    <input type="checkbox" name="columns" value="{{ col_name }}"
-                           {% if col_name in selected_columns %}checked{% endif %}>
-                    {{ col_label }}
-                </label>
-                {% endfor %}
-            </div>
-            <div style="margin-top: 12px;">
-                <button type="submit" class="btn btn-primary" id="updateColumnsBtn" style="padding: 8px 20px;">Update Columns</button>
-            </div>
+        <label style="font-weight:600;margin-bottom:10px;display:block">Select Columns to Display:</label>
+        <div class="column-selector">
+            {% for col_name, col_label in all_columns %}
+            <label>
+                <input type="checkbox" name="columns" value="{{ col_name }}" {% if col_name in selected_columns %}checked{% endif %}>
+                {{ col_label }}
+            </label>
+            {% endfor %}
         </div>
-
-        <!-- Filter Help -->
         <div class="filter-help">
-            <strong>Filter Syntax (use filters in table below):</strong>
-            <div style="margin-left: 15px;">
-                • <strong>Text columns:</strong> Use <code>%</code> as wildcard (e.g., <code>%google%</code> or just <code>google</code>)<br>
-                • <strong>Date columns:</strong>
-                  <code>2026-02-17</code> (exact day),
-                  <code>&gt;2026-02-15</code> (after),
-                  <code>&lt;2026-02-20</code> (before),
-                  <code>2026-02-15 to 2026-02-17</code> (range)<br>
-                • Leave blank to show all results
-            </div>
+            <strong>Filter syntax</strong>
+            Enter part of a name or address; use <code>%</code> as a wildcard.
+            For Time: <code>2026-10-17</code>, <code>&gt;2026-10-15</code>,
+            <code>&lt;2026-10-20</code>, or <code>2026-10-15 to 2026-10-17</code>.
+            All nonempty filters must match the same record. Leave fields blank for all traffic.
         </div>
-
-        <!-- Per Page Selector -->
-        <div class="filter-item" style="max-width: 200px;">
-            <label for="per_page">Rows per page:</label>
+        <div class="filter-item" style="max-width:200px;margin:14px 0">
+            <label for="per_page">Rows per table</label>
             <select name="per_page" id="per_page">
-                ... existing options ...
+                {% for count in [10, 25, 50, 100, 200, 500] %}
+                <option value="{{ count }}" {% if per_page == count %}selected{% endif %}>{{ count }}</option>
+                {% endfor %}
             </select>
         </div>
-
-        <!-- Filter Inputs (moved inside the form for reliable submission) -->
-        <div style="margin: 15px 0;">
-            <label style="font-weight: 600; display: block; margin-bottom: 8px;">Filters</label>
-            <div class="filters-grid">
-                {% for col_name in selected_columns %}
-                    {% set col_label = dict(all_columns)[col_name] %}
-                    <div class="filter-item">
-                        <label>{{ col_label }}</label>
-                        <input type="text"
-                               name="filter_{{ col_name }}"
-                               value="{{ filters.get(col_name, '') }}"
-                               placeholder="{% if col_name in ['session_start', 'session_end'] %}YYYY-MM-DD{% else %}filter...{% endif %}">
-                    </div>
-                {% endfor %}
+        <label style="font-weight:600;margin-bottom:8px;display:block">Filters</label>
+        <div class="filters-grid">
+            {% for col_name in selected_columns %}
+            <div class="filter-item">
+                <label for="filter_{{ col_name }}">{{ dict(all_columns)[col_name] }}</label>
+                <input id="filter_{{ col_name }}" type="text" name="filter_{{ col_name }}"
+                       value="{{ filters.get(col_name, '') }}" placeholder="filter..." autocomplete="off">
             </div>
+            {% endfor %}
         </div>
-
-        <!-- Hidden fields for sorting -->
-        <input type="hidden" name="sort" value="{{ sort_col }}">
-        <input type="hidden" name="order" value="{{ sort_order }}">
-
-        <!-- Action Buttons -->
+        <input type="hidden" name="dns_sort" value="{{ dns.sort }}">
+        <input type="hidden" name="dns_order" value="{{ dns.order }}">
+        <input type="hidden" name="dns_page" value="1">
+        <input type="hidden" name="nat_sort" value="{{ nat.sort }}">
+        <input type="hidden" name="nat_order" value="{{ nat.order }}">
+        <input type="hidden" name="nat_page" value="1">
         <div class="filter-actions">
-            <button type="submit" class="btn btn-primary">Apply Filters</button>
-            <a href="{{ url_for('admin.traffic.traffic') }}" class="btn btn-secondary">Reset</a>
+            <button type="submit" class="btn btn-primary">Apply Filters / Update Columns</button>
+            <a href="{{ url_for('admin.traffic.traffic', reset=1) }}" class="btn btn-secondary traffic-link traffic-reset">Reset Filters &amp; Sorting</a>
         </div>
     </form>
 </div>
 
-<!-- Results -->
-
-
-<div class="pagination-controls">
-    <div class="pagination-info">
-        Showing {{ ((page - 1) * per_page) + 1 if total and total > 0 else 0 }} - {{ [page * per_page, total]|min if total else (page * per_page) }} of {{ total if total is not none else 'many' }} sessions
-    </div>
-    <div class="pagination-buttons">
-        {% if page > 1 %}
-        <a href="{{ url_for('admin.traffic.traffic', page=page-1, per_page=per_page, sort=sort_col, order=sort_order, columns=selected_columns, **filters) }}">
-            ← Previous
-        </a>
-        {% else %}
-        <span style="color: #ccc;">← Previous</span>
-        {% endif %}
-
-        <span>Page {{ page }} of {{ total_pages }}</span>
-
-        {% if page < total_pages %}
-        <a href="{{ url_for('admin.traffic.traffic', page=page+1, per_page=per_page, sort=sort_col, order=sort_order, columns=selected_columns, **filters) }}">
-            Next →
-        </a>
-        {% else %}
-        <span style="color: #ccc;">Next →</span>
-        {% endif %}
-    </div>
+<div id="traffic-auto-controls" style="display:flex;align-items:center;gap:10px;margin:8px 0;flex-wrap:wrap;font-size:0.9em">
+    <span id="tv-countdown">Refreshing in <strong id="tv-secs">60</strong>s</span>
+    <button type="button" id="tv-pause" class="btn btn-secondary" style="padding:5px 9px">Pause</button>
+    <button type="button" id="tv-now" class="btn btn-primary" style="padding:5px 9px">Refresh now</button>
+    <span id="traffic-status" role="status" aria-live="polite"></span>
 </div>
 
-
-{% if split_view %}<h3>DNS lookups</h3>{% endif %}
-<div class="table-responsive">
-    <table>
-        <thead>
-            <tr>
+<div id="traffic-results">
+{% for kind, table_data in [('dns', dns), ('nat', nat)] %}
+<section class="traffic-table-section" id="{{ kind }}-traffic">
+    <h3>{{ 'DNS Lookups' if kind == 'dns' else 'NAT Sessions' }}</h3>
+    <div class="pagination-controls">
+        <div class="pagination-info">
+            {% if table_data.rows %}
+            Showing {{ (table_data.page - 1) * per_page + 1 }}–{{ (table_data.page - 1) * per_page + (table_data.rows|length) }}
+            {% if table_data.has_next %}(more records available){% endif %}
+            {% else %}No records on this page{% endif %}
+        </div>
+        <div class="pagination-buttons">
+            {% if table_data.page > 1 %}
+                <a class="traffic-link" href="{{ link_for(kind, page=table_data.page-1) }}">&larr; Previous</a>
+            {% else %}<span>Previous</span>{% endif %}
+            <span>Page {{ table_data.page }}</span>
+            {% if table_data.has_next %}
+                <a class="traffic-link" href="{{ link_for(kind, page=table_data.page+1) }}">Next &rarr;</a>
+            {% else %}<span>Next</span>{% endif %}
+        </div>
+    </div>
+    <div class="table-responsive">
+        <table>
+            <thead><tr>
                 {% for col_name in selected_columns %}
-                {% set col_label = dict(all_columns)[col_name] %}
-                <th class="sortable {% if sort_col == col_name %}active{% endif %}">
-                    <a href="#" onclick="sortTable('{{ col_name }}'); return false;">
-                        {{ col_label }}
-                        {% if sort_col == col_name %}
-                        <span class="sort-arrow">{{ '▲' if sort_order == 'asc' else '▼' }}</span>
-                        {% endif %}
+                <th class="sortable {% if table_data.sort == col_name %}active{% endif %}"
+                    aria-sort="{{ 'ascending' if table_data.sort == col_name and table_data.order == 'asc' else ('descending' if table_data.sort == col_name else 'none') }}">
+                    <a class="traffic-link" href="{{ link_for(kind, col=col_name) }}"
+                       title="Sort {{ 'DNS' if kind == 'dns' else 'NAT' }} by {{ dict(all_columns)[col_name] }}">
+                        {{ dict(all_columns)[col_name] }}
+                        {% if table_data.sort == col_name %}<span class="sort-arrow">{{ '▲' if table_data.order == 'asc' else '▼' }}</span>{% endif %}
                     </a>
                 </th>
                 {% endfor %}
-            </tr>
-        </thead>
-        {% if rows %}
-        <tbody>
-            {% for row in rows %}
-            <tr>
-                {% for col_name in selected_columns %}
-                <td>
-                    {% if row[col_name] is none %}
-                    <span style="color: #999;">—</span>
-                    {% elif col_name in ['session_start', 'session_end'] %}
-                    {{ row[col_name].strftime('%Y-%m-%d %H:%M:%S') if row[col_name] else '—' }}
-                    {% elif col_name == 'duration_seconds' %}
-                    {{ "%.2f"|format(row[col_name]) if row[col_name] else '0.00' }}
-                    {% elif col_name == 'domain_name' %}
-                    <span class="truncate" title="{{ row[col_name] }}">{{ row[col_name] }}</span>
-                    {% else %}
-                    {{ row[col_name] }}
-                    {% endif %}
-                </td>
-                {% endfor %}
-            </tr>
-            {% endfor %}
-        </tbody>
-        {% endif %}
-    </table>
-</div>
-
-<!-- Mobile cards -->
-
-{% if split_view %}
-<h3 style="margin-top:2em;">NAT sessions</h3>
-<div class="table-responsive">
-    <table>
-        <thead><tr>
-            <th>Time</th><th>Client IP</th><th>Src port</th><th>Domain</th>
-            <th>Dest IP</th><th>Dest port</th><th>MAC</th><th>User</th>
-        </tr></thead>
-        <tbody>
-        {% for row in nat_rows %}
-            <tr>
-                <td>{{ row.lookup_timestamp.strftime('%Y-%m-%d %H:%M:%S') if row.lookup_timestamp else '—' }}</td>
-                <td>{{ row.client_ip or '—' }}</td>
-                <td>{{ row.lan_src_port or '—' }}</td>
-                <td>{{ row.domain_name or '—' }}</td>
-                <td>{{ row.domain_ip or '—' }}</td>
-                <td>{{ row.dst_port or '—' }}</td>
-                <td>{{ row.src_mac or '—' }}</td>
-                <td>{{ row.user_email or '—' }}</td>
-            </tr>
-        {% else %}
-            <tr><td colspan="8">No NAT sessions</td></tr>
-        {% endfor %}
-        </tbody>
-    </table>
-</div>
-{% endif %}
-
-<div class="mobile-cards">
-    {% if rows %}
-    {% for row in rows %}
-    <div class="mobile-card">
-        {% for col_name in selected_columns %}
-        {% set col_label = dict(all_columns)[col_name] %}
-        <div class="mobile-card-row">
-            <span class="mobile-card-label">{{ col_label }}</span>
-            <span class="mobile-card-value">
-                {% if row[col_name] is none %}
-                <span style="color:#999;">—</span>
-                {% elif col_name in ['session_start', 'session_end'] %}
-                {{ row[col_name].strftime('%Y-%m-%d %H:%M') if row[col_name] else '—' }}
-                {% elif col_name == 'duration_seconds' %}
-                {{ "%.2f"|format(row[col_name]) if row[col_name] else '0.00' }}
+            </tr></thead>
+            <tbody>
+                {% for row in table_data.rows %}
+                <tr>
+                    {% for col_name in selected_columns %}
+                    {% set value = row.get(col_name) %}
+                    <td>
+                        {% if value is none %}<span style="color:#888">—</span>
+                        {% elif col_name == 'lookup_timestamp' %}{{ value.strftime('%Y-%m-%d %H:%M:%S') }}
+                        {% elif col_name == 'domain_name' %}<span class="truncate" title="{{ value }}">{{ value }}</span>
+                        {% else %}{{ value }}{% endif %}
+                    </td>
+                    {% endfor %}
+                </tr>
                 {% else %}
-                {{ row[col_name] }}
-                {% endif %}
-            </span>
+                <tr><td colspan="{{ selected_columns|length }}" class="empty-state">
+                    {% if table_data.error %}{{ table_data.error }}
+                    {% elif filters %}No matching {{ 'DNS' if kind == 'dns' else 'NAT' }} records. Adjust or reset the filters.
+                    {% else %}No {{ 'DNS' if kind == 'dns' else 'NAT' }} records found.{% endif %}
+                </td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <div class="mobile-cards">
+        {% for row in table_data.rows %}
+        <div class="mobile-card">
+            {% for col_name in selected_columns %}
+            {% set value = row.get(col_name) %}
+            <div class="mobile-card-row">
+                <span class="mobile-card-label">{{ dict(all_columns)[col_name] }}</span>
+                <span class="mobile-card-value">{{ value if value is not none else '—' }}</span>
+            </div>
+            {% endfor %}
         </div>
-        {% endfor %}        
-    </div>
-    {% endfor %}
-    {% endif %}
-</div>
-{% if rows %}
-<div class="pagination-controls">
-    <div class="pagination-info">
-        Showing {{ ((page - 1) * per_page) + 1 if total and total > 0 else 0 }} - {{ [page * per_page, total]|min if total else (page * per_page) }} of {{ total if total is not none else 'many' }} sessions
-    </div>
-    <div class="pagination-buttons">
-        {% if page > 1 %}
-        <a href="{{ url_for('admin.traffic.traffic', page=page-1, per_page=per_page, sort=sort_col, order=sort_order, columns=selected_columns, **filters) }}">
-            ← Previous
-        </a>
         {% else %}
-        <span style="color: #ccc;">← Previous</span>
-        {% endif %}
-
-        <span>Page {{ page }} of {{ total_pages }}</span>
-
-        {% if page < total_pages %}
-        <a href="{{ url_for('admin.traffic.traffic', page=page+1, per_page=per_page, sort=sort_col, order=sort_order, columns=selected_columns, **filters) }}">
-            Next →
-        </a>
-        {% else %}
-        <span style="color: #ccc;">Next →</span>
-        {% endif %}
+        <div class="empty-state">No matching records.</div>
+        {% endfor %}
     </div>
+</section>
+{% endfor %}
 </div>
-{% endif %}
-{% if rows %}
-{% else %}
-<div class="empty-state">
-    <h3>No traffic sessions found</h3>
-    <p>Try adjusting your filters or check back later.</p>
-</div>
-{% endif %}
 
 <script>
-function sortTable(column) {
-    const form = document.getElementById('filterForm');
-    const sortInput = form.querySelector('input[name="sort"]');
-    const orderInput = form.querySelector('input[name="order"]');
-
-    if (sortInput.value === column) {
-        orderInput.value = orderInput.value === 'asc' ? 'desc' : 'asc';
-    } else {
-        sortInput.value = column;
-        orderInput.value = 'desc';
-    }
-
-    form.submit();
-}
-
-document.addEventListener('DOMContentLoaded', function() {
-    const filterInputs = document.querySelectorAll('tr.filter-row input');
-    filterInputs.forEach(input => {
-        input.addEventListener('keypress', function(e) {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                document.getElementById('filterForm').submit();
-            }
-        });
-    });
-
-    function syncMobileFilters() {
-        document.querySelectorAll('.mobile-filter-input').forEach(function(inp) {
-            const target = document.getElementById(inp.dataset.target);
-            if (target) target.value = inp.value;
-        });
-    }
-    document.querySelectorAll('.mobile-filter-input').forEach(function(inp) {
-        inp.addEventListener('keypress', function(e) {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                syncMobileFilters();
-                document.getElementById('filterForm').submit();
-            }
-        });
-    });
-
-    const initialColumns = new Set({{ selected_columns|tojson }});
-    const columnCheckboxes = document.querySelectorAll('.column-selector input[type="checkbox"]');
-    const updateColumnsBtn = document.getElementById('updateColumnsBtn');
-
-    function checkColumnsChanged() {
-        const currentColumns = new Set();
-        columnCheckboxes.forEach(checkbox => {
-            if (checkbox.checked) {
-                currentColumns.add(checkbox.value);
-            }
-        });
-
-        const changed = initialColumns.size !== currentColumns.size ||
-                       [...initialColumns].some(col => !currentColumns.has(col));
-
-        updateColumnsBtn.disabled = !changed;
-        if (changed) {
-            updateColumnsBtn.style.opacity = '1';
-            updateColumnsBtn.style.cursor = 'pointer';
-        } else {
-            updateColumnsBtn.style.opacity = '0.5';
-            updateColumnsBtn.style.cursor = 'not-allowed';
-        }
-    }
-
-    checkColumnsChanged();
-
-    columnCheckboxes.forEach(checkbox => {
-        checkbox.addEventListener('change', checkColumnsChanged);
-    });
-
-    const form = document.getElementById('filterForm');
-    form.addEventListener('submit', function() {
-        syncMobileFilters();
-
-        if (!updateColumnsBtn.disabled) {
-            updateColumnsBtn.disabled = true;
-            updateColumnsBtn.textContent = 'Updating...';
-            updateColumnsBtn.style.opacity = '0.6';
-        }
-    });
-});
-
-// Auto-refresh every 60 seconds
-(function() {
-    const REFRESH_INTERVAL = 60000;
-    let countdown = REFRESH_INTERVAL / 1000;
+(function () {
+    'use strict';
+    const REFRESH_SECONDS = 60;
+    let countdown = REFRESH_SECONDS;
     let paused = false;
-    let timer = null;
-
-    const tableWrapper = document.querySelector('.table-responsive') || document.querySelector('table');
-    if (!tableWrapper) return;
-
-    const bar = document.createElement('div');
-    bar.style.cssText = 'display:flex;align-items:center;gap:12px;margin-bottom:8px;font-size:0.85em;color:#666;';
-    bar.innerHTML = `
-        <span id="tv-countdown">Refreshing in <b id="tv-secs">${countdown}</b>s</span>
-        <button id="tv-pause" style="font-size:0.85em;padding:2px 8px;cursor:pointer;">Pause</button>
-        <button id="tv-now" style="font-size:0.85em;padding:2px 8px;cursor:pointer;">Refresh now</button>
-    `;
-    tableWrapper.parentNode.insertBefore(bar, tableWrapper);
-
+    let activeController = null;
+    let requestSerial = 0;
+    const statusEl = document.getElementById('traffic-status');
     const secsEl = document.getElementById('tv-secs');
     const pauseBtn = document.getElementById('tv-pause');
-    const nowBtn = document.getElementById('tv-now');
 
-    function doRefresh() {
-        window.location.href = window.location.href;
+    function status(message, isError) {
+        statusEl.textContent = message;
+        statusEl.style.color = isError ? '#a32727' : '#456448';
     }
 
-    function tick() {
-        if (paused) return;
-        countdown--;
-        secsEl.textContent = countdown;
-        if (countdown <= 0) doRefresh();
+    async function loadTraffic(url, options = {}) {
+        // Abort an older refresh if a user clicks another header or filter.
+        const serial = ++requestSerial;
+        if (activeController) activeController.abort();
+        activeController = new AbortController();
+        status('Updating…', false);
+        try {
+            const response = await fetch(url, {
+                credentials: 'same-origin',
+                headers: { 'X-Requested-With': 'XMLHttpRequest' },
+                signal: activeController.signal
+            });
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            const html = await response.text();
+            if (serial !== requestSerial) return;
+            const newPage = new DOMParser().parseFromString(html, 'text/html');
+            const newResults = newPage.getElementById('traffic-results');
+            if (!newResults) throw new Error('Traffic results missing; your login may have expired');
+            const currentResults = document.getElementById('traffic-results');
+            currentResults.replaceWith(newResults);
+
+            const replacement = newPage.getElementById('filterForm');
+            if (options.updateForm) {
+                if (replacement) document.getElementById('filterForm').replaceWith(replacement);
+            } else if (replacement) {
+                // Keep newly selected sort orders in the form without erasing
+                // unsubmitted filter edits when a header is clicked.
+                const form = document.getElementById('filterForm');
+                replacement.querySelectorAll('input[type="hidden"]').forEach(function (field) {
+                    const current = form.querySelector('input[name="' + field.name + '"]');
+                    if (current) current.value = field.value;
+                });
+            }
+            const finalUrl = new URL(response.url, window.location.href);
+            if (options.history === 'push') {
+                window.history.pushState({}, '', finalUrl.pathname + finalUrl.search);
+            }
+            countdown = REFRESH_SECONDS;
+            secsEl.textContent = countdown;
+            status('', false);
+            // Do not scroll, focus or navigate. Only the results are replaced.
+        } catch (error) {
+            if (error.name !== 'AbortError' && serial === requestSerial) {
+                status('Unable to refresh: ' + error.message, true);
+            }
+        }
     }
 
-    timer = setInterval(tick, 1000);
-
-    pauseBtn.addEventListener('click', function() {
-        paused = !paused;
-        pauseBtn.textContent = paused ? 'Resume' : 'Pause';
-        document.getElementById('tv-countdown').style.opacity = paused ? '0.4' : '1';
+    document.addEventListener('submit', function (event) {
+        if (event.target.id !== 'filterForm') return;
+        event.preventDefault();
+        const form = event.target;
+        const params = new URLSearchParams(new FormData(form));
+        params.set('dns_page', '1');
+        params.set('nat_page', '1');
+        params.set('save', '1');
+        loadTraffic(form.action + '?' + params.toString(), { updateForm: true, history: 'push' });
     });
 
-    nowBtn.addEventListener('click', doRefresh);
+    document.addEventListener('click', function (event) {
+        const link = event.target.closest('a.traffic-link');
+        if (!link) return;
+        if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button !== 0) return;
+        event.preventDefault();
+        loadTraffic(link.href, {
+            updateForm: link.classList.contains('traffic-reset'),
+            history: 'push'
+        });
+    });
+
+    pauseBtn.addEventListener('click', function () {
+        paused = !paused;
+        pauseBtn.textContent = paused ? 'Resume' : 'Pause';
+        if (!paused) countdown = REFRESH_SECONDS;
+    });
+    document.getElementById('tv-now').addEventListener('click', function () {
+        loadTraffic(window.location.href);
+    });
+    window.addEventListener('popstate', function () {
+        loadTraffic(window.location.href, { updateForm: true });
+    });
+    setInterval(function () {
+        if (paused || activeController && !activeController.signal.aborted && statusEl.textContent === 'Updating…') return;
+        countdown -= 1;
+        secsEl.textContent = countdown;
+        if (countdown <= 0) loadTraffic(window.location.href);
+    }, 1000);
 })();
 </script>
 {% endblock %}
