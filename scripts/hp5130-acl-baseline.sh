@@ -97,13 +97,23 @@ def switch_last_octet():
         return 2
 
 def switch_ip_for_subnet(cidr, fallback=None):
-    if fallback:
-        return fallback
+    # This script runs once PER SWITCH. A policy JSON may have been exported
+    # while looking at the gateway switch (.31). Do not copy a gateway's
+    # switch_ip to a new member (.32): that creates duplicate SVI addresses.
+    # Preserve a custom switch_ip only when it belongs to THIS host and subnet.
     net = ipaddress.ip_network(cidr, strict=False)
     host_id = switch_last_octet()
+    if fallback:
+        try:
+            explicit = ipaddress.ip_address(str(fallback))
+            if (explicit in net and not explicit.is_multicast and
+                    int(str(explicit).split('.')[-1]) == host_id):
+                return str(explicit)
+        except ValueError:
+            pass
     candidate = int(net.network_address) + host_id
     if candidate >= int(net.broadcast_address):
-        candidate = int(net.network_address) + 2
+        raise SystemExit(f"Cannot derive a unique switch IP in {cidr} for host offset {host_id}")
     return str(ipaddress.ip_address(candidate))
 
 def parse_visible(value):
@@ -596,7 +606,12 @@ log "Sending ACL/PBR baseline to switch ${SWITCH_HOST}"
 log "Command block:"
 printf '%s\n' "$CMDS" >&2
 
-SWITCH_OUT=$(printf '%s\n' "$CMDS" | ssh -tt $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}" 2>&1 || true)
+# A failed SSH session must NEVER be reported as a successful baseline.
+# The previous `|| true` masked permission, timeout and connection errors.
+if ! SWITCH_OUT=$(printf '%s\n' "$CMDS" | ssh -tt $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}" 2>&1); then
+  log "ERROR: SSH baseline push to ${SWITCH_HOST} failed: ${SWITCH_OUT}"
+  exit 1
+fi
 
 log "Switch output:"
 printf '%s\n' "$SWITCH_OUT" >&2

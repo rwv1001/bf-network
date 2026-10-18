@@ -62,6 +62,7 @@ FORGET_SECRET_KEY=""
 FORGET_ALL_SECRETS=0
 SHOW_STATE_ONLY=0
 ADD_SWITCH=0
+FINISH_ADD_SWITCH=0
 STATE_READY=0
 STATE_PASSPHRASE=""
 STATE_FORMAT_EXPECTED="bf-network-installer-state-v1"
@@ -93,6 +94,10 @@ parse_args() {
         case "$1" in
             --add-switch)
                 ADD_SWITCH=1
+                shift
+                ;;
+            --finish-add-switch)
+                FINISH_ADD_SWITCH=1
                 shift
                 ;;
             --state-file)
@@ -154,8 +159,11 @@ parse_args() {
 Usage: sudo ./installer.sh [options]
 
 Options:
-  --add-switch            Configure one extra 5130 for an existing site, then exit.
-                          With --config NAME, reuse that config's SSH key, username and VLANs.
+  --add-switch            Configure an extra 5130 over serial, then offer a safe
+                           Pi-based ACL/PBR integration step after the trunk is connected.
+  --finish-add-switch     Resume Pi-based integration without touching serial/port config.
+                           Use the same --config NAME/site state as --add-switch.
+                           Reuses the last add-switch name, management IP, and ports.
   --state-file PATH       Use a different encrypted state file.
   --reset-state           Delete the saved state and start from scratch.
   --forget-answer KEY     Forget one cached prompt answer, then continue.
@@ -932,7 +940,7 @@ interface $iface
 description Inter-switch link
 port link-type trunk
 port trunk permit vlan $permit
-port trunk pvid vlan 1
+port trunk pvid vlan 2
 arp detection trust
 dhcp snooping trust
 #
@@ -991,14 +999,23 @@ compose_member_switch_config() {
     last="$(last_octet "$mgmt_ip")"
     radius="${SAVED_ANSWERS[RADIUS_SERVER]:-${RADIUS_SERVER:-}}"
     portal="${SAVED_ANSWERS[PORTAL_IP]:-${PORTAL_IP:-}}"
-    secret="${SAVED_ANSWERS[RADIUS_SECRET]:-${RADIUS_SECRET:-}}"
+    # The original installer uses ensure_generated_secret RADIUS_SECRET;
+    # it lives in GENERATED_SECRETS, not SAVED_ANSWERS.  Never invent a new
+    # site secret while adding a switch or silently omit RADIUS.
+    secret="${GENERATED_SECRETS[RADIUS_SECRET]:-${SAVED_ANSWERS[add_switch_radius_secret]:-${RADIUS_SECRET:-}}}"
 
-    VLAN_CONFIG=""
+    [ -n "$secret" ] || die "Missing existing site RADIUS secret. Use the original --config state or enter the exact existing secret; do not generate a new one."
+
+    VLAN_CONFIG="vlan 1
+name unused_native
+description UNUSED-NATIVE-UNTAGGED
+#
+"
     local vlan
     local -a user_vlans=()
     read -r -a user_vlans <<< "$ADD_SW_USER_VLANS"
     for vlan in "${user_vlans[@]}"; do
-        VLAN_CONFIG+=$(build_managed_vlan_stanza "$vlan" "")
+        VLAN_CONFIG+=$(build_managed_vlan_stanza "$vlan" "${SAVED_ANSWERS[vlan_${vlan}_name]:-}")
         VLAN_CONFIG+=$'\n'
     done
     VLAN_CONFIG+=$(build_managed_vlan_stanza "$ADD_SW_MGMT_VLAN" "management")
@@ -1006,7 +1023,16 @@ compose_member_switch_config() {
     VLAN_CONFIG+=$(build_managed_vlan_stanza "$ADD_SW_WIRED_VLAN" "wired_unregistered")
     VLAN_CONFIG+=$'\n'
     for vlan in $ADD_SW_ISP_VLANS; do
-        VLAN_CONFIG+=$(build_managed_vlan_stanza "$vlan" "" "UPLINK-TO-ISP")
+        local isp_idx=$((vlan - ${SAVED_ANSWERS[isp_vlan_base]:-${ISP_VLAN_BASE:-2}}))
+        local isp_name="${SAVED_ANSWERS[isp_${isp_idx}_name]:-ISP}"
+        VLAN_CONFIG+=$(build_managed_vlan_stanza "$vlan" "$isp_name" "UPLINK-TO-${isp_name}")
+        VLAN_CONFIG+=$'\n'
+    done
+
+    for ((ext_index=0; ext_index<${SAVED_ANSWERS[num_external_vlans]:-0}; ext_index++)); do
+        local ext_id="${SAVED_ANSWERS[external_vlan_${ext_index}_id]:-}"
+        [ -n "$ext_id" ] || die "Missing external VLAN #$ext_index in site state"
+        VLAN_CONFIG+=$(build_managed_vlan_stanza "$ext_id" "external_${ext_id}")
         VLAN_CONFIG+=$'\n'
     done
 
@@ -1097,7 +1123,7 @@ mac-authentication domain macauth
 #
 "
     else
-        echo "WARNING: RADIUS server or secret missing; mac-authentication will not be configured on ${ADD_SW_NAME}."
+        die "Cannot provision a switch without the site's existing RADIUS configuration."
     fi
 
     NTP_CONFIG=""
@@ -1138,6 +1164,235 @@ scheduler schedule nightly-backup
 "
 }
 
+# Finish a previously serial-configured member switch.  This stage is
+# deliberately separate and resumable: it never re-runs the console installer.
+# Run only after setting up the existing-end trunk and physically connecting it.
+finish_add_switch_on_pi() {
+    info "Complete add-switch: ACL/PBR baseline and Pi site registration"
+    local sw_ip="${SAVED_ANSWERS[add_switch_mgmt_ip]:-}"
+    local sw_name="${SAVED_ANSWERS[add_switch_name]:-}"
+    local sw_ge="${SAVED_ANSWERS[add_switch_max_1g]:-48}"
+    [ -n "$sw_ip" ] && [ -n "$sw_name" ] || die "No add-switch state found. Run --add-switch first with the same --config."
+    python3 - "$sw_ip" <<'PYVALIDATE'
+import ipaddress,sys
+ipaddress.IPv4Address(sys.argv[1])
+PYVALIDATE
+
+    local pi_default="${SAVED_ANSWERS[pi_wifi_ip_after_cutover]:-${SAVED_ANSWERS[PI_WIFI_IP]:-}}"
+    local pi_user_default="${SAVED_ANSWERS[PI_USER]:-admin}"
+    local pi_key_default="${SAVED_ANSWERS[pi_key_path]:-}"
+    local pi_repo_default="${SAVED_ANSWERS[PI_REPO_DIR]:-/home/${pi_user_default}/bf-network}"
+    if [ -n "$pi_default" ]; then
+        prompt_default FINISH_PI_IP "Reachable Pi SSH address" "$pi_default" "add_switch_pi_ip"
+    else
+        prompt_required FINISH_PI_IP "Reachable Pi SSH address" "add_switch_pi_ip"
+    fi
+    # If already saved from an interrupted finish, use the saved value.
+    # Otherwise use the original site's address without changing site-wide state.
+    prompt_default FINISH_PI_USER "Pi SSH username" "$pi_user_default" "add_switch_pi_user"
+    prompt_default FINISH_PI_KEY "Pi SSH private key" "$pi_key_default" "add_switch_pi_key"
+    prompt_default FINISH_PI_REPO "Pi bf-network repository path" "$pi_repo_default" "add_switch_pi_repo"
+    [ -f "$FINISH_PI_KEY" ] || die "Pi SSH key missing: $FINISH_PI_KEY"
+    local octet
+    octet="$(last_octet "$sw_ip")"
+    echo "Pi: $FINISH_PI_USER@$FINISH_PI_IP (repo $FINISH_PI_REPO)"
+    echo "Switch: $sw_name / $sw_ip / GE max $sw_ge"
+    echo "The switch must already be connected to the existing switch on its trunk."
+    local confirm
+    read -r -p "Apply the existing site's ACL/PBR policy, then update Pi .env and restart Kea/web? [y/N] " confirm
+    is_yes "$confirm" || { echo 'No changes made to the Pi.'; return 0; }
+
+    # All arguments are shell-quoted as a single SSH remote command.
+    # Never interpolate a user's .env file with shell source/eval.
+    local repair answer_repair
+    read -r -p "Is this an EXISTING switch missing RADIUS/macauth or inter-switch native VLAN? Repair both now? [y/N] " answer_repair
+    repair=0
+    is_yes "$answer_repair" && repair=1
+
+    local q_repo q_ip q_octet q_ge q_repair q_isl remote_cmd
+    q_repo="$(shell_quote "$FINISH_PI_REPO")"
+    q_ip="$(shell_quote "$sw_ip")"
+    q_octet="$(shell_quote "$octet")"
+    q_ge="$(shell_quote "$sw_ge")"
+    q_repair="$(shell_quote "$repair")"
+    q_isl="$(shell_quote "${SAVED_ANSWERS[add_switch_isl_port]:-}")"
+    remote_cmd="sudo -n bash -s -- $q_repo $q_ip $q_octet $q_ge $q_repair $q_isl"
+    ssh -i "$FINISH_PI_KEY" -o BatchMode=yes -o IdentitiesOnly=yes \
+        -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 \
+        "${FINISH_PI_USER}@${FINISH_PI_IP}" "$remote_cmd" <<'REMOTE_ADD_SWITCH'
+set -euo pipefail
+repo="$1"; sw_ip="$2"; octet="$3"; max_ge="$4"; repair="$5"; isl_num="$6"
+umask 077
+cd "$repo"
+test -f .env || { echo 'Pi site .env is missing' >&2; exit 1; }
+test -f scripts/hp5130-acl-baseline.sh || { echo 'ACL baseline script missing on Pi; deploy updated repository first' >&2; exit 1; }
+# Baseline's old version silently succeeded after SSH failures and could copy
+# Cam-01's SVI addresses to a member. Require the matching safe baseline.
+grep -q 'Cannot derive a unique switch IP' scripts/hp5130-acl-baseline.sh || {
+  echo 'Deploy the matching patched hp5130-acl-baseline.sh on the Pi first' >&2; exit 1;
+}
+# Do not recreate containers before the baseline: the switch remains outside
+# SWITCH_HOSTS until it has its required ACL/PBR protections.
+docker compose ps --status running kea | grep -q kea || { echo 'Kea is not running' >&2; exit 1; }
+docker compose exec -T kea python3 -c '
+import json
+p="/scripts/scriptdata/hp5130-policy.json"
+a=json.load(open(p))
+assert a.get("routers") and a.get("vlans"), "Empty router/VLAN policy; configure site ISP/VLAN policy first"
+print("Policy ready: %d routers, %d VLANs" % (len(a["routers"]), len(a["vlans"])))
+'
+# Older serial installers skipped the RADIUS settings and used PVID 1 on
+# inter-switch links. Only repair if explicitly requested: never overwrite a
+# port or RADIUS configuration on an already-working switch by default.
+if [ "$repair" = 1 ]; then
+    echo "Repairing existing switch RADIUS/macauth and inter-switch PVID..."
+    case "$isl_num" in ''|*[!0-9]*) echo 'Missing/invalid ISL port number' >&2; exit 1;; esac
+    [ "$isl_num" -gt 0 ] && [ "$isl_num" -le 52 ] || { echo 'ISL port outside 1..52' >&2; exit 1; }
+    if [ "$isl_num" -le "$max_ge" ]; then
+        isl_if="GigabitEthernet1/0/$isl_num"
+    else
+        isl_if="Ten-GigabitEthernet1/0/$isl_num"
+    fi
+    repair_file="$(mktemp)"; repair_reply="$(mktemp)"
+    trap 'rm -f "$repair_file" "$repair_reply"' EXIT
+    python3 - .env "$sw_ip" "$isl_if" > "$repair_file" <<'PYRADIUS'
+from pathlib import Path
+import re,shlex,sys,ipaddress
+ipaddress.ip_address(sys.argv[2])
+settings={}
+for line in Path(sys.argv[1]).read_text().splitlines():
+    m=re.match(r'^\s*(RADIUS_SECRET|RADIUS_SERVER)\s*=\s*(.*?)\s*$',line)
+    if m:
+        tok=shlex.split(m.group(2),comments=True)
+        if len(tok)!=1: raise SystemExit('Missing or invalid '+m.group(1))
+        settings[m.group(1)]=tok[0]
+secret=settings.get('RADIUS_SECRET','')
+server=settings.get('RADIUS_SERVER','')
+if not re.fullmatch(r'[A-Za-z0-9_.~+-]+',secret):
+    raise SystemExit('Unsupported characters in RADIUS_SECRET; configure manually')
+ipaddress.IPv4Address(server)
+print('system-view')
+print('radius scheme rad1')
+print('primary authentication '+server)
+print('primary accounting '+server)
+print('key authentication simple '+secret)
+print('key accounting simple '+secret)
+print('user-name-format without-domain')
+print('nas-ip '+sys.argv[2])
+print('quit')
+print('radius dynamic-author server')
+print('client ip '+server+' key simple '+secret)
+print('quit')
+print('domain macauth')
+print('authentication lan-access radius-scheme rad1')
+print('authorization lan-access radius-scheme rad1')
+print('accounting lan-access radius-scheme rad1')
+print('quit')
+print('mac-authentication')
+print('mac-authentication domain macauth')
+print('interface '+sys.argv[3])
+print('port trunk pvid vlan 2')
+print('quit')
+print('save force')
+print('quit')
+print('quit')
+PYRADIUS
+    # Neither the input commands (RADIUS key) nor echoed SSH output are printed.
+    if ! docker compose exec -T -e "SWITCH_HOSTS=$sw_ip" kea sh -c '
+       exec ssh -tt -i "$SWITCH_KEY_PATH" -p "${SWITCH_SSH_PORT:-22}" \
+          -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa \
+          -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 \
+          "${SWITCH_USER}@${SWITCH_HOSTS}"
+    ' < "$repair_file" > "$repair_reply" 2>&1; then
+        echo 'RADIUS/ISL repair SSH failed. Commands not printed because they contain a secret.' >&2
+        exit 1
+    fi
+    if grep -Eiq 'Invalid|Error|Incomplete|Unrecognized|Ambiguous' "$repair_reply"; then
+        echo 'RADIUS/ISL repair reported a Comware command error. Check on switch console.' >&2
+        exit 1
+    fi
+    rm -f "$repair_file" "$repair_reply"
+    trap - EXIT
+    echo 'RADIUS/macauth and ISL PVID repair sent successfully.'
+fi
+
+echo "Applying current site ACL/PBR policy to $sw_ip before adding it to SWITCH_HOSTS..."
+docker compose exec -T -e "SWITCH_HOSTS=$sw_ip" kea /scripts/hp5130-acl-baseline.sh
+
+# Persist switches atomically, preserving site .env ownership and comments.
+# A dated backup is made before changing anything.  No source/eval of .env.
+python3 - .env "$sw_ip" "$octet" "$max_ge" <<'PYENV'
+from pathlib import Path
+import datetime, os, re, shlex, stat, sys, tempfile
+p=Path(sys.argv[1]); sw_ip=sys.argv[2]; octet=sys.argv[3]; max_ge=int(sys.argv[4])
+orig=p.read_text(); lines=orig.splitlines(keepends=True)
+vals={}
+for line in lines:
+    m=re.match(r'^\s*(SWITCH_HOSTS|SWITCH_HOSTS_BYTES|WATCHDOG_SWITCH_HOSTS|SWITCH_GE_MAX)\s*=\s*(.*?)\s*$',line)
+    if m:
+        s=m.group(2).strip()
+        try:
+            parts=shlex.split(s, comments=True)
+            vals[m.group(1)]=' '.join(parts)
+        except ValueError as exc:
+            raise SystemExit('Malformed .env value for '+m.group(1)+': '+str(exc))
+if not vals.get('SWITCH_HOSTS'):
+    raise SystemExit('No existing SWITCH_HOSTS in .env; refusing to invent site topology')
+def unique(items):
+    return list(dict.fromkeys(items))
+new_hosts=unique(vals['SWITCH_HOSTS'].split()+[sw_ip])
+old_octets=[s.strip() for s in vals.get('SWITCH_HOSTS_BYTES','').split(',') if s.strip()]
+if not old_octets:
+    old_octets=[x.rsplit('.',1)[-1] for x in vals['SWITCH_HOSTS'].split()]
+new_octets=unique(old_octets+[octet])
+watch=unique(vals.get('WATCHDOG_SWITCH_HOSTS',vals['SWITCH_HOSTS']).split()+[sw_ip])
+updates={'SWITCH_HOSTS':' '.join(new_hosts),'SWITCH_HOSTS_BYTES':','.join(new_octets),
+         'WATCHDOG_SWITCH_HOSTS':' '.join(watch),
+         'SWITCH_GE_MAX':str(max(max_ge,int(vals.get('SWITCH_GE_MAX') or 48)))}
+for k,v in updates.items():
+    if not re.fullmatch(r'[0-9A-Za-z_,. ]+',v):
+        raise SystemExit('Unsafe environment value: '+k)
+seen=set(); out=[]
+for line in lines:
+    m=re.match(r'^(\s*)(SWITCH_HOSTS|SWITCH_HOSTS_BYTES|WATCHDOG_SWITCH_HOSTS|SWITCH_GE_MAX)\s*=.*$',line)
+    if m:
+        k=m.group(2)
+        if k in seen:
+            raise SystemExit('Duplicate key '+k+' in .env; refusing ambiguous change')
+        seen.add(k)
+        out.append(m.group(1)+k+"='"+updates[k]+"'\n")
+    else: out.append(line)
+for k,v in updates.items():
+    if k not in seen: out.append(k+"='"+v+"'\n")
+new=''.join(out)
+if new==orig:
+    print('Site .env already contains switch; no changes needed')
+else:
+    stamp=datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+    backup=p.with_name(p.name+'.before-add-switch-'+stamp)
+    backup.write_text(orig); os.chmod(backup,stat.S_IMODE(p.stat().st_mode)); os.chown(backup,p.stat().st_uid,p.stat().st_gid)
+    fd,name=tempfile.mkstemp(prefix='.env.add-switch-',dir=p.parent)
+    try:
+        with os.fdopen(fd,'w') as f:
+            f.write(new); f.flush(); os.fsync(f.fileno())
+        os.chmod(name,stat.S_IMODE(p.stat().st_mode))
+        os.chown(name,p.stat().st_uid,p.stat().st_gid)
+        os.replace(name,p)
+    finally:
+        if os.path.exists(name): os.unlink(name)
+    print('Updated site .env. Backup:',backup)
+print('SWITCH_HOSTS:', updates['SWITCH_HOSTS'])
+print('SWITCH_HOSTS_BYTES:', updates['SWITCH_HOSTS_BYTES'])
+PYENV
+
+echo 'Restarting Kea and web to load the new switch list...'
+docker compose up -d --no-deps --force-recreate kea web watchdog
+echo "DONE: $sw_ip added to site switch list and ACL/PBR baseline applied."
+REMOTE_ADD_SWITCH
+    echo "Next: refresh Switch Ports in the admin UI and assign roles."
+    echo "Do not attach clients to ports with stale/unreviewed configurations."
+}
+
 add_switch_to_existing_network() {
     info "Add one HP 5130 to an existing network"
     if [ -n "$CONFIG_NAME" ]; then
@@ -1163,6 +1418,13 @@ add_switch_to_existing_network() {
     prompt_default ADD_SW_MGMT_VLAN "Management VLAN" "$default_mgmt" "MANAGEMENT_VLAN"
     prompt_default ADD_SW_WIRED_VLAN "Wired unregistered VLAN" "$default_wired" "WIRED_VLAN"
     prompt_default ADD_SW_USER_VLANS "User VLAN IDs already in use (space separated)" "$default_vlans" "vlan_input"
+    # Reuse the site-wide encrypted RADIUS secret. If this is a state from a
+    # different machine, request the EXISTING secret explicitly.
+    if [ -z "${GENERATED_SECRETS[RADIUS_SECRET]:-${SAVED_ANSWERS[add_switch_radius_secret]:-}}" ]; then
+        echo "The original site's RADIUS_SECRET is not present in this encrypted installer state."
+        echo "Enter the existing secret from the Pi .env (DO NOT generate a new one)."
+        prompt_secret_required ADD_SW_RADIUS_SECRET "Existing site's RADIUS shared secret" "add_switch_radius_secret"
+    fi
     # ISP uplink VLANs are site-wide. Once the site config has them, every
     # additional switch uses the same list. Do not store this as an
     # add_switch_* answer: --forget-add-switch would ask again.
@@ -1197,10 +1459,26 @@ add_switch_to_existing_network() {
     octet="$(last_octet "$ADD_SW_IP")"
     net_base="$(echo "$ADD_SW_IP" | awk -F. '{print $1"."$2}')"
     permit="$ADD_SW_ISP_VLANS $ADD_SW_USER_VLANS $ADD_SW_MGMT_VLAN $ADD_SW_WIRED_VLAN"
+    # Extra user-defined VLANs must be permitted on both ends of the trunk.
+    # Their SVI addresses are site-specific and require a separate port/VLAN
+    # management step; we do not silently invent addresses in other subnets.
+    local ext_count="${SAVED_ANSWERS[num_external_vlans]:-0}"
+    local ext_index ext_id
+    if [[ "$ext_count" =~ ^[0-9]+$ ]]; then
+        for ((ext_index=0; ext_index<ext_count; ext_index++)); do
+            ext_id="${SAVED_ANSWERS[external_vlan_${ext_index}_id]:-}"
+            [ -n "$ext_id" ] || die "External VLAN #$ext_index missing in saved site config"
+            permit+=" $ext_id"
+        done
+    fi
     isl_iface="$(get_interface "$ADD_SW_ISL" "$ADD_SW_MAX_1G")"
     PUBLIC_KEY="$(comware_public_key_body "${ADD_SW_KEY}.pub")" \
         || die "Failed to convert ${ADD_SW_KEY}.pub to HP 5130 format."
     compose_member_switch_config "$ADD_SW_IP" "$isl_iface" "$permit"
+    if [ "${SAVED_ANSWERS[num_external_vlans]:-0}" -gt 0 ]; then
+        echo "WARNING: site external VLANs were added to the trunk, but their new"
+        echo "switch SVI IPs require explicit configuration in the ports/VLAN UI."
+    fi
 
     info "Serial configure $ADD_SW_NAME ($ADD_SW_IP)"
     echo "Connect the USB serial cable to the NEW switch only."
@@ -1231,6 +1509,7 @@ New switch $ADD_SW_NAME is configured. Do this before plugging the trunk in.
     description Inter-switch link
     port link-type trunk
     port trunk permit vlan ${permit}
+    port trunk pvid vlan 2
     arp detection trust
     dhcp snooping trust
    quit
@@ -1239,7 +1518,11 @@ New switch $ADD_SW_NAME is configured. Do this before plugging the trunk in.
 
 2. Plug ${isl_iface} on ${ADD_SW_NAME} into ${ADD_SW_EXISTING_ISL}.
 
-3. On the Pi, edit the site .env. SWITCH_HOSTS_BYTES is what the portal uses
+3. The next integration step can update the Pi .env and apply the ACL/PBR
+   baseline, using the currently deployed policy. If that step is deferred,
+   do these manually BEFORE putting any clients on the new switch.
+
+   On the Pi, edit the site .env. SWITCH_HOSTS_BYTES is what the portal uses
    (last octet on ${net_base}.${ADD_SW_MGMT_VLAN}.x). Append ${octet}.
    If this switch has more 1G ports than the current SWITCH_GE_MAX, raise it
    (and keep SWITCH_XGE_MAX small — Ten-Gig ports are few).
@@ -1253,7 +1536,11 @@ New switch $ADD_SW_NAME is configured. Do this before plugging the trunk in.
    cd /home/admin/bf-network
    docker compose up -d kea web --force-recreate --no-deps
 
-4. In the admin UI, refresh switch ports. ${isl_iface} should show as
+4. If doing manual integration, you MUST also run the ACL/PBR baseline on
+   ${ADD_SW_IP} (see the provided README). This is NOT part of the serial phase.
+   An unbaselined switch must not be used for clients.
+
+5. In the admin UI, refresh switch ports. ${isl_iface} should show as
    inter_switch. Leave the other ports unknown until you assign roles.
 
 SSH check, from a host that can reach the management VLAN:
@@ -1264,6 +1551,15 @@ SSH check, from a host that can reach the management VLAN:
     ${ADD_SW_USER}@${ADD_SW_IP}
 
 EOF
+    echo "IMPORTANT: This switch is NOT complete until the ACL/PBR baseline"
+    echo "has been applied from the Pi and verified."
+    local answer
+    read -r -p "After configuring the existing trunk and CONNECTING the switches, run Pi-based integration now? [y/N] " answer
+    if is_yes "$answer"; then
+        finish_add_switch_on_pi
+    else
+        echo "Finish later with: sudo ./installer.sh --finish-add-switch${CONFIG_NAME:+ --config $CONFIG_NAME}"
+    fi
 }
 
 validate_private_base() {
@@ -4582,6 +4878,10 @@ else
 fi
 REAL_HOME="$(eval echo "~$REAL_USER")"
 
+if [ "$FINISH_ADD_SWITCH" -eq 1 ]; then
+    finish_add_switch_on_pi
+    exit 0
+fi
 if [ "$ADD_SWITCH" -eq 1 ]; then
     add_switch_to_existing_network
     exit 0
@@ -6576,7 +6876,7 @@ authorization lan-access radius-scheme rad1
 accounting lan-access radius-scheme rad1
 #
 mac-authentication
-mac-authentication domain 
+mac-authentication domain macauth
 #
 stp bpdu-protection
 #
