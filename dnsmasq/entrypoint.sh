@@ -56,6 +56,11 @@ while IFS= read -r domain; do
   add_domain_mapping "$domain" "$PORTAL_IP"
 done < /tmp/captive-probe-domains.txt
 
+if [ -n "${PORTAL_URL:-}" ]; then
+  portal_host=$(printf '%s' "$PORTAL_URL" | sed -E 's#^https?://##; s#/.*##; s#:[0-9]+$##')
+  add_domain_mapping "$portal_host" "$PORTAL_IP"
+fi
+
 if [ "$preauth_enabled" = "1" ]; then
   printf '%s\n' "$PREAUTH_MS_DOMAINS" | tr ',;' '\n\n' > /tmp/captive-ms-domains.txt
   while IFS= read -r domain; do
