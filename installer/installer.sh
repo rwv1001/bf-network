@@ -163,13 +163,15 @@ Options:
                            Pi-based ACL/PBR integration step after the trunk is connected.
   --finish-add-switch     Resume Pi-based integration without touching serial/port config.
                            Use the same --config NAME/site state as --add-switch.
-                           Reuses the last add-switch name, management IP, and ports.
+                           Reuses the last add-switch details, or prompts for an
+                           already-configured switch if --forget-add-switch cleared them.
   --state-file PATH       Use a different encrypted state file.
   --reset-state           Delete the saved state and start from scratch.
   --forget-answer KEY     Forget one cached prompt answer, then continue.
   --forget-add-switch      Forget cached --add-switch answers (name, IP, ports,
                           password). Site config is kept. With --add-switch,
-                          forgets then prompts for the next switch.
+                          prompts for the next serial install; with
+                          --finish-add-switch, prompts for an existing switch.
   --forget-step KEY       Forget one completed checkpoint, then exit.
   --forget-steps          Forget all completed checkpoints (keep answers/secrets), then exit.
   --forget-secret NAME    Forget one generated secret (e.g. DB_PASSWORD), then exit.
@@ -424,11 +426,17 @@ state_init() {
             state_save
             echo "Forgot $forgotten --add-switch answer(s). Site config was kept."
         fi
-        if [ "$ADD_SWITCH" -ne 1 ]; then
+        # Finishing an ALREADY configured switch must not require the serial
+        # installer. The finish stage will ask for a new target IP/name.
+        if [ "$ADD_SWITCH" -ne 1 ] && [ "$FINISH_ADD_SWITCH" -ne 1 ]; then
             state_progress
             exit 0
         fi
-        echo "Continuing into --add-switch for the next switch."
+        if [ "$FINISH_ADD_SWITCH" -eq 1 ]; then
+            echo "Continuing into --finish-add-switch: enter the existing switch details."
+        else
+            echo "Continuing into --add-switch for the next switch."
+        fi
     fi
     
     if [ -n "$FORGET_STEP_KEY" ]; then
@@ -1172,10 +1180,25 @@ finish_add_switch_on_pi() {
     local sw_ip="${SAVED_ANSWERS[add_switch_mgmt_ip]:-}"
     local sw_name="${SAVED_ANSWERS[add_switch_name]:-}"
     local sw_ge="${SAVED_ANSWERS[add_switch_max_1g]:-48}"
-    [ -n "$sw_ip" ] && [ -n "$sw_name" ] || die "No add-switch state found. Run --add-switch first with the same --config."
-    python3 - "$sw_ip" <<'PYVALIDATE'
-import ipaddress,sys
-ipaddress.IPv4Address(sys.argv[1])
+    local recovered_target=0
+    if [ -z "$sw_ip" ] || [ -z "$sw_name" ]; then
+        echo "No pending add-switch name/IP is saved in this installer state."
+        echo "This commonly happens after --forget-add-switch."
+        echo "You can finish an ALREADY SERIAL-CONFIGURED switch without repeating serial setup."
+        echo "Do not enter the IP of a different switch; the baseline changes live ACL/PBR rules."
+        # Re-ask any missing values. prompt_required persists the selected
+        # target in encrypted state so an interrupted finish is resumable.
+        prompt_required sw_name "Sysname of the EXISTING switch to finish" "add_switch_name"
+        prompt_required sw_ip "Existing switch management IPv4 address (for example 10.7.99.32)" "add_switch_mgmt_ip"
+        prompt_default sw_ge "Highest 1Gbps physical port number on this switch" "$sw_ge" "add_switch_max_1g"
+        recovered_target=1
+    fi
+    python3 - "$sw_ip" "$sw_name" "$sw_ge" <<'PYVALIDATE'
+import ipaddress,re,sys
+addr=ipaddress.IPv4Address(sys.argv[1])
+assert not (addr.is_multicast or addr.is_unspecified or addr.is_loopback or addr.is_link_local), 'Invalid switch management address'
+assert re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}',sys.argv[2]), 'Invalid switch sysname'
+assert re.fullmatch(r'[0-9]+',sys.argv[3]) and 1 <= int(sys.argv[3]) <= 52, 'Invalid GE port maximum'
 PYVALIDATE
 
     local pi_default="${SAVED_ANSWERS[pi_wifi_ip_after_cutover]:-${SAVED_ANSWERS[PI_WIFI_IP]:-}}"
@@ -1199,8 +1222,14 @@ PYVALIDATE
     echo "Switch: $sw_name / $sw_ip / GE max $sw_ge"
     echo "The switch must already be connected to the existing switch on its trunk."
     local confirm
-    read -r -p "Apply the existing site's ACL/PBR policy, then update Pi .env and restart Kea/web? [y/N] " confirm
-    is_yes "$confirm" || { echo 'No changes made to the Pi.'; return 0; }
+    if [ "$recovered_target" -eq 1 ]; then
+        echo "RECOVERED TARGET: $sw_name ($sw_ip)"
+        read -r -p "Type the switch management IP ($sw_ip) to authorise changes to THIS switch, or press Enter to cancel: " confirm
+        [ "$confirm" = "$sw_ip" ] || { echo 'Cancelled. No changes made to the Pi.'; return 0; }
+    else
+        read -r -p "Apply the existing site's ACL/PBR policy, then update Pi .env and restart Kea/web? [y/N] " confirm
+        is_yes "$confirm" || { echo 'No changes made to the Pi.'; return 0; }
+    fi
 
     # All arguments are shell-quoted as a single SSH remote command.
     # Never interpolate a user's .env file with shell source/eval.
@@ -1208,6 +1237,21 @@ PYVALIDATE
     read -r -p "Is this an EXISTING switch missing RADIUS/macauth or inter-switch native VLAN? Repair both now? [y/N] " answer_repair
     repair=0
     is_yes "$answer_repair" && repair=1
+    if [ "$repair" -eq 1 ]; then
+        # --forget-add-switch deliberately clears the ISL port. Never guess
+        # a physical interface when issuing PVID changes to a live switch.
+        local isl_port="${SAVED_ANSWERS[add_switch_isl_port]:-}"
+        if [ -z "$isl_port" ]; then
+            prompt_required isl_port "Inter-switch trunk port NUMBER on $sw_name (e.g. 45)" "add_switch_isl_port"
+        fi
+        case "$isl_port" in
+            ''|*[!0-9]*) die "Inter-switch port must be a number (1-52)" ;;
+        esac
+        [ "$isl_port" -ge 1 ] && [ "$isl_port" -le 52 ] || die "Inter-switch port must be between 1 and 52"
+        local port_confirmation
+        read -r -p "Confirm ISL port $isl_port on $sw_name ($sw_ip) for native VLAN 2 repair [y/N]: " port_confirmation
+        is_yes "$port_confirmation" || { echo 'Cancelled. No changes made to the Pi.'; return 0; }
+    fi
 
     local q_repo q_ip q_octet q_ge q_repair q_isl remote_cmd
     q_repo="$(shell_quote "$FINISH_PI_REPO")"
