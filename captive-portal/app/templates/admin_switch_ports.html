@@ -281,6 +281,9 @@
 
 <div class="page-header">
     <h2>Switch Port Roles</h2>
+    <form method="post" action="{{ url_for('admin.switch_ports.refresh') }}" style="display:inline;">
+        <button type="submit" class="btn btn-warning">Refresh ports</button>
+    </form>
 </div>
 <div class="update-ports-bar">
     <button type="button" id="updatePortsBtn" class="btn update-ports-btn" disabled>Update ports</button>
