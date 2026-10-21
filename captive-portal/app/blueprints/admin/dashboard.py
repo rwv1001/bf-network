@@ -132,6 +132,9 @@ def index():
     devices_sort     = request.args.get('devices_sort',     'first_seen')
     devices_order    = request.args.get('devices_order',    'desc')
 
+    unregistered_sort  = request.args.get('unregistered_sort',  'last_seen')
+    unregistered_order = request.args.get('unregistered_order', 'desc')
+
     # ── Pending requests ──────────────────────────────────────────────────────
     all_pending = (RegistrationRequest.query
                    .filter_by(status='pending')
@@ -277,12 +280,18 @@ def index():
         .filter(DeviceOwnership.end_datetime.is_(None))
         .scalar_subquery()
     )
-    unregistered_devices = (
+    unregistered_query = (
         db.session.query(Device)
         .filter(~Device.mac_address.in_(active_ownership_macs))
-        .order_by(Device.last_seen.desc())
-        .all()
     )
+    valid_unreg_sorts = {'mac_address', 'ip_address', 'last_seen'}
+    if unregistered_sort not in valid_unreg_sorts:
+        unregistered_sort = 'last_seen'
+    sort_col = getattr(Device, unregistered_sort, Device.last_seen)
+    unregistered_query = unregistered_query.order_by(
+        sort_col.desc() if unregistered_order == 'desc' else sort_col.asc()
+    )
+    unregistered_devices = unregistered_query.all()
     unregistered_total = len(unregistered_devices)
     fixed_ip_reservations = (
         Device.query
@@ -398,6 +407,8 @@ def index():
         pending_search=pending_search, pending_sort=pending_sort, pending_order=pending_order,
         unregistered_devices=unregistered_devices,
         unregistered_total=unregistered_total,
+        unregistered_sort=unregistered_sort,
+        unregistered_order=unregistered_order,
         switch_hosts=get_switch_hosts(),
         vlan_map=vlan_map,
         wired_unregistered_vlan=get_wired_unregistered_vlan_id(),

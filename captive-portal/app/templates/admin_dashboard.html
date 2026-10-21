@@ -492,9 +492,24 @@ function searchTable(tableType, searchValue) {
 <table>
     <thead>
         <tr>
-            <th>MAC Address</th>
-            <th>IP Address</th>
-            <th>Last Seen</th>
+            <th class="sortable {% if unregistered_sort == 'mac_address' %}active{% endif %}">
+                <a href="javascript:void(0)" onclick="return sortTable('unregistered', 'mac_address');">
+                    MAC Address
+                    <span class="sort-arrow">{% if unregistered_sort == 'mac_address' %}{{ '▼' if unregistered_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if unregistered_sort == 'ip_address' %}active{% endif %}">
+                <a href="javascript:void(0)" onclick="return sortTable('unregistered', 'ip_address');">
+                    IP Address
+                    <span class="sort-arrow">{% if unregistered_sort == 'ip_address' %}{{ '▼' if unregistered_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
+            <th class="sortable {% if unregistered_sort == 'last_seen' %}active{% endif %}">
+                <a href="javascript:void(0)" onclick="return sortTable('unregistered', 'last_seen');">
+                    Last Seen
+                    <span class="sort-arrow">{% if unregistered_sort == 'last_seen' %}{{ '▼' if unregistered_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
             {% if current_user.can_manage_users %}
             <th>Assign to User</th>
             {% endif %}
