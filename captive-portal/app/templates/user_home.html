@@ -155,7 +155,12 @@
     </div>
     {% if row.first_seen %}
     <div style="font-size: 0.85em; color: #888; margin-top: 6px;">
-      First seen: {{ row.first_seen.strftime('%Y-%m-%d %H:%M') }} UTC
+      First seen: {{ row.first_seen | localtime }}
+    </div>
+    {% endif %}
+    {% if row.last_seen %}
+    <div style="font-size: 0.85em; color: #888; margin-top: 2px;">
+      Last seen: {{ row.last_seen | localtime }}
     </div>
     {% endif %}
     {% if not row.needs_approval %}

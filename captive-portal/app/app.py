@@ -122,6 +122,18 @@ def create_app():
             'portal_poll_url':        os.getenv('PORTAL_POLL_URL', '').strip(),
         }
 
+    # ── Jinja filters ─────────────────────────────────────────────────────────
+    from datetime import datetime, timezone
+
+    @app.template_filter('localtime')
+    def localtime_filter(dt):
+        """Format a naive UTC datetime in the server's local timezone (DST-aware)."""
+        if not dt:
+            return '-'
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone().strftime('%Y-%m-%d %H:%M')
+
     # ── Before-request: MFA / forced-password-change enforcement ─────────────
     from core.auth import enforce_mfa_setup
     app.before_request(enforce_mfa_setup)

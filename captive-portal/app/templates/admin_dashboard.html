@@ -428,7 +428,7 @@ function searchTable(tableType, searchValue) {
         <tr>
             <td style="padding: 8px;">
                 {% for timestamp in req.submitted_times %}
-                    <div style="margin: 4px 0;">{{ timestamp.strftime('%Y-%m-%d %H:%M') }}</div>
+                    <div style="margin: 4px 0;">{{ timestamp | localtime }}</div>
                 {% endfor %}
             </td>
             <td>{{ req.first_name }} {{ req.last_name }}</td>
@@ -504,6 +504,12 @@ function searchTable(tableType, searchValue) {
                     <span class="sort-arrow">{% if unregistered_sort == 'ip_address' %}{{ '▼' if unregistered_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
                 </a>
             </th>
+            <th class="sortable {% if unregistered_sort == 'first_seen' %}active{% endif %}">
+                <a href="javascript:void(0)" onclick="return sortTable('unregistered', 'first_seen');">
+                    First Seen
+                    <span class="sort-arrow">{% if unregistered_sort == 'first_seen' %}{{ '▼' if unregistered_order == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+                </a>
+            </th>
             <th class="sortable {% if unregistered_sort == 'last_seen' %}active{% endif %}">
                 <a href="javascript:void(0)" onclick="return sortTable('unregistered', 'last_seen');">
                     Last Seen
@@ -520,7 +526,8 @@ function searchTable(tableType, searchValue) {
         <tr>
             <td style="font-family: monospace;">{{ device.mac_address }}</td>
             <td>{{ device.ip_address or '-' }}</td>
-            <td>{{ device.last_seen.strftime('%Y-%m-%d %H:%M') if device.last_seen else '-' }}</td>
+            <td>{{ device.first_seen | localtime }}</td>
+            <td>{{ device.last_seen | localtime }}</td>
             {% if current_user.can_manage_users %}
             <td>
                 {% set _conn_type = 'wired' if (device.is_wired or device.current_vlan == wired_unregistered_vlan) else (device.connection_type or '') %}
@@ -1144,7 +1151,7 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
             <td>{{ device.ssid or '-' }}</td>
             <td style="font-family: monospace; font-size: 11px; white-space: nowrap;">
                 {% if device.switch_iface %}
-                    <span title="{% if device.switch_host %}Switch: {{ device.switch_host }}{% endif %}{% if device.switch_iface_seen_at %} — Last seen: {{ device.switch_iface_seen_at.strftime('%Y-%m-%d %H:%M') }}{% endif %}">
+                    <span title="{% if device.switch_host %}Switch: {{ device.switch_host }}{% endif %}{% if device.switch_iface_seen_at %} — Last seen: {{ device.switch_iface_seen_at | localtime }}{% endif %}">
                         {% if device.switch_host %}<span style="color:#666;">{{ device.switch_host.split('.')[-1] }}:</span>{% endif %}{{ device.switch_iface }}
                     </span>
                 {% else %}
@@ -1153,14 +1160,14 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
             </td>
             <td style="font-size: 12px;">
                 {% if device.first_seen %}
-                    {{ device.first_seen.strftime('%Y-%m-%d %H:%M') }}
+                    {{ device.first_seen | localtime }}
                 {% else %}
                     <em style="color: #999;">-</em>
                 {% endif %}
             </td>
             <td style="font-size: 12px;">
                 {% if device.last_seen %}
-                    {{ device.last_seen.strftime('%Y-%m-%d %H:%M') }}
+                    {{ device.last_seen | localtime }}
                 {% else %}
                     <em style="color: #999;">-</em>
                 {% endif %}

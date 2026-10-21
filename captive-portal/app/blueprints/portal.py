@@ -1990,8 +1990,15 @@ def user_home():
             'vlan_id':        vlan_id,
             'vlan_label':     label_for_vlan(vlan_id, vlan_map),
             'first_seen':     entry.get('first_seen'),
+            'last_seen':      entry.get('last_seen'),
             'needs_approval': not can_adopt_direct,
         })
+
+    # Most recently first-seen devices first
+    unregistered_rows.sort(
+        key=lambda r: r['first_seen'] or datetime.min,
+        reverse=True,
+    )
 
     if request.method == 'POST':
         action = request.form.get('action', '')

@@ -284,7 +284,7 @@ def index():
         db.session.query(Device)
         .filter(~Device.mac_address.in_(active_ownership_macs))
     )
-    valid_unreg_sorts = {'mac_address', 'ip_address', 'last_seen'}
+    valid_unreg_sorts = {'mac_address', 'ip_address', 'first_seen', 'last_seen'}
     if unregistered_sort not in valid_unreg_sorts:
         unregistered_sort = 'last_seen'
     sort_col = getattr(Device, unregistered_sort, Device.last_seen)
