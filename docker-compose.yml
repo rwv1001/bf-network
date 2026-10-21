@@ -249,6 +249,10 @@ services:
       DATABASE_URL: postgresql://${DB_USER:-portal_user}:${DB_PASSWORD:-change_this_password}@127.0.0.1:5432/${DB_NAME:-captive_portal}
       REDIS_URL: redis://127.0.0.1:6379/0
       SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required – set it in .env}
+      # Display timezone for admin dashboard and user pages (IANA name, DST-aware).
+      # Also sets the container TZ so system time matches.
+      TZ: ${TIMEZONE:-Europe/London}
+      TIMEZONE: ${TIMEZONE:-Europe/London}
       GRAPH_TENANT_ID: ${GRAPH_TENANT_ID}
       GRAPH_CLIENT_ID: ${GRAPH_CLIENT_ID}
       GRAPH_CLIENT_SECRET: ${GRAPH_CLIENT_SECRET}

@@ -124,15 +124,24 @@ def create_app():
 
     # ── Jinja filters ─────────────────────────────────────────────────────────
     from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+
+    def _get_display_tz():
+        name = os.getenv('TIMEZONE', 'Europe/London').strip() or 'Europe/London'
+        try:
+            return ZoneInfo(name)
+        except Exception:
+            logger.warning("Invalid TIMEZONE=%r, falling back to Europe/London", name)
+            return ZoneInfo('Europe/London')
 
     @app.template_filter('localtime')
     def localtime_filter(dt):
-        """Format a naive UTC datetime in the server's local timezone (DST-aware)."""
+        """Format a naive UTC datetime in the configured TIMEZONE (DST-aware)."""
         if not dt:
             return '-'
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone().strftime('%Y-%m-%d %H:%M')
+        return dt.astimezone(_get_display_tz()).strftime('%Y-%m-%d %H:%M')
 
     # ── Before-request: MFA / forced-password-change enforcement ─────────────
     from core.auth import enforce_mfa_setup

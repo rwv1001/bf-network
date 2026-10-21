@@ -1,0 +1,25 @@
+{
+  "description": "Dashboard and user-home times now display in a configurable local timezone (DST-aware). A new TIMEZONE environment variable (IANA name such as Europe/London) controls the display timezone and is also set as the container TZ.",
+
+  "env": {
+    "add": [
+      {
+        "key": "TIMEZONE",
+        "description": "IANA timezone name used for all times shown on the admin dashboard and user home page (e.g. Europe/London, America/New_York, Asia/Tokyo). Handles daylight saving automatically. Also sets the web container's system timezone.",
+        "default": "Europe/London",
+        "required": true,
+        "sensitive": false
+      }
+    ],
+    "remove": []
+  },
+
+  "db": {
+    "up": null,
+    "down": null,
+    "verify_up": [],
+    "verify_down": []
+  },
+
+  "notes": "After the upgrade the web container must be rebuilt and restarted so the new TIMEZONE variable is picked up (docker compose build web && docker compose up -d web). Existing sites that leave the default will see Europe/London (BST in summer, GMT in winter). If your site is in a different zone, set the correct IANA name during the preflight prompt."
+}

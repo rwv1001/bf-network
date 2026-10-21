@@ -549,7 +549,65 @@ state_save_on_exit() {
     exit "$rc"
 }
 
-prompt_default() {
+prompt_timezone() {
+    local key="timezone"
+    if answer_exists "$key"; then
+        TIMEZONE="${SAVED_ANSWERS[$key]}"
+        echo "Using saved timezone: $TIMEZONE"
+        return 0
+    fi
+
+    # Common IANA timezones, grouped roughly by region for easier scanning.
+    local -a zones=(
+        "Europe/London"        "Europe/Dublin"       "Europe/Paris"         "Europe/Berlin"
+        "Europe/Amsterdam"     "Europe/Brussels"     "Europe/Madrid"        "Europe/Rome"
+        "Europe/Zurich"        "Europe/Vienna"       "Europe/Stockholm"     "Europe/Oslo"
+        "Europe/Copenhagen"    "Europe/Helsinki"     "Europe/Warsaw"        "Europe/Prague"
+        "Europe/Budapest"      "Europe/Athens"       "Europe/Lisbon"        "Europe/Moscow"
+        "America/New_York"     "America/Chicago"     "America/Denver"       "America/Los_Angeles"
+        "America/Toronto"      "America/Vancouver"   "America/Mexico_City"  "America/Sao_Paulo"
+        "America/Buenos_Aires" "America/Santiago"    "America/Bogota"       "America/Lima"
+        "Asia/Tokyo"           "Asia/Shanghai"       "Asia/Hong_Kong"       "Asia/Singapore"
+        "Asia/Seoul"           "Asia/Taipei"         "Asia/Bangkok"         "Asia/Jakarta"
+        "Asia/Kolkata"         "Asia/Dubai"          "Asia/Riyadh"          "Asia/Jerusalem"
+        "Australia/Sydney"     "Australia/Melbourne" "Australia/Brisbane"   "Australia/Perth"
+        "Australia/Adelaide"   "Pacific/Auckland"    "Pacific/Honolulu"     "Africa/Johannesburg"
+        "Africa/Cairo"         "Africa/Lagos"        "UTC"                  "Etc/UTC"
+    )
+
+    echo
+    echo "Select the timezone for dashboard and user-facing times (DST-aware)."
+    echo "Enter the number of your choice:"
+    echo
+
+    local cols=4
+    local i=0
+    local count=${#zones[@]}
+    while [ $i -lt $count ]; do
+        local line=""
+        local c
+        for ((c=0; c<cols && i<count; c++)); do
+            printf -v line "%s  %2d) %-22s" "$line" "$((i+1))" "${zones[$i]}"
+            i=$((i+1))
+        done
+        echo "$line"
+    done
+    echo
+
+    local choice=""
+    while true; do
+        read -r -p "Timezone number [1]: " choice
+        choice="${choice:-1}"
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "$count" ]; then
+            TIMEZONE="${zones[$((choice-1))]}"
+            break
+        fi
+        echo "Please enter a number between 1 and $count."
+    done
+
+    echo "Selected timezone: $TIMEZONE"
+    save_answer "$key" "$TIMEZONE"
+}
     local var_name="$1"
     local prompt="$2"
     local default_value="$3"
@@ -2903,6 +2961,7 @@ write_pi_env_file() {
         write_env_line DEEPSEEK_API_KEY ""
         write_env_line ANTHROPIC_API_KEY ""
         write_env_line SECRET_KEY "$SECRET_KEY"
+        write_env_line TIMEZONE "${TIMEZONE:-Europe/London}"
 
         write_env_line GRAPH_TENANT_ID "$GRAPH_TENANT_ID"
         write_env_line GRAPH_CLIENT_ID "$GRAPH_CLIENT_ID"
@@ -6520,6 +6579,7 @@ info "Bunny.net DNS-01 Certificate (for local HTTPS)"
 prompt_required BUNNY_API_KEY "Bunny.net API Key (Account → API Keys)"
 
 info "Kea / Logging / Backups"
+prompt_timezone
 prompt_default KEA_LEASE_LIFETIME "Kea lease lifetime seconds" "86400"
 prompt_default TEST_ENV "Enable TEST_ENV?" "true"
 prompt_default ENABLE_DB_BACKUPS "Set up automatic database backups?" "y"

@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y \
     openssh-client \
     docker.io \
     sudo \
+    tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
