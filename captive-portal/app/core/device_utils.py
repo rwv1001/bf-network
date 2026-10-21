@@ -12,7 +12,7 @@ Covers:
 
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import text
 
@@ -266,20 +266,51 @@ def unregister_device(device: Device, commit: bool = True) -> None:
     ip_address = device.ip_address
     vlan_id = device.current_vlan
 
-    # Apply ACL block + DNS hijack for the remainder of the current lease
+    # Best-effort: if the device row has no IP, look it up from the active
+    # lease or from Kea so we can still apply the block/hijack.
+    if not ip_address:
+        active = get_active_iplease(mac_address)
+        if active:
+            ip_address = active.ip_address
+            if not vlan_id:
+                vlan_id = active.vlan_id
+    if not ip_address:
+        try:
+            from kea_integration import get_kea_client
+            kea_lookup = get_kea_client(
+                control_socket=os.getenv('KEA_CONTROL_SOCKET', '/kea/sockets/kea4-ctrl-socket')
+            )
+            if kea_lookup:
+                ip_address = kea_lookup.get_lease_ip_for_mac(
+                    mac_address, subnet_id=vlan_id
+                ) or kea_lookup.get_lease_ip_for_mac(mac_address)
+        except Exception as exc:
+            logger.debug("unregister_device: Kea IP lookup failed for %s: %s", mac_address, exc)
+
+    # Apply ACL block + DNS hijack so the device is treated exactly like a
+    # freshly plugged-in unregistered device. Do this whenever we have an IP
+    # that is not already in the blocked pool — do not require a successful
+    # Kea lease-expiry lookup (that lookup often fails and left devices open).
     if ip_address and not is_blocked_pool_ip(ip_address):
         lease_expiry = get_lease_expiry_for_mac(mac_address, subnet_id=vlan_id)
-        if lease_expiry and lease_expiry > datetime.utcnow():
-            if vlan_id:
-                manage_switch_acl('block', ip_address, vlan_id)
-            manage_dns_hijack('hijack', ip_address)
-            upsert_iplease(
-                mac_address=mac_address, ip_address=ip_address, vlan_id=vlan_id,
-                lease_start=datetime.utcnow(), lease_expiry=lease_expiry,
-                from_blocked_pool=False, dns_hijacked=True,
-            )
-            logger.info("unregister_device: blocked %s at %s until %s",
-                        mac_address, ip_address, lease_expiry)
+        if not lease_expiry or lease_expiry <= datetime.utcnow():
+            # Fallback: block for the remainder of a typical lease window.
+            try:
+                fallback_sec = int(os.getenv('KEA_LEASE_LIFETIME', '86400'))
+            except (TypeError, ValueError):
+                fallback_sec = 86400
+            lease_expiry = datetime.utcnow() + timedelta(seconds=max(3600, fallback_sec))
+
+        if vlan_id:
+            manage_switch_acl('block', ip_address, vlan_id)
+        manage_dns_hijack('hijack', ip_address)
+        upsert_iplease(
+            mac_address=mac_address, ip_address=ip_address, vlan_id=vlan_id,
+            lease_start=datetime.utcnow(), lease_expiry=lease_expiry,
+            from_blocked_pool=False, dns_hijacked=True,
+        )
+        logger.info("unregister_device: blocked %s at %s until %s",
+                    mac_address, ip_address, lease_expiry)
 
     # Remove Kea reservation on every subnet (11, 250, 0, …), then CoA if wired
     kea_socket = os.getenv('KEA_CONTROL_SOCKET', '/kea/sockets/kea4-ctrl-socket')
