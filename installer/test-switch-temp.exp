@@ -252,6 +252,60 @@ while {$attempt <= $max_attempts} {
 
 set timeout 30
 
+# Comware user-view commands (undo terminal monitor, restore, reboot, quit)
+# only work at <...>. Nested views look like [Cam-04-GigabitEthernet1/0/1].
+# Keep quitting until we are in user view.
+# Patterns are the same style as the wake loop (braced regexes must not use
+# \r/\n — those are literal backslash characters inside {...}).
+proc ensure_user_view {} {
+    global timeout
+    set saved_timeout $timeout
+    set timeout 8
+    # One nudge so the switch reprints its current prompt.
+    # After each quit, consume the command echo ("[prompt]quit") before
+    # looking for the next prompt. Otherwise the prompt inside that echo is
+    # matched again and an extra quit is queued — which lands on <...> and
+    # logs the console out.
+    send "\r"
+    set max_quit 6
+    for {set i 0} {$i < $max_quit} {incr i} {
+        expect {
+            -re {<[A-Za-z0-9_.-]+>} {
+                puts "At user-view prompt."
+                set timeout $saved_timeout
+                return
+            }
+            -re {\[[^\]]+\]} {
+                set seen $expect_out(0,string)
+                puts "Still in system/interface view ($seen); sending quit ([expr {$i+1}]/$max_quit)"
+                send "quit\r"
+                # Eat the echo of this quit so "[prompt]quit" is not treated
+                # as a fresh prompt on the next iteration.
+                expect {
+                    -re {quit} {}
+                    timeout {
+                        puts "WARNING: did not see quit echo"
+                    }
+                }
+            }
+            -re {[Ll]ogin:|[Uu]sername:} {
+                puts "ERROR: console logged out while returning to user view"
+                set timeout $saved_timeout
+                exit 1
+            }
+            timeout {
+                puts "ensure_user_view: no prompt yet (try [expr {$i+1}])"
+                send "\r"
+            }
+        }
+    }
+    set timeout $saved_timeout
+    puts "ERROR: Could not reach user-view <...> prompt after $max_quit quits"
+    exit 1
+}
+
+ensure_user_view
+
 send "undo terminal monitor\r"
 expect { -re {%[^\r\n]*[\r\n]+} { exp_continue } -re {<[^>\r\n]+>} {} }
 
@@ -510,6 +564,7 @@ if {$do_wipe} {
         }
     }
 
+    ensure_user_view
     send "undo terminal monitor\r"
     expect { -re {%[^\r\n]*[\r\n]+} { exp_continue } -re {<[^>\r\n]+>} {} }
     puts "Factory reset complete; applying new configuration."

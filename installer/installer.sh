@@ -608,6 +608,8 @@ prompt_timezone() {
     echo "Selected timezone: $TIMEZONE"
     save_answer "$key" "$TIMEZONE"
 }
+
+prompt_default() {
     local var_name="$1"
     local prompt="$2"
     local default_value="$3"
@@ -1133,7 +1135,27 @@ ip address ${net_base}.${vlan}.${last} 255.255.255.0
         local isp_idx=$((vlan - isp_base))
         local portion="${SAVED_ANSWERS[isp_${isp_idx}_network_portion]:-}"
         if [ -z "$portion" ]; then
-            die "No network portion saved for ISP VLAN $vlan (isp_${isp_idx}_network_portion). Re-run the site install, or set it in the installer state."
+            echo
+            echo "No network portion is saved for ISP VLAN $vlan (isp_${isp_idx}_network_portion)."
+            echo "This is the first three octets of the ISP LAN (for example 192.168.1 for 192.168.1.0/24)."
+            local portion_key="isp_${isp_idx}_network_portion"
+            local entered=""
+            while true; do
+                # prompt_required writes into the named variable in its own scope;
+                # re-read from SAVED_ANSWERS so the caller's local is updated.
+                prompt_required entered \
+                    "Network portion (first 3 octets) for ISP VLAN $vlan" \
+                    "$portion_key"
+                entered="${SAVED_ANSWERS[$portion_key]:-}"
+                if [[ "$entered" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                    portion="$entered"
+                    break
+                fi
+                echo "Enter exactly three octets, for example 192.168.1"
+                invalidate_answer "$portion_key"
+                entered=""
+            done
+            echo "Saved network portion for ISP VLAN $vlan: $portion"
         fi
         local isp_name="${SAVED_ANSWERS[isp_${isp_idx}_name]:-ISP}"
         VLAN_IFACE_CONFIG+="
@@ -1271,9 +1293,24 @@ PYVALIDATE
     # If already saved from an interrupted finish, use the saved value.
     # Otherwise use the original site's address without changing site-wide state.
     prompt_default FINISH_PI_USER "Pi SSH username" "$pi_user_default" "add_switch_pi_user"
-    prompt_default FINISH_PI_KEY "Pi SSH private key" "$pi_key_default" "add_switch_pi_key"
+    # Re-ask if the saved path is missing (wrong machine, moved key, typo).
+    while true; do
+        if [ -n "$pi_key_default" ] && [ ! -f "$pi_key_default" ]; then
+            echo "Saved Pi SSH key not found: $pi_key_default"
+            invalidate_answer "add_switch_pi_key"
+            pi_key_default=""
+        fi
+        prompt_default FINISH_PI_KEY "Pi SSH private key" "$pi_key_default" "add_switch_pi_key"
+        FINISH_PI_KEY="${SAVED_ANSWERS[add_switch_pi_key]:-$FINISH_PI_KEY}"
+        if [ -f "$FINISH_PI_KEY" ]; then
+            break
+        fi
+        echo "Pi SSH key missing: $FINISH_PI_KEY"
+        echo "Enter the full path to an existing private key."
+        invalidate_answer "add_switch_pi_key"
+        pi_key_default=""
+    done
     prompt_default FINISH_PI_REPO "Pi bf-network repository path" "$pi_repo_default" "add_switch_pi_repo"
-    [ -f "$FINISH_PI_KEY" ] || die "Pi SSH key missing: $FINISH_PI_KEY"
     local octet
     octet="$(last_octet "$sw_ip")"
     echo "Pi: $FINISH_PI_USER@$FINISH_PI_IP (repo $FINISH_PI_REPO)"
@@ -1319,9 +1356,11 @@ PYVALIDATE
     q_repair="$(shell_quote "$repair")"
     q_isl="$(shell_quote "${SAVED_ANSWERS[add_switch_isl_port]:-}")"
     remote_cmd="sudo -n bash -s -- $q_repo $q_ip $q_octet $q_ge $q_repair $q_isl"
+    set +e
+    remote_log="$(mktemp)"
     ssh -i "$FINISH_PI_KEY" -o BatchMode=yes -o IdentitiesOnly=yes \
         -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 \
-        "${FINISH_PI_USER}@${FINISH_PI_IP}" "$remote_cmd" <<'REMOTE_ADD_SWITCH'
+        "${FINISH_PI_USER}@${FINISH_PI_IP}" "$remote_cmd" <<'REMOTE_ADD_SWITCH' | tee "$remote_log"
 set -euo pipefail
 repo="$1"; sw_ip="$2"; octet="$3"; max_ge="$4"; repair="$5"; isl_num="$6"
 umask 077
@@ -1342,7 +1381,7 @@ p="/scripts/scriptdata/hp5130-policy.json"
 a=json.load(open(p))
 assert a.get("routers") and a.get("vlans"), "Empty router/VLAN policy; configure site ISP/VLAN policy first"
 print("Policy ready: %d routers, %d VLANs" % (len(a["routers"]), len(a["vlans"])))
-'
+' </dev/null
 # Older serial installers skipped the RADIUS settings and used PVID 1 on
 # inter-switch links. Only repair if explicitly requested: never overwrite a
 # port or RADIUS configuration on an already-working switch by default.
@@ -1419,7 +1458,10 @@ PYRADIUS
 fi
 
 echo "Applying current site ACL/PBR policy to $sw_ip before adding it to SWITCH_HOSTS..."
-docker compose exec -T -e "SWITCH_HOSTS=$sw_ip" kea /scripts/hp5130-acl-baseline.sh
+# ./scripts is bind-mounted at /scripts (see docker-compose.yml), so the file is already in the container.
+# kea-custom is Alpine and has no bash: a #!/bin/bash shebang makes exec report
+# "no such file or directory" even though the script is present. Invoke sh directly.
+docker compose exec -T -e "SWITCH_HOSTS=$sw_ip" kea sh /scripts/hp5130-acl-baseline.sh </dev/null
 
 # Persist switches atomically, preserving site .env ownership and comments.
 # A dated backup is made before changing anything.  No source/eval of .env.
@@ -1488,9 +1530,18 @@ print('SWITCH_HOSTS_BYTES:', updates['SWITCH_HOSTS_BYTES'])
 PYENV
 
 echo 'Restarting Kea and web to load the new switch list...'
-docker compose up -d --no-deps --force-recreate kea web watchdog
+docker compose up -d --no-deps --force-recreate kea web watchdog </dev/null
 echo "DONE: $sw_ip added to site switch list and ACL/PBR baseline applied."
 REMOTE_ADD_SWITCH
+    ssh_rc=${PIPESTATUS[0]}
+    set -e
+    if [ "$ssh_rc" -ne 0 ] || ! grep -q '^DONE:' "$remote_log"; then
+        echo "ERROR: Pi-side add-switch did not complete (ssh exit $ssh_rc)." >&2
+        echo "A successful run must print a DONE: line after the baseline and .env update." >&2
+        echo "Remote output saved at: $remote_log" >&2
+        exit 1
+    fi
+    rm -f "$remote_log"
     echo "Next: refresh Switch Ports in the admin UI and assign roles."
     echo "Do not attach clients to ports with stale/unreviewed configurations."
 }
