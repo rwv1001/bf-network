@@ -42,9 +42,10 @@ fi
 [ -n "$PYTHON_BIN" ] || { echo "python3 required" >&2; exit 1; }
 
 SSH_OPTS="-i $SWITCH_KEY_PATH -p $SWITCH_SSH_PORT -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3"
-# Comware never closes an allocated PTY, so ssh -tt waits forever after the
-# last quit. No -tt, and a hard timeout, so a live-but-idle session cannot
-# freeze the installer. 180s covers save force.
+# Comware needs a PTY or it refuses the session ("Pseudo-terminal will not be
+# allocated"). -tt forces one. Comware then never closes it, so timeout is
+# what stops the hang: 124 means the commands were sent and the prompt is
+# still open, which is success. 180s covers save force.
 BASELINE_SSH_TIMEOUT="${BASELINE_SSH_TIMEOUT:-180}"
 
 CMDS="$("$PYTHON_BIN" - "$HP5130_POLICY_PATH" "$KEA_CONFIG_PATH" "$DOH_DOT_IPS" "$PORTAL_IP" "$ORACLE_VPS_HOST" "$SWITCH_HOST" "$NET" "$HIJACK_DNS_IP" "$WIRED_VLAN" "$WIRED_INBOUND_ACL" "$WIRED_OUTBOUND_ACL" "$ROUTER_UPLINK_ACL_MIN" "$ROUTER_UPLINK_ACL_MAX" "$HP5130_CURRENT_CONFIG_PATH" "$PORTAL_FORWARD_PORT" "$UNIFI_FORWARD_PORT" "$MANAGEMENT_VLAN" <<'PY'
@@ -620,7 +621,7 @@ printf '%s\n' "$CMDS" >&2
 # commands; the commands themselves have already been sent, so that is not a
 # failure. Any other non-zero is a real SSH failure.
 set +e
-SWITCH_OUT=$(printf '%s\n' "$CMDS" | timeout "$BASELINE_SSH_TIMEOUT" ssh $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}" 2>&1)
+SWITCH_OUT=$(printf '%s\n' "$CMDS" | timeout "$BASELINE_SSH_TIMEOUT" ssh -tt $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}" 2>&1)
 ssh_rc=$?
 set -e
 if [ "$ssh_rc" -eq 124 ]; then
