@@ -1326,6 +1326,50 @@ PYVALIDATE
         is_yes "$confirm" || { echo 'No changes made to the Pi.'; return 0; }
     fi
 
+    # The file existing is not enough: a wrong key (or wrong user) is
+    # Permission denied, not a missing file. Re-prompt instead of dying.
+    while true; do
+        echo "Testing SSH to ${FINISH_PI_USER}@${FINISH_PI_IP} with ${FINISH_PI_KEY} ..."
+        ssh_err="$(mktemp)"
+        if ssh -i "$FINISH_PI_KEY" -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 \
+            "${FINISH_PI_USER}@${FINISH_PI_IP}" 'echo pi_ssh_ok' </dev/null 2>"$ssh_err"; then
+            rm -f "$ssh_err"
+            echo "Pi SSH authenticated."
+            break
+        fi
+        echo
+        echo "SSH to ${FINISH_PI_USER}@${FINISH_PI_IP} failed."
+        if grep -qi 'Permission denied' "$ssh_err"; then
+            echo "The private key was rejected (Permission denied)."
+            echo "Wrong key for this user, or the public key is not in authorized_keys."
+        else
+            cat "$ssh_err" >&2
+        fi
+        rm -f "$ssh_err"
+        echo
+        local retry
+        read -r -p "Re-enter the Pi SSH user and private key? [Y/n] " retry
+        if ! is_yes "${retry:-y}"; then
+            echo "Cancelled. No changes made to the Pi."
+            return 0
+        fi
+        invalidate_answer "add_switch_pi_user"
+        invalidate_answer "add_switch_pi_key"
+        prompt_required FINISH_PI_USER "Pi SSH username" "add_switch_pi_user"
+        while true; do
+            prompt_required FINISH_PI_KEY "Pi SSH private key" "add_switch_pi_key"
+            FINISH_PI_KEY="${SAVED_ANSWERS[add_switch_pi_key]:-$FINISH_PI_KEY}"
+            if [ -f "$FINISH_PI_KEY" ]; then
+                break
+            fi
+            echo "Pi SSH key missing: $FINISH_PI_KEY"
+            echo "Enter the full path to an existing private key."
+            invalidate_answer "add_switch_pi_key"
+        done
+        echo "Pi: $FINISH_PI_USER@$FINISH_PI_IP (repo $FINISH_PI_REPO)"
+    done
+
     # All arguments are shell-quoted as a single SSH remote command.
     # Never interpolate a user's .env file with shell source/eval.
     local repair answer_repair
@@ -1642,9 +1686,18 @@ add_switch_to_existing_network() {
     fi
     free_serial_port "$DETECTED_PORT"
 
+    # Always wipe. A reused 5130 keeps old VLANs, SVIs, portal rules and
+    # trunks; layering the new config on top leaves that residue. Expect
+    # already implements restore factory-default + reboot when given -wipe.
+    # -np restores the same console password after the empty factory login.
+    echo
+    echo "Wiping $ADD_SW_NAME to factory defaults before applying the new config."
+    echo "This erases everything on the switch and takes 2–4 minutes for the reboot."
+    echo
+
     # No -ip: expect would address Vlan-interface 1. Management SVI is in the
     # shared member config. SSH user, key and ssh server enable stay in expect.
-    local cmd=("$EXPECT_SCRIPT" -port "$DETECTED_PORT" -cp "$ADD_SW_PASSWORD" -user "$ADD_SW_USER" -pubkey "$PUBLIC_KEY" -name "$ADD_SW_NAME" -vlan-config "$VLAN_CONFIG" -dynamic-config "$DYNAMIC_CONFIG" -debug)
+    local cmd=("$EXPECT_SCRIPT" -wipe -port "$DETECTED_PORT" -cp "$ADD_SW_PASSWORD" -np "$ADD_SW_PASSWORD" -user "$ADD_SW_USER" -pubkey "$PUBLIC_KEY" -name "$ADD_SW_NAME" -vlan-config "$VLAN_CONFIG" -dynamic-config "$DYNAMIC_CONFIG" -debug)
     echo "Calling Expect for $ADD_SW_IP on $DETECTED_PORT (password redacted)."
     "${cmd[@]}"
 
