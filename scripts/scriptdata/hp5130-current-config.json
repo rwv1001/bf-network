@@ -11,6 +11,47 @@
     "uplink_vlans": {
       "3": "SCG"
     },
-    "timestamp": "2026-10-09T10:19:12.543885Z"
+    "timestamp": "2026-10-25T15:43:05.502915Z"
+  },
+  "10.7.99.32": {
+    "pbr_names": [
+      "PBR-O2",
+      "PBR-SCG"
+    ],
+    "nqa_names": [
+      "pbro2",
+      "pbrscg"
+    ],
+    "uplink_vlans": {},
+    "timestamp": "2026-10-25T15:43:15.648715Z"
+  },
+  "10.7.99.33": {
+    "pbr_names": [
+      "PBR-O2",
+      "PBR-SCG"
+    ],
+    "nqa_names": [
+      "pbro2",
+      "pbrscg"
+    ],
+    "uplink_vlans": {
+      "2": "O2",
+      "3": "SCG"
+    },
+    "timestamp": "2026-10-25T15:43:23.150717Z"
+  },
+  "10.7.99.35": {
+    "pbr_names": [
+      "PBR-O2",
+      "PBR-SCG"
+    ],
+    "nqa_names": [
+      "pbro2",
+      "pbrscg"
+    ],
+    "uplink_vlans": {
+      "3": "SCG"
+    },
+    "timestamp": "2026-10-25T15:43:30.221309Z"
   }
 }

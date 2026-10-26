@@ -42,6 +42,10 @@ fi
 [ -n "$PYTHON_BIN" ] || { echo "python3 required" >&2; exit 1; }
 
 SSH_OPTS="-i $SWITCH_KEY_PATH -p $SWITCH_SSH_PORT -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3"
+# Comware never closes an allocated PTY, so ssh -tt waits forever after the
+# last quit. No -tt, and a hard timeout, so a live-but-idle session cannot
+# freeze the installer. 180s covers save force.
+BASELINE_SSH_TIMEOUT="${BASELINE_SSH_TIMEOUT:-180}"
 
 CMDS="$("$PYTHON_BIN" - "$HP5130_POLICY_PATH" "$KEA_CONFIG_PATH" "$DOH_DOT_IPS" "$PORTAL_IP" "$ORACLE_VPS_HOST" "$SWITCH_HOST" "$NET" "$HIJACK_DNS_IP" "$WIRED_VLAN" "$WIRED_INBOUND_ACL" "$WIRED_OUTBOUND_ACL" "$ROUTER_UPLINK_ACL_MIN" "$ROUTER_UPLINK_ACL_MAX" "$HP5130_CURRENT_CONFIG_PATH" "$PORTAL_FORWARD_PORT" "$UNIFI_FORWARD_PORT" "$MANAGEMENT_VLAN" <<'PY'
 import ipaddress
@@ -532,6 +536,10 @@ for vlan in vlans:
     
     emit("quit")
 
+# 3099 is the tight management allow-list. Defining it is fine; applying it
+# outbound replaces 3991, which is the isolation filter the site actually
+# runs, and on some firmware the second outbound filter is rejected and the
+# session stalls. Leave 3991 applied.
 emit("undo acl advanced 3098")
 emit("undo acl number 3099")
 emit(f"acl number 3099 name VLAN{management_vlan}_EGRESS")
@@ -587,11 +595,11 @@ emit(f" rule 96 permit udp source 8.8.4.4 0 destination {portal_ip} 0 source-por
 emit(f" rule 97 permit tcp source 8.8.4.4 0 destination {portal_ip} 0 source-port eq dns established")
 emit(" rule 100 deny ip")
 emit("quit")
+# Do not apply 3099. 3991 was bound above and must stay the outbound filter.
 emit(f"interface Vlan-interface{management_vlan}")
 emit(" undo packet-filter 3098 inbound")
 emit(" undo packet-filter 3099 inbound")
 emit(" undo packet-filter 3099 outbound")
-emit(" packet-filter 3099 outbound")
 emit("quit")
 
 emit("save force")
@@ -608,8 +616,17 @@ printf '%s\n' "$CMDS" >&2
 
 # A failed SSH session must NEVER be reported as a successful baseline.
 # The previous `|| true` masked permission, timeout and connection errors.
-if ! SWITCH_OUT=$(printf '%s\n' "$CMDS" | ssh -tt $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}" 2>&1); then
-  log "ERROR: SSH baseline push to ${SWITCH_HOST} failed: ${SWITCH_OUT}"
+# timeout(1) returns 124 if Comware is still sitting at the prompt after the
+# commands; the commands themselves have already been sent, so that is not a
+# failure. Any other non-zero is a real SSH failure.
+set +e
+SWITCH_OUT=$(printf '%s\n' "$CMDS" | timeout "$BASELINE_SSH_TIMEOUT" ssh $SSH_OPTS "${SWITCH_USER}@${SWITCH_HOST}" 2>&1)
+ssh_rc=$?
+set -e
+if [ "$ssh_rc" -eq 124 ]; then
+  log "Switch SSH did not close within ${BASELINE_SSH_TIMEOUT}s; commands were sent. Continuing."
+elif [ "$ssh_rc" -ne 0 ]; then
+  log "ERROR: SSH baseline push to ${SWITCH_HOST} failed (exit $ssh_rc): ${SWITCH_OUT}"
   exit 1
 fi
 

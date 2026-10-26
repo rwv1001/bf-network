@@ -109,7 +109,7 @@
           },
           {
             "name": "v4-captive-portal",
-            "data": "https://lon.english.op.org/.well-known/captive-portal"
+            "data": "https://cam.english.op.org/.well-known/captive-portal"
           }
         ],
         "reservations": [
@@ -154,6 +154,27 @@
             "user-context": {
               "infra-ghost": true
             }
+          },
+          {
+            "hw-address": "02:00:c0:a8:0b:20",
+            "ip-address": "10.7.11.32",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:0b:21",
+            "ip-address": "10.7.11.33",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:0b:23",
+            "ip-address": "10.7.11.35",
+            "user-context": {
+              "infra-ghost": true
+            }
           }
         ]
       },
@@ -182,7 +203,7 @@
           },
           {
             "name": "v4-captive-portal",
-            "data": "https://lon.english.op.org/.well-known/captive-portal"
+            "data": "https://cam.english.op.org/.well-known/captive-portal"
           }
         ],
         "reservations": [
@@ -227,6 +248,27 @@
             "user-context": {
               "infra-ghost": true
             }
+          },
+          {
+            "hw-address": "02:00:c0:a8:15:20",
+            "ip-address": "10.7.21.32",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:15:21",
+            "ip-address": "10.7.21.33",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:15:23",
+            "ip-address": "10.7.21.35",
+            "user-context": {
+              "infra-ghost": true
+            }
           }
         ]
       },
@@ -255,7 +297,7 @@
           },
           {
             "name": "v4-captive-portal",
-            "data": "https://lon.english.op.org/.well-known/captive-portal"
+            "data": "https://cam.english.op.org/.well-known/captive-portal"
           }
         ],
         "reservations": [
@@ -300,6 +342,27 @@
             "user-context": {
               "infra-ghost": true
             }
+          },
+          {
+            "hw-address": "02:00:c0:a8:1f:20",
+            "ip-address": "10.7.31.32",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:1f:21",
+            "ip-address": "10.7.31.33",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:1f:23",
+            "ip-address": "10.7.31.35",
+            "user-context": {
+              "infra-ghost": true
+            }
           }
         ]
       },
@@ -328,7 +391,7 @@
           },
           {
             "name": "v4-captive-portal",
-            "data": "https://lon.english.op.org/.well-known/captive-portal"
+            "data": "https://cam.english.op.org/.well-known/captive-portal"
           }
         ],
         "reservations": [
@@ -373,6 +436,27 @@
             "user-context": {
               "infra-ghost": true
             }
+          },
+          {
+            "hw-address": "02:00:c0:a8:29:20",
+            "ip-address": "10.7.41.32",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:29:21",
+            "ip-address": "10.7.41.33",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:29:23",
+            "ip-address": "10.7.41.35",
+            "user-context": {
+              "infra-ghost": true
+            }
           }
         ]
       },
@@ -401,7 +485,7 @@
           },
           {
             "name": "v4-captive-portal",
-            "data": "https://lon.english.op.org/.well-known/captive-portal"
+            "data": "https://cam.english.op.org/.well-known/captive-portal"
           }
         ],
         "reservations": [
@@ -446,6 +530,27 @@
             "user-context": {
               "infra-ghost": true
             }
+          },
+          {
+            "hw-address": "02:00:c0:a8:33:20",
+            "ip-address": "10.7.51.32",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:33:21",
+            "ip-address": "10.7.51.33",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:33:23",
+            "ip-address": "10.7.51.35",
+            "user-context": {
+              "infra-ghost": true
+            }
           }
         ]
       },
@@ -469,7 +574,7 @@
           },
           {
             "name": "v4-captive-portal",
-            "data": "https://lon.english.op.org/.well-known/captive-portal"
+            "data": "https://cam.english.op.org/.well-known/captive-portal"
           }
         ],
         "reservations": [
@@ -511,6 +616,27 @@
           {
             "hw-address": "02:00:c0:a8:fa:1f",
             "ip-address": "10.7.250.31",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:fa:20",
+            "ip-address": "10.7.250.32",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:fa:21",
+            "ip-address": "10.7.250.33",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:fa:23",
+            "ip-address": "10.7.250.35",
             "user-context": {
               "infra-ghost": true
             }
@@ -575,6 +701,27 @@
           {
             "hw-address": "02:00:c0:a8:63:1f",
             "ip-address": "10.7.99.31",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:63:20",
+            "ip-address": "10.7.99.32",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:63:21",
+            "ip-address": "10.7.99.33",
+            "user-context": {
+              "infra-ghost": true
+            }
+          },
+          {
+            "hw-address": "02:00:c0:a8:63:23",
+            "ip-address": "10.7.99.35",
             "user-context": {
               "infra-ghost": true
             }
