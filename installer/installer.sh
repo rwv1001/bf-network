@@ -1574,7 +1574,27 @@ print('SWITCH_HOSTS_BYTES:', updates['SWITCH_HOSTS_BYTES'])
 PYENV
 
 echo 'Restarting Kea and web to load the new switch list...'
-docker compose up -d --no-deps --force-recreate kea web watchdog </dev/null
+# compose often recreates the containers and then never returns, which freezes
+# the installer after the switch work is already done. Bound it, then accept
+# success if the three containers are actually running.
+set +e
+timeout 180 docker compose up -d --no-deps --force-recreate kea web watchdog </dev/null
+compose_rc=$?
+set -e
+if [ "$compose_rc" -ne 0 ]; then
+    echo "docker compose up did not return cleanly (exit $compose_rc); checking container state..."
+    running="$(docker compose ps --status running --format '{{.Service}}' kea web watchdog 2>/dev/null || true)"
+    missing=""
+    for svc in kea web watchdog; do
+        printf '%s\n' "$running" | grep -qx "$svc" || missing="$missing $svc"
+    done
+    if [ -n "$missing" ]; then
+        echo "ERROR: still not running:$missing" >&2
+        docker compose ps kea web watchdog >&2 || true
+        exit 1
+    fi
+    echo "kea, web and watchdog are running; continuing."
+fi
 echo "DONE: $sw_ip added to site switch list and ACL/PBR baseline applied."
 REMOTE_ADD_SWITCH
     ssh_rc=${PIPESTATUS[0]}
