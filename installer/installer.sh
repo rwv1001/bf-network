@@ -1573,27 +1573,29 @@ print('SWITCH_HOSTS:', updates['SWITCH_HOSTS'])
 print('SWITCH_HOSTS_BYTES:', updates['SWITCH_HOSTS_BYTES'])
 PYENV
 
-echo 'Restarting Kea and web to load the new switch list...'
+echo 'Restarting Kea, web, watchdog and FreeRADIUS to load the new switch list...'
+# FreeRADIUS clients.conf is generated only at container start from SWITCH_HOSTS.
+# Without a restart the new switch stays an "unknown client".
 # compose often recreates the containers and then never returns, which freezes
 # the installer after the switch work is already done. Bound it, then accept
-# success if the three containers are actually running.
+# success if the four containers are actually running.
 set +e
-timeout 180 docker compose up -d --no-deps --force-recreate kea web watchdog </dev/null
+timeout 180 docker compose up -d --no-deps --force-recreate kea web watchdog freeradius </dev/null
 compose_rc=$?
 set -e
 if [ "$compose_rc" -ne 0 ]; then
     echo "docker compose up did not return cleanly (exit $compose_rc); checking container state..."
-    running="$(docker compose ps --status running --format '{{.Service}}' kea web watchdog 2>/dev/null || true)"
+    running="$(docker compose ps --status running --format '{{.Service}}' kea web watchdog freeradius 2>/dev/null || true)"
     missing=""
-    for svc in kea web watchdog; do
+    for svc in kea web watchdog freeradius; do
         printf '%s\n' "$running" | grep -qx "$svc" || missing="$missing $svc"
     done
     if [ -n "$missing" ]; then
         echo "ERROR: still not running:$missing" >&2
-        docker compose ps kea web watchdog >&2 || true
+        docker compose ps kea web watchdog freeradius >&2 || true
         exit 1
     fi
-    echo "kea, web and watchdog are running; continuing."
+    echo "kea, web, watchdog and freeradius are running; continuing."
 fi
 echo "DONE: $sw_ip added to site switch list and ACL/PBR baseline applied."
 REMOTE_ADD_SWITCH
@@ -1760,7 +1762,9 @@ New switch $ADD_SW_NAME is configured. Do this before plugging the trunk in.
    SWITCH_XGE_MAX=4
 
    cd /home/admin/bf-network
-   docker compose up -d kea web --force-recreate --no-deps
+   # freeradius must be recreated so entrypoint.sh regenerates clients.conf
+   # from the updated SWITCH_HOSTS; otherwise the new switch is "unknown client".
+   docker compose up -d kea web freeradius --force-recreate --no-deps
 
 4. If doing manual integration, you MUST also run the ACL/PBR baseline on
    ${ADD_SW_IP} (see the provided README). This is NOT part of the serial phase.
