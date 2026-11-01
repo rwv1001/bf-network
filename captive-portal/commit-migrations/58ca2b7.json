@@ -1,0 +1,34 @@
+{
+  "description": "Capture translated WAN NAT ports, track actual conntrack packets and event counts, and optimise traffic viewer",
+  "env": {
+    "add": [],
+    "remove": []
+  },
+  "db": {
+    "up": "commit-migrations/58ca2b7-up.sh",
+    "down": "commit-migrations/58ca2b7-down.sh",
+    "verify_up": [
+      {
+        "type": "column",
+        "table": "nat_sessions",
+        "column": "wan_src_port"
+      },
+      {
+        "type": "column",
+        "table": "nat_sessions",
+        "column": "event_count"
+      },
+      {
+        "type": "column",
+        "table": "nat_sessions",
+        "column": "start_event_seen"
+      },
+      {
+        "type": "column",
+        "table": "nat_sessions",
+        "column": "end_event_seen"
+      }
+    ]
+  },
+  "notes": "Migration is repeatable. Historical packet_count values cannot be reliably corrected. Rollback retains the new columns and captured WAN port data. The UDM logger must be installed on the router separately."
+}

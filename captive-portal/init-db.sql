@@ -214,7 +214,12 @@ CREATE TABLE IF NOT EXISTS nat_sessions (
     dst_port INTEGER NOT NULL,
     session_start TIMESTAMP NOT NULL,
     session_end TIMESTAMP NOT NULL,
-    packet_count INTEGER DEFAULT 1,
+    -- Actual cumulative conntrack packet counters when available; NULL otherwise.
+    packet_count INTEGER,
+    event_count INTEGER NOT NULL DEFAULT 0,
+    wan_src_port INTEGER CHECK (wan_src_port BETWEEN 1 AND 65535),
+    start_event_seen BOOLEAN NOT NULL DEFAULT FALSE,
+    end_event_seen BOOLEAN NOT NULL DEFAULT FALSE,
     switch_iface VARCHAR(100),
     src_mac VARCHAR(17),
     switch_host VARCHAR(255),
@@ -245,7 +250,9 @@ SELECT
     session_start,
     session_end,
     packet_count,
-    EXTRACT(EPOCH FROM (session_end - session_start)) AS duration_seconds
+    CASE WHEN start_event_seen AND end_event_seen
+         THEN EXTRACT(EPOCH FROM (session_end - session_start))
+         ELSE NULL END AS duration_seconds
 FROM nat_sessions
 WHERE session_end > (CURRENT_TIMESTAMP - INTERVAL '2 minutes')
 ORDER BY session_end DESC;
@@ -257,7 +264,8 @@ SELECT
     SUM(packet_count) AS total_packets,
     MIN(session_start) AS first_seen,
     MAX(session_end) AS last_seen,
-    AVG(EXTRACT(EPOCH FROM (session_end - session_start))) AS avg_session_duration_seconds
+    AVG(EXTRACT(EPOCH FROM (session_end - session_start))) FILTER
+        (WHERE start_event_seen AND end_event_seen) AS avg_session_duration_seconds
 FROM nat_sessions
 GROUP BY src_ip
 ORDER BY last_seen DESC;
@@ -343,6 +351,8 @@ CREATE TABLE IF NOT EXISTS ip_leases (
 
 CREATE INDEX IF NOT EXISTS idx_il_mac    ON ip_leases(mac_address);
 CREATE INDEX IF NOT EXISTS idx_il_ip     ON ip_leases(ip_address);
+CREATE INDEX IF NOT EXISTS idx_il_ip_lease_start
+    ON ip_leases(ip_address, lease_start DESC) INCLUDE (lease_expiry, mac_address);
 CREATE INDEX IF NOT EXISTS idx_il_expiry ON ip_leases(lease_expiry);
 
 
@@ -365,9 +375,15 @@ SELECT
     dns.domain_name,
     dns.query_count AS dns_query_count,
     n.packet_count,
-    EXTRACT(EPOCH FROM (n.session_end - n.session_start)) AS duration_seconds,
+    CASE WHEN n.start_event_seen AND n.end_event_seen
+         THEN EXTRACT(EPOCH FROM (n.session_end - n.session_start))
+         ELSE NULL END AS duration_seconds,
     COALESCE(n.switch_iface, d.switch_iface) AS switch_iface,
-    n.switch_host
+    n.switch_host,
+    n.wan_src_port,
+    n.event_count,
+    n.start_event_seen,
+    n.end_event_seen
 FROM nat_sessions n
 LEFT JOIN devices d ON n.src_mac = d.mac_address
 LEFT JOIN LATERAL (
@@ -515,7 +531,7 @@ LEFT JOIN LATERAL (
 ) own ON lse.mac_address IS NOT NULL
 LEFT JOIN users u ON u.id = own.user_id
 LEFT JOIN LATERAL (
-    SELECT n2.src_port, n2.dst_port
+    SELECT n2.wan_src_port AS src_port, n2.dst_port
     FROM nat_sessions n2
     WHERE n2.src_ip = l.client_ip
       AND n2.dst_ip = l.resolved_ip
@@ -561,7 +577,7 @@ SELECT
     n.user_email,
     n.user_first_name,
     n.user_last_name,
-    n.src_port AS wan_src_port,
+    n.wan_src_port AS wan_src_port,
     n.dst_port,
     'nat'::text AS traffic_source
 FROM nat_sessions_enriched n

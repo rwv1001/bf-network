@@ -2,7 +2,7 @@
 """
 NAT Log Parser Service (Containerized)
 Parses remote-syslog.log for NAT-Logger entries and stores sessions in PostgreSQL.
-Groups continuous activity (< 60 second gaps) into sessions.
+Tracks conntrack NEW/UPDATE/DESTROY events; legacy logs use a 60-second gap.
 Monitors log freshness and attempts to reinstall UDM logger if stale.
 """
 
@@ -13,7 +13,7 @@ import csv
 import logging
 import psycopg2
 import subprocess
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple, Dict
 from pathlib import Path
 
@@ -101,82 +101,91 @@ class NATParser:
             return False
     
     def parse_nat_line(self, line: str) -> Optional[Tuple]:
+        """Read legacy and v2 NAT-Logger messages; return event and kernel counters.
+
+        Time is the embedded RFC5424 microsecond timestamp when available,
+        otherwise the syslog wrapper timestamp. PostgreSQL timestamps are UTC naive.
         """
-        Parse NAT-Logger syslog line
-        Expected format: 2026-02-15T23:06:25+00:00 192.168.1.1 NAT-Logger: SNAT: local_src=192.168.10.13:46766 dst=8.8.8.8:443
-        Returns: (timestamp, src_ip, src_port, dst_ip, dst_port)
-        """
-        # Check if line contains NAT-Logger
-        if "NAT-Logger" not in line:
+        if 'NAT-Logger' not in line or 'SNAT:' not in line:
             return None
-        
-        # Extract timestamp (ISO format at start of line)
-        ts_match = re.match(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})', line)
-        if not ts_match:
+        high_res = re.search(r'\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+(?:Z|[+-]\d{2}:\d{2})?)', line)
+        coarse = re.match(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})?)', line)
+        match = high_res or coarse
+        if not match:
             return None
-        timestamp_str = ts_match.group(1)
-        
-        # Parse timestamp
         try:
-            timestamp = datetime.fromisoformat(timestamp_str)
+            timestamp = datetime.fromisoformat(match.group(1).replace('Z', '+00:00'))
+            if timestamp.tzinfo:
+                timestamp = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
         except ValueError:
-            logger.warning(f"Could not parse timestamp: {timestamp_str}")
             return None
-        
-        # Extract SNAT data: local_src=IP:PORT dst=IP:PORT
-        snat_match = re.search(r'local_src=([0-9.]+):(\d+)\s+dst=([0-9.]+):(\d+)', line)
-        if not snat_match:
+        snat = re.search(r'local_src=([0-9.]+):(\d+)\s+dst=([0-9.]+):(\d+)', line)
+        if not snat:
             return None
-        
-        src_ip = snat_match.group(1)
-        src_port = int(snat_match.group(2))
-        dst_ip = snat_match.group(3)
-        dst_port = int(snat_match.group(4))
-        
-        return (timestamp, src_ip, src_port, dst_ip, dst_port)
-    
-    def process_nat_entry(self, timestamp, src_ip, src_port, dst_ip, dst_port):
-        """Process a NAT entry - either update existing session or create new one"""
-        session_key = (src_ip, src_port, dst_ip, dst_port)
-        
-        # Check if we have an active session for this connection
-        if session_key in self.active_sessions:
-            session = self.active_sessions[session_key]
-            
-            # Check if this entry is within session gap time
-            time_gap = (timestamp - session['last_seen']).total_seconds()
-            
-            if time_gap <= SESSION_GAP_SECONDS:
-                # Update existing session
-                session['last_seen'] = timestamp
-                session['packet_count'] += 1
-                logger.debug(f"Updated session {src_ip}:{src_port} -> {dst_ip}:{dst_port} (gap: {time_gap:.1f}s)")
-            else:
-                # Gap too large - close old session and start new one
-                self._close_session(session_key, session)
-                self._start_new_session(session_key, timestamp)
-                logger.debug(f"New session {src_ip}:{src_port} -> {dst_ip}:{dst_port} (gap: {time_gap:.1f}s)")
+        src_ip, src_port, dst_ip, dst_port = snat.groups()
+        port_match = re.search(r'\bwan_src_port=(\d+)\b', line)
+        event_match = re.search(r'\bevent=(NEW|UPDATE|DESTROY)\b', line)
+        packets_match = re.search(r'\bpackets=(\d+)\b', line)
+        wan_src_port = int(port_match.group(1)) if port_match else None
+        if wan_src_port is not None and not 1 <= wan_src_port <= 65535:
+            wan_src_port = None
+        # INT in the existing schema; do not silently truncate huge counters.
+        packets = int(packets_match.group(1)) if packets_match else None
+        if packets is not None and packets > 2147483647:
+            packets = None
+        return (timestamp, src_ip, int(src_port), dst_ip, int(dst_port),
+                wan_src_port, event_match.group(1) if event_match else 'LEGACY', packets)
+
+    def process_nat_entry(self, timestamp, src_ip, src_port, dst_ip, dst_port,
+                          wan_src_port=None, event_type='LEGACY', actual_packets=None):
+        """Use conntrack packet counters, not the number of received syslog lines."""
+        key = (src_ip, src_port, dst_ip, dst_port)
+        session = self.active_sessions.get(key)
+        if session:
+            gap = (timestamp - session['last_seen']).total_seconds()
+            # Conntrack v2 flows can be idle for hours between NEW and DESTROY.
+            # Never split those flows on the legacy 60-second event-gap rule.
+            if gap > SESSION_GAP_SECONDS and not session.get('conntrack_v2') and event_type == 'LEGACY':
+                self._close_session(key, session)
+                session = self.active_sessions.get(key)
+        if session is None:
+            self._start_new_session(key, timestamp, wan_src_port,
+                                    event_type, actual_packets)
+            session = self.active_sessions[key]
         else:
-            # New connection - start new session
-            self._start_new_session(session_key, timestamp)
-            logger.debug(f"Started session {src_ip}:{src_port} -> {dst_ip}:{dst_port}")
-    
-    def _start_new_session(self, session_key, timestamp):
-        """Start a new session"""
+            session['start'] = min(session['start'], timestamp)
+            session['last_seen'] = max(session['last_seen'], timestamp)
+            session['event_count'] += 1
+            if wan_src_port is not None:
+                session['wan_src_port'] = wan_src_port
+            if actual_packets is not None:
+                if session['packet_count'] is None:
+                    session['packet_count'] = actual_packets
+                else:
+                    session['packet_count'] = max(session['packet_count'], actual_packets)
+            session['start_event_seen'] |= event_type == 'NEW'
+            session['end_event_seen'] |= event_type == 'DESTROY'
+            session['conntrack_v2'] |= event_type != 'LEGACY'
+        if event_type == 'DESTROY':
+            # The teardown timestamp is the observed end, not a stale timeout.
+            self._close_session(key, session)
+
+    def _start_new_session(self, session_key, timestamp,
+                           wan_src_port=None, event_type='LEGACY', actual_packets=None):
         src_ip, src_port, dst_ip, dst_port = session_key
         self.active_sessions[session_key] = {
-            'src_ip': src_ip,
-            'src_port': src_port,
-            'dst_ip': dst_ip,
-            'dst_port': dst_port,
-            'start': timestamp,
-            'last_seen': timestamp,
-            'packet_count': 1
+            'src_ip': src_ip, 'src_port': src_port,
+            'dst_ip': dst_ip, 'dst_port': dst_port,
+            'start': timestamp, 'last_seen': timestamp,
+            'wan_src_port': wan_src_port,
+            'event_count': 1,
+            'packet_count': actual_packets,  # None if no kernel counters
+            'start_event_seen': event_type == 'NEW',
+            'end_event_seen': event_type == 'DESTROY',
+            'conntrack_v2': event_type != 'LEGACY',
         }
-        # Track this IP for device sync
         self.seen_ips.add(src_ip)
-        logger.debug(f"Added {src_ip} to seen_ips (total: {len(self.seen_ips)})")
-    
+
     def _get_port_info_by_ips(self, src_ips):
         """Batch-lookup port info for a set of src IPs.
         Uses Kea leases (timestamped IP->MAC) then mac_port_cache (MAC->port+host)
@@ -193,7 +202,7 @@ class NATParser:
             return {}
 
         # Step 2: MAC -> {switch_iface, switch_host} via mac_port_cache
-        macs = list(ip_to_mac.values())
+        macs = [record['mac_address'] for record in ip_to_mac.values()]
         mac_to_port = {}
         try:
             with self.db_conn.cursor() as cur:
@@ -220,62 +229,60 @@ class NATParser:
         return result
 
     def _close_session(self, session_key, session):
-        """Close a session and write to database"""
+        """Upsert a completed/expired session with a real translated port if known."""
         if session['src_ip'] in local_ips():
+            self.active_sessions.pop(session_key, None)
             return
         try:
             port_map = self._get_port_info_by_ips({session['src_ip']})
             port_info = port_map.get(session['src_ip'], {})
-            src_mac     = port_info.get('src_mac')
+            src_mac = port_info.get('src_mac')
             switch_iface = port_info.get('switch_iface')
-            switch_host  = port_info.get('switch_host')
+            switch_host = port_info.get('switch_host')
             with self.db_conn.cursor() as cur:
-                # Use INSERT ... ON CONFLICT to handle duplicates gracefully
-                # If the same session already exists, update it with the latest end time and packet count
                 cur.execute("""
                     INSERT INTO nat_sessions
-                    (src_ip, src_port, dst_ip, dst_port, session_start, session_end,
-                     packet_count, src_mac, switch_iface, switch_host)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        (src_ip, src_port, dst_ip, dst_port, session_start,
+                         session_end, packet_count, event_count, wan_src_port,
+                         start_event_seen, end_event_seen,
+                         src_mac, switch_iface, switch_host)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (src_ip, src_port, dst_ip, dst_port, session_start)
                     DO UPDATE SET
-                        session_end  = EXCLUDED.session_end,
-                        packet_count = EXCLUDED.packet_count,
-                        src_mac      = COALESCE(nat_sessions.src_mac,      EXCLUDED.src_mac),
+                        session_end = GREATEST(nat_sessions.session_end, EXCLUDED.session_end),
+                        packet_count = GREATEST(nat_sessions.packet_count, EXCLUDED.packet_count),
+                        event_count = GREATEST(nat_sessions.event_count, EXCLUDED.event_count),
+                        wan_src_port = COALESCE(EXCLUDED.wan_src_port, nat_sessions.wan_src_port),
+                        start_event_seen = nat_sessions.start_event_seen OR EXCLUDED.start_event_seen,
+                        end_event_seen = nat_sessions.end_event_seen OR EXCLUDED.end_event_seen,
+                        src_mac = COALESCE(nat_sessions.src_mac, EXCLUDED.src_mac),
                         switch_iface = COALESCE(nat_sessions.switch_iface, EXCLUDED.switch_iface),
-                        switch_host  = COALESCE(nat_sessions.switch_host,  EXCLUDED.switch_host)
+                        switch_host = COALESCE(nat_sessions.switch_host, EXCLUDED.switch_host)
                 """, (
-                    session['src_ip'],
-                    session['src_port'],
-                    session['dst_ip'],
-                    session['dst_port'],
-                    session['start'],
-                    session['last_seen'],
-                    session['packet_count'],
-                    src_mac,
-                    switch_iface,
-                    switch_host,
+                    session['src_ip'], session['src_port'],
+                    session['dst_ip'], session['dst_port'],
+                    session['start'], session['last_seen'],
+                    session['packet_count'], session['event_count'],
+                    session['wan_src_port'], session['start_event_seen'],
+                    session['end_event_seen'], src_mac, switch_iface, switch_host,
                 ))
             self.db_conn.commit()
-            
             duration = (session['last_seen'] - session['start']).total_seconds()
+            complete = session['start_event_seen'] and session['end_event_seen']
             logger.info(
-                f"Closed session {session['src_ip']}:{session['src_port']} -> "
-                f"{session['dst_ip']}:{session['dst_port']} "
-                f"(duration: {duration:.1f}s, packets: {session['packet_count']})"
-            )
-            
-            # Remove from active sessions
-            del self.active_sessions[session_key]
-            
-        except Exception as e:
-            logger.error(f"Failed to close session: {e}")
-            # Rollback the transaction on error
+                'Closed session %s:%s -> %s:%s (observed: %.3fs, complete=%s, '
+                'kernel_packets=%s, events=%s, wan_port=%s)',
+                session['src_ip'], session['src_port'], session['dst_ip'],
+                session['dst_port'], duration, complete,
+                session['packet_count'], session['event_count'], session['wan_src_port'])
+            self.active_sessions.pop(session_key, None)
+        except Exception as exc:
+            logger.error('Failed to close session: %s', exc)
             try:
                 self.db_conn.rollback()
-            except:
+            except Exception:
                 pass
-    
+
     def update_device_ips(self):
         """
         Update device IPs based on Kea leases for recently seen IPs.
@@ -395,8 +402,7 @@ class NATParser:
             return {}
     
     def flush_active_sessions(self):
-        """Upsert all in-progress sessions to DB without closing them.
-        This makes them visible in the Traffic Viewer while still ongoing."""
+        """Persist active sessions without ending them. Works on the session table only."""
         if not self.active_sessions:
             return
         now = datetime.now()
@@ -409,46 +415,61 @@ class NATParser:
                 for session in self.active_sessions.values():
                     if session['src_ip'] in local_ips():
                         continue
-                    port_info    = port_map.get(session['src_ip'], {})
-                    src_mac      = port_info.get('src_mac')
-                    switch_iface = port_info.get('switch_iface')
-                    switch_host  = port_info.get('switch_host')
+                    port_info = port_map.get(session['src_ip'], {})
                     cur.execute("""
                         INSERT INTO nat_sessions
-                        (src_ip, src_port, dst_ip, dst_port, session_start, session_end,
-                         packet_count, src_mac, switch_iface, switch_host)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            (src_ip, src_port, dst_ip, dst_port, session_start,
+                             session_end, packet_count, event_count, wan_src_port,
+                             start_event_seen, end_event_seen,
+                             src_mac, switch_iface, switch_host)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (src_ip, src_port, dst_ip, dst_port, session_start)
                         DO UPDATE SET
-                            session_end  = EXCLUDED.session_end,
-                            packet_count = EXCLUDED.packet_count,
-                            src_mac      = COALESCE(nat_sessions.src_mac,      EXCLUDED.src_mac),
+                            session_end = GREATEST(nat_sessions.session_end, EXCLUDED.session_end),
+                            packet_count = GREATEST(nat_sessions.packet_count, EXCLUDED.packet_count),
+                            event_count = GREATEST(nat_sessions.event_count, EXCLUDED.event_count),
+                            wan_src_port = COALESCE(EXCLUDED.wan_src_port, nat_sessions.wan_src_port),
+                            start_event_seen = nat_sessions.start_event_seen OR EXCLUDED.start_event_seen,
+                            end_event_seen = nat_sessions.end_event_seen OR EXCLUDED.end_event_seen,
+                            src_mac = COALESCE(nat_sessions.src_mac, EXCLUDED.src_mac),
                             switch_iface = COALESCE(nat_sessions.switch_iface, EXCLUDED.switch_iface),
-                            switch_host  = COALESCE(nat_sessions.switch_host,  EXCLUDED.switch_host)
+                            switch_host = COALESCE(nat_sessions.switch_host, EXCLUDED.switch_host)
                     """, (
                         session['src_ip'], session['src_port'],
                         session['dst_ip'], session['dst_port'],
                         session['start'], session['last_seen'],
-                        session['packet_count'], src_mac, switch_iface, switch_host
+                        session['packet_count'], session['event_count'],
+                        session['wan_src_port'], session['start_event_seen'],
+                        session['end_event_seen'],
+                        port_info.get('src_mac'), port_info.get('switch_iface'),
+                        port_info.get('switch_host'),
                     ))
             self.db_conn.commit()
-            logger.debug(f"Flushed {len(self.active_sessions)} active sessions to DB")
-        except Exception as e:
-            logger.error(f"Error flushing active sessions: {e}")
+            logger.debug('Flushed %d active sessions', len(self.active_sessions))
+        except Exception as exc:
+            logger.error('Error flushing active sessions: %s', exc)
+            try:
+                self.db_conn.rollback()
+            except Exception:
+                pass
 
     def close_stale_sessions(self):
-        """Close sessions that haven't seen activity recently"""
+        """Close legacy sessions after idle gap; retain v2 conntrack flows to DESTROY.
+
+        An idle, still-open conntrack connection must not be treated as a
+        0-second session. v2 flows have a 24-hour safety fallback if DESTROY
+        was missed (e.g. router reboot/log loss); those are marked incomplete.
+        """
         current_time = datetime.now()
         stale_keys = []
-        
         for key, session in self.active_sessions.items():
-            time_since_last = (current_time - session['last_seen']).total_seconds()
-            if time_since_last > SESSION_GAP_SECONDS * 2:  # 2x the gap threshold
+            idle_seconds = (current_time - session['last_seen']).total_seconds()
+            threshold = 86400 if session.get('conntrack_v2') else SESSION_GAP_SECONDS * 2
+            if idle_seconds > threshold:
                 stale_keys.append(key)
-        
         for key in stale_keys:
             self._close_session(key, self.active_sessions[key])
-    
+
     def _load_position(self):
         """Load last file position from disk, or default to end-of-file."""
         if os.path.exists(POSITION_FILE):
@@ -504,8 +525,7 @@ class NATParser:
                     
                     result = self.parse_nat_line(line)
                     if result:
-                        timestamp, src_ip, src_port, dst_ip, dst_port = result
-                        self.process_nat_entry(timestamp, src_ip, src_port, dst_ip, dst_port)
+                        self.process_nat_entry(*result)
                         self.last_log_timestamp = datetime.now()
 
                 self.last_position = f.tell()
@@ -818,6 +838,9 @@ class NATParser:
         logger.info("Attempting to reinstall NAT logger on UDM (stale log trigger)...")
         self.last_reinstall_attempt = datetime.now()
         udm_routers = [r for r in self.cached_routers if r['nat_logger_type'] == 'udm']
+        if not udm_routers:
+            self.load_routers()
+            udm_routers = [r for r in self.cached_routers if r['nat_logger_type'] == 'udm']
         if not udm_routers:
             logger.warning("No UDM router found in DB - cannot reinstall")
             return

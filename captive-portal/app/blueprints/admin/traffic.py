@@ -242,18 +242,19 @@ def traffic():
         FROM dns_lookups l
     '''
     nat_base = '''
-        SELECT n.session_id AS lookup_id,
+        SELECT n.id AS lookup_id,
                n.session_start AS lookup_timestamp,
-               host(n.src_ip::inet) AS client_ip,
+               host(n.src_ip) AS client_ip,
                n.src_port AS lan_src_port,
-               n.domain_name AS domain_name,
-               host(n.dst_ip::inet) AS domain_ip,
+               NULL::text AS domain_name,
+               host(n.dst_ip) AS domain_ip,
                n.src_mac::text AS src_mac,
-               n.src_port AS wan_src_port,
+               n.wan_src_port AS wan_src_port,
                n.dst_port AS dst_port,
                'nat'::text AS traffic_source
-        FROM nat_sessions_enriched n
+        FROM nat_sessions n
     '''
+
     fallback_base = '''
         SELECT p.session_id AS lookup_id,
                p.session_start AS lookup_timestamp,
@@ -271,7 +272,8 @@ def traffic():
     # Only columns that exist in the initial (pre-ownership-join) row can be
     # searched/sorted before pagination. This matters for large traffic tables.
     raw_cols = set(valid_cols) - {'user_email', 'user_first_name', 'user_last_name'}
-    base_cols = {'dns': raw_cols - {'src_mac'}, 'nat': raw_cols, 'pihole': raw_cols}
+    base_cols = {'dns': raw_cols - {'src_mac'},
+                 'nat': raw_cols - {'domain_name'}, 'pihole': raw_cols}
 
     def filter_sql(alias, active, params):
         clauses = []
@@ -322,7 +324,7 @@ def traffic():
         LEFT JOIN LATERAL (
             SELECT lease.mac_address FROM ip_leases lease
             WHERE b.traffic_source = 'dns'
-              AND host(lease.ip_address::inet) = b.client_ip
+              AND lease.ip_address = b.client_ip
               AND lease.lease_start <= b.lookup_timestamp
               AND lease.lease_expiry > b.lookup_timestamp
             ORDER BY lease.lease_start DESC LIMIT 1
@@ -335,10 +337,21 @@ def traffic():
             ORDER BY own.start_datetime DESC LIMIT 1
         ) own ON TRUE
         LEFT JOIN users u ON u.id = own.user_id
+        -- Domain resolution is performed after paging in the usual request
+        -- path: this lateral probe runs only for the displayed NAT rows.
+        LEFT JOIN LATERAL (
+            SELECT r.domain_name FROM dns_resolutions r
+            WHERE b.traffic_source = 'nat'
+              AND r.resolved_ip = b.domain_ip::inet
+              AND r.last_seen >= b.lookup_timestamp - INTERVAL '12 hours'
+              AND r.last_seen <= b.lookup_timestamp + INTERVAL '12 hours'
+            ORDER BY ABS(EXTRACT(EPOCH FROM (r.last_seen - b.lookup_timestamp)))
+            LIMIT 1
+        ) natdns ON TRUE
     '''
     enriched_select = '''
         SELECT b.lookup_id, b.lookup_timestamp, b.client_ip, b.lan_src_port,
-               b.domain_name, b.domain_ip,
+               COALESCE(b.domain_name, natdns.domain_name) AS domain_name, b.domain_ip,
                COALESCE(b.src_mac, lse.mac_address::text)::text AS src_mac,
                u.email AS user_email, u.first_name AS user_first_name,
                u.last_name AS user_last_name,
