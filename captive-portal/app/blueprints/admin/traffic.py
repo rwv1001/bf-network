@@ -249,7 +249,7 @@ def traffic():
                n.domain_name AS domain_name,
                host(n.dst_ip::inet) AS domain_ip,
                n.src_mac::text AS src_mac,
-               NULL::integer AS wan_src_port,
+               n.src_port AS wan_src_port,
                n.dst_port AS dst_port,
                'nat'::text AS traffic_source
         FROM nat_sessions_enriched n
