@@ -1201,6 +1201,11 @@ def register():
             close_ownership(mac_address, commit=True)
             active_ownership = None
         if not active_ownership:
+            # A fresh registration must not inherit validation from a prior owner/life
+            device.ownership_validated = None
+            device.confirmation_token = None
+            device.confirmation_confirmed_at = None
+            device.confirmation_deadline = None
             open_ownership(mac_address, user.id, commit=True)
 
         # Blocked-user check
@@ -1784,6 +1789,7 @@ def unregister(token):
     device.ownership_validated       = None
     device.unregister_token          = None
     device.profile_snapshot          = None
+    device.confirmation_token        = None
     device.confirmation_confirmed_at = None
     device.confirmation_deadline     = None
     device.stale                     = True
@@ -1809,7 +1815,7 @@ def confirm_device(token):
     if not device:
         flash('Invalid or expired confirmation link', 'error')
         return redirect(url_for('portal.index'))
-    if device.registration_status == 'unregistered':
+    if device.registration_status not in ('registered', 'blocked') or not get_active_ownership(device.mac_address):
         flash('This device is unregistered.', 'error')
         return render_template('status.html', device=device, unregistered=True)
     device.confirmation_confirmed_at = datetime.utcnow()
@@ -1831,7 +1837,7 @@ def reject_device(token):
     if not device:
         flash('Invalid or expired link', 'error')
         return redirect(url_for('portal.index'))
-    if device.registration_status == 'unregistered':
+    if device.registration_status not in ('registered', 'blocked') or not get_active_ownership(device.mac_address):
         flash('This device is already unregistered.', 'info')
         return render_template('status.html', device=device, unregistered=True)
     unregister_device(device)

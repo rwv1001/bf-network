@@ -804,19 +804,31 @@ class KeaIntegration:
         """
         try:
             mac = mac.lower().replace('-', ':')
-            
-            arguments = {
-                "identifier-type": "hw-address",
-                "identifier": mac
-            }
 
-            if subnet_id is not None:
-                arguments["subnet-id"] = self._resolve_subnet_id(subnet_id)
+            if subnet_id is None:
+                # lease4-get by hw-address requires subnet-id; this variant searches all subnets
+                command = {
+                    "command": "lease4-get-by-hw-address",
+                    "service": ["dhcp4"],
+                    "arguments": {"hw-address": mac}
+                }
+                response = self._send_command(command)
+                if response.get("result") == 0:
+                    leases = response.get("arguments", {}).get("leases") or []
+                    if not leases:
+                        return None
+                    # Prefer the most recently touched lease
+                    return max(leases, key=lambda l: l.get("cltt") or 0)
+                return None
 
             command = {
                 "command": "lease4-get",
                 "service": ["dhcp4"],
-                "arguments": arguments
+                "arguments": {
+                    "identifier-type": "hw-address",
+                    "identifier": mac,
+                    "subnet-id": self._resolve_subnet_id(subnet_id),
+                }
             }
             
             response = self._send_command(command)

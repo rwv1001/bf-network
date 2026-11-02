@@ -251,6 +251,9 @@ def delete_device(device_id):
     device.internet_accessible = None
     device.internet_blocked    = None
     device.ownership_validated = None
+    device.confirmation_token  = None
+    device.confirmation_confirmed_at = None
+    device.confirmation_deadline = None
     device.stale               = True
     sync_registration_status(device)
 
