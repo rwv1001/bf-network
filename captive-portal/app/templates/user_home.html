@@ -41,6 +41,8 @@
           <span style="background:#4CAF50; color:white; padding:2px 8px; border-radius:4px; font-size:0.8em;">CONNECTED</span>
         {% elif dev.assigned_vlan and dev.assigned_vlan != dev.current_vlan %}
           <span style="background:#ff9800; color:white; padding:2px 8px; border-radius:4px; font-size:0.8em;">WRONG VLAN</span>
+        {% elif dev.registration_status == 'registered' or dev.assigned_vlan %}
+          <span style="background:#9e9e9e; color:white; padding:2px 8px; border-radius:4px; font-size:0.8em;">NOT CONNECTED</span>
         {% else %}
           <span style="background:#9e9e9e; color:white; padding:2px 8px; border-radius:4px; font-size:0.8em;">PENDING</span>
         {% endif %}
