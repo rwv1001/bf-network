@@ -5469,22 +5469,35 @@ arp detection enable
 declare -A VLAN_ISP_INDEX=()   # vlan_id -> index into ISP_NAMES
 
 info "VLAN → ISP routing"
-for vlan in "${VLAN_LIST[@]}"; do
-    echo
-    echo "User VLAN $vlan — which ISP should carry this VLAN’s traffic?"
-    for i in $(printf '%s\n' "${!ISP_NAMES[@]}" | sort -n); do
-        echo "  $((i + 1))) ${ISP_NAMES[$i]}  (uplink VLAN $(isp_vlan_id "$i"), net ${ISP_NETWORK_PORTION[$i]}.0/24)"
+echo "=== VLAN→ISP routing (single-ISP auto-assign build 2026-11-07) ==="
+isp_count="${#ISP_NAMES[@]}"
+echo "ISP count: $isp_count (NUM_ISPS=${NUM_ISPS:-unset})"
+# Auto-assign whenever there is only one ISP, regardless of how NUM_ISPS was set.
+if [ "$isp_count" -le 1 ] || [ "${NUM_ISPS:-1}" -eq 1 ]; then
+    echo "Only one ISP configured (${ISP_NAMES[0]:-ISP}). Assigning all user VLANs to it (no prompt)."
+    for vlan in "${VLAN_LIST[@]}"; do
+        VLAN_ISP_INDEX[$vlan]=0
+        save_answer "vlan_${vlan}_isp" "1"
+        echo "  VLAN $vlan → ISP 1 (${ISP_NAMES[0]:-ISP})"
     done
-    while true; do
-        prompt_line ans "Enter ISP number [1-${#ISP_NAMES[@]}]: " "vlan_${vlan}_isp"
-        if [[ "$ans" =~ ^[0-9]+$ ]] && [ "$ans" -ge 1 ] && [ "$ans" -le "${#ISP_NAMES[@]}" ]; then
-            VLAN_ISP_INDEX[$vlan]=$((ans - 1))
-            break
-        fi
-        echo "Invalid choice."
-        invalidate_answer "vlan_${vlan}_isp"
+else
+    for vlan in "${VLAN_LIST[@]}"; do
+        echo
+        echo "User VLAN $vlan — which ISP should carry this VLAN’s traffic?"
+        for i in $(printf '%s\n' "${!ISP_NAMES[@]}" | sort -n); do
+            echo "  $((i + 1))) ${ISP_NAMES[$i]}  (uplink VLAN $(isp_vlan_id "$i"), net ${ISP_NETWORK_PORTION[$i]}.0/24)"
+        done
+        while true; do
+            prompt_line ans "Enter ISP number [1-${#ISP_NAMES[@]}]: " "vlan_${vlan}_isp"
+            if [[ "$ans" =~ ^[0-9]+$ ]] && [ "$ans" -ge 1 ] && [ "$ans" -le "${#ISP_NAMES[@]}" ]; then
+                VLAN_ISP_INDEX[$vlan]=$((ans - 1))
+                break
+            fi
+            echo "Invalid choice."
+            invalidate_answer "vlan_${vlan}_isp"
+        done
     done
-done
+fi
 
 declare -a ISP_GW=()
 for i in $(printf '%s\n' "${!ISP_NAMES[@]}" | sort -n); do
@@ -7396,6 +7409,10 @@ prompt_default CENTRAL_HOST \
     "bf-central SSH hostname or IP" \
     "bf-central.english.op.org" \
     "central_ssh_host"
+
+# Needed for the key comment below (used before the later reassignment of CENTRAL_HOST).
+SAFE_CENTRAL="$(printf '%s' "$CENTRAL_HOST" | tr '.' '_' | tr -cd '[:alnum:]_')"
+[ -n "$SAFE_CENTRAL" ] || SAFE_CENTRAL="central"
 
 prompt_default CENTRAL_SSH_USER \
     "SSH username on bf-central" \
