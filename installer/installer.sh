@@ -1419,6 +1419,17 @@ grep -q 'Cannot derive a unique switch IP' scripts/hp5130-acl-baseline.sh || {
 # Do not recreate containers before the baseline: the switch remains outside
 # SWITCH_HOSTS until it has its required ACL/PBR protections.
 docker compose ps --status running kea | grep -q kea || { echo 'Kea is not running' >&2; exit 1; }
+# A wiped/re-added switch generates a new SSH host key. The containers pin
+# switch keys in shared/ssh-known-hosts; drop any stale entry for this IP so
+# the baseline push below is not refused as a host-key mismatch.
+if [ -f shared/ssh-known-hosts/known_hosts ]; then
+    ssh-keygen -R "$sw_ip" -f shared/ssh-known-hosts/known_hosts >/dev/null 2>&1 || true
+    rm -f shared/ssh-known-hosts/known_hosts.old
+    # ssh-keygen rewrites the file under this script's umask 077; the web
+    # container (PORTAL_GID) must still be able to read and append to it.
+    chgrp "$(stat -c %g shared/ssh-known-hosts)" shared/ssh-known-hosts/known_hosts 2>/dev/null || true
+    chmod 664 shared/ssh-known-hosts/known_hosts 2>/dev/null || true
+fi
 docker compose exec -T kea python3 -c '
 import json
 p="/scripts/scriptdata/hp5130-policy.json"
@@ -3076,6 +3087,32 @@ EOF
     pi_sudo "rm -f /tmp/bf-setup-chrony.sh"
 }
 
+setup_pi_host_firewall() {
+    # Allow-list on the Pi for traffic from user VLANs. The Pi has an address
+    # on every user VLAN, so devices reach it at L2 and no switch ACL applies;
+    # without this an unregistered device can reach NPM admin, Pi-hole, UniFi,
+    # SSH, syslog and TFTP. Loopback (VPS reverse tunnels), established flows,
+    # the management VLAN and the Wi-Fi/ISP side are never restricted.
+    # PI_FW_ENABLED=false in .env skips installation (unit disabled if present).
+    local enabled="${PI_FW_ENABLED:-true}"
+    local q_repo unit
+    q_repo="$(shell_quote "$PI_REPO_DIR")"
+    if ! is_yes "$enabled" && [ "$enabled" != "true" ]; then
+        info "Host firewall disabled (PI_FW_ENABLED=$enabled)"
+        pi_sudo "systemctl disable --now bf-host-firewall.service 2>/dev/null || true"
+        return 0
+    fi
+    info "Installing host firewall (user-VLAN allow-list)"
+    unit="$(mktemp)"
+    sed -e "s#/home/admin/bf-network#${PI_REPO_DIR}#g" \
+        "$SCRIPT_DIR/../scripts/bf-host-firewall.service" > "$unit"
+    pi_scp_to "$unit" /tmp/bf-host-firewall.service
+    rm -f "$unit"
+    pi_sudo "chmod 755 $q_repo/scripts/pi-host-firewall.sh"
+    pi_sudo "mv /tmp/bf-host-firewall.service /etc/systemd/system/bf-host-firewall.service && chmod 644 /etc/systemd/system/bf-host-firewall.service && systemctl daemon-reload && systemctl enable --now bf-host-firewall.service"
+    pi_sudo "$q_repo/scripts/pi-host-firewall.sh status | head -20" || true
+}
+
 write_pi_env_file() {
     ENV_TMP="$(mktemp)"
 
@@ -3218,6 +3255,23 @@ write_pi_env_file() {
         write_env_line SWITCH_USER "$NEW_USERNAME"
         write_env_line SWITCH_NETCONF_PORT "830"
         write_env_line SWITCH_KEY_PATH "$DOCKER_SWITCH_KEY_PATH"
+        # Switch SSH host-key pinning. Keys are recorded on first contact in the
+        # shared known_hosts volume and must match afterwards. "accept-new" is
+        # the pinning mode; "no" restores the old unverified behaviour.
+        write_env_line SWITCH_SSH_KNOWN_HOSTS "/ssh-known-hosts/known_hosts"
+        write_env_line SWITCH_SSH_HOSTKEY_POLICY "accept-new"
+        # Gunicorn bind address inside the web container. Must stay 127.0.0.1 so
+        # LAN clients cannot bypass NPM and forge X-Real-IP.
+        write_env_line PORTAL_BIND_ADDR "127.0.0.1"
+        # BlastRADIUS (CVE-2024-3596): HP5130 MAC-auth requests carry no
+        # Message-Authenticator, so "false" is required until HPE firmware adds it.
+        write_env_line SWITCH_RADIUS_REQUIRE_MA "false"
+        # Pi host firewall (scripts/pi-host-firewall.sh). Admin SSH to the Pi
+        # is expected via the management VLAN, Wi-Fi/ISP LAN or the VPS tunnel.
+        write_env_line PI_FW_ENABLED "${PI_FW_ENABLED:-true}"
+        write_env_line PI_FW_ALLOW_SSH_FROM_USER_VLANS "${PI_FW_ALLOW_SSH_FROM_USER_VLANS:-0}"
+        write_env_line PI_FW_EXTRA_TCP_PORTS ""
+        write_env_line PI_FW_EXTRA_UDP_PORTS ""
         write_env_line SWITCH_PORT_LOOKUP_ENABLED "1"
         write_env_line TEST_ENV "$TEST_ENV"
 
@@ -4912,6 +4966,10 @@ Redo with:  sudo ./installer.sh --forget-answer bf_repo_ref
         echo "TFTP already marked configured; re-applying so the backup directory stays the one the switches use."
         setup_pi_tftp_server
     fi
+
+    # Always re-apply: the allow-list is derived from the current VLAN set.
+    setup_pi_host_firewall
+    complete_step "setup_pi_host_firewall"
 
     
 
@@ -7884,6 +7942,29 @@ echo "Installer SSH during setup uses Wi-Fi. Day-to-day SSH is the management VL
 echo "  ssh -i ${PI_KEY_PATH} ${PI_USER}@${LOCAL_BASE}.${MANAGEMENT_VLAN}.${PORTAL_IP_BYTE}"
 echo "${WAN_IFACE} stays a VLAN parent (no IPv4). Do not put an address on the bare NIC."
 print_ssh_tunnel_usage
+echo
+echo "----------------------------------------------------------------------------"
+echo "MANUAL STEP STILL REQUIRED — UniFi client isolation"
+echo "----------------------------------------------------------------------------"
+echo "Switch ACLs only filter traffic that is ROUTED between VLANs or out to an"
+echo "ISP. Two devices on the same Wi-Fi VLAN talk at layer 2 and never pass an"
+echo "ACL, so an unregistered device can still reach other devices on its SSID."
+echo "Enable Client Device Isolation on each SSID whose users should not see"
+echo "each other (at minimum the guest SSID):"
+echo
+echo "  UniFi Network  →  Settings  →  WiFi  →  <SSID>  →  Advanced (Manual)"
+echo "    →  Client Device Isolation  =  ON   →  Apply Changes"
+echo
+echo "SSIDs configured by this installer:"
+for idx in "${!VLAN_LIST[@]}"; do
+    _ssid="${VLAN_SSIDS[$idx]:-}"
+    [ -n "$_ssid" ] || continue
+    printf '  VLAN %-4s %-20s SSID: %s\n' "${VLAN_LIST[$idx]}" "${VLAN_NAMES[$idx]:-}" "$_ssid"
+done
+echo
+echo "Leave isolation OFF on SSIDs where devices must discover each other"
+echo "(casting, printers, smart speakers). Wired devices on the unregistered"
+echo "VLAN ${WIRED_VLAN} are already limited to the portal by ACL 3000."
 echo
 echo "Installation Complete!"
 

@@ -23,6 +23,9 @@ export AUTOSSH_POLL=10
 USER_HOST="${ORACLE_VPS_USER:-ubuntu}@${ORACLE_VPS_HOST}"
 REMOTE_PORT="${ORACLE_VPS_HTTPS_PORT:-9443}"
 KEY="${ORACLE_VPS_SSH_KEY_PATH:-/keys/oracle_rsa}"
+# Pin the VPS host key after first contact so a MITM cannot impersonate it.
+KNOWN_HOSTS="${SWITCH_SSH_KNOWN_HOSTS:-/dev/null}"
+HOSTKEY_POLICY="${SWITCH_SSH_HOSTKEY_POLICY:-accept-new}"
 
 while true; do
     echo "tunnel: connecting to ${USER_HOST} ..."
@@ -32,8 +35,8 @@ while true; do
         -o ServerAliveCountMax=2 \
         -o ExitOnForwardFailure=yes \
         -o TCPKeepAlive=yes \
-        -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null \
+        -o StrictHostKeyChecking="$HOSTKEY_POLICY" \
+        -o UserKnownHostsFile="$KNOWN_HOSTS" \
         -i "$KEY" \
         -R "127.0.0.1:${REMOTE_PORT}:127.0.0.1:443" \
         "$USER_HOST" \

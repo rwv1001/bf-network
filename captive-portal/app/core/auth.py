@@ -67,13 +67,18 @@ class AdminUser:
         self.must_change_password = must_change_password
 
     # ── Flask-Login interface ─────────────────────────────────────────────────
+    # These must be properties: Flask-Login evaluates them as attributes, and a
+    # bound method would be truthy even when it should be False.
 
+    @property
     def is_authenticated(self):
         return True
 
+    @property
     def is_active(self):
         return True
 
+    @property
     def is_anonymous(self):
         return False
 

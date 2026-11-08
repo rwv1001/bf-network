@@ -40,7 +40,9 @@ SWITCH_KEY_PATH="${SWITCH_KEY_PATH:-$DEFAULT_KEY_PATH}"
 # --- SSH options ---
 SSH_TTY_FLAG="${SSH_TTY_FLAG:--tt}"
 SSH_HOSTKEY_OPTS="${SSH_HOSTKEY_OPTS:--o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa}"
-SSH_OPTS="-i $SWITCH_KEY_PATH -p $SWITCH_SSH_PORT $SSH_HOSTKEY_OPTS -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3"
+SWITCH_SSH_KNOWN_HOSTS="${SWITCH_SSH_KNOWN_HOSTS:-/dev/null}"
+SWITCH_SSH_HOSTKEY_POLICY="${SWITCH_SSH_HOSTKEY_POLICY:-accept-new}"
+SSH_OPTS="-i $SWITCH_KEY_PATH -p $SWITCH_SSH_PORT $SSH_HOSTKEY_OPTS -o StrictHostKeyChecking=$SWITCH_SSH_HOSTKEY_POLICY -o UserKnownHostsFile=$SWITCH_SSH_KNOWN_HOSTS -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3"
 
 # --- Subnet helper ---
 subnet_network=$(echo "$SUBNET" | cut -d/ -f1)

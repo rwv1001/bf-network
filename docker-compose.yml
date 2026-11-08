@@ -39,6 +39,7 @@ services:
       - ./scripts:/scripts:ro
       - ./scripts/scriptdata:/scripts/scriptdata:ro
       - ./shared/acl-queue:/acl-queue
+      - ./shared/ssh-known-hosts:/ssh-known-hosts
       - /home/rwv1001/.ssh:/keys:ro
       - ./kea/logs:/kea/logs
       - /etc/localtime:/etc/localtime:ro
@@ -55,6 +56,9 @@ services:
       SWITCH_USER: ${SWITCH_USER:-robert}
       SWITCH_SSH_PORT: ${SWITCH_SSH_PORT:-22}
       SWITCH_KEY_PATH: ${SWITCH_KEY_PATH:-/keys/id_rsa}
+      # Switch SSH host-key pinning (shared with web/watchdog). See core/switch.py.
+      SWITCH_SSH_KNOWN_HOSTS: ${SWITCH_SSH_KNOWN_HOSTS:-/ssh-known-hosts/known_hosts}
+      SWITCH_SSH_HOSTKEY_POLICY: ${SWITCH_SSH_HOSTKEY_POLICY:-accept-new}
       SWITCH_POE: ${SWITCH_POE:-yes}
       SWITCH_GE_MAX: ${SWITCH_GE_MAX:-52}
       SWITCH_XGE_MAX: ${SWITCH_XGE_MAX:-4}
@@ -118,6 +122,12 @@ services:
       mkdir -p /acl-queue
       chgrp -R ${PORTAL_GID:-1000} /acl-queue || true
       chmod 2775 /acl-queue || true
+      # Shared SSH known_hosts for switch host-key pinning (web runs as PORTAL_GID)
+      mkdir -p /ssh-known-hosts
+      touch /ssh-known-hosts/known_hosts || true
+      chgrp -R ${PORTAL_GID:-1000} /ssh-known-hosts || true
+      chmod 2775 /ssh-known-hosts || true
+      chmod 664 /ssh-known-hosts/known_hosts || true
       chmod 755 /kea/leases || true
       umask 0002
       # Ensure the ACL rule-number allocation table exists.
@@ -209,8 +219,12 @@ services:
       - ./captive-portal/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
       - /etc/localtime:/etc/localtime:ro
     network_mode: host
+    # Host networking is needed so the other host-mode containers can reach
+    # the DB on 127.0.0.1, but that also exposed 5432 on every VLAN interface.
+    # Every consumer (web, kea, freeradius, parsers) uses DB_HOST=127.0.0.1.
+    command: ["postgres", "-c", "listen_addresses=127.0.0.1"]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-portal_user} -d ${DB_NAME:-captive_portal}"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${DB_USER:-portal_user} -d ${DB_NAME:-captive_portal}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -224,8 +238,10 @@ services:
     volumes:
       - /etc/localtime:/etc/localtime:ro
     network_mode: host
+    # Redis has no auth here; never let it listen on the VLAN interfaces.
+    command: ["redis-server", "--bind", "127.0.0.1", "--protected-mode", "yes"]
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-h", "127.0.0.1", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -311,6 +327,8 @@ services:
       SWITCH_PORT_LOOKUP_ENABLED: ${SWITCH_PORT_LOOKUP_ENABLED:-1}
       SWITCH_NETCONF_PORT: ${SWITCH_NETCONF_PORT:-830}
       SWITCH_KEY_PATH: ${SWITCH_KEY_PATH:-/keys/id_rsa}
+      SWITCH_SSH_KNOWN_HOSTS: ${SWITCH_SSH_KNOWN_HOSTS:-/ssh-known-hosts/known_hosts}
+      SWITCH_SSH_HOSTKEY_POLICY: ${SWITCH_SSH_HOSTKEY_POLICY:-accept-new}
       USER_DEVICE_INTERFACES: ${USER_DEVICE_INTERFACES:-15}
       SWITCH_REPLUG_ENABLED: ${SWITCH_REPLUG_ENABLED:-false}
       SWITCH_REPLUG_DELAY_SEC: ${SWITCH_REPLUG_DELAY_SEC:-3}
@@ -349,6 +367,10 @@ services:
       PORTAL_ADMIN_USER: ${PORTAL_ADMIN_USER:-admin}
       PORTAL_ADMIN_PASSWORD: ${PORTAL_ADMIN_PASSWORD:?PORTAL_ADMIN_PASSWORD is required}
       PORTAL_FORWARD_PORT: ${PORTAL_FORWARD_PORT:-8081}
+      # Gunicorn must only be reachable via NPM (127.0.0.1). If it listened on
+      # the LAN, a client could bypass the proxy and forge X-Real-IP, which is
+      # what the portal uses to identify the device.
+      PORTAL_BIND_ADDR: ${PORTAL_BIND_ADDR:-127.0.0.1}
       UNIFI_FORWARD_PORT: ${UNIFI_FORWARD_PORT:-8080}
       WAN_IFACE: ${WAN_IFACE:-eth0}
     volumes:
@@ -362,6 +384,7 @@ services:
       - ./scripts:/scripts:ro
       - ./scripts/scriptdata:/scripts/scriptdata
       - ./shared/acl-queue:/acl-queue
+      - ./shared/ssh-known-hosts:/ssh-known-hosts
       - /home/rwv1001/.ssh:/keys:ro
       - /etc/systemd/network:/host-systemd-network
       - ./watchdog:/watchdog-data
@@ -452,6 +475,7 @@ services:
     entrypoint: ["/tunnel-entrypoint.sh"]
     volumes:
       - /home/rwv1001/.ssh:/keys:ro
+      - ./shared/ssh-known-hosts:/ssh-known-hosts
       - ./captive-portal/tunnel-entrypoint.sh:/tunnel-entrypoint.sh:ro
       - /etc/localtime:/etc/localtime:ro
     environment:
@@ -460,6 +484,8 @@ services:
       ORACLE_VPS_ENABLED: ${ORACLE_VPS_ENABLED:-true}
       ORACLE_VPS_HTTPS_PORT: ${ORACLE_VPS_HTTPS_PORT:-9443}
       ORACLE_VPS_SSH_KEY_PATH: ${ORACLE_VPS_SSH_KEY_PATH:-/keys/oracle_rsa}
+      SWITCH_SSH_KNOWN_HOSTS: ${SWITCH_SSH_KNOWN_HOSTS:-/ssh-known-hosts/known_hosts}
+      SWITCH_SSH_HOSTKEY_POLICY: ${SWITCH_SSH_HOSTKEY_POLICY:-accept-new}
 
   mdns:
     image: python:3-alpine
@@ -683,6 +709,8 @@ services:
       WATCHDOG_SWITCH_HOSTS: ${SWITCH_HOSTS:-}
       WATCHDOG_SWITCH_USER: ${SWITCH_USER:-robert}
       WATCHDOG_SWITCH_KEY_PATH: ${SWITCH_KEY_PATH:-/keys/id_rsa}
+      SWITCH_SSH_KNOWN_HOSTS: ${SWITCH_SSH_KNOWN_HOSTS:-/ssh-known-hosts/known_hosts}
+      SWITCH_SSH_HOSTKEY_POLICY: ${SWITCH_SSH_HOSTKEY_POLICY:-accept-new}
       # Space-separated IPs of switches that have an RPS fitted.
       # Absent/Fault on a secondary PSU is only alerted for listed switches.
       WATCHDOG_SWITCH_RPS_HOSTS: ${SWITCH_RPS_HOSTS:-}
@@ -695,6 +723,7 @@ services:
       - ./watchdog:/data
       # SSH key for optional peer reboot
       - /home/rwv1001/.ssh:/keys:ro
+      - ./shared/ssh-known-hosts:/ssh-known-hosts
       # Syslog log directory — for staleness check
       - ./syslog-container/logs:/logs:ro
       - /etc/localtime:/etc/localtime:ro

@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>{% block title %}Blackfriars Network Access Portal{% endblock %}</title>
     <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
     <link rel="shortcut icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
@@ -344,6 +345,73 @@
     <style>.container { max-width: 95%; }</style>
     {% endif %}
     {% block extra_head %}{% endblock %}
+    <script>
+    // CSRF: add the token to same-origin mutating fetch() calls and to any POST
+    // form that does not already carry a csrf_token field (e.g. forms built
+    // dynamically or in partials). Runs before page scripts so every fetch is covered.
+    (function () {
+        var meta = document.querySelector('meta[name=csrf-token]');
+        var token = meta ? meta.content : '';
+        if (!token) return;
+        window.CSRF_TOKEN = token;
+
+        var safeMethods = /^(GET|HEAD|OPTIONS|TRACE)$/i;
+        function sameOrigin(url) {
+            try { return new URL(url, window.location.href).origin === window.location.origin; }
+            catch (e) { return false; }
+        }
+        if (window.fetch) {
+            var origFetch = window.fetch;
+            window.fetch = function (input, init) {
+                init = init || {};
+                var method = (init.method || (input && input.method) || 'GET');
+                var url = (typeof input === 'string') ? input : (input && input.url) || '';
+                if (!safeMethods.test(method) && sameOrigin(url)) {
+                    var headers = new Headers(init.headers || (input && input.headers) || {});
+                    if (!headers.has('X-CSRFToken')) headers.set('X-CSRFToken', token);
+                    init.headers = headers;
+                }
+                return origFetch.call(this, input, init);
+            };
+        }
+        if (window.XMLHttpRequest) {
+            var origOpen = XMLHttpRequest.prototype.open;
+            XMLHttpRequest.prototype.open = function (method, url) {
+                this._csrfNeeded = !safeMethods.test(method || 'GET') && sameOrigin(url || '');
+                return origOpen.apply(this, arguments);
+            };
+            var origSend = XMLHttpRequest.prototype.send;
+            XMLHttpRequest.prototype.send = function () {
+                if (this._csrfNeeded) { try { this.setRequestHeader('X-CSRFToken', token); } catch (e) {} }
+                return origSend.apply(this, arguments);
+            };
+        }
+        function ensureToken(form) {
+            var method = (form.getAttribute('method') || 'GET').toUpperCase();
+            if (method !== 'POST') return;
+            if (form.querySelector('input[name=csrf_token]')) return;
+            var input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = 'csrf_token';
+            input.value = token;
+            form.appendChild(input);
+        }
+        function injectFormTokens(root) {
+            (root || document).querySelectorAll('form').forEach(ensureToken);
+        }
+        document.addEventListener('DOMContentLoaded', function () {
+            injectFormTokens(document);
+            if (window.MutationObserver) {
+                new MutationObserver(function () { injectFormTokens(document); })
+                    .observe(document.body, { childList: true, subtree: true });
+            }
+        });
+        document.addEventListener('submit', function (ev) {
+            var form = ev.target;
+            if (form && form.tagName === 'FORM') ensureToken(form);
+        }, true);
+    })();
+    </script>
 </head>
 <body>
     <div class="container">

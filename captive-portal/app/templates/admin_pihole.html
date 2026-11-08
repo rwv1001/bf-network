@@ -86,21 +86,25 @@
     <h2>Blocking Control</h2>
     {% if blocking and blocking.blocking == 'disabled' %}
     <form method="POST" style="display:inline;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="action" value="enable_blocking">
         <button type="submit" class="btn btn-success">&#10003; Re-enable Blocking Now</button>
     </form>
     {% else %}
     <form method="POST" style="display:inline;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="action" value="disable_blocking">
         <input type="hidden" name="timer" value="1800">
         <button type="submit" class="btn">Disable 30 min</button>
     </form>
     <form method="POST" style="display:inline;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="action" value="disable_blocking">
         <input type="hidden" name="timer" value="3600">
         <button type="submit" class="btn">Disable 1 hour</button>
     </form>
     <form method="POST" style="display:inline;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="action" value="disable_blocking">
         <input type="hidden" name="timer" value="0">
         <button type="submit" class="btn btn-warn"
@@ -119,6 +123,7 @@
         <div style="flex:1; min-width:260px; background:#f0fff4; border:1px solid #9ae6b4; border-radius:8px; padding:16px;">
             <h3 style="margin-top:0; color:#276749;">Whitelist a Domain</h3>
             <form method="POST">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="action" value="add_whitelist">
                 <div class="ph-row">
                     <input type="text" name="domain" placeholder="example.com" class="form-control" required>
@@ -144,6 +149,7 @@
             <h3 style="margin-top:0; color:#c53030;">Blacklist a Domain</h3>
             <p style="font-size:.82em; color:#c53030; margin:0 0 8px;">Blocks the domain and all subdomains.</p>
             <form method="POST">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="action" value="add_blacklist">
                 <div class="ph-row">
                     <input type="text" name="domain" placeholder="example.com" class="form-control" required>
@@ -190,6 +196,7 @@
                         <span style="color:#a0aec0;"> &#9998;</span>
                     </summary>
                     <form method="POST" style="margin-top:4px; padding:6px; background:#f7fafc; border:1px solid #e2e8f0; border-radius:4px;">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <input type="hidden" name="action" value="update_domain_groups">
                         <input type="hidden" name="domain" value="{{ d.domain }}">
                         <input type="hidden" name="type" value="allow">
@@ -206,6 +213,7 @@
             </td>
             <td>
                 <form method="POST" style="display:inline;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <input type="hidden" name="action" value="remove_domain">
                     <input type="hidden" name="domain" value="{{ d.domain }}">
                     <input type="hidden" name="type" value="allow">
@@ -247,6 +255,7 @@
                         <span style="color:#a0aec0;"> &#9998;</span>
                     </summary>
                     <form method="POST" style="margin-top:4px; padding:6px; background:#f7fafc; border:1px solid #e2e8f0; border-radius:4px;">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <input type="hidden" name="action" value="update_domain_groups">
                         <input type="hidden" name="domain" value="{{ d.domain }}">
                         <input type="hidden" name="type" value="deny">
@@ -263,6 +272,7 @@
             </td>
             <td>
                 <form method="POST" style="display:inline;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <input type="hidden" name="action" value="remove_domain">
                     <input type="hidden" name="domain" value="{{ d.domain }}">
                     <input type="hidden" name="type" value="deny">
@@ -291,6 +301,7 @@
 
     <div style="margin-bottom:12px;">
         <form method="POST" style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end; margin-bottom:6px;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="action" value="add_adlist">
             <input type="url" name="address" placeholder="https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
                 class="form-control" style="flex:2; min-width:300px;" required>
@@ -309,6 +320,7 @@
             <button type="submit" class="btn">Add Blocklist</button>
         </form>
         <form method="POST" style="display:inline;" id="gravity-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="action" value="update_gravity">
             <button type="submit" class="btn btn-success" id="gravity-btn"
                 onclick="if(!confirm('Re-download all blocklists now? This takes ~30–60 seconds.')) return false; this.disabled=true; this.textContent='⏳ Updating… please wait'; return true;">
@@ -356,6 +368,7 @@
                         <span style="color:#a0aec0;"> &#9998;</span>
                     </summary>
                     <form method="POST" style="margin-top:4px; padding:6px; background:#f7fafc; border:1px solid #e2e8f0; border-radius:4px;">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <input type="hidden" name="action" value="update_adlist_groups">
                         <input type="hidden" name="address" value="{{ a.address }}">
                         {% for g in groups %}
@@ -372,6 +385,7 @@
             </td>
             <td>
                 <form method="POST" style="display:inline;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <input type="hidden" name="action" value="remove_adlist">
                     <input type="hidden" name="address" value="{{ a.address }}">
                     <button type="submit" class="btn btn-small btn-danger"
@@ -397,6 +411,7 @@
         assignment.
     </p>
     <form method="POST" class="ph-row" style="margin-bottom:16px;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="action" value="add_group">
         <input type="text" name="name" placeholder="Group name (e.g. Restricted)" class="form-control" style="max-width:220px;" required>
         <input type="text" name="comment" placeholder="Description (optional)" class="form-control" style="max-width:300px;">
@@ -426,6 +441,7 @@
             <td>
                 {% if g.name != 'Default' %}
                 <form method="POST" style="display:inline;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <input type="hidden" name="action" value="remove_group">
                     <input type="hidden" name="name" value="{{ g.name }}">
                     <button type="submit" class="btn btn-small btn-danger"
@@ -461,6 +477,7 @@
             <td><code>{{ vp.subnet }}</code></td>
             <td>
                 <form method="POST" id="vlanform_{{ vp.vlan }}" style="margin:0;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <input type="hidden" name="action" value="set_vlan_client">
                     <input type="hidden" name="subnet" value="{{ vp.subnet }}">
                     {% if vp.client_id %}<input type="hidden" name="client_id" value="{{ vp.client_id }}">{% endif %}
@@ -480,6 +497,7 @@
                 <button type="submit" form="vlanform_{{ vp.vlan }}" class="btn btn-small">Save</button>
                 {% if vp.client_id %}
                 <form method="POST" style="display:inline;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <input type="hidden" name="action" value="remove_vlan_client">
                     <input type="hidden" name="client_id" value="{{ vp.client_id }}">
                     <button type="submit" class="btn btn-small btn-warn"

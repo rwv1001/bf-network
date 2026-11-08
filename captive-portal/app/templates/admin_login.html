@@ -6,6 +6,7 @@
 
 {% block content %}
 <form method="POST" action="{{ url_for('admin.manage_admins.login') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="form-group">
         <label for="username">Username</label>
         <input type="text" id="username" name="username" required autofocus>

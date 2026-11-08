@@ -44,7 +44,9 @@ SWITCH_USER="${SWITCH_USER:-robert}"
 SWITCH_SSH_PORT="${SWITCH_SSH_PORT:-22}"
 SWITCH_KEY_PATH="${SWITCH_KEY_PATH:-$DEFAULT_KEY_PATH}"
 
-SSH_OPTS="-tt -i $SWITCH_KEY_PATH -p $SWITCH_SSH_PORT -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10"
+SWITCH_SSH_KNOWN_HOSTS="${SWITCH_SSH_KNOWN_HOSTS:-/dev/null}"
+SWITCH_SSH_HOSTKEY_POLICY="${SWITCH_SSH_HOSTKEY_POLICY:-accept-new}"
+SSH_OPTS="-tt -i $SWITCH_KEY_PATH -p $SWITCH_SSH_PORT -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa -o StrictHostKeyChecking=$SWITCH_SSH_HOSTKEY_POLICY -o UserKnownHostsFile=$SWITCH_SSH_KNOWN_HOSTS -o ConnectTimeout=10"
 
 log "START action=clear_mac_auth switch=$SWITCH_HOST user=$SWITCH_USER"
 

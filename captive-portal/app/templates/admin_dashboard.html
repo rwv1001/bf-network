@@ -334,6 +334,7 @@ function searchTable(tableType, searchValue) {
     {% if test_env and current_user.can_manage_users %}
     <form method="post" action="{{ url_for('admin.dashboard.reset_test') }}" style="display: inline-block; margin-left: 10px;"
           onsubmit="return confirm('Reset test environment? This deletes all users, devices, and requests, clears ACL/DNS hijack rules, reapplies the baseline ACLs, clears all MAC authentication sessions, and resets user device ports on the switch.');">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <button type="submit" class="btn" style="background: #c0392b;">Reset Test Environment</button>
     </form>
     {% endif %}
@@ -553,6 +554,7 @@ function searchTable(tableType, searchValue) {
     <div style="background: white; max-width: 600px; margin: 50px auto; padding: 30px; border-radius: 5px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
         <h3 style="margin-top: 0;">Assign Device to User</h3>
         <form method="post" action="{{ url_for('admin.unregistered.assign_device') }}" id="assignDeviceForm">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <div style="margin-bottom: 15px;">
                 <label style="display: block; margin-bottom: 5px; font-weight: bold;">MAC Address:</label>
                 <input type="text" name="mac_address" id="assignMacAddress" readonly 
@@ -671,6 +673,7 @@ document.getElementById('assignDeviceModal').addEventListener('click', function(
     <div style="background: white; max-width: 480px; margin: 50px auto; padding: 30px; border-radius: 5px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
         <h3 style="margin-top: 0;">Reassign Device</h3>
         <form method="post" id="reassignDeviceForm">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <div style="margin-bottom: 15px;">
                 <label style="display: block; margin-bottom: 5px; font-weight: bold;">MAC Address:</label>
                 <input type="text" id="reassignMacAddress" readonly style="width: 100%; padding: 8px; border: 1px solid #ddd; background: #f5f5f5; box-sizing: border-box;">
@@ -938,6 +941,7 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
                 </a>
                 {% if user.blocked %}
                 <form method="POST" action="{{ url_for('admin.users.unblock_user', user_id=user.id) }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <button type="submit" class="btn btn-success btn-small action-btn"
                             onclick="return confirm('Allow devices for this user?')">
                         Unblock
@@ -945,6 +949,7 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
                 </form>
                 {% else %}
                 <form method="POST" action="{{ url_for('admin.users.block_user', user_id=user.id) }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <button type="submit" class="btn btn-danger btn-small action-btn"
                             onclick="return confirm('Block all devices for this user?')">
                         Block
@@ -954,6 +959,7 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
                 {% if current_user.can_manage_users %}
                 {% if user.devices|length == 0 %}
                 <form method="POST" action="{{ url_for('admin.users.delete_user', user_id=user.id) }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <button type="submit" class="btn btn-small action-btn" style="background:#6c757d;"
                             onclick="return confirm('Permanently delete user {{ user.email }}? This cannot be undone.')">
                         Delete
@@ -1193,6 +1199,7 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
                 <div class="action-stack">
                 {% if device.registration_status == 'registered' %}
                 <form method="POST" action="{{ url_for('admin.devices.block_device', device_id=device.id) }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <button type="submit" class="btn btn-danger btn-small action-btn"
                             onclick="return confirm('Block this device? It will be moved to restricted VLAN.')">
                         Block
@@ -1203,6 +1210,7 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
                 <span class="action-btn" style="background:#ccc;color:#555;" title="Cannot unblock device while user is blocked">Blocked</span>
                 {% else %}
                 <form method="POST" action="{{ url_for('admin.devices.unblock_device', device_id=device.id) }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <button type="submit" class="btn btn-success btn-small action-btn">
                         Unblock
                     </button>
@@ -1210,6 +1218,7 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
                 {% endif %}
                 {% endif %}
                 <form method="POST" action="{{ url_for('admin.devices.delete_device', device_id=device.id) }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <button type="submit" class="btn btn-small action-btn"
                             style="background:#6c757d;"
                             onclick="return confirm('Delete this device? It will be disconnected from the network.')">
@@ -1273,6 +1282,7 @@ document.getElementById('reassignDeviceModal').addEventListener('click', functio
 <form method="POST" action="{{ url_for('admin.dashboard.fixed_ip_reservations') }}"
       style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-bottom:10px;"
       onsubmit="return confirmFixedIpKeaWarning();">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="action" value="add">
     <div>
         <label style="font-size:12px;font-weight:600;display:block;">MAC *</label>
@@ -1365,6 +1375,7 @@ function confirmFixedIpKeaWarning() {
         {% for d in fixed_ip_reservations %}
         <tr>
             <form method="POST" action="{{ url_for('admin.dashboard.fixed_ip_reservations') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="action" value="add">
             <input type="hidden" name="mac_address" value="{{ d.mac_address }}">
             <td style="font-family:monospace;font-size:12px;vertical-align:middle;">{{ d.mac_address }}</td>
@@ -1412,6 +1423,7 @@ function confirmFixedIpKeaWarning() {
             </form>
                 <form method="POST" action="{{ url_for('admin.dashboard.fixed_ip_reservations') }}" style="display:inline;"
                       onsubmit="return confirm('Remove reservation for {{ d.mac_address }}?');">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <input type="hidden" name="action" value="delete">
                     <input type="hidden" name="mac_address" value="{{ d.mac_address }}">
                     <input type="hidden" name="ip" value="{{ d.fixed_ip }}">
@@ -1439,6 +1451,7 @@ function confirmFixedIpKeaWarning() {
 </div>
 
 <form method="POST" action="{{ url_for('admin.dashboard.domain_policies') }}" style="margin-bottom: 25px;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="action" value="add">
     <div style="display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 10px;">
         <label for="domain" style="font-weight: 600;">New Domain</label>
@@ -1527,6 +1540,7 @@ function confirmFixedIpKeaWarning() {
                 </td>
                 <td style="white-space: nowrap;">
                     <form id="domain-form-{{ policy.id }}" method="POST" action="{{ url_for('admin.dashboard.domain_policies') }}" style="display: inline;">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <input type="hidden" name="policy_id" value="{{ policy.id }}">
                         <input type="hidden" name="domain" value="{{ policy.domain }}">
                         <button type="submit" class="btn btn-small" name="action" value="update">Update</button>

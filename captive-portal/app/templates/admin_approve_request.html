@@ -82,6 +82,7 @@
 {% endif %}
 
 <form method="POST" action="{{ url_for('admin.dashboard.process_request', request_id=request.id) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="action" value="approve">
     
     <div class="form-group">
@@ -129,6 +130,7 @@
 <h3 style="color: #dc3545; margin-top: 40px;">Or Reject Request</h3>
 
 <form method="POST" action="{{ url_for('admin.dashboard.process_request', request_id=request.id) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="action" value="reject">
     
     <div class="form-group">

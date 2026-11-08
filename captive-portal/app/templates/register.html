@@ -132,6 +132,7 @@
 {% endif %}
 <form method="POST" action="{{ url_for('portal.register') }}"
     {%- if show_status %} style="display:none"{% endif %}>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="registration_step" id="registrationStepInput" value="1">
     {% if show_status and device and device.wired_target_vlan %}
     <input type="hidden" name="wired_vlan_id" value="{{ device.wired_target_vlan }}">

@@ -282,6 +282,7 @@
 <div class="page-header">
     <h2>Switch Port Roles</h2>
     <form method="post" action="{{ url_for('admin.switch_ports.refresh') }}" style="display:inline;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <button type="submit" class="btn btn-warning">Refresh ports</button>
     </form>
 </div>

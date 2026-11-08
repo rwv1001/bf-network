@@ -27,6 +27,9 @@ POLICY_JSON="$HP5130_POLICY_PATH"
 WIRED_VLAN="${WIRED_VLAN:-250}"
 WIRED_INBOUND_ACL="${WIRED_INBOUND_ACL:-3000}"
 WIRED_OUTBOUND_ACL="${WIRED_OUTBOUND_ACL:-3999}"
+# Per-session ACL the switch binds to an unregistered/blocked wired device's
+# MAC when FreeRADIUS returns Filter-Id = this number (sites-enabled/default).
+WIRED_PORT_ACL="${WIRED_PORT_ACL:-3002}"
 
 ROUTER_UPLINK_ACL_MIN="${ROUTER_UPLINK_ACL_MIN:-3951}"
 ROUTER_UPLINK_ACL_MAX="${ROUTER_UPLINK_ACL_MAX:-3957}"
@@ -41,22 +44,25 @@ if [ -z "$PYTHON_BIN" ]; then
 fi
 [ -n "$PYTHON_BIN" ] || { echo "python3 required" >&2; exit 1; }
 
-SSH_OPTS="-i $SWITCH_KEY_PATH -p $SWITCH_SSH_PORT -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3"
+SWITCH_SSH_KNOWN_HOSTS="${SWITCH_SSH_KNOWN_HOSTS:-/dev/null}"
+SWITCH_SSH_HOSTKEY_POLICY="${SWITCH_SSH_HOSTKEY_POLICY:-accept-new}"
+SSH_OPTS="-i $SWITCH_KEY_PATH -p $SWITCH_SSH_PORT -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa -o StrictHostKeyChecking=$SWITCH_SSH_HOSTKEY_POLICY -o UserKnownHostsFile=$SWITCH_SSH_KNOWN_HOSTS -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3"
 # Comware needs a PTY or it refuses the session ("Pseudo-terminal will not be
 # allocated"). -tt forces one. Comware then never closes it, so timeout is
 # what stops the hang: 124 means the commands were sent and the prompt is
 # still open, which is success. 180s covers save force.
 BASELINE_SSH_TIMEOUT="${BASELINE_SSH_TIMEOUT:-180}"
 
-CMDS="$("$PYTHON_BIN" - "$HP5130_POLICY_PATH" "$KEA_CONFIG_PATH" "$DOH_DOT_IPS" "$PORTAL_IP" "$ORACLE_VPS_HOST" "$SWITCH_HOST" "$NET" "$HIJACK_DNS_IP" "$WIRED_VLAN" "$WIRED_INBOUND_ACL" "$WIRED_OUTBOUND_ACL" "$ROUTER_UPLINK_ACL_MIN" "$ROUTER_UPLINK_ACL_MAX" "$HP5130_CURRENT_CONFIG_PATH" "$PORTAL_FORWARD_PORT" "$UNIFI_FORWARD_PORT" "$MANAGEMENT_VLAN" <<'PY'
+CMDS="$("$PYTHON_BIN" - "$HP5130_POLICY_PATH" "$KEA_CONFIG_PATH" "$DOH_DOT_IPS" "$PORTAL_IP" "$ORACLE_VPS_HOST" "$SWITCH_HOST" "$NET" "$HIJACK_DNS_IP" "$WIRED_VLAN" "$WIRED_INBOUND_ACL" "$WIRED_OUTBOUND_ACL" "$ROUTER_UPLINK_ACL_MIN" "$ROUTER_UPLINK_ACL_MAX" "$HP5130_CURRENT_CONFIG_PATH" "$PORTAL_FORWARD_PORT" "$UNIFI_FORWARD_PORT" "$MANAGEMENT_VLAN" "$WIRED_PORT_ACL" <<'PY'
 import ipaddress
 import json
 import os
 import re
 import sys
 
-policy_path, kea_path, doh_dot_ips, portal_ip, oracle_vps_host, switch_host, network_word, hijack_dns_ip, wired_vlan_id, wired_inbound_acl, wired_outbound_acl, router_uplink_acl_min, router_uplink_acl_max, current_config_path, portal_forward_port, unifi_forward_port, management_vlan = sys.argv[1:18]
+policy_path, kea_path, doh_dot_ips, portal_ip, oracle_vps_host, switch_host, network_word, hijack_dns_ip, wired_vlan_id, wired_inbound_acl, wired_outbound_acl, router_uplink_acl_min, router_uplink_acl_max, current_config_path, portal_forward_port, unifi_forward_port, management_vlan, wired_port_acl = sys.argv[1:19]
 
+wired_port_acl = str(wired_port_acl or "3002").strip() or "3002"
 portal_forward_port = str(portal_forward_port or "8081").strip() or "8081"
 unifi_forward_port = str(unifi_forward_port or "8080").strip() or "8080"
 management_vlan = str(management_vlan or "99").strip() or "99"
@@ -290,21 +296,59 @@ emit("quit")
 # -------------------------------------------------------------------------
 portal_last_octet = str(portal_ip).split(".")[-1]
 wired_portal_ip = f"{network_word}.{wired_vlan_id}.{portal_last_octet}"
+
+# Walled-garden rule set shared by the SVI PREAUTH ACL and the per-port
+# RADIUS-assigned ACL, keyed by rule number so both can be updated in place.
+# Rule 100 (deny ip) is appended separately and is never touched on update.
+PREAUTH_RULES = {
+    1:  "permit udp source-port eq bootpc destination-port eq bootps",
+    2:  "permit udp source-port eq bootps destination-port eq bootpc",
+    5:  f"permit udp destination {portal_ip} 0 destination-port eq dns",
+    6:  f"permit tcp destination {portal_ip} 0 destination-port eq dns",
+    7:  f"permit udp destination {hijack_dns_ip} 0 destination-port eq dns",
+    8:  f"permit tcp destination {hijack_dns_ip} 0 destination-port eq dns",
+    9:  f"permit icmp destination {hijack_dns_ip} 0",
+    10: f"permit tcp destination {portal_ip} 0 destination-port eq www",
+    11: f"permit tcp destination {portal_ip} 0 destination-port eq 443",
+    13: f"permit tcp destination {hijack_dns_ip} 0 destination-port eq 443",
+    14: f"permit udp destination {portal_ip} 0 destination-port eq ntp",
+    15: f"permit icmp destination {portal_ip} 0",
+}
+# Add an id here if it is ever removed from PREAUTH_RULES so live copies of
+# the per-port ACL lose it on the next baseline push.
+PREAUTH_RETIRED_RULES = []
+
 emit(f"undo acl number {wired_inbound_acl}")
 emit(f"acl number {wired_inbound_acl} name PREAUTH")
-emit(" rule 1 permit udp source-port eq bootpc destination-port eq bootps")
-emit(" rule 2 permit udp source-port eq bootps destination-port eq bootpc")
-emit(f" rule 5 permit udp destination {portal_ip} 0 destination-port eq dns")
-emit(f" rule 6 permit tcp destination {portal_ip} 0 destination-port eq dns")
-emit(f" rule 7 permit udp destination {hijack_dns_ip} 0 destination-port eq dns")
-emit(f" rule 8 permit tcp destination {hijack_dns_ip} 0 destination-port eq dns")
-emit(f" rule 9 permit icmp destination {hijack_dns_ip} 0")
-emit(f" rule 10 permit tcp destination {portal_ip} 0 destination-port eq www")
-emit(f" rule 11 permit tcp destination {portal_ip} 0 destination-port eq 443")
+for n, body in sorted(PREAUTH_RULES.items()):
+    emit(f" rule {n} {body}")
+# SVI filter only: the Pi's own address on the wired VLAN (Kea listens there).
 emit(f" rule 12 permit ip destination {wired_portal_ip} 0")
-emit(f" rule 13 permit tcp destination {hijack_dns_ip} 0 destination-port eq 443")
-emit(f" rule 14 permit udp destination {portal_ip} 0 destination-port eq ntp")
 emit(" rule 100 deny ip")
+emit("quit")
+
+# -------------------------------------------------------------------------
+# Per-port PREAUTH ACL, assigned by RADIUS (Filter-Id) to each unregistered
+# or blocked wired MAC. Unlike the SVI filter above it is applied at the
+# physical port, so it also stops same-VLAN (L2) traffic to other hosts and
+# to the Pi's wired-VLAN address — hence no rule 12 here.
+#
+# Verified 2026-11-08 on 5130 EI R3507P18 (scripts/hp5130-test-filter-id-acl.sh):
+# the switch binds the ACL per session ("Authorization ACL number/name"),
+# and DELETING the ACL silently removes filtering from live sessions without
+# a re-auth. So: never `undo acl` here. Create-if-missing, rewrite rules 1-99
+# in place, and leave rule 100 (deny ip) permanently present so the ACL is
+# never empty (an empty authorization ACL fails the session).
+# -------------------------------------------------------------------------
+emit(f"acl advanced {wired_port_acl}")
+emit(" description PREAUTH-PORT (RADIUS Filter-Id for unregistered/blocked wired)")
+emit(" rule 100 deny ip")
+# Rule ids dropped from PREAUTH_RULES in the past; listed explicitly because
+# `undo rule` of a non-existent id prints a message the error check may trip on.
+for n in PREAUTH_RETIRED_RULES:
+    emit(f" undo rule {n}")
+for n, body in sorted(PREAUTH_RULES.items()):
+    emit(f" rule {n} {body}")
 emit("quit")
 
 # -------------------------------------------------------------------------
@@ -361,6 +405,14 @@ for router in routers:
 # ISP uplink outbound ACLs.
 # Each router ACL denies VLAN source subnets that are not assigned to that
 # router, then blocks DoH/DoT and blocked-pool sources.
+#
+# Why per-device blocks live here (OUTBOUND on the uplink SVI) and not
+# INBOUND on the user VLAN's SVI: tested 2026-11-08 on 5130 EI R3507P18 with
+# scripts/hp5130-test-inbound-acl.sh. An inbound packet-filter deny on an SVI
+# that also has `ip policy-based-route` is matched and counted (243 hits) but
+# the packets are still forwarded, on both the PBR next-hop path and the PBR
+# deny-node/normal-routing path. The PBR action overrides the filter deny in
+# hardware. Inbound filters only work on SVIs with no PBR (e.g. VLAN 250).
 # -------------------------------------------------------------------------
 for router in routers:
     router_id = int(router["id"])

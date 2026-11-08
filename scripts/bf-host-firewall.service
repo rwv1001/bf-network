@@ -1,0 +1,17 @@
+[Unit]
+Description=bf-network host firewall (allow-list for traffic from user VLANs)
+# Interfaces must exist for -i matches to be meaningful; Docker nat rules are
+# independent of this (filter INPUT only), so no ordering against docker.service.
+After=network-online.target systemd-networkd.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=ENV_FILE=/home/admin/bf-network/.env
+ExecStart=/home/admin/bf-network/scripts/pi-host-firewall.sh apply
+ExecReload=/home/admin/bf-network/scripts/pi-host-firewall.sh apply
+ExecStop=/home/admin/bf-network/scripts/pi-host-firewall.sh remove
+
+[Install]
+WantedBy=multi-user.target

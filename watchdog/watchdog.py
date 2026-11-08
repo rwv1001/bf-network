@@ -1018,7 +1018,9 @@ def _try_peer_reboot(cfg: dict) -> None:
     log.warning('Attempting SSH reboot of peer %s@%s', user, host)
     try:
         subprocess.run(
-            ['ssh', '-i', key, '-o', 'StrictHostKeyChecking=no',
+            ['ssh', '-i', key,
+             '-o', f"StrictHostKeyChecking={os.getenv('SWITCH_SSH_HOSTKEY_POLICY', 'accept-new')}",
+             '-o', f"UserKnownHostsFile={os.getenv('SWITCH_SSH_KNOWN_HOSTS', '/dev/null')}",
              '-o', 'ConnectTimeout=10', f'{user}@{host}',
              'sudo reboot'],
             capture_output=True, timeout=20,
@@ -1224,8 +1226,9 @@ def _ssh_switch(host: str, command: str, cfg: dict, timeout: int = 30) -> str | 
         '-p', port,
         '-o', 'HostKeyAlgorithms=+ssh-rsa',
         '-o', 'PubkeyAcceptedAlgorithms=+ssh-rsa',
-        '-o', 'StrictHostKeyChecking=no',
-        '-o', 'UserKnownHostsFile=/dev/null',
+        # Pin the switch host key in the shared known_hosts (see compose).
+        '-o', f"StrictHostKeyChecking={os.getenv('SWITCH_SSH_HOSTKEY_POLICY', 'accept-new')}",
+        '-o', f"UserKnownHostsFile={os.getenv('SWITCH_SSH_KNOWN_HOSTS', '/dev/null')}",
         '-o', 'ConnectTimeout=10',
         '-o', 'ServerAliveInterval=5',
         '-o', 'ServerAliveCountMax=3',

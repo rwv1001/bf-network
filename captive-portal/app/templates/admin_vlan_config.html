@@ -226,6 +226,7 @@
 
 {% block content %}
 <form id="vlan-config-form" method="POST" action="{{ url_for('admin.vlans.vlan_config') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="config-section">
         <h2 class="section-title">VLAN Mappings</h2>
 

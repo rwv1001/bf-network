@@ -64,7 +64,9 @@ log() {
 SSH_TTY_FLAG="${SSH_TTY_FLAG:--tt}"
 SSH_TTY_FALLBACK="${SSH_TTY_FALLBACK:-0}"
 SSH_HOSTKEY_OPTS="${SSH_HOSTKEY_OPTS:--o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa}"
-SSH_OPTS="-i $SWITCH_KEY_PATH -p $SWITCH_SSH_PORT $SSH_HOSTKEY_OPTS -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3"
+SWITCH_SSH_KNOWN_HOSTS="${SWITCH_SSH_KNOWN_HOSTS:-/dev/null}"
+SWITCH_SSH_HOSTKEY_POLICY="${SWITCH_SSH_HOSTKEY_POLICY:-accept-new}"
+SSH_OPTS="-i $SWITCH_KEY_PATH -p $SWITCH_SSH_PORT $SSH_HOSTKEY_OPTS -o StrictHostKeyChecking=$SWITCH_SSH_HOSTKEY_POLICY -o UserKnownHostsFile=$SWITCH_SSH_KNOWN_HOSTS -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3"
 
 if [ -z "$DELAY_SEC" ]; then
   DELAY_SEC="${SWITCH_REPLUG_DELAY_SEC:-3}"

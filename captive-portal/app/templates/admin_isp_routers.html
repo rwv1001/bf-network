@@ -308,6 +308,7 @@ function showPushBanner(msg, type) {
                     {% if routers|length > 1 %}
                     <form method="POST" style="display:inline;"
                           onsubmit="return confirm('Delete router {{ router.name }}?');">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <input type="hidden" name="action" value="delete">
                         <input type="hidden" name="router_id" value="{{ router.id }}">
                         <button type="submit" class="btn btn-danger btn-sm">Delete</button>
@@ -318,6 +319,7 @@ function showPushBanner(msg, type) {
             <tr class="edit-row" id="edit-row-{{ router.id }}">
                 <td colspan="8">
                     <form method="POST" class="edit-form">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <input type="hidden" name="action" value="update">
                         <input type="hidden" name="router_id" value="{{ router.id }}">
                         <div class="form-group">
@@ -418,6 +420,7 @@ function showPushBanner(msg, type) {
     <div class="card-header">➕ Add ISP Router</div>
     <div class="card-body">
         <form method="POST" class="add-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="action" value="add">
             <div class="form-group">
                 <label>Router Name *</label>

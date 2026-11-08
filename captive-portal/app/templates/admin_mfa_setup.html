@@ -160,6 +160,7 @@
         </div>
 
         <form method="post" action="{{ url_for('admin.manage_admins.mfa_setup') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             {% if show_qr %}
                 <input type="hidden" name="action" value="verify">
             {% else %}
@@ -239,6 +240,7 @@
         <h2>📱 Add Another Authenticator Device</h2>
         <p style="margin-bottom: 15px; color: #555;">You can register the same account on a second phone or authenticator app. Both devices will generate valid login codes.</p>
         <form method="post" action="{{ url_for('admin.manage_admins.mfa_setup') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="action" value="add_device">
             <button type="submit" class="btn-mfa-primary">Show QR Code for New Device</button>
         </form>

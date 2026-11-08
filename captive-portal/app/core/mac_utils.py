@@ -50,48 +50,48 @@ def get_client_ip() -> str:
     return request.remote_addr
 
 
-def get_client_mac() -> str:
+def get_client_mac(allow_client_hint: bool = False) -> str:
     """
-    Resolve the client MAC address from:
-    1. X-Client-MAC header / query param / form field
-    2. Kea CSV lease file
-    3. Kea control socket
-    4. ip_leases DB table (fallback)
+    Resolve the client MAC address from the request's source IP via:
+    1. Kea CSV lease file
+    2. Kea control socket
+    3. ip_leases DB table (fallback)
+
+    The IP is what the reverse proxy observed, so the result is trusted.
+
+    ``allow_client_hint`` additionally accepts a ``mac`` query/form parameter
+    *only when the IP lookup found nothing*. The register page's status
+    polling uses this because, while a device is being moved between VLANs,
+    its new address may not yet be in any lease source. Callers that make
+    authorisation decisions (login, user_home, adopt, registration) must
+    leave it False — a browser-supplied MAC is never proof of identity.
     """
     logger.debug("=== get_client_mac() called ===")
 
-    # Try direct sources first
-    mac = request.headers.get('X-Client-MAC')
-    if mac:
-        logger.debug(f"[get_client_mac] Found MAC in X-Client-MAC header: {mac}")
-    else:
-        mac = request.args.get('mac')
+    mac = None
+    ip_address = get_client_ip()
+    logger.debug(f"[get_client_mac] IP-based lookup for IP: {ip_address}")
+
+    if ip_address:
+        mac = _mac_from_lease_file(ip_address)
         if mac:
-            logger.debug(f"[get_client_mac] Found MAC in query param: {mac}")
+            logger.debug(f"[get_client_mac] Found MAC via lease file: {mac}")
         else:
-            mac = request.form.get('mac')
+            mac = _mac_from_kea_socket(ip_address)
             if mac:
-                logger.debug(f"[get_client_mac] Found MAC in form data: {mac}")
-
-    # Fallback to IP-based lookup
-    if not mac:
-        ip_address = get_client_ip()
-        logger.debug(f"[get_client_mac] No direct MAC found. Trying IP-based lookup for IP: {ip_address}")
-
-        if ip_address:
-            mac = _mac_from_lease_file(ip_address)
-            if mac:
-                logger.debug(f"[get_client_mac] Found MAC via lease file: {mac}")
+                logger.debug(f"[get_client_mac] Found MAC via Kea control socket: {mac}")
             else:
-                mac = _mac_from_kea_socket(ip_address)
+                mac = _mac_from_iplease_db(ip_address)
                 if mac:
-                    logger.debug(f"[get_client_mac] Found MAC via Kea control socket: {mac}")
+                    logger.debug(f"[get_client_mac] Found MAC via ip_leases DB: {mac}")
                 else:
-                    mac = _mac_from_iplease_db(ip_address)
-                    if mac:
-                        logger.debug(f"[get_client_mac] Found MAC via ip_leases DB: {mac}")
-                    else:
-                        logger.debug(f"[get_client_mac] No MAC found for IP {ip_address} in any source")
+                    logger.debug(f"[get_client_mac] No MAC found for IP {ip_address} in any source")
+
+    if not mac and allow_client_hint:
+        hint = request.args.get('mac') or request.form.get('mac')
+        if hint:
+            logger.debug(f"[get_client_mac] Using client-supplied MAC hint: {hint}")
+            mac = hint
 
     # Normalize MAC format
     if mac:

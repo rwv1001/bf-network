@@ -121,11 +121,13 @@ else
     exit 3
 fi
 
+SWITCH_SSH_KNOWN_HOSTS="${SWITCH_SSH_KNOWN_HOSTS:-/dev/null}"
+SWITCH_SSH_HOSTKEY_POLICY="${SWITCH_SSH_HOSTKEY_POLICY:-accept-new}"
 SSH_OPTS="-tt -i $SWITCH_KEY_PATH -p $SWITCH_SSH_PORT \
     -o HostKeyAlgorithms=+ssh-rsa \
     -o PubkeyAcceptedAlgorithms=+ssh-rsa \
-    -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
+    -o StrictHostKeyChecking=$SWITCH_SSH_HOSTKEY_POLICY \
+    -o UserKnownHostsFile=$SWITCH_SSH_KNOWN_HOSTS \
     -o ConnectTimeout=15 \
     -o ServerAliveInterval=5 \
     -o ServerAliveCountMax=2"

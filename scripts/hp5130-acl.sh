@@ -60,6 +60,14 @@ SAFE_HOST="$(echo "${SWITCH_HOST}" | tr '.:' '__')"
 SWITCH_USER="${SWITCH_USER:-robert}"
 SWITCH_SSH_PORT="${SWITCH_SSH_PORT:-22}"
 SWITCH_KEY_PATH="${SWITCH_KEY_PATH:-$DEFAULT_KEY_PATH}"
+# Host-key pinning: first contact records the switch key in the shared
+# known_hosts file, later contacts must match (MITM protection). With no file
+# configured (/dev/null) this degrades to the old unverified behaviour.
+# Defined here because the apply-batch block below runs before the main
+# SSH_OPTS are assembled.
+SWITCH_SSH_KNOWN_HOSTS="${SWITCH_SSH_KNOWN_HOSTS:-/dev/null}"
+SWITCH_SSH_HOSTKEY_POLICY="${SWITCH_SSH_HOSTKEY_POLICY:-accept-new}"
+SSH_HOSTKEY_CHECK_OPTS="-o StrictHostKeyChecking=$SWITCH_SSH_HOSTKEY_POLICY -o UserKnownHostsFile=$SWITCH_SSH_KNOWN_HOSTS"
 KEA_CONFIG_PATH="${KEA_CONFIG_PATH:-}"
 PYTHON_BIN="${PYTHON_BIN:-}"
 
@@ -331,6 +339,27 @@ is_valid_ip() {
   echo "$1" | awk -F. 'NF==4 && $1>=0 && $1<=255 && $2>=0 && $2<=255 && $3>=0 && $3<=255 && $4>=0 && $4<=255 {exit 0} {exit 1}'
 }
 
+# Print every ISP router uplink ACL number from the policy, one per line.
+# Per-device deny rules go into all of them so a block holds no matter which
+# uplink the traffic finally exits (PBR failover, visible_vlans, misconfig).
+all_uplink_acls() {
+  pol="$1"
+  [ -n "$PYTHON_BIN" ] && [ -f "$pol" ] || return 0
+  "$PYTHON_BIN" - "$pol" 2>/dev/null <<'PY'
+import json, sys
+try:
+    p = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+acls = []
+for r in p.get('routers', []):
+    a = str(r.get('uplink_acl') or '').strip()
+    if a.isdigit() and a not in acls:
+        acls.append(a)
+print('\n'.join(acls))
+PY
+}
+
 if [ "$MODE" = "worker" ]; then
   run_worker
   exit 0
@@ -397,27 +426,13 @@ PY
     [ -z "$VLAN_ID" ] && VLAN_ID=$(echo "$ip" | cut -d. -f3)
 
     POLICY_JSON="${HP5130_POLICY_PATH:-/scripts/scriptdata/hp5130-policy.json}"
-    if [ -n "$PYTHON_BIN" ] && [ -f "$POLICY_JSON" ] && [ -n "$VLAN_ID" ]; then
-      ACL_NUM=$("$PYTHON_BIN" - "$POLICY_JSON" "$VLAN_ID" 2>/dev/null <<'PY'
-import json, sys
-pol, vlan = sys.argv[1], int(sys.argv[2])
-try:
-    p = json.load(open(pol))
-except Exception:
-    print(''); sys.exit(0)
-for v in p.get('vlans', []):
-    if int(v.get('vlan_id', 0)) == vlan:
-        rid = int(v.get('isp_router_id') or v.get('resolved_isp_router_id') or 1)
-        for r in p.get('routers', []):
-            if int(r.get('id', 0)) == rid:
-                print(r.get('uplink_acl') or '')
-                sys.exit(0)
-print('')
-PY
-)
-      ACL_NUM=$(printf '%s' "$ACL_NUM" | tr -d '[:space:]')
-    fi
-    [ -z "$ACL_NUM" ] && ACL_NUM=3953
+    # Every ISP uplink ACL, not just the VLAN's assigned router. Traffic can
+    # leave via another uplink when PBR's NQA track is down (Comware falls
+    # back to the static default) or when a VLAN has visible_vlans set, so a
+    # deny on a single uplink is not a reliable block.
+    ACL_NUMS=$(all_uplink_acls "$POLICY_JSON")
+    [ -z "$ACL_NUMS" ] && ACL_NUMS=3953
+    ACL_NUM=$(printf '%s\n' $ACL_NUMS | head -1)
 
     PSQL_BIN="$(command -v psql 2>/dev/null || true)"
     DB_URL="${DATABASE_URL:-}"
@@ -446,17 +461,21 @@ COMMIT;" 2>/dev/null | grep -E '^[0-9]+$' | tail -1)
     fi
 
     if [ "$action" = "block" ]; then
-      CMDS="${CMDS}acl advanced ${ACL_NUM}
+      for acl in $ACL_NUMS; do
+        CMDS="${CMDS}acl advanced ${acl}
 rule ${RULE_NUM} deny ip source ${ip} 0
 quit
 "
-      log "BATCH_ADD block ip=$ip acl=$ACL_NUM rule=$RULE_NUM"
+      done
+      log "BATCH_ADD block ip=$ip acls=$(printf '%s' "$ACL_NUMS" | tr '\n' ',') rule=$RULE_NUM"
     else
-      CMDS="${CMDS}acl advanced ${ACL_NUM}
+      for acl in $ACL_NUMS; do
+        CMDS="${CMDS}acl advanced ${acl}
 undo rule ${RULE_NUM}
 quit
 "
-      log "BATCH_ADD unblock ip=$ip acl=$ACL_NUM rule=$RULE_NUM"
+      done
+      log "BATCH_ADD unblock ip=$ip acls=$(printf '%s' "$ACL_NUMS" | tr '\n' ',') rule=$RULE_NUM"
     fi
     printf '%s|%s\n' "$action" "$ip" >> "$applied"
     any=1
@@ -479,7 +498,7 @@ quit
   printf '%s\n' "$CMDS" | timeout "${ACL_SSH_TIMEOUT:-90}" ssh ${SSH_TTY_FLAG:--tt} \
     -i "$SWITCH_KEY_PATH" -p "$SWITCH_SSH_PORT" \
     -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa \
-    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    $SSH_HOSTKEY_CHECK_OPTS \
     -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 \
     "${SWITCH_USER}@${SWITCH_HOST}" > "$apply_out" 2>/tmp/ssh_batch.err
   ssh_status=$?
@@ -728,6 +747,9 @@ log "ACL_LOOKUP: PYTHON_BIN=${PYTHON_BIN:-<empty>}"
 if [ -n "$PYTHON_BIN" ] && [ -f "$POLICY_JSON" ] && [ -n "$VLAN_ID" ]; then
     log "ACL_LOOKUP: [BRANCH] Entering Python lookup path"
 
+    # All ISP uplink ACLs (see all_uplink_acls). ACL_NUM keeps the VLAN's own
+    # router ACL first for logging; ACL_NUMS is what the rules are written to.
+    ACL_NUMS=$(all_uplink_acls "$POLICY_JSON")
     ACL_NUM=$(
         "$PYTHON_BIN" - "$POLICY_JSON" "$VLAN_ID" 2>&1 <<'PY'
 import json
@@ -791,6 +813,8 @@ if [ -z "$ACL_NUM" ]; then
     log "ERROR: Could not determine uplink_acl for VLAN $VLAN_ID from policy"
     ACL_NUM=""
 fi
+[ -z "${ACL_NUMS:-}" ] && ACL_NUMS="$ACL_NUM"
+log "ACL_LOOKUP: uplink ACLs to update: $(printf '%s' "$ACL_NUMS" | tr '\n' ' ')"
 
 
 
@@ -905,7 +929,7 @@ fi
 SSH_TTY_FLAG="${SSH_TTY_FLAG:--tt}"  # Changed: Default to -tt for Comware
 SSH_TTY_FALLBACK="${SSH_TTY_FALLBACK:-0}"  # Changed: Disable fallback
 SSH_HOSTKEY_OPTS="${SSH_HOSTKEY_OPTS:--o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa}"
-SSH_OPTS="-i $SWITCH_KEY_PATH -p $SWITCH_SSH_PORT $SSH_HOSTKEY_OPTS -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3"
+SSH_OPTS="-i $SWITCH_KEY_PATH -p $SWITCH_SSH_PORT $SSH_HOSTKEY_OPTS $SSH_HOSTKEY_CHECK_OPTS -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3"
 # Hard cap per SSH session. Without it, a session left at the switch prompt
 # hangs until the vty idle-timeout (15 min) and wedges the whole queue.
 SSH_TIMEOUT="${ACL_SSH_TIMEOUT:-90}"
@@ -957,16 +981,18 @@ apply_accepted() {
 log "APPLY action=$ACTION ip=$IP_ADDRESS vlan=$VLAN_ID acl=${ACL_NUM} rule=$RULE_NUM host=$SWITCH_HOST"
 
 if [ "$ACTION" = "block" ]; then
-  CMDS=$(cat <<EOF
-system-view
-acl advanced ${ACL_NUM}
+  CMDS="system-view
+"
+  for acl in $ACL_NUMS; do
+    CMDS="${CMDS}acl advanced ${acl}
 rule $RULE_NUM deny ip source $IP_ADDRESS 0
 quit
-quit
+"
+  done
+  CMDS="${CMDS}quit
 
 quit
-EOF
-)
+"
 elif [ "$ACTION" = "unblock" ]; then
   # One system-view session, every uplink ACL. The policy ACL also loses the
   # allocated id and the old formula id even when display did not list them.
@@ -984,7 +1010,9 @@ quit
 "
     log "UNBLOCK_UNDO ip=$IP_ADDRESS acl=$acl rule=$n"
   }
-  add_undo "$ACL_NUM" "$RULE_NUM"
+  for acl in $ACL_NUMS; do
+    add_undo "$acl" "$RULE_NUM"
+  done
   CMDS="${CMDS}quit
 
 quit

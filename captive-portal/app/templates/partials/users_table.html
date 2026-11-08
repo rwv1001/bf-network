@@ -136,6 +136,7 @@
                 </a>
                 {% if user.blocked %}
                 <form method="POST" action="{{ url_for('admin.users.unblock_user', user_id=user.id) }}" style="display: inline; margin-left: 5px;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <button type="submit" class="btn btn-success btn-small"
                             onclick="return confirm('Unblock all devices for this user?')">
                         ✅ Unblock
@@ -143,6 +144,7 @@
                 </form>
                 {% else %}
                 <form method="POST" action="{{ url_for('admin.users.block_user', user_id=user.id) }}" style="display: inline; margin-left: 5px;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <button type="submit" class="btn btn-danger btn-small"
                             onclick="return confirm('Block all devices for this user?')">
                         🚫 Block
@@ -152,6 +154,7 @@
                 {% if current_user.can_manage_users %}
                 {% if user.devices|length == 0 %}
                 <form method="POST" action="{{ url_for('admin.users.delete_user', user_id=user.id) }}" style="display: inline; margin-left: 5px;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <button type="submit" class="btn btn-small" style="background: #dc3545;"
                             onclick="return confirm('Permanently delete user {{ user.email }}? This cannot be undone.')">
                         🗑️ Delete

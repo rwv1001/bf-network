@@ -15,7 +15,7 @@ from flask import request
 from flask_login import current_user
 from flask_socketio import Namespace, emit, disconnect
 
-from core.switch import get_switch_hosts
+from core.switch import get_switch_hosts, switch_hostkey_ssh_opts
 from extensions import socketio
 
 TERMINAL_NS = "/switch-terminal"
@@ -36,8 +36,7 @@ def build_switch_ssh_args(host: str) -> list:
         "-p", switch_port,
         "-o", "HostKeyAlgorithms=+ssh-rsa",
         "-o", "PubkeyAcceptedAlgorithms=+ssh-rsa",
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "UserKnownHostsFile=/dev/null",
+        *switch_hostkey_ssh_opts(),
         "-o", "ConnectTimeout=10",
         "-o", "ServerAliveInterval=5",
         "-o", "ServerAliveCountMax=3",
@@ -58,20 +57,10 @@ def set_pty_size(fd: int, rows: int, cols: int):
 
 
 def socket_user_can_manage_vlans() -> bool:
-    """
-    Replace this with your real permission check.
-
-    Your HTTP route uses @permission_required('manage_vlans'), so the socket
-    should enforce the same permission rather than only checking login.
-    """
+    """Same gate as the HTTP route: @permission_required('manage_vlans')."""
     if not current_user or not current_user.is_authenticated:
         return False
-
-    # Example only. Adapt to your User / permission model.
-    if hasattr(current_user, "has_permission"):
-        return current_user.has_permission("manage_vlans")
-
-    return True
+    return bool(getattr(current_user, "can_manage_vlans", False))
 
 
 class SwitchTerminalNamespace(Namespace):

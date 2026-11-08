@@ -621,7 +621,9 @@ def _access_enforcement_cleared(mac_address: str) -> bool:
 def api_device_status():
     logger.debug("=== /api/device-status called ===")
 
-    mac_address = get_client_mac()
+    # Read-only poll: the register page passes ?mac= so polling survives the
+    # VLAN move. The hint is only honoured when the IP lookup finds nothing.
+    mac_address = get_client_mac(allow_client_hint=True)
     request_ip = get_client_ip()
     ip_address = _effective_device_ip(mac_address, request_ip) if mac_address else request_ip
 
@@ -773,7 +775,10 @@ def registration_status():
         resp.headers['Vary'] = 'Origin'
         return resp, 200
 
-    mac_address = get_client_mac()
+    # trusted_mac comes from the proxy-observed IP; the hinted MAC is only
+    # used to *report* status, never to change enforcement for this IP.
+    trusted_mac = get_client_mac()
+    mac_address = trusted_mac or get_client_mac(allow_client_hint=True)
     if not mac_address:
         resp = jsonify({'status': 'unknown', 'message': 'Could not detect MAC address'})
         resp.headers['Access-Control-Allow-Origin'] = '*'
@@ -861,7 +866,8 @@ def registration_status():
             pw_resp.headers['Access-Control-Allow-Origin'] = '*'
             return pw_resp
 
-        if device.registration_status == 'registered' and not network_mismatch and current_ip:
+        if (device.registration_status == 'registered' and not network_mismatch
+                and current_ip and trusted_mac):
             if not is_blocked_pool_ip(current_ip):
                 # Only touch enforcement while it is still pending. Once the
                 # device is marked accessible and the ACL row is gone, further
@@ -928,7 +934,7 @@ def registration_status():
 @portal_bp.route('/api/block-status')
 @limiter.exempt
 def api_block_status():
-    mac_address = get_client_mac()
+    mac_address = get_client_mac(allow_client_hint=True)
     if not mac_address:
         return jsonify({'blocked': True, 'message': 'Could not detect MAC address'})
     device = Device.query.filter_by(mac_address=mac_address).first()

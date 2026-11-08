@@ -16,6 +16,18 @@ if [ -f /etc/freeradius/clients.conf.template ]; then
         /etc/freeradius/clients.conf.template > /etc/freeradius/clients.conf
 
     # One client stanza per switch in SWITCH_HOSTS
+    #
+    # BlastRADIUS (CVE-2024-3596): HP5130/Comware MAC-auth Access-Requests
+    # (PAP, Service-Type = Call-Check) contain no Message-Authenticator, so
+    # require_message_authenticator must stay "false" for these clients or
+    # MAC authentication stops working. Do NOT use "auto": the same switch
+    # also sends 802.1X/EAP requests that DO carry it, and auto would then
+    # start rejecting the MAC-auth requests. limit_proxy_state = true still
+    # blocks the Proxy-State vector. The remaining exposure requires an
+    # attacker on-path between the switch and this host on the management
+    # VLAN; closing it fully needs HPE firmware that adds the attribute
+    # (set SWITCH_RADIUS_REQUIRE_MA=yes once such firmware is running).
+    sw_require_ma="${SWITCH_RADIUS_REQUIRE_MA:-false}"
     idx=0
     for sw_ip in ${SWITCH_HOSTS}; do
         idx=$((idx + 1))
@@ -27,7 +39,7 @@ client hp5130-sw${idx} {
         secret = ${RADIUS_SECRET}
         shortname = hp5130-sw${idx}
         nas_type = other
-        require_message_authenticator = false
+        require_message_authenticator = ${sw_require_ma}
         limit_proxy_state = true
 }
 EOF
@@ -61,6 +73,16 @@ fi
 
 # Set proper permissions
 chmod 640 /etc/raddb/clients.conf 2>/dev/null || true
+
+# Validate the generated configuration before starting so a template error
+# is reported once, clearly, instead of a silent restart loop.
+if ! freeradius -C -f >/tmp/radius-check.log 2>&1; then
+    echo "FATAL: FreeRADIUS configuration check failed:" >&2
+    grep -E "Errors reading|error|EOF reached|Failed|Unknown|expected" /tmp/radius-check.log >&2 || cat /tmp/radius-check.log >&2
+    echo "Generated /etc/freeradius/clients.conf (secrets redacted):" >&2
+    sed -E 's/(secret *= *).*/\1<redacted>/' /etc/freeradius/clients.conf >&2
+    exit 1
+fi
 
 # Start FreeRADIUS (the executable is called 'freeradius' not 'radiusd' in this image)
 echo "Starting freeradius..."

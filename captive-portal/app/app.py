@@ -53,7 +53,12 @@ def create_app():
 
 
     # ── Core config ───────────────────────────────────────────────────────────
-    app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
+    # Fail closed: a predictable fallback key would let anyone forge session
+    # cookies (admin login, CSRF tokens). docker-compose already requires it.
+    secret_key = os.getenv('SECRET_KEY', '').strip()
+    if not secret_key or secret_key == 'dev-secret-key-change-in-production':
+        raise RuntimeError('SECRET_KEY must be set to a strong random value')
+    app.config['SECRET_KEY'] = secret_key
     app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv(
         'DATABASE_URL',
         'postgresql://portal_user:password@db:5432/captive_portal',
@@ -64,7 +69,15 @@ def create_app():
         'pool_recycle':       300,
         'pool_reset_on_return': 'rollback',
     }
-    app.config['WTF_CSRF_CHECK_DEFAULT'] = False
+    # CSRF is enforced on every POST/PUT/PATCH/DELETE. Routes that are hit by
+    # OS captive-portal probes or by machine clients with their own secret
+    # are explicitly exempted below with csrf.exempt().
+    # - TIME_LIMIT None: token lives as long as the session (admin pages are
+    #   often left open for hours; the 1h default produced spurious failures).
+    # - SSL_STRICT False: captive mini-browsers frequently omit Referer; the
+    #   token + SameSite=Lax cookie is the real protection.
+    app.config['WTF_CSRF_TIME_LIMIT'] = None
+    app.config['WTF_CSRF_SSL_STRICT'] = False
 
     app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
     app.config['SESSION_COOKIE_SECURE'] = True   # Set to True in production (HTTPS)
@@ -154,6 +167,17 @@ def create_app():
     app.register_blueprint(portal_bp)
     app.register_blueprint(admin_bp)
 
+    # CSRF exemptions: captive-portal detection probes POST without a session
+    # (Windows NCSI, Android, etc.), and the blocked-page helper is called
+    # cross-origin from hijacked pages. None of these mutate account state.
+    from blueprints.portal import (
+        api_request_unblock, blocked_page, index as portal_index,
+        windows_captive_portal_detection,
+    )
+    for _view in (portal_index, blocked_page, windows_captive_portal_detection,
+                  api_request_unblock):
+        csrf.exempt(_view)
+
     # ── Central sync client ───────────────────────────────────────────────────
     # NOTE: do NOT wrap this in app.app_context(). init_central_client only
     # stores references and spawns a daemon thread. The thread creates its own
@@ -166,6 +190,7 @@ def create_app():
 
     # ── Central inbound push endpoint ─────────────────────────────────────────
     @app.route('/api/v1/push', methods=['POST'])
+    @csrf.exempt
     def central_inbound_push():
         push_secret = os.getenv('CENTRAL_PUSH_SECRET', '').strip()
         if not push_secret:
@@ -219,6 +244,26 @@ def create_app():
         return jsonify(payload), 200 if overall_ok else 500
 
     # ── Error handlers ────────────────────────────────────────────────────────
+    from flask_wtf.csrf import CSRFError
+
+    @app.errorhandler(CSRFError)
+    def csrf_error(e):
+        logger.warning('CSRF failure on %s %s from %s: %s',
+                       request.method, request.path, request.remote_addr, e.description)
+        wants_json = (
+            request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+            or request.is_json
+            or request.path.startswith('/api/')
+        )
+        if wants_json:
+            return jsonify({'status': 'error',
+                            'message': 'Security token missing or expired. Please reload the page and try again.'}), 400
+        return render_template(
+            'error.html', code=400,
+            message='Your session security token was missing or has expired. '
+                    'Please go back, reload the page and try again.',
+        ), 400
+
     @app.errorhandler(404)
     def not_found(e):
         return render_template('error.html', code=404, message='Page not found.'), 404

@@ -554,28 +554,22 @@ def import_device_from_central(mac_address: str, central_data: dict) -> Optional
     device.ownership_validated = True
 
     # Wired cross-site: trigger port bounce if on wrong VLAN
-    # The device arrived on VLAN 250 (wired_unregistered). RADIUS placed it
-    # there because it had no local record. Now that we've imported it, queue a
-    # port bounce so the switch re-auths via RADIUS, which will now return the
-    # correct VLAN. A short-lease expiry alone is NOT sufficient — DHCP DISCOVER
-    # goes out on whatever VLAN the switch port is currently on, not the target.
+    # If the device is already plugged in here it sits on VLAN 250
+    # (wired_unregistered) because RADIUS had no local record. Now that we've
+    # imported it, queue a port bounce so the switch re-auths via RADIUS, which
+    # will now return the correct VLAN. A short-lease expiry alone is NOT
+    # sufficient — DHCP DISCOVER goes out on whatever VLAN the switch port is
+    # currently on, not the target.
     needs_bounce = False
     if is_wired_device and central_vlan and not device_blocked:
-        # Never let a missing local helper fail the whole import. A 500 here
-        # makes central retry the same push forever and the device never appears.
-        try:
-            from core.vlan_utils import get_wired_unregistered_vlan_id
-            wired_unreg_vlan = get_wired_unregistered_vlan_id()
-        except Exception as exc:
-            logger.warning("import_device_from_central: wired VLAN lookup failed for %s: %s", mac, exc)
-            wired_unreg_vlan = None
         current_vlan = getattr(device, 'current_vlan', None)
-        if current_vlan in (None, wired_unreg_vlan) or current_vlan != central_vlan:
+        device.wired_target_vlan = central_vlan
+        # current_vlan None = never seen at this site. That is not a VLAN
+        # mismatch; when it first connects here RADIUS returns assigned_vlan
+        # directly. Only a device actually sitting on another VLAN is wrong.
+        if current_vlan is not None and current_vlan != central_vlan:
             device.registration_status = "wrong_vlan"
-            device.wired_target_vlan = central_vlan
-            # Only bounce a port that is actually on this site. An imported
-            # device has no local lease yet, so a bounce would 500 or no-op.
-            needs_bounce = current_vlan not in (None,)
+            needs_bounce = True
 
     app_db.session.commit()
 
@@ -979,9 +973,18 @@ def _apply_inbound(event_type: str, data: dict) -> None:
         device.wired_target_vlan = new_vlan
         device.is_wired = True
         device.connection_type = "wired"
-        if old_vlan != new_vlan:
+        # A device never seen here (old_vlan None) is not on the wrong VLAN;
+        # it has no port to bounce either.
+        present_elsewhere = old_vlan is not None and old_vlan != new_vlan
+        if present_elsewhere:
             device.registration_status = "wrong_vlan"
         db.session.commit()
+        if not present_elsewhere:
+            logger.info(
+                "central: updated wired device %s VLAN %s → %s (not connected here, no bounce)",
+                mac, old_vlan, new_vlan,
+            )
+            return
         # Trigger RADIUS re-auth via port bounce — this is the only reliable
         # way to move a wired device to a new VLAN (short lease expiry alone
         # won't help because DHCP DISCOVER still goes out on the current VLAN).

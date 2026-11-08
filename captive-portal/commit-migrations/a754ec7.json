@@ -1,0 +1,72 @@
+{
+  "description": "Security hardening: CSRF protection enforced on all forms; device identity is resolved only from the proxy-observed IP (browser-supplied MAC no longer trusted); Postgres, Redis and Gunicorn bind to 127.0.0.1 only; HP5130 SSH host keys are pinned in a shared known_hosts volume; BlastRADIUS settings made explicit in FreeRADIUS.",
+
+  "env": {
+    "add": [
+      {
+        "key": "SWITCH_SSH_KNOWN_HOSTS",
+        "description": "Path INSIDE the containers of the shared known_hosts file used to pin HP5130 (and Oracle VPS) SSH host keys. The volume ./shared/ssh-known-hosts is mounted at /ssh-known-hosts in web, kea, watchdog and tunnel. Leave the default unless you have moved the volume. Setting it to /dev/null disables pinning (old unverified behaviour).",
+        "default": "/ssh-known-hosts/known_hosts",
+        "required": false,
+        "sensitive": false
+      },
+      {
+        "key": "SWITCH_SSH_HOSTKEY_POLICY",
+        "description": "OpenSSH StrictHostKeyChecking value for switch/VPS connections. 'accept-new' (recommended) records each host key on first contact and refuses later connections if it changes. Use 'no' only as a temporary escape hatch. If a switch is wiped/reinstalled its key changes: run  ssh-keygen -R <switch-ip> -f shared/ssh-known-hosts/known_hosts  on the Pi (the installer add-switch flow does this automatically).",
+        "default": "accept-new",
+        "required": false,
+        "sensitive": false
+      },
+      {
+        "key": "PORTAL_BIND_ADDR",
+        "description": "Address Gunicorn listens on inside the web container (host network). Keep 127.0.0.1 so the portal is only reachable through Nginx Proxy Manager; if it listened on the LAN a client could bypass NPM and forge the X-Real-IP header the portal uses to identify devices. Only change if NPM is moved off this host.",
+        "default": "127.0.0.1",
+        "required": false,
+        "sensitive": false
+      },
+      {
+        "key": "SWITCH_RADIUS_REQUIRE_MA",
+        "description": "FreeRADIUS require_message_authenticator for the HP5130 client stanzas (BlastRADIUS, CVE-2024-3596). Must be 'false' on current Comware firmware because MAC-authentication Access-Requests carry no Message-Authenticator; 'yes' or 'auto' would break MAC-auth. Set to 'yes' only after upgrading the switches to HPE firmware that includes the CVE-2024-3596 fix and confirming MAC-auth still works.",
+        "default": "false",
+        "required": false,
+        "sensitive": false
+      },
+      {
+        "key": "PI_FW_ENABLED",
+        "description": "Install the Pi host firewall (scripts/pi-host-firewall.sh via bf-host-firewall.service) on the next installer run. The Pi has an address on every user VLAN, so devices reach it directly and switch ACLs never apply; the firewall limits traffic from user VLANs to DHCP, DNS, HTTP/HTTPS, the pre-auth relay port, NTP and ICMP. Loopback (VPS tunnels / VS Code SSH), established connections, the management VLAN and the Wi-Fi/ISP side are unrestricted. Value true/false.",
+        "default": "true",
+        "required": false,
+        "sensitive": false
+      },
+      {
+        "key": "PI_FW_ALLOW_SSH_FROM_USER_VLANS",
+        "description": "1 = also allow SSH (tcp/22) to the Pi from user VLANs; 0 = SSH only from the management VLAN, Wi-Fi/ISP LAN, or the Oracle VPS tunnel. Use 1 only if you administer the Pi from a device on a user VLAN.",
+        "default": "0",
+        "required": false,
+        "sensitive": false
+      },
+      {
+        "key": "PI_FW_EXTRA_TCP_PORTS",
+        "description": "Optional comma-separated extra TCP ports to allow from user VLANs (e.g. a printer management port the Pi proxies). Usually empty.",
+        "default": "",
+        "required": false,
+        "sensitive": false
+      },
+      {
+        "key": "PI_FW_EXTRA_UDP_PORTS",
+        "description": "Optional comma-separated extra UDP ports to allow from user VLANs. Usually empty.",
+        "default": "",
+        "required": false,
+        "sensitive": false
+      }
+    ],
+    "remove": []
+  },
+
+  "db": {
+    "up": null,
+    "down": null
+  },
+
+  "notes": "No database changes. After updating: (1) `docker compose build web` is required because the Gunicorn bind address moved into the Dockerfile CMD; (2) restart db, redis, web, freeradius, kea, watchdog and tunnel so the new bind addresses and SSH options take effect; (3) verify with  ss -ltn | grep -E '5432|6379|8081'  that these ports now show only 127.0.0.1; (4) the first switch SSH after the update records each switch key into shared/ssh-known-hosts/known_hosts — check `docker compose logs kea web` for any 'REMOTE HOST IDENTIFICATION HAS CHANGED' message, which indicates a stale entry to remove with ssh-keygen -R. (5) Per-device ACL blocks are now written to EVERY ISP uplink ACL (hp5130-acl.sh), so a block holds even if PBR fails over to another ISP; existing single-ACL rules are unaffected and are removed normally on unblock. (6) Wired unregistered/blocked devices now receive a RADIUS-assigned per-port ACL (3002 PREAUTH-PORT) that confines them to the portal even for same-VLAN traffic. ORDER MATTERS: the ACL must exist on every switch before FreeRADIUS starts returning it, so push the ACL baseline first (restarting web does this automatically on start-up, or use the ISP Routers page 'Push all switch config'), THEN restart freeradius. Verify on a switch with `display mac-authentication connection` — an unregistered wired session should show 'Authorization ACL number/name: 3002'. If a switch somehow lacks the ACL the device falls back to the mac-auth guest VLAN (same VLAN 250) and still reaches the portal. (7) The Pi host firewall is NOT enabled by this update alone: review `sudo scripts/pi-host-firewall.sh plan`, then either rerun the installer (which installs/enables bf-host-firewall.service) or run `sudo scripts/pi-host-firewall.sh apply` manually; `sudo scripts/pi-host-firewall.sh remove` reverts instantly. All admin and portal forms now require a CSRF token; if a page was open across the update, reload it before submitting. Rollback: these variables are harmless to leave in .env; the previous code ignores them."
+}

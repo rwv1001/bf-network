@@ -85,33 +85,6 @@ def login():
             flash('Invalid credentials', 'error')
             return render_template('admin_login.html')
 
-        # Legacy env-var fallback
-        from werkzeug.security import check_password_hash, generate_password_hash
-        admin_username = os.getenv('ADMIN_USERNAME', 'admin')
-        admin_password_hash = os.getenv(
-            'ADMIN_PASSWORD_HASH',
-            generate_password_hash('admin123'),
-        )
-        if username == admin_username and check_password_hash(admin_password_hash, password):
-            if not admin:
-                admin = Admin(username=username)
-                admin.set_password(password)
-                admin.can_manage_users = True
-                admin.can_manage_vlans = True
-                admin.can_view_traffic = True
-                admin.can_manage_admins = True
-                admin.can_manage_switch_ports = True
-                admin.can_manage_isp_routers = True
-                admin.can_manage_firmware = True
-                admin.can_manage_pihole = True
-                db.session.add(admin)
-                db.session.commit()
-                logger.info("Migrated legacy admin '%s' to database", username)
-            login_user(make_admin_user(admin))
-            return redirect(url_for('admin.dashboard.index'))
-
-        flash('Invalid credentials', 'error')
-
     return render_template('admin_login.html')
 
 

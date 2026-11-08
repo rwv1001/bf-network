@@ -71,6 +71,7 @@
 </div>
 
 <form method="POST" action="{{ url_for('admin.users.import_users') }}" enctype="multipart/form-data">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="form-group">
         <label for="csv_file">CSV File <span class="required">*</span></label>
         <input type="file" id="csv_file" name="csv_file" accept=".csv" required>

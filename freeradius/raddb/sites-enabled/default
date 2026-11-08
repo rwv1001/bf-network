@@ -842,19 +842,27 @@ post-auth {
 
    
     # Dynamic VLAN for wired MAC auth (moved outside TLS checks)
+    #
+    # Filter-Id is the HP5130's "authorization ACL": a numeric value makes the
+    # switch bind that ACL to this MAC on its port for the whole session, which
+    # is the only place same-VLAN (L2) traffic can be filtered. ACL 3002
+    # (PREAUTH-PORT) is maintained by scripts/hp5130-acl-baseline.sh and
+    # permits only DHCP, DNS/HTTP(S)/NTP/ICMP to the portal. Registered devices
+    # get no Filter-Id (a non-numeric value is read as a user-profile name and
+    # is ignored; a missing ACL would refuse the session). Verified on
+    # R3507P18 with scripts/hp5130-test-filter-id-acl.sh.
     if (&control:Tmp-String-0 && "%{control:Tmp-String-0}" != "") {
         update reply {
             Tunnel-Type := VLAN
             Tunnel-Medium-Type := IEEE-802
             Tunnel-Private-Group-Id := &control:Tmp-String-0
-            Filter-Id := "WIRED_REGISTERED"
         }
     } else {
         update reply {
             Tunnel-Type := VLAN
             Tunnel-Medium-Type := IEEE-802
             Tunnel-Private-Group-Id := "250"
-            Filter-Id := "WIRED_UNREGISTERED"
+            Filter-Id := "3002"
         }
     }
 

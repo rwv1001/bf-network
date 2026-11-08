@@ -321,15 +321,20 @@ For other email providers, adjust `SMTP_HOST` and `SMTP_PORT`.
 
 ### Device Not Getting MAC Address
 
-The portal tries to detect MAC from:
-- `X-Client-MAC` header
-- `mac` query parameter
-- `mac` form field
+The portal resolves the MAC from the client IP seen by the reverse proxy
+(`X-Real-IP` set by Nginx Proxy Manager), via:
+- the Kea lease file
+- the Kea control socket
+- the `ip_leases` table
 
-You may need to:
-- Configure your switch to pass MAC in HTTP headers
-- Use DHCP option 82 and configure accordingly
-- Pass MAC in the redirect URL
+A browser-supplied `mac` query parameter is only accepted by the read-only
+status-polling endpoints (`/api/device-status`, `/api/registration-status`,
+`/api/block-status`), and only when the IP lookup finds nothing (the window
+while a device moves VLANs). It is never used for login, adoption or
+registration. The former `X-Client-MAC` header is no longer honoured.
+
+If detection fails on-site, check that the device's IP appears in
+`kea/leases/kea-leases4.csv` and that NPM is forwarding `X-Real-IP`.
 
 ### Email Not Sending
 

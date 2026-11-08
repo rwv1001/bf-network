@@ -69,6 +69,25 @@ def common_port_undo_commands():
 # Low-level SSH execution
 # ---------------------------------------------------------------------------
 
+def switch_hostkey_ssh_opts() -> list:
+    """
+    SSH host-key verification options shared by every switch SSH caller.
+
+    The switch's key is recorded on first contact in SWITCH_SSH_KNOWN_HOSTS
+    (a shared volume, see docker-compose) and must match afterwards, which
+    stops an on-path attacker on the management VLAN impersonating the
+    switch. If the file is unset the old unverified behaviour is kept.
+    After a switch wipe/reinstall the key changes; clear the stale entry with
+    `ssh-keygen -R <switch-ip> -f shared/ssh-known-hosts/known_hosts`.
+    """
+    policy = os.getenv('SWITCH_SSH_HOSTKEY_POLICY', 'accept-new').strip() or 'accept-new'
+    known_hosts = os.getenv('SWITCH_SSH_KNOWN_HOSTS', '/dev/null').strip() or '/dev/null'
+    return [
+        '-o', f'StrictHostKeyChecking={policy}',
+        '-o', f'UserKnownHostsFile={known_hosts}',
+    ]
+
+
 def run_switch_command(host: str, command: str, extra_input: str = '',
                        disable_paging: bool = False, timeout: int = 120):
     """
@@ -96,8 +115,7 @@ def run_switch_command(host: str, command: str, extra_input: str = '',
         '-p', switch_port,
         '-o', 'HostKeyAlgorithms=+ssh-rsa',
         '-o', 'PubkeyAcceptedAlgorithms=+ssh-rsa',
-        '-o', 'StrictHostKeyChecking=no',
-        '-o', 'UserKnownHostsFile=/dev/null',
+        *switch_hostkey_ssh_opts(),
         '-o', 'ConnectTimeout=10',
         '-o', 'ServerAliveInterval=5',
         '-o', 'ServerAliveCountMax=3',

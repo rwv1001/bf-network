@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>Two-Factor Authentication - BF-Network Admin</title>
     <style>
         * {
@@ -140,6 +141,7 @@
         </div>
         
         <form method="post" action="{{ url_for('admin.manage_admins.mfa_verify') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <div class="form-group">
                 <label for="code">Verification Code</label>
                 <input type="text" id="code" name="code" 
