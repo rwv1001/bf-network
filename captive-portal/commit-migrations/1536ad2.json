@@ -1,0 +1,58 @@
+{
+  "description": "Optional per-port ingress ACL on AP uplink ports (core/ap_ingress_acl.py). A reconciler in the web container keeps one advanced ACL (default 3988) on every switch port whose role is AP / Cheap AP / Migration AP, denying the IPs of unregistered or admin-blocked clients at the physical port while permitting DHCP and the portal services. Because it is applied at the port, it also stops same-VLAN (layer-2) traffic from such clients to other hosts, which VLAN-interface ACLs cannot see. Disabled by default; defaults to dry-run (logs the plan, changes nothing) when enabled.",
+
+  "env": {
+    "add": [
+      {
+        "key": "AP_INGRESS_ACL_ENABLED",
+        "description": "0 (default) = reconciler not started. 1 = start it. Combine with AP_INGRESS_ACL_DRY_RUN=1 first and check `docker compose logs web | grep 'AP ingress'` for the generated plan before switching dry-run off.",
+        "default": "0",
+        "required": false,
+        "sensitive": false
+      },
+      {
+        "key": "AP_INGRESS_ACL_DRY_RUN",
+        "description": "1 (default) = compute and log the switch commands but never push them. 0 = push and verify them. Only set 0 after reviewing the dry-run output on each switch.",
+        "default": "1",
+        "required": false,
+        "sensitive": false
+      },
+      {
+        "key": "AP_INGRESS_ACL_NUMBER",
+        "description": "Advanced ACL number (3000-3999) owned by the reconciler. Must not collide with the baseline ACLs (3000/3001/3002/3099, 3x11 isolation, 395x uplinks, 3991, 3999); the reconciler refuses to run if it does, or if an ACL with that number exists without its ownership marker.",
+        "default": "3988",
+        "required": false,
+        "sensitive": false
+      },
+      {
+        "key": "AP_INGRESS_ACL_INTERVAL",
+        "description": "Seconds between reconciliation passes (minimum 5). Each pass re-reads the switch config only when the lease/device picture changed, or every 5 minutes as an audit.",
+        "default": "15",
+        "required": false,
+        "sensitive": false
+      },
+      {
+        "key": "AP_INGRESS_ACL_MAX_IPS",
+        "description": "Safety cap on the number of denied client IPs; above this the reconciler logs an error and leaves the switch untouched (protects TCAM).",
+        "default": "250",
+        "required": false,
+        "sensitive": false
+      },
+      {
+        "key": "AP_INGRESS_ACL_KEA_CSV",
+        "description": "Path inside the web container of Kea's lease file, used as the authoritative IP->MAC source.",
+        "default": "/kea/leases/kea-leases4.csv",
+        "required": false,
+        "sensitive": false
+      }
+    ],
+    "remove": []
+  },
+
+  "db": {
+    "up": null,
+    "down": null
+  },
+
+  "notes": "No database changes and nothing changes on the switches unless AP_INGRESS_ACL_ENABLED=1 AND AP_INGRESS_ACL_DRY_RUN=0. Suggested rollout per site: (1) make sure every AP uplink port has role 'AP Uplink' (or Cheap/Migration AP) on the Switch Ports page — the reconciler only touches those ports and never detaches an ACL when the AP list is empty; (2) set AP_INGRESS_ACL_ENABLED=1, leave DRY_RUN=1, restart web, and read `docker compose logs web | grep 'AP ingress'` — it prints the exact commands and the list of denied IPs; (3) set DRY_RUN=0 and restart web; verify on the switch with `display acl 3988` and `display packet-filter interface GigabitEthernet1/0/<ap-port>`. Rollback: set ENABLED=0 (the ACL and port bindings stay but stop being updated) or remove manually: `undo packet-filter 3988 inbound` on each AP port, then `undo acl advanced 3988`. The reconciler does not `save force`; the nightly scheduler job persists the config."
+}

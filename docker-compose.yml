@@ -381,6 +381,12 @@ services:
       PORTAL_BIND_ADDR: ${PORTAL_BIND_ADDR:-127.0.0.1}
       UNIFI_FORWARD_PORT: ${UNIFI_FORWARD_PORT:-8080}
       WAN_IFACE: ${WAN_IFACE:-eth0}
+      AP_INGRESS_ACL_ENABLED: ${AP_INGRESS_ACL_ENABLED:-0}
+      AP_INGRESS_ACL_DRY_RUN: ${AP_INGRESS_ACL_DRY_RUN:-1}
+      AP_INGRESS_ACL_NUMBER: ${AP_INGRESS_ACL_NUMBER:-3988}
+      AP_INGRESS_ACL_INTERVAL: ${AP_INGRESS_ACL_INTERVAL:-15}
+      AP_INGRESS_ACL_MAX_IPS: ${AP_INGRESS_ACL_MAX_IPS:-250}
+      AP_INGRESS_ACL_KEA_CSV: ${AP_INGRESS_ACL_KEA_CSV:-/kea/leases/kea-leases4.csv}
     volumes:
       - ./captive-portal/app:/app
       - ./shared/restart-queue:/restart-queue

@@ -305,6 +305,8 @@ def create_app():
     )
     start_wifi_confirmation_sweeper(app)
     start_ip_lease_sweeper(app)
+    from core.ap_ingress_acl import start_ap_ingress_acl_reconciler
+    start_ap_ingress_acl_reconciler(app)
     startup_switch_discovery(app)
     startup_write_prefix_map(app)
     startup_dns_hijack_blocked_pools(app)

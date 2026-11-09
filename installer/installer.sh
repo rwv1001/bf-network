@@ -3244,6 +3244,16 @@ write_pi_env_file() {
         # BlastRADIUS (CVE-2024-3596): HP5130 MAC-auth requests carry no
         # Message-Authenticator, so "false" is required until HPE firmware adds it.
         write_env_line SWITCH_RADIUS_REQUIRE_MA "false"
+        # Per-port ingress ACL on AP uplink ports (core/ap_ingress_acl.py):
+        # denies unregistered/blocked client IPs at the physical port so they
+        # cannot reach other hosts on the same VLAN. Off by default; enable
+        # with DRY_RUN=1 first and read `docker compose logs web | grep "AP ingress"`.
+        write_env_line AP_INGRESS_ACL_ENABLED "${AP_INGRESS_ACL_ENABLED:-0}"
+        write_env_line AP_INGRESS_ACL_DRY_RUN "${AP_INGRESS_ACL_DRY_RUN:-1}"
+        write_env_line AP_INGRESS_ACL_NUMBER "${AP_INGRESS_ACL_NUMBER:-3988}"
+        write_env_line AP_INGRESS_ACL_INTERVAL "${AP_INGRESS_ACL_INTERVAL:-15}"
+        write_env_line AP_INGRESS_ACL_MAX_IPS "${AP_INGRESS_ACL_MAX_IPS:-250}"
+        write_env_line AP_INGRESS_ACL_KEA_CSV "/kea/leases/kea-leases4.csv"
         # Pi host firewall (scripts/pi-host-firewall.sh). Admin SSH to the Pi
         # is expected via the management VLAN, Wi-Fi/ISP LAN or the VPS tunnel.
         write_env_line PI_FW_ENABLED "${PI_FW_ENABLED:-true}"
