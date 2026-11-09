@@ -364,6 +364,14 @@ services:
       HP5130_CURRENT_CONFIG_PATH: ${HP5130_CURRENT_CONFIG_PATH:-/scripts/scriptdata/hp5130-current-config.json}
       ACL_BASELINE_SCRIPT: ${ACL_BASELINE_SCRIPT:-/scripts/hp5130-acl-baseline.sh}
       DNS_SCRIPT: ${DNS_SCRIPT:-/scripts/dns-hijack.sh}
+      # Pi host firewall (user-VLAN allow-list), re-applied by web at start-up.
+      PI_FW_SCRIPT: ${PI_FW_SCRIPT:-/scripts/pi-host-firewall.sh}
+      PI_FW_ENABLED: ${PI_FW_ENABLED:-true}
+      PI_FW_ALLOW_SSH_FROM_USER_VLANS: ${PI_FW_ALLOW_SSH_FROM_USER_VLANS:-0}
+      PI_FW_EXTRA_TCP_PORTS: ${PI_FW_EXTRA_TCP_PORTS:-}
+      PI_FW_EXTRA_UDP_PORTS: ${PI_FW_EXTRA_UDP_PORTS:-}
+      PREAUTH_PROXY_PORT: ${PREAUTH_PROXY_PORT:-8443}
+      VLAN_PREFIX_MAP: ${VLAN_PREFIX_MAP:-}
       PORTAL_ADMIN_USER: ${PORTAL_ADMIN_USER:-admin}
       PORTAL_ADMIN_PASSWORD: ${PORTAL_ADMIN_PASSWORD:?PORTAL_ADMIN_PASSWORD is required}
       PORTAL_FORWARD_PORT: ${PORTAL_FORWARD_PORT:-8081}

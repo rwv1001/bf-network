@@ -301,12 +301,14 @@ def create_app():
         startup_switch_discovery,
         startup_write_prefix_map,
         startup_dns_hijack_blocked_pools,
+        startup_host_firewall,
     )
     start_wifi_confirmation_sweeper(app)
     start_ip_lease_sweeper(app)
     startup_switch_discovery(app)
     startup_write_prefix_map(app)
     startup_dns_hijack_blocked_pools(app)
+    startup_host_firewall(app)
 
     # Run the potentially slow ACL baseline push in a background thread
     # so it doesn't block Gunicorn master/worker creation under --preload

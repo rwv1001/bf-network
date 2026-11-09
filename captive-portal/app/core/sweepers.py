@@ -463,3 +463,42 @@ def startup_dns_hijack_blocked_pools(app) -> None:
             logger.warning("Failed to apply startup blocked-pool DNS hijack: %s", exc)   
 
     threading.Thread(target=_run, daemon=True).start()    
+
+
+def startup_host_firewall(app) -> None:
+    """Re-apply the Pi host firewall (user-VLAN allow-list) on every start.
+
+    Like the DNS-hijack rules, iptables state is not persistent, so the
+    privileged web container re-derives it from the current .env each time
+    the stack comes up. Idempotent; PI_FW_ENABLED=false removes the rules.
+    """
+
+    def _run():
+        time.sleep(8)
+        script_path = os.getenv('PI_FW_SCRIPT', '/scripts/pi-host-firewall.sh')
+        if not os.path.isfile(script_path):
+            logger.warning("Host firewall script not found: %s", script_path)
+            return
+        enabled = os.getenv('PI_FW_ENABLED', 'true').strip().lower() not in {'0', 'false', 'no', 'off'}
+        action = 'apply' if enabled else 'remove'
+        env = dict(os.environ)
+        repo_dir = os.getenv('GIT_REPO_DIR', '').strip()
+        if repo_dir:
+            env.setdefault('ENV_FILE', os.path.join(repo_dir, '.env'))
+        try:
+            result = subprocess.run(
+                ['bash', script_path, action],
+                capture_output=True, text=True, timeout=60, env=env,
+            )
+        except Exception as exc:
+            logger.warning("Host firewall %s failed to run: %s", action, exc)
+            return
+        if result.returncode == 0:
+            logger.info("Host firewall %s ok:\n%s", action,
+                        (result.stderr.strip() or result.stdout.strip() or '<no output>'))
+        else:
+            logger.warning("Host firewall %s failed (exit=%s)\nSTDOUT:\n%s\nSTDERR:\n%s",
+                           action, result.returncode,
+                           result.stdout.strip() or '<empty>', result.stderr.strip() or '<empty>')
+
+    threading.Thread(target=_run, daemon=True).start()

@@ -47,7 +47,7 @@ RUN set -eux; \
     chown -R ${PORTAL_UID}:${PORTAL_GID} /app ./scripts/scriptdata 2>/dev/null || true; \
     \
     # Sudo rights
-    echo "portal ALL=(ALL) NOPASSWD: /usr/sbin/iptables, /usr/sbin/conntrack, /usr/bin/docker, /usr/local/bin/python3, /usr/bin/python3, /sbin/ip, /usr/sbin/ip" >> /etc/sudoers
+    echo "portal ALL=(ALL) NOPASSWD: /usr/sbin/iptables, /usr/sbin/ip6tables, /usr/sbin/conntrack, /usr/bin/docker, /usr/local/bin/python3, /usr/bin/python3, /sbin/ip, /usr/sbin/ip" >> /etc/sudoers
 
 # Default; override at runtime via Compose environment
 ENV PORTAL_FORWARD_PORT=8081

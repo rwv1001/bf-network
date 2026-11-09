@@ -1,0 +1,30 @@
+{
+  "description": "Pi host firewall is now applied automatically: the captive-portal-web container re-derives the user-VLAN allow-list (scripts/pi-host-firewall.sh) from .env at every start-up, exactly like the DNS-hijack iptables rules. The separate systemd unit (bf-host-firewall.service) is removed. Also: ip6tables added to the web container's sudo rules so the IPv6 part of the firewall can be applied.",
+
+  "env": {
+    "add": [
+      {
+        "key": "PI_FW_ENABLED",
+        "description": "Already in .env from the previous update, but it now has an effect: true = the web container applies the host firewall on every start-up (user VLANs may reach the Pi only for DHCP, DNS, HTTP/HTTPS, the pre-auth relay port, NTP, ICMP); false = the web container REMOVES the firewall on start-up. Loopback (VPS tunnels / VS Code SSH), established connections, the management VLAN and the Wi-Fi/ISP side are never restricted. Leave true unless you need to disable it.",
+        "default": "true",
+        "required": false,
+        "sensitive": false
+      },
+      {
+        "key": "PI_FW_ALLOW_SSH_FROM_USER_VLANS",
+        "description": "Confirm before the firewall becomes automatic: 1 = also allow SSH (tcp/22) to the Pi from user VLANs; 0 = SSH only from the management VLAN, Wi-Fi/ISP LAN or the Oracle VPS tunnel. Set 1 only if you administer the Pi from a device on a user VLAN.",
+        "default": "0",
+        "required": false,
+        "sensitive": false
+      }
+    ],
+    "remove": []
+  },
+
+  "db": {
+    "up": null,
+    "down": null
+  },
+
+  "notes": "No database changes. After updating: (1) `docker compose build web` is recommended (the Dockerfile sudoers list gained ip6tables); without it the firewall still applies for IPv4 and logs 'ip6tables unavailable or not permitted; skipping IPv6 rules'. (2) Restart web. About 10 s later `docker compose logs web | grep -i 'host firewall'` should show 'Host firewall apply ok' with one line per user VLAN; `sudo scripts/pi-host-firewall.sh status` shows the chains and drop counters. (3) If a previous installer run created bf-host-firewall.service on this host, retire it (the web container now owns the rules): `sudo systemctl disable --now bf-host-firewall.service; sudo rm -f /etc/systemd/system/bf-host-firewall.service; sudo systemctl daemon-reload`. Leaving it in place is harmless (both apply the same idempotent rules). (4) Rollback to 0286010 keeps whatever rules are currently loaded until the next reboot; `sudo scripts/pi-host-firewall.sh remove` clears them immediately."
+}

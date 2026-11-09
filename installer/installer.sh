@@ -3087,31 +3087,9 @@ EOF
     pi_sudo "rm -f /tmp/bf-setup-chrony.sh"
 }
 
-setup_pi_host_firewall() {
-    # Allow-list on the Pi for traffic from user VLANs. The Pi has an address
-    # on every user VLAN, so devices reach it at L2 and no switch ACL applies;
-    # without this an unregistered device can reach NPM admin, Pi-hole, UniFi,
-    # SSH, syslog and TFTP. Loopback (VPS reverse tunnels), established flows,
-    # the management VLAN and the Wi-Fi/ISP side are never restricted.
-    # PI_FW_ENABLED=false in .env skips installation (unit disabled if present).
-    local enabled="${PI_FW_ENABLED:-true}"
-    local q_repo unit
-    q_repo="$(shell_quote "$PI_REPO_DIR")"
-    if ! is_yes "$enabled" && [ "$enabled" != "true" ]; then
-        info "Host firewall disabled (PI_FW_ENABLED=$enabled)"
-        pi_sudo "systemctl disable --now bf-host-firewall.service 2>/dev/null || true"
-        return 0
-    fi
-    info "Installing host firewall (user-VLAN allow-list)"
-    unit="$(mktemp)"
-    sed -e "s#/home/admin/bf-network#${PI_REPO_DIR}#g" \
-        "$SCRIPT_DIR/../scripts/bf-host-firewall.service" > "$unit"
-    pi_scp_to "$unit" /tmp/bf-host-firewall.service
-    rm -f "$unit"
-    pi_sudo "chmod 755 $q_repo/scripts/pi-host-firewall.sh"
-    pi_sudo "mv /tmp/bf-host-firewall.service /etc/systemd/system/bf-host-firewall.service && chmod 644 /etc/systemd/system/bf-host-firewall.service && systemctl daemon-reload && systemctl enable --now bf-host-firewall.service"
-    pi_sudo "$q_repo/scripts/pi-host-firewall.sh status | head -20" || true
-}
+# The Pi host firewall (scripts/pi-host-firewall.sh) is applied by the
+# captive-portal-web container at every start-up from the PI_FW_* .env keys,
+# the same way the DNS-hijack iptables rules are; no systemd unit is needed.
 
 write_pi_env_file() {
     ENV_TMP="$(mktemp)"
@@ -4966,10 +4944,6 @@ Redo with:  sudo ./installer.sh --forget-answer bf_repo_ref
         echo "TFTP already marked configured; re-applying so the backup directory stays the one the switches use."
         setup_pi_tftp_server
     fi
-
-    # Always re-apply: the allow-list is derived from the current VLAN set.
-    setup_pi_host_firewall
-    complete_step "setup_pi_host_firewall"
 
     
 
