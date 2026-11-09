@@ -1069,9 +1069,14 @@ document.addEventListener('DOMContentLoaded', function() {
         accessInterval = setTimeout(checkAccess, 0);
     }
 
-    function showStatus(message, type) {
+    function showStatus(message, type, asHtml) {
         statusMessage.style.display = 'block';
-        statusMessage.textContent = message;
+        // Only messages built from server data we control are rendered as HTML.
+        if (asHtml) {
+            statusMessage.innerHTML = message;
+        } else {
+            statusMessage.textContent = message;
+        }
 
         if (type === 'success' && institutionUrl && institutionButtonText) {
             institutionLink.innerHTML = `<a href="${institutionUrl}" target="_blank" rel="noopener" class="btn" style="display: inline-block;">${institutionButtonText}</a>`;
@@ -1210,12 +1215,12 @@ document.addEventListener('DOMContentLoaded', function() {
 
         if (isWired) {
             const vlanText = assignedVlan ? `VLAN ${assignedVlan}` : 'the assigned network';
-            return `The administrator has not granted you access to this network, but has instead granted you access to ${vlanText}.<br><br>
-                    Please unplug your Ethernet cable, wait 5 seconds, and plug it back in again.`;
+            return `The administrator has not granted you access to this network, but has instead granted you access to <strong>${vlanText}</strong>.<br><br>
+                    <strong>Please unplug your Ethernet cable, wait 5 seconds, and plug it back in again.</strong>`;
         } else {
             const networkName = assignedSsid || (assignedVlan ? `VLAN ${assignedVlan}` : 'the assigned network');
-            return `The administrator has not granted you access to this network, but has instead granted you access to ${networkName}.<br><br>
-                    Please disconnect from your current network and connect to ${networkName}.`;
+            return `The administrator has not granted you access to this network, but has instead granted you access to <strong>${networkName}</strong>.<br><br>
+                    Please disconnect from your current network and connect to <strong>${networkName}</strong>.`;
         }
     }
 

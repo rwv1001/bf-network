@@ -822,8 +822,11 @@ def registration_status():
         _, current_vlan, detected_ssid = detect_connection_type(current_ip)
         current_ssid = get_ssid_for_vlan(current_vlan) or detected_ssid
         expected_ssid = get_ssid_for_vlan(device.current_vlan) or device.ssid
+        # Compare with the ASSIGNED VLAN. current_vlan is rewritten on every
+        # lease, so comparing against it hid a device sitting on the wrong SSID.
+        expected_vlan = device.assigned_vlan or device.current_vlan
         network_mismatch = bool(
-            current_vlan and device.current_vlan and current_vlan != device.current_vlan
+            current_vlan and expected_vlan and current_vlan != expected_vlan
         )
 
         _sel_vlan = device.assigned_vlan or current_vlan
@@ -1671,6 +1674,24 @@ def wrong_vlan_page():
     _, detected_vlan, _ = detect_connection_type(get_client_ip())
     detected_ssid = get_ssid_for_vlan(detected_vlan) if detected_vlan else None
 
+    # Offer "request access here instead" only for a real, owned, registered
+    # device on a selectable VLAN that is not already the subject of a request.
+    pending_change = None
+    can_request_change = False
+    if device and detected_vlan and device.assigned_vlan and detected_vlan != device.assigned_vlan:
+        pending_change = (
+            RegistrationRequest.query
+            .filter_by(mac_address=device.mac_address, status='pending')
+            .order_by(RegistrationRequest.submitted_at.desc())
+            .first()
+        )
+        can_request_change = (
+            pending_change is None
+            and get_active_ownership(device.mac_address) is not None
+            and detected_vlan in get_vlan_map().values()
+            and detected_vlan != get_wired_unregistered_vlan_id()
+        )
+
     return render_template(
         'wrong_vlan.html',
         mac_address=mac_address,
@@ -1678,7 +1699,84 @@ def wrong_vlan_page():
         assigned_ssid=assigned_ssid,
         detected_vlan=detected_vlan,
         detected_ssid=detected_ssid,
+        can_request_change=can_request_change,
+        pending_change=pending_change,
     )
+
+
+@portal_bp.route('/wrong-vlan/request-change', methods=['POST'])
+@limiter.limit("5 per minute")
+def wrong_vlan_request_change():
+    """
+    Registered device on a VLAN other than its assigned one asks the admin to
+    move its assignment to the network it is currently on. Files an ordinary
+    RegistrationRequest with requested_vlan = detected VLAN, so the existing
+    approval flow (assigned_vlan := requested_vlan, unhijack, unblock) applies.
+    """
+    mac_address = get_client_mac()
+    device = Device.query.filter_by(mac_address=mac_address).first() if mac_address else None
+    if not device or not device.assigned_vlan:
+        flash('This device is not registered.', 'error')
+        return redirect(url_for('portal.wrong_vlan_page'))
+
+    ownership = get_active_ownership(device.mac_address)
+    user = User.query.get(ownership.user_id) if ownership and ownership.user_id else None
+    if not user:
+        flash('This device has no owner on record; please register it instead.', 'error')
+        return redirect(url_for('portal.register'))
+
+    ip_address = get_client_ip()
+    _, detected_vlan, detected_ssid = detect_connection_type(ip_address)
+    if not detected_vlan or detected_vlan == device.assigned_vlan:
+        flash('You are already on your assigned network.', 'info')
+        return redirect(url_for('portal.register'))
+    if detected_vlan not in get_vlan_map().values() or detected_vlan == get_wired_unregistered_vlan_id():
+        flash('Access cannot be requested for this network.', 'error')
+        return redirect(url_for('portal.wrong_vlan_page'))
+
+    if RegistrationRequest.query.filter_by(mac_address=device.mac_address, status='pending').first():
+        flash('A request for this device is already waiting for the administrator.', 'info')
+        return redirect(url_for('portal.wrong_vlan_page'))
+
+    note = (request.form.get('reason') or '').strip()[:500]
+    reg_request = RegistrationRequest(
+        mac_address=device.mac_address,
+        ip_address=ip_address,
+        email=user.email,
+        first_name=user.first_name or '',
+        last_name=user.last_name or '',
+        phone_number=user.phone_number or '',
+        device_type=device.device_name or 'device',
+        requested_vlan=detected_vlan,
+        user_agent=request.headers.get('User-Agent', '')[:500],
+        status='pending',
+        approval_token=secrets.token_urlsafe(32),
+        notes=(
+            f"VLAN change request: device is assigned VLAN {device.assigned_vlan} "
+            f"({get_ssid_for_vlan(device.assigned_vlan) or 'wired'}) but connected on VLAN "
+            f"{detected_vlan} ({detected_ssid or 'wired'})."
+            + (f" User note: {note}" if note else "")
+        ),
+    )
+    db.session.add(reg_request)
+    db.session.commit()
+
+    try:
+        approval_url = build_portal_url(
+            url_for('admin.approvals.approve_request', token=reg_request.approval_token)
+        )
+        send_admin_notification(
+            reg_request, approval_url,
+            current_vlan=detected_vlan, current_ssid=detected_ssid,
+        )
+    except Exception as exc:
+        logger.warning("VLAN change request: admin notification failed for %s: %s",
+                       device.mac_address, exc)
+
+    logger.info("VLAN change requested: mac=%s user=%s assigned=%s detected=%s",
+                device.mac_address, user.email, device.assigned_vlan, detected_vlan)
+    flash('Your request has been sent to the administrator. This page will update once it is decided.', 'success')
+    return redirect(url_for('portal.wrong_vlan_page'))
 
 
 @portal_bp.route('/registered')

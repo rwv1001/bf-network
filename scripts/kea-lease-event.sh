@@ -102,6 +102,17 @@ UPDATE devices
    AND registration_status = 'wrong_vlan'
    AND assigned_vlan IS NOT NULL
    AND assigned_vlan = ${VLAN_ID};
+-- A registered device that shows up on a different VLAN than assigned is
+-- restricted by the Kea hook; reflect that so the dashboard and status
+-- polls say wrong_vlan rather than registered-with-full-access.
+UPDATE devices
+   SET registration_status = 'wrong_vlan',
+       internet_accessible = false
+ WHERE mac_address = '${MAC_ADDRESS}'
+   AND registration_status = 'registered'
+   AND internet_blocked IS NOT TRUE
+   AND assigned_vlan IS NOT NULL
+   AND assigned_vlan <> ${VLAN_ID};
 ENDSQL
 
         # ── Table 7: upsert ip_leases row ─────────────────────────────────────

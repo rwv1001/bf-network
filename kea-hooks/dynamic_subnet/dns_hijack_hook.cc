@@ -1758,6 +1758,11 @@ extern "C"
             }
 
             bool do_hijack = false; // track for lease event
+            // When the device must stay restricted (wrong VLAN), the
+            // unregistered_leases row is removed WITHOUT passing the IP: with
+            // an IP, unregistered-lease.sh remove also fires unhijack+unblock,
+            // which used to cancel the block queued a moment earlier.
+            bool keep_restricted = false;
             if (host)
             {
                 bool blocked = is_blocked_host(host);
@@ -1809,6 +1814,7 @@ extern "C"
                     manage_dns_hijack("hijack", ip_address, lease->subnet_id_);
 
                     do_hijack = true;
+                    keep_restricted = true;
                 }
 
                 else
@@ -1836,6 +1842,7 @@ extern "C"
                         manage_acl("block", ip_address, lease->subnet_id_);
 
                         do_hijack = true;
+                        keep_restricted = true;
                     }
 
                     else
@@ -1854,7 +1861,7 @@ extern "C"
                     }
                 }
 
-                manage_unregistered_lease("remove", mac_clean, ip_address, 0);
+                manage_unregistered_lease("remove", mac_clean, keep_restricted ? "" : ip_address, 0);
 
                 if (!blocked_ip.empty() && blocked_ip != ip_address)
 
@@ -1888,13 +1895,25 @@ extern "C"
 
                 heal_kea_reservation(mac_clean, static_cast<uint32_t>(assigned));
 
-                manage_dns_hijack("unhijack", ip_address, lease->subnet_id_);
-
-                manage_acl("unblock", ip_address, lease->subnet_id_);
-
-                manage_unregistered_lease("remove", mac_clean, ip_address, 0);
-
-                do_hijack = false;
+                // Healing restores the reservation; it must not grant access on
+                // a VLAN other than the assigned one.
+                if (is_assigned_vlan_mismatch(mac_clean, lease->subnet_id_))
+                {
+                    std::cout << "DNS Hijack Hook: Device " << mac_clean
+                              << " registered (VLAN " << assigned << ") but on wrong VLAN (subnet "
+                              << lease->subnet_id_ << ") - restricting access" << std::endl;
+                    manage_dns_hijack("hijack", ip_address, lease->subnet_id_);
+                    manage_acl("block", ip_address, lease->subnet_id_);
+                    manage_unregistered_lease("remove", mac_clean, "", 0);
+                    do_hijack = true;
+                }
+                else
+                {
+                    manage_dns_hijack("unhijack", ip_address, lease->subnet_id_);
+                    manage_acl("unblock", ip_address, lease->subnet_id_);
+                    manage_unregistered_lease("remove", mac_clean, ip_address, 0);
+                    do_hijack = false;
+                }
 
             }
 
@@ -2051,6 +2070,7 @@ extern "C"
             std::cout.flush();
 
             bool do_hijack = false;
+            bool keep_restricted = false; // see lease4_select
 
             if (host)
 
@@ -2245,6 +2265,7 @@ extern "C"
                     manage_dns_hijack("hijack", ip_address, lease->subnet_id_);
 
                     do_hijack = true;
+                    keep_restricted = true;
                 }
 
                 else
@@ -2270,6 +2291,7 @@ extern "C"
                         manage_acl("block", ip_address, lease->subnet_id_);
 
                         do_hijack = true;
+                        keep_restricted = true;
                     }
 
                     else
@@ -2290,7 +2312,7 @@ extern "C"
                     }
                 }
 
-                manage_unregistered_lease("remove", mac_address, ip_address, 0);
+                manage_unregistered_lease("remove", mac_address, keep_restricted ? "" : ip_address, 0);
 
                 if (!blocked_ip.empty() && blocked_ip != ip_address)
 
@@ -2328,13 +2350,27 @@ extern "C"
 
                 heal_kea_reservation(mac_clean, static_cast<uint32_t>(assigned));
 
-                manage_dns_hijack("unhijack", ip_address, lease->subnet_id_);
+                if (is_assigned_vlan_mismatch(mac_clean, lease->subnet_id_))
+                {
+                    std::cout << "DNS Hijack Hook: Device " << mac_clean
+                              << " registered (VLAN " << assigned << ") but on wrong VLAN (subnet "
+                              << lease->subnet_id_ << ") - restricting access" << std::endl;
+                    std::cout.flush();
+                    manage_dns_hijack("hijack", ip_address, lease->subnet_id_);
+                    manage_acl("block", ip_address, lease->subnet_id_);
+                    manage_unregistered_lease("remove", mac_clean, "", 0);
+                    do_hijack = true;
+                }
+                else
+                {
+                    manage_dns_hijack("unhijack", ip_address, lease->subnet_id_);
 
-                manage_acl("unblock", ip_address, lease->subnet_id_);
+                    manage_acl("unblock", ip_address, lease->subnet_id_);
 
-                manage_unregistered_lease("remove", mac_clean, ip_address, 0);
+                    manage_unregistered_lease("remove", mac_clean, ip_address, 0);
 
-                do_hijack = false;
+                    do_hijack = false;
+                }
 
             }
 

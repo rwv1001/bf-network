@@ -30,6 +30,35 @@
     </p>
 </div>
 
+{% if pending_change %}
+<div id="changeRequestBox" class="info-box" style="margin-top: 16px;">
+    <strong>⏳ Request sent</strong>
+    <p style="margin-top: 6px; color: #555;">
+        You asked on {{ pending_change.submitted_at|localtime }} for this device to be allowed on
+        <strong>{{ detected_ssid or ('VLAN ' ~ detected_vlan) }}</strong>. The administrator has been notified;
+        internet access stays off until the request is decided. You can still connect to
+        <strong>{{ assigned_ssid or ('VLAN ' ~ assigned_vlan) if assigned_vlan else 'your assigned network' }}</strong> in the meantime.
+    </p>
+</div>
+{% elif can_request_change %}
+<div id="changeRequestBox" class="info-box" style="margin-top: 16px;">
+    <strong>Prefer to stay on {{ detected_ssid or ('VLAN ' ~ detected_vlan) }}?</strong>
+    <p style="margin-top: 6px; color: #555;">
+        Ask the administrator to move this device's access to this network instead.
+        Internet access remains blocked until they approve.
+    </p>
+    <form method="POST" action="{{ url_for('portal.wrong_vlan_request_change') }}" style="margin-top: 10px;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <div class="form-group" style="margin-bottom: 10px;">
+            <label for="reason">Reason (optional)</label>
+            <input type="text" id="reason" name="reason" class="form-control" maxlength="500"
+                   placeholder="e.g. this laptop is used for guest presentations">
+        </div>
+        <button type="submit" class="btn btn-primary">Request access on {{ detected_ssid or ('VLAN ' ~ detected_vlan) }}</button>
+    </form>
+</div>
+{% endif %}
+
 <script>
 (() => {
     const pollInterval = 3000;
@@ -52,6 +81,7 @@
 
     const statusAlert = document.getElementById('statusAlert');
     const instructionsBox = document.getElementById('instructionsBox');
+    const changeRequestBox = document.getElementById('changeRequestBox');
 
     const detectedEls = [
         document.getElementById('detectedNetwork'),
@@ -92,6 +122,9 @@
 
         if (instructionsBox) {
             instructionsBox.style.display = 'none';
+        }
+        if (changeRequestBox) {
+            changeRequestBox.style.display = 'none';
         }
     };
 
