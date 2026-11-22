@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+
+{% block title %}Backups - Admin Portal{% endblock %}
+
+{% block header %}Disaster-Recovery Backups{% endblock %}
+
+{% block extra_head %}
+<style>
+    .bk-card { background: white; border-radius: 8px; padding: 20px 24px; margin-bottom: 24px;
+               box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
+    .bk-card h3 { margin: 0 0 12px; color: #2c3e2c; }
+    .bk-note { color: #555; font-size: 14px; line-height: 1.5; }
+    .bk-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    .bk-table th, .bk-table td { text-align: left; padding: 7px 10px; border-bottom: 1px solid #eee; }
+    .bk-table th { color: #555; font-weight: 600; }
+    .bk-table td.num { text-align: right; white-space: nowrap; }
+    .bk-name { font-family: monospace; font-size: 12px; word-break: break-all; }
+    .bk-state { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 13px; font-weight: 600; }
+    .bk-ok { background: #d4edda; color: #155724; }
+    .bk-warn { background: #fff3cd; color: #856404; }
+    .bk-bad { background: #f8d7da; color: #721c24; }
+    .bk-alert { padding: 12px 16px; border-radius: 6px; margin-bottom: 14px; font-size: 14px; line-height: 1.5; }
+    .bk-btn { padding: 8px 18px; border: none; border-radius: 5px; cursor: pointer; font-size: 14px;
+              background: #2c3e2c; color: white; text-decoration: none; display: inline-block; }
+    .bk-btn:hover { background: #3d5a3d; }
+    .bk-btn-sm { padding: 4px 12px; font-size: 12px; }
+    .bk-kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; font-size: 14px; }
+    .bk-kv dt { color: #555; }
+    .bk-kv dd { margin: 0; word-break: break-word; }
+</style>
+{% endblock %}
+
+{% macro filesize(n) %}{% if n >= 1048576 %}{{ '%.1f'|format(n / 1048576) }} MB{% else %}{{ '%.0f'|format(n / 1024) }} kB{% endif %}{% endmacro %}
+
+{% macro bundle_table(files, group, owner) %}
+<table class="bk-table">
+    <thead><tr><th>Created</th><th>File</th><th class="num">Size</th><th></th></tr></thead>
+    <tbody>
+    {% for f in files %}
+    <tr>
+        <td style="white-space:nowrap;">{{ f.created }}</td>
+        <td class="bk-name">{{ f.name }}</td>
+        <td class="num">{{ filesize(f.size) }}</td>
+        <td class="num"><a class="bk-btn bk-btn-sm"
+            href="{{ url_for('admin.backups.download_backup', group=group, owner=owner, name=f.name) }}">Download</a></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endmacro %}
+
+{% block content %}
+<div class="bk-card">
+    <h3>Status</h3>
+    {% if not status %}
+    <div class="bk-alert bk-bad">
+        The backup service has not reported yet. Start it on the server with
+        <code>docker compose up -d --build backup</code>.
+    </div>
+    {% else %}
+        {% if status.state == 'unconfigured' %}
+        <div class="bk-alert bk-bad">
+            <strong>No backups are being made.</strong> {{ status.detail }}.<br>
+            Create the recovery key once for the whole organisation with
+            <code>installer.sh --init-recovery-key</code>, then put the public half in this
+            server's <code>.env</code> as <code>BACKUP_PUBLIC_KEY</code> and run
+            <code>docker compose up -d backup</code>. See <code>docs/RECOVERY.md</code>.
+        </div>
+        {% elif status.state == 'error' %}
+        <div class="bk-alert bk-bad"><strong>The last backup failed:</strong> {{ status.detail }}</div>
+        {% elif status.state == 'disabled' %}
+        <div class="bk-alert bk-warn">Backups are switched off (<code>BACKUP_ENABLED</code> is not 1).</div>
+        {% endif %}
+        {% if status.last_upload and not status.last_upload.ok %}
+        <div class="bk-alert bk-warn"><strong>Not replicated off this server:</strong> {{ status.last_upload.error }}</div>
+        {% endif %}
+        {% if status.last_pull and not status.last_pull.ok %}
+        <div class="bk-alert bk-warn"><strong>Could not fetch other sites' backups:</strong> {{ status.last_pull.error }}</div>
+        {% endif %}
+        {% if status.transport_warning %}
+        <div class="bk-alert bk-warn">{{ status.transport_warning }}</div>
+        {% endif %}
+        <dl class="bk-kv">
+            <dt>State</dt>
+            <dd><span class="bk-state {% if status.state == 'ok' %}bk-ok{% elif status.state in ('waiting', 'disabled') %}bk-warn{% else %}bk-bad{% endif %}">{{ status.state }}</span></dd>
+            <dt>Site</dt><dd>{{ status.site_id }}</dd>
+            <dt>Nightly run</dt><dd>{{ status.schedule or '—' }} (server time)</dd>
+            <dt>Last run</dt>
+            <dd>{% if status.last_run %}{{ status.last_run.utc }} ({{ status.last_run.reason }}){% if not status.last_run.ok %} — failed{% endif %}{% else %}never{% endif %}</dd>
+            <dt>Sent to central</dt>
+            <dd>{% if status.last_upload and status.last_upload.ok %}{{ status.last_upload.utc }}{% else %}no{% endif %}</dd>
+            <dt>Recovery key</dt>
+            <dd class="bk-name">{{ status.key_fingerprint or 'not configured' }}</dd>
+        </dl>
+    {% endif %}
+    <form method="post" action="{{ url_for('admin.backups.run_backup') }}" style="margin-top:16px;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button type="submit" class="bk-btn" {% if trigger_pending %}disabled{% endif %}>
+            {% if trigger_pending %}Backup requested…{% else %}Back up now{% endif %}
+        </button>
+    </form>
+    <p class="bk-note" style="margin-top:14px;">
+        Every file here is encrypted to the organisation's recovery key, whose private half is
+        <strong>not</strong> on this or any other server. A download is useless without that key and its
+        passphrase; it is opened only by <code>installer.sh</code> in one of its recovery modes.
+        Check that the fingerprint above matches the one printed when the key was created.
+        Traffic history (DNS lookups, NAT sessions, Pi-hole query log) is deliberately not included.
+    </p>
+</div>
+
+<div class="bk-card">
+    <h3>This site</h3>
+    <p class="bk-note">Rebuild this server (<code>--restore-site</code>), clone one of its switches
+        (<code>--clone-switch</code>) or re-create its entries on the tunnel VPS (<code>--rebuild-vps</code>).</p>
+    {% if own %}{{ bundle_table(own, 'own', '-') }}{% else %}<p class="bk-note">None yet.</p>{% endif %}
+</div>
+
+<div class="bk-card">
+    <h3>Other sites</h3>
+    <p class="bk-note">Copies held here so that another site can be rebuilt even if its own server and
+        bf-central are both lost.</p>
+    {% for p in peers %}
+    <h4 style="margin:16px 0 6px;color:#2c3e2c;">{{ p.site_id }}</h4>
+    {{ bundle_table(p.files, 'peers', p.site_id) }}
+    {% else %}
+    <p class="bk-note">None yet. They arrive through bf-central after the other sites' nightly runs.</p>
+    {% endfor %}
+</div>
+
+<div class="bk-card">
+    <h3>bf-central</h3>
+    <p class="bk-note">The central server's database and settings, for <code>--restore-central</code>.</p>
+    {% if central %}{{ bundle_table(central, 'central', '-') }}{% else %}<p class="bk-note">None yet.
+        bf-central makes one a day once <code>BACKUP_PUBLIC_KEY</code> is set in its <code>.env</code>.</p>{% endif %}
+</div>
+{% endblock %}

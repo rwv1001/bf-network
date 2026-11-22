@@ -24,6 +24,17 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXPECT_SCRIPT="$SCRIPT_DIR/test-switch-temp.exp"
+
+# Shared pieces: bf-central install/restore, and the disaster-recovery modes.
+for _lib in central recovery; do
+    if [ ! -f "$SCRIPT_DIR/lib/$_lib.sh" ]; then
+        echo "ERROR: $SCRIPT_DIR/lib/$_lib.sh is missing. Copy the whole installer/ directory, not only installer.sh." >&2
+        exit 1
+    fi
+    # shellcheck disable=SC1090
+    . "$SCRIPT_DIR/lib/$_lib.sh"
+done
+unset _lib
 BF_REPO_URL="https://github.com/rwv1001/bf-network.git"
 BF_REPO_BRANCH="main"
 KEA_LFC_FIX_REV="2026-08-21-v4"
@@ -154,11 +165,98 @@ parse_args() {
                     shift
                 fi
                 ;;    
+            --init-recovery-key)
+                RECOVERY_MODE="init-key"
+                shift
+                ;;
+            --inspect-backup)
+                [ "$#" -ge 2 ] || die "--inspect-backup requires a bundle file."
+                RECOVERY_MODE="inspect"; RECOVERY_BUNDLE="$2"
+                shift 2
+                ;;
+            --extract-to)
+                [ "$#" -ge 2 ] || die "--extract-to requires a directory."
+                RECOVERY_EXTRACT_TO="$2"
+                shift 2
+                ;;
+            --recovery-key)
+                [ "$#" -ge 2 ] || die "--recovery-key requires the path of bf-recovery-private.asc."
+                RECOVERY_KEY_FILE="$2"
+                shift 2
+                ;;
+            --restore-site)
+                [ "$#" -ge 2 ] || die "--restore-site requires a site bundle file."
+                RECOVERY_MODE="restore-site"; RECOVERY_BUNDLE="$2"
+                shift 2
+                ;;
+            --restore-central)
+                [ "$#" -ge 2 ] || die "--restore-central requires a central bundle file."
+                RECOVERY_MODE="restore-central"; RECOVERY_BUNDLE="$2"
+                shift 2
+                ;;
+            --retarget-vps)
+                [ "$#" -ge 2 ] || die "--retarget-vps requires the new VPS address."
+                RECOVERY_MODE="retarget-vps"; RETARGET_VPS_HOST="$2"
+                shift 2
+                ;;
+            --clone-switch)
+                [ "$#" -ge 2 ] || die "--clone-switch requires the switch name (e.g. Lei-01)."
+                RECOVERY_MODE="clone-switch"; CLONE_SWITCH_NAME="$2"
+                shift 2
+                ;;
+            --from-backup)
+                [ "$#" -ge 2 ] || die "--from-backup requires a site bundle file."
+                RECOVERY_BUNDLE="$2"
+                shift 2
+                ;;
+            --switch-config)
+                [ "$#" -ge 2 ] || die "--switch-config requires a saved .cfg file."
+                CLONE_SWITCH_CFG="$2"
+                shift 2
+                ;;
+            --uplink-port)
+                [ "$#" -ge 2 ] || die "--uplink-port requires an interface name (e.g. GigabitEthernet1/0/1)."
+                CLONE_UPLINK_PORT="$2"
+                shift 2
+                ;;
+            --wipe-switch)
+                CLONE_WIPE=1
+                shift
+                ;;
             -h|--help)
                 cat <<'EOF'
 Usage: sudo ./installer.sh [options]
 
-Options:
+With no recovery option this is the normal, resumable site install.
+
+DISASTER RECOVERY  (read docs/RECOVERY.md first; every mode explains what it
+will and will not do and asks for a typed confirmation before changing anything)
+
+  --init-recovery-key     ONCE for the whole organisation: create the key pair
+                          that protects all backups. Prints the BACKUP_PUBLIC_KEY
+                          line for each server's .env. Changes no server.
+  --inspect-backup FILE   Open a backup bundle and show what is in it. Changes
+                          nothing. Add --extract-to DIR to keep a PLAINTEXT copy.
+  --restore-site FILE     Rebuild a dead SITE SERVER on replacement hardware from
+                          a site bundle. WIPES the machine it is pointed at.
+                          Does not touch switches, bf-central or the VPS.
+                          Use the site's --config NAME.
+  --restore-central FILE  Build bf-central on a NEW server from a central bundle.
+                          Refuses if ~/bf-central already exists there. Touches
+                          no site. You repoint DNS afterwards.
+  --retarget-vps HOST     The tunnel VPS died: configure a new VPS at HOST for
+                          THIS site and point the site's tunnels at it. Run once
+                          per site (with its --config NAME). You repoint DNS.
+  --clone-switch NAME     A switch died: load its saved configuration onto a
+                          replacement over the serial cable. Needs either
+                            --from-backup FILE   (a site bundle), or
+                            --switch-config FILE (a 5130-startup-NAME.cfg).
+                          Optional: --uplink-port IFACE, --wipe-switch (factory
+                          reset the replacement first).
+  --recovery-key FILE     Where bf-recovery-private.asc is, if not in
+                          ~/bf-recovery-key/.
+
+NORMAL INSTALL OPTIONS
   --add-switch            Configure an extra 5130 over serial, then offer a safe
                            Pi-based ACL/PBR integration step after the trunk is connected.
   --finish-add-switch     Resume Pi-based integration without touching serial/port config.
@@ -543,6 +641,8 @@ display_saved_answers() {
 state_save_on_exit() {
     local rc=$?
     trap - EXIT
+    # Decrypted backup material (recovery modes) must not outlive the run.
+    recovery_cleanup || true
     if [ "$STATE_READY" -eq 1 ]; then
         state_save || true
     fi
@@ -3292,6 +3392,13 @@ write_pi_env_file() {
 
         write_env_line ENABLE_DB_BACKUPS "$ENABLE_DB_BACKUPS"
         write_env_line BACKUP_RETENTION_DAYS "$BACKUP_RETENTION_DAYS"
+        # Encrypted disaster-recovery bundles (backup container, docs/RECOVERY.md)
+        write_env_line BACKUP_PUBLIC_KEY "${BACKUP_PUBLIC_KEY:-}"
+        write_env_line BACKUP_ENABLED "${BACKUP_ENABLED:-1}"
+        write_env_line BACKUP_TIME "${BACKUP_TIME:-02:40}"
+        write_env_line BACKUP_KEEP_LOCAL "${BACKUP_KEEP_LOCAL:-14}"
+        write_env_line BACKUP_KEEP_PEER "${BACKUP_KEEP_PEER:-2}"
+        write_env_line BACKUP_REPLICATE "${BACKUP_REPLICATE:-1}"
         write_env_line PORTAL_ADMIN_USER "$PORTAL_ADMIN_USER"
         write_env_line PORTAL_ADMIN_PASSWORD "$PORTAL_ADMIN_PASSWORD"
         
@@ -4290,6 +4397,8 @@ configure_pi_backups() {
     cat > "$tmpdir/bf-network-db-backup.sh" <<'EOF'
 #!/bin/bash
 set -euo pipefail
+# These dumps are not encrypted and hold password hashes: root only.
+umask 077
 REPO_DIR="${BF_NETWORK_REPO_DIR:-/home/admin/bf-network}"
 RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-30}"
 ENV_FILE="$REPO_DIR/.env"
@@ -4879,6 +4988,9 @@ Redo with:  sudo ./installer.sh --forget-answer bf_repo_ref
     if ! step_done "pi_env_file"; then
         info "Writing target host .env file"
         write_pi_env_file
+        if [ -n "$RESTORE_SITE_DIR" ]; then
+            restore_merge_env "$ENV_TMP"
+        fi
         pi_scp_to "$ENV_TMP" "/tmp/bf-network.env"
         pi_sudo "mv /tmp/bf-network.env $q_repo/.env && chmod 600 $q_repo/.env && chown $q_user:$q_user $q_repo/.env"
         rm -f "$ENV_TMP"
@@ -4974,6 +5086,18 @@ Redo with:  sudo ./installer.sh --forget-answer bf_repo_ref
         echo "Skipping completed step: target host Docker DB wipe"
     fi
 
+    # --restore-site: put the backed-up NPM / Pi-hole / key / policy files back
+    # now that the wipe above has cleared the data directories.
+    if [ -n "$RESTORE_SITE_DIR" ]; then
+        if ! step_done "pi_restore_files"; then
+            restore_site_push_files
+            unset 'COMPLETED_STEPS[pi_compose_up]'
+            complete_step "pi_restore_files"
+        else
+            echo "Skipping completed step: backed-up files already copied"
+        fi
+    fi
+
    
     
     if ! step_done "pi_compose_up"; then
@@ -4990,6 +5114,12 @@ Redo with:  sudo ./installer.sh --forget-answer bf_repo_ref
         docker compose exec -T db pg_isready -U portal_user -d captive_portal"
 
         apply_kea_schema "$q_repo"
+
+        # --restore-site: load the backed-up database before anything that
+        # reads it is started.
+        if [ -n "$RESTORE_SITE_DIR" ]; then
+            restore_site_database "$q_repo"
+        fi
 
         info "Building and verifying Kea image"
         pi_sudo "cd $q_repo && if docker compose version >/dev/null 2>&1; then docker compose build kea; else docker-compose build kea; fi"
@@ -5129,8 +5259,23 @@ echo
 
 # GnuPG is needed before any other prompts so prior answers can be restored.
 install_gpg
+
+# Recovery modes that need no installer state (see lib/recovery.sh, lib/central.sh).
+case "$RECOVERY_MODE" in
+    init-key)        recovery_init_key; exit 0 ;;
+    inspect)         recovery_inspect; exit 0 ;;
+    restore-central) restore_central_from_bundle; exit 0 ;;
+    clone-switch)    recovery_clone_switch; exit 0 ;;
+esac
+
 state_init
 trap state_save_on_exit EXIT
+
+# Recovery modes that drive the normal install flow below.
+case "$RECOVERY_MODE" in
+    restore-site) restore_site_prepare ;;
+    retarget-vps) retarget_vps_prepare ;;
+esac
 
 install_ipcalc
 install_expect
@@ -6622,6 +6767,9 @@ else
 fi
 
 ORACLE_VPS_SSH_KEY_PATH="/keys/oracle_rsa"
+if [ "$RECOVERY_MODE" = "retarget-vps" ] && ! step_done "oracle_vps_configured"; then
+    retarget_vps_seed_certificate
+fi
 if ! step_done "oracle_vps_configured"; then
     configure_oracle_vps
     complete_step "oracle_vps_configured"
@@ -6767,6 +6915,19 @@ prompt_default KEA_LEASE_LIFETIME "Kea lease lifetime seconds" "86400"
 prompt_default TEST_ENV "Enable TEST_ENV?" "true"
 prompt_default ENABLE_DB_BACKUPS "Set up automatic database backups?" "y"
 prompt_default BACKUP_RETENTION_DAYS "Backup retention days" "30"
+
+info "Encrypted disaster-recovery backups"
+echo "Each night the server makes an encrypted bundle (database without traffic"
+echo "history, .env, keys, switch configs) and exchanges copies with the other"
+echo "sites through bf-central. It needs the organisation's recovery PUBLIC key:"
+echo "the BACKUP_PUBLIC_KEY value printed by  installer.sh --init-recovery-key ."
+echo "Leave empty to set it up later; until then NO recovery bundles are made."
+echo "(This answer is saved, so later installer runs keep the key in .env.)"
+prompt_default BACKUP_PUBLIC_KEY \
+    "Recovery public key (BACKUP_PUBLIC_KEY value, one line)" \
+    "" \
+    "backup_public_key"
+BACKUP_PUBLIC_KEY="${BACKUP_PUBLIC_KEY#BACKUP_PUBLIC_KEY=}"
 prompt_default NAT_RETENTION_DAYS "NAT log retention days" "90"
 prompt_default DNS_RETENTION_DAYS "DNS log retention days" "90"
 # Docker json-file logs rotate by size, not age: size x files caps each container (10m x 3 = 30 MB)
@@ -6895,6 +7056,11 @@ prompt_ack "poe_downstream_vlan_mode" \
 m=0
 echo "DEBUG: IPS indices = ${!IPS[*]}"
 echo "DEBUG: IPS values  = ${IPS[*]}"
+
+# --restore-site rebuilds the server only; the switches are running.
+if [ -n "$RESTORE_SITE_DIR" ]; then
+    restore_site_skip_switches
+fi
 
 
 
@@ -7317,7 +7483,11 @@ EOF
     done
 }
 
-push_switch_config_backups
+if [ -n "$RESTORE_SITE_DIR" ]; then
+    echo "Restore mode: leaving the switches' nightly config-backup job as it is."
+else
+    push_switch_config_backups
+fi
 
 # =============================================================================
 # Multi-ISP firmware requirement (after switch SSH is available)
@@ -7551,33 +7721,8 @@ normalize_central_api_url() {
         *) printf 'http://%s' "$url" ;;
     esac
 }
-# ---------------------------------------------------------------------------
-# SSH helpers for the central server
-# ---------------------------------------------------------------------------
-central_ssh_raw() {
-    ssh -i "$CENTRAL_SSH_KEY" \
-        -o BatchMode=yes \
-        -o StrictHostKeyChecking=accept-new \
-        -o UserKnownHostsFile="$REAL_HOME/.ssh/known_hosts" \
-        "${CENTRAL_SSH_USER}@${CENTRAL_HOST}" "$@"
-}
-
-central_ssh() {
-    local cmd="$1"
-    central_ssh_raw "bash -lc $(remote_quote "$cmd")"
-}
-
-central_sudo() {
-    central_ssh_raw sudo -n bash -lc "$(remote_quote "$1")"
-}
-
-central_scp_to() {
-    local src="$1" dest="$2"
-    scp -i "$CENTRAL_SSH_KEY" \
-        -o StrictHostKeyChecking=accept-new \
-        -o UserKnownHostsFile="$REAL_HOME/.ssh/known_hosts" \
-        "$src" "${CENTRAL_SSH_USER}@${CENTRAL_HOST}:${dest}"
-}
+# central_ssh_raw / central_ssh / central_sudo / central_scp_to are defined in
+# lib/central.sh (shared with --restore-central).
 # After SSH test succeeds:
 if central_ssh "test -d \$HOME/bf-central"; then
     CENTRAL_DOMAIN_CLEAN="$(_central_domain_from_remote)"
@@ -7691,71 +7836,8 @@ Install the public key first, e.g.:
     fi
 }
 
-_install_bf_central_stack() {
-    info "Installing bf-central on ${CENTRAL_HOST}"
-    echo "Checking / installing prerequisites on ${CENTRAL_HOST}..."
-
-    local bootstrap_tmp
-    bootstrap_tmp="$(mktemp)"
-    cat > "$bootstrap_tmp" <<'REMOTE_EOF'
-#!/bin/bash
-set -euo pipefail
-export DEBIAN_FRONTEND=noninteractive
-
-if command -v apt-get >/dev/null 2>&1; then
-    sudo apt-get update -qq
-    command -v git >/dev/null 2>&1 || sudo apt-get install -y git
-    command -v curl >/dev/null 2>&1 || sudo apt-get install -y curl
-else
-    echo "WARNING: apt-get not found – please ensure git is installed manually."
-fi
-
-if ! command -v docker >/dev/null 2>&1; then
-    echo "Docker not found – installing..."
-    curl -fsSL https://get.docker.com | sudo sh
-    sudo usermod -aG docker "$(whoami)" || true
-fi
-
-if ! docker info >/dev/null 2>&1; then
-    echo "Docker is installed but the current user may not yet have permission."
-    echo "You may need to log out/in or run: newgrp docker"
-fi
-
-echo "Prerequisites ready."
-REMOTE_EOF
-
-    central_scp_to "$bootstrap_tmp" "/tmp/bf-central-bootstrap.sh"
-    rm -f "$bootstrap_tmp"
-    central_ssh "bash /tmp/bf-central-bootstrap.sh && rm -f /tmp/bf-central-bootstrap.sh"
-
-    central_ssh "git clone --branch main https://github.com/rwv1001/bf-central.git \$HOME/bf-central"
-
-    CENTRAL_DB_PASSWORD="$(generate_secret)"
-    ADMIN_KEY="$(generate_secret)"
-    CENTRAL_DOMAIN_CLEAN="$(printf '%s' "$CENTRAL_API_URL" | sed -E 's|^https?://||; s|/.*||')"
-
-    prompt_default GUNICORN_WORKERS \
-        "Gunicorn workers for bf-central" \
-        "2" \
-        "central_gunicorn_workers"
-
-    local central_env_tmp
-    central_env_tmp="$(mktemp)"
-    {
-        write_env_line DB_PASSWORD "$CENTRAL_DB_PASSWORD"
-        write_env_line ADMIN_KEY "$ADMIN_KEY"
-        write_env_line GUNICORN_WORKERS "$GUNICORN_WORKERS"
-        write_env_line CENTRAL_DOMAIN "$CENTRAL_DOMAIN_CLEAN"
-    } > "$central_env_tmp"
-
-    central_scp_to "$central_env_tmp" "/tmp/bf-central.env"
-    rm -f "$central_env_tmp"
-    central_ssh "mv /tmp/bf-central.env \$HOME/bf-central/.env && chmod 600 \$HOME/bf-central/.env"
-    central_ssh "cd \$HOME/bf-central && (docker compose up -d --build || docker-compose up -d --build)"
-
-    echo "Waiting for bf-central API to become ready..."
-    sleep 12
-}
+# _install_bf_central_stack is defined in lib/central.sh (shared with
+# --restore-central, which installs the same stack with the backed-up .env).
 
 _recover_central_admin_key() {
     local extract_tmp
@@ -7776,7 +7858,7 @@ EOF
             "Could not read ADMIN_KEY from remote .env – please enter it" \
             "central_admin_key"
     else
-        echo "Recovered ADMIN_KEY from remote .env: $ADMIN_KEY"
+        echo "Recovered ADMIN_KEY from the remote .env (not shown)."
     fi
 }
 
@@ -7915,6 +7997,15 @@ finalize_pi_isp_mdns_interfaces
 apply_pi_mgmt_default_route
 apply_pihole_split_horizon_dns
 restart_pi_compose_stack
+
+# Keep a copy of the (encrypted) installer state on the server so that it is
+# inside the nightly backup bundle.
+push_installer_state_to_site
+
+case "$RECOVERY_MODE" in
+    retarget-vps) retarget_vps_finish ;;
+    restore-site) restore_site_finished ;;
+esac
 
 echo
 echo "============================================================================"

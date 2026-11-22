@@ -24,6 +24,7 @@ from blueprints.admin.traffic import traffic_bp               # noqa: E402
 from blueprints.admin.pihole import pihole_bp                 # noqa: E402
 from blueprints.admin.firmware import firmware_bp             # noqa: E402
 from blueprints.admin.isp_routers import isp_routers_bp       # noqa: E402
+from blueprints.admin.backups import backups_bp               # noqa: E402
 
 admin_bp.register_blueprint(unregistered_bp)
 admin_bp.register_blueprint(dashboard_bp)
@@ -38,3 +39,4 @@ admin_bp.register_blueprint(traffic_bp)
 admin_bp.register_blueprint(pihole_bp)
 admin_bp.register_blueprint(firmware_bp)
 admin_bp.register_blueprint(isp_routers_bp)
+admin_bp.register_blueprint(backups_bp)

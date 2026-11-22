@@ -451,6 +451,8 @@
             {% if current_user.can_manage_firmware %}
             <a href="{{ url_for('admin.firmware.admin_firmware') }}"
                class="{% if request.endpoint and request.endpoint.startswith('admin.firmware') %}active{% endif %}">Firmware</a>
+            <a href="{{ url_for('admin.backups.admin_backups') }}"
+               class="{% if request.endpoint and request.endpoint.startswith('admin.backups') %}active{% endif %}">Backups</a>
             {% endif %}
             {% if current_user.can_manage_pihole %}
             <a href="{{ url_for('admin.pihole.admin_pihole') }}"

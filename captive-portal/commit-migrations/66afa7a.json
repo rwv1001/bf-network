@@ -1,0 +1,58 @@
+{
+  "description": "Encrypted disaster-recovery backups. A new `backup` container makes a nightly bundle (database without traffic history, .env, SSH keys, switch start-up configs, NPM/Pi-hole/certificate state), encrypts it to the organisation's recovery PUBLIC key and exchanges copies with the other sites through bf-central. New admin page Admin -> Backups lists and downloads this site's, other sites' and bf-central's bundles. The installer gains recovery modes (--restore-site, --clone-switch, --restore-central, --retarget-vps, --inspect-backup, --init-recovery-key). Runbook: docs/RECOVERY.md.",
+
+  "env": {
+    "add": [
+      {
+        "key": "BACKUP_PUBLIC_KEY",
+        "description": "Recovery PUBLIC key, base64 on one line, as printed by `installer.sh --init-recovery-key` (run that once for the whole organisation). Empty = no bundles are made and Admin -> Backups says so. Never put the private key here: the backup container refuses to run if it finds one.",
+        "default": "",
+        "required": false,
+        "sensitive": false
+      },
+      {
+        "key": "BACKUP_ENABLED",
+        "description": "1 (default) = make bundles when BACKUP_PUBLIC_KEY is set. 0 = off.",
+        "default": "1",
+        "required": false,
+        "sensitive": false
+      },
+      {
+        "key": "BACKUP_TIME",
+        "description": "Time of the nightly run, HH:MM in the server's local time.",
+        "default": "02:40",
+        "required": false,
+        "sensitive": false
+      },
+      {
+        "key": "BACKUP_KEEP_LOCAL",
+        "description": "How many of this site's own bundles to keep on this server.",
+        "default": "14",
+        "required": false,
+        "sensitive": false
+      },
+      {
+        "key": "BACKUP_KEEP_PEER",
+        "description": "How many bundles to keep here for each other site and for bf-central.",
+        "default": "2",
+        "required": false,
+        "sensitive": false
+      },
+      {
+        "key": "BACKUP_REPLICATE",
+        "description": "1 (default) = upload this site's bundle to bf-central and download the others' (needs CENTRAL_API_URL and CENTRAL_API_KEY). 0 = keep bundles on this server only.",
+        "default": "1",
+        "required": false,
+        "sensitive": false
+      }
+    ],
+    "remove": []
+  },
+
+  "db": {
+    "up": null,
+    "down": null
+  },
+
+  "notes": "No database changes (the page uses the existing 'manage firmware' permission), so there are no up/down scripts. Nothing happens until BACKUP_PUBLIC_KEY is set. Roll-out, in this order: (1) once, on the installer machine: `sudo ./installer.sh --init-recovery-key`; store the private key file and passphrase offline in two places. (2) bf-central: update ~/bf-central to the matching version, add BACKUP_PUBLIC_KEY to its .env, `docker compose up -d --build`. Sites running this version against an OLD bf-central still make local bundles; the upload fails with HTTP 404 and the Backups page reports it. (3) each site, after this update: add BACKUP_PUBLIC_KEY to .env, then `docker compose up -d --build backup` (new service, builds a small image) and `docker compose restart web` (the Backups page and menu entry appear only after web restarts). (4) Admin -> Backups: check the fingerprint, press Back up now. The backup container uses host networking only to reach Postgres on 127.0.0.1, has a read-only root filesystem, all capabilities dropped except DAC_OVERRIDE/CHOWN/FOWNER, and mounts /etc, /root, /home, /var/lib/tftpboot and /var/lib/bf-network-installer read-only. Bundles are written to <repo>/backups/bundles (git-ignored via shared/ and backups rules: check `git status` shows nothing new there). Rolling back to 66afa7a: `docker compose stop backup && docker compose rm -f backup`; the firmware page removes the BACKUP_* keys from .env on rollback, so keep a note of BACKUP_PUBLIC_KEY (it is not secret) to put back when you update again. The older plaintext cron dump (ENABLE_DB_BACKUPS, <repo>/backups/postgres) is unchanged and independent."
+}

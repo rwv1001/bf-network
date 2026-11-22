@@ -70,6 +70,14 @@ for {set i 0} {$i < $argc} {incr i} {
         "-wipe" {
             set do_wipe 1
         }
+        "-clone-tftp-server" {
+            incr i
+            set clone_tftp_server [lindex $argv $i]
+        }
+        "-clone-tftp-path" {
+            incr i
+            set clone_tftp_path [lindex $argv $i]
+        }
         default {
             puts "Unknown option: $arg"
             exit 1
@@ -774,6 +782,132 @@ if {[info exists vlan_config] && $vlan_config ne ""} {
 
 if {[info exists dynamic_config] && $dynamic_config ne ""} {
     send "$dynamic_config\r"
+}
+
+# === CLONE MODE (installer.sh --clone-switch) ===
+# The lines sent above were a TEMPORARY configuration that only makes the TFTP
+# server reachable. Fetch the dead switch's saved configuration, make it the
+# start-up configuration and reboot WITHOUT saving. Nothing below this block
+# runs in clone mode: in particular there must be no "save", which would
+# overwrite the fetched file with the temporary configuration.
+if {[info exists clone_tftp_server] && $clone_tftp_server ne ""} {
+    if {![info exists clone_tftp_path] || $clone_tftp_path eq ""} {
+        puts "ERROR: -clone-tftp-server needs -clone-tftp-path"
+        exit 1
+    }
+    set timeout 20
+    send "return\r"
+    expect {
+        -re {<[^>\r\n]+>} {}
+        timeout {
+            puts "ERROR: clone: could not return to user view. Nothing was saved."
+            exit 3
+        }
+    }
+
+    # A trunk that has just come up can take ~30 s to forward (spanning tree).
+    set reachable 0
+    for {set try 1} {$try <= 15} {incr try} {
+        send "ping -c 1 -t 2 $clone_tftp_server\r"
+        expect {
+            -re {1 packet\(s\) received} { set reachable 1; exp_continue }
+            -re {<[^>\r\n]+>} {}
+            timeout {}
+        }
+        if {$reachable} { break }
+        puts "clone: TFTP server $clone_tftp_server not reachable yet (try $try/15)"
+        sleep 5
+    }
+    if {!$reachable} {
+        puts "ERROR: clone: $clone_tftp_server never answered ping. Check the uplink cable/port."
+        puts "Nothing was saved: power-cycle the switch and it is as it was."
+        exit 3
+    }
+
+    set timeout 120
+    send "tftp $clone_tftp_server get $clone_tftp_path bf-clone.cfg\r"
+    expect {
+        -re {\[Y/N\]:?} { send "Y\r"; exp_continue }
+        -re {<[^>\r\n]+>} {}
+        timeout {
+            puts "ERROR: clone: TFTP download timed out. Nothing was saved."
+            exit 3
+        }
+    }
+
+    # Trust the file, not the transfer chatter: it must exist and be non-trivial.
+    set timeout 20
+    set clone_size 0
+    send "dir bf-clone.cfg\r"
+    expect {
+        -re {\s+-[rwx-]+\s+([0-9]+)\s+[^\r\n]*bf-clone\.cfg} { set clone_size $expect_out(1,string); exp_continue }
+        -re {<[^>\r\n]+>} {}
+        timeout {}
+    }
+    if {$clone_size < 2000} {
+        puts "ERROR: clone: bf-clone.cfg was not downloaded (size $clone_size)."
+        puts "Is $clone_tftp_path present on the TFTP server $clone_tftp_server ?"
+        puts "Nothing was saved: power-cycle the switch and it is as it was."
+        exit 3
+    }
+    puts "clone: downloaded bf-clone.cfg ($clone_size bytes)"
+
+    send "startup saved-configuration bf-clone.cfg main\r"
+    expect {
+        -re {\[Y/N\]:?} { send "Y\r"; exp_continue }
+        -re {<[^>\r\n]+>} {}
+        timeout {
+            puts "ERROR: clone: could not set the start-up configuration."
+            exit 3
+        }
+    }
+    set startup_ok 0
+    send "display startup\r"
+    expect {
+        -re {Next main startup saved-configuration file:[^\r\n]*bf-clone\.cfg} { set startup_ok 1; exp_continue }
+        -re {<[^>\r\n]+>} {}
+        timeout {}
+    }
+    if {!$startup_ok} {
+        puts "ERROR: clone: the switch did not accept bf-clone.cfg as its start-up configuration."
+        puts "Nothing else was changed; it will boot as before."
+        exit 3
+    }
+
+    # Same reboot dialogue as the factory-reset path above: never save.
+    set timeout 30
+    send "reboot\r"
+    expect {
+        -re {save current configuration\?} {
+            expect -re {\[Y/N\]:}
+            send "N\r"
+            exp_continue
+        }
+        -re {[Cc]urrent configuration may be lost} {
+            expect -re {\[Y/N\]:}
+            send "N\r"
+            exp_continue
+        }
+        -re {This command will reboot} {
+            expect -re {\[Y/N\]:}
+            send "Y\r"
+        }
+        -re {Are you sure\?} {
+            send "Y\r"
+        }
+        -re {Continue\?} {
+            expect -re {\[Y/N\]:}
+            send "Y\r"
+        }
+        timeout {
+            puts "ERROR: clone: no reboot confirmation seen. The clone IS staged as the"
+            puts "start-up configuration; power-cycle the switch to boot into it."
+            exit 4
+        }
+    }
+    puts "\nclone: switch is rebooting into the cloned configuration."
+    sleep 3
+    exit 0
 }
 
 if {$username ne "" && $pubkey ne ""} {

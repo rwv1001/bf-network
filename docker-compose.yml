@@ -746,3 +746,65 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  # ── Encrypted disaster-recovery backups (docs/RECOVERY.md) ─────────────────────
+  # Once a night: dump the database WITHOUT traffic history, add .env, keys,
+  # switch configs and host network files, encrypt the lot to the recovery
+  # PUBLIC key and (if central is configured) exchange bundles with the other
+  # sites through bf-central. Does nothing until BACKUP_PUBLIC_KEY is set.
+  # The matching private key must never be put on this server.
+  backup:
+    build: ./backup
+    image: bf-network-backup:1
+    container_name: bf-backup
+    restart: unless-stopped
+    logging: *default-logging
+    # Host networking only so pg_dump can reach Postgres on 127.0.0.1 (the DB
+    # listens nowhere else). This container opens no listening socket.
+    network_mode: host
+    read_only: true
+    cap_drop: [ALL]
+    # Reads root-owned files (NPM data, acme.sh, host network config) and hands
+    # the finished bundles to the portal user; nothing else.
+    cap_add: [DAC_OVERRIDE, CHOWN, FOWNER]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      # Plaintext is staged here only, never on disk.
+      - /work:size=768m,mode=0700
+      - /tmp
+    environment:
+      BACKUP_ENABLED: ${BACKUP_ENABLED:-1}
+      BACKUP_PUBLIC_KEY: ${BACKUP_PUBLIC_KEY:-}
+      BACKUP_TIME: ${BACKUP_TIME:-02:40}
+      BACKUP_KEEP_LOCAL: ${BACKUP_KEEP_LOCAL:-14}
+      BACKUP_KEEP_PEER: ${BACKUP_KEEP_PEER:-2}
+      BACKUP_REPLICATE: ${BACKUP_REPLICATE:-1}
+      BACKUP_EXCLUDE_TABLE_DATA: ${BACKUP_EXCLUDE_TABLE_DATA:-dns_lookups dns_resolutions pihole_blocked_queries nat_sessions}
+      BACKUP_HOST_REPO_DIR: ${GIT_REPO_DIR:-}
+      BACKUP_FILE_UID: ${PORTAL_UID:-1000}
+      BACKUP_FILE_GID: ${PORTAL_GID:-1000}
+      PGHOST: 127.0.0.1
+      PGPORT: ${DB_PORT:-5432}
+      PGUSER: ${DB_USER:-portal_user}
+      PGPASSWORD: ${DB_PASSWORD:-change_this_password}
+      PGDATABASE: ${DB_NAME:-captive_portal}
+      CENTRAL_API_URL: ${CENTRAL_API_URL:-}
+      CENTRAL_API_KEY: ${CENTRAL_API_KEY:-}
+      CENTRAL_SITE_ID: ${CENTRAL_SITE_ID:-}
+    volumes:
+      - ./backup:/opt/bf-backup:ro
+      - .:/repo:ro
+      - /etc:/hostfs/etc:ro
+      - /root:/hostfs/root:ro
+      - /home:/hostfs/home:ro
+      - /var/lib/tftpboot:/hostfs/var/lib/tftpboot:ro
+      - /var/lib/bf-network-installer:/hostfs/var/lib/bf-network-installer:ro
+      # Output: encrypted bundles only (own/, peers/<site>/, central/).
+      - ./backups/bundles:/backups
+      # The admin page drops a `trigger` file here for "Back up now".
+      - ./shared/backup-queue:/queue
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      db:
+        condition: service_healthy
