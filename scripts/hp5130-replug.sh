@@ -20,6 +20,7 @@ fi
 
 SWITCH_HOSTS="${SWITCH_HOSTS:?SWITCH_HOSTS required}"
 # yes unless SWITCH_POE is explicitly disabled. Missing .env entry means yes.
+# May be a single value or a comma-separated list matching SWITCH_HOSTS order.
 SWITCH_POE="${SWITCH_POE:-yes}"
 SWITCH_HOST="$(printf '%s' "${SWITCH_HOSTS}" | awk '{print $1}')"
 SWITCH_USER="${SWITCH_USER:-robert}"
@@ -443,9 +444,37 @@ if [ -z "$CACHE_IFACE" ] && command -v docker >/dev/null 2>&1; then
 fi
 
 poe_supported() {
-  case "$(printf '%s' "$SWITCH_POE" | tr '[:upper:]' '[:lower:]')" in
-    0|no|n|false|off|disabled) return 1 ;;
-    *) return 0 ;;
+  # SWITCH_POE may be a single yes/no or a comma-separated list matching
+  # the order of SWITCH_HOSTS. When a list is present we look up the target
+  # host; unknown host or missing entry is treated as no (safer).
+  local raw host idx val
+  raw="$(printf '%s' "$SWITCH_POE" | tr '[:upper:]' '[:lower:]')"
+  host="${REPLUG_TARGET_HOST:-$SWITCH_HOST}"
+
+  # single value (no comma)
+  case "$raw" in
+    *,*)
+      # list mode
+      idx=0
+      for h in $SWITCH_HOSTS; do
+        if [ "$h" = "$host" ]; then
+          val="$(printf '%s' "$raw" | cut -d, -f$((idx + 1)) | tr -d ' ')"
+          case "$val" in
+            0|no|n|false|off|disabled) return 1 ;;
+            *) return 0 ;;
+          esac
+        fi
+        idx=$((idx + 1))
+      done
+      # host not found in list
+      return 1
+      ;;
+    *)
+      case "$raw" in
+        0|no|n|false|off|disabled) return 1 ;;
+        *) return 0 ;;
+      esac
+      ;;
   esac
 }
 

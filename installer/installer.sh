@@ -1492,21 +1492,22 @@ PYVALIDATE
         is_yes "$port_confirmation" || { echo 'Cancelled. No changes made to the Pi.'; return 0; }
     fi
 
-    local q_repo q_ip q_octet q_ge q_repair q_isl remote_cmd
+    local q_repo q_ip q_octet q_ge q_repair q_isl q_poe remote_cmd
     q_repo="$(shell_quote "$FINISH_PI_REPO")"
     q_ip="$(shell_quote "$sw_ip")"
     q_octet="$(shell_quote "$octet")"
     q_ge="$(shell_quote "$sw_ge")"
     q_repair="$(shell_quote "$repair")"
     q_isl="$(shell_quote "${SAVED_ANSWERS[add_switch_isl_port]:-}")"
-    remote_cmd="sudo -n bash -s -- $q_repo $q_ip $q_octet $q_ge $q_repair $q_isl"
+    q_poe="$(shell_quote "${ADD_SW_POE:-yes}")"
+    remote_cmd="sudo -n bash -s -- $q_repo $q_ip $q_octet $q_ge $q_repair $q_isl $q_poe"
     set +e
     remote_log="$(mktemp)"
     ssh -i "$FINISH_PI_KEY" -o BatchMode=yes -o IdentitiesOnly=yes \
         -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 \
         "${FINISH_PI_USER}@${FINISH_PI_IP}" "$remote_cmd" <<'REMOTE_ADD_SWITCH' | tee "$remote_log"
 set -euo pipefail
-repo="$1"; sw_ip="$2"; octet="$3"; max_ge="$4"; repair="$5"; isl_num="$6"
+repo="$1"; sw_ip="$2"; octet="$3"; max_ge="$4"; repair="$5"; isl_num="$6"; new_poe="${7:-yes}"
 umask 077
 cd "$repo"
 test -f .env || { echo 'Pi site .env is missing' >&2; exit 1; }
@@ -1620,14 +1621,14 @@ docker compose exec -T -e "SWITCH_HOSTS=$sw_ip" kea sh /scripts/hp5130-acl-basel
 
 # Persist switches atomically, preserving site .env ownership and comments.
 # A dated backup is made before changing anything.  No source/eval of .env.
-python3 - .env "$sw_ip" "$octet" "$max_ge" <<'PYENV'
+python3 - .env "$sw_ip" "$octet" "$max_ge" "$new_poe" <<'PYENV'
 from pathlib import Path
 import datetime, os, re, shlex, stat, sys, tempfile
-p=Path(sys.argv[1]); sw_ip=sys.argv[2]; octet=sys.argv[3]; max_ge=int(sys.argv[4])
+p=Path(sys.argv[1]); sw_ip=sys.argv[2]; octet=sys.argv[3]; max_ge=int(sys.argv[4]); new_poe=sys.argv[5]
 orig=p.read_text(); lines=orig.splitlines(keepends=True)
 vals={}
 for line in lines:
-    m=re.match(r'^\s*(SWITCH_HOSTS|SWITCH_HOSTS_BYTES|WATCHDOG_SWITCH_HOSTS|SWITCH_GE_MAX)\s*=\s*(.*?)\s*$',line)
+    m=re.match(r'^\s*(SWITCH_HOSTS|SWITCH_HOSTS_BYTES|WATCHDOG_SWITCH_HOSTS|SWITCH_GE_MAX|SWITCH_POE)\s*=\s*(.*?)\s*$',line)
     if m:
         s=m.group(2).strip()
         try:
@@ -1640,20 +1641,38 @@ if not vals.get('SWITCH_HOSTS'):
 def unique(items):
     return list(dict.fromkeys(items))
 new_hosts=unique(vals['SWITCH_HOSTS'].split()+[sw_ip])
+was_new = sw_ip not in vals['SWITCH_HOSTS'].split()
+...
 old_octets=[s.strip() for s in vals.get('SWITCH_HOSTS_BYTES','').split(',') if s.strip()]
 if not old_octets:
     old_octets=[x.rsplit('.',1)[-1] for x in vals['SWITCH_HOSTS'].split()]
 new_octets=unique(old_octets+[octet])
 watch=unique(vals.get('WATCHDOG_SWITCH_HOSTS',vals['SWITCH_HOSTS']).split()+[sw_ip])
+# SWITCH_POE: expand a single value to a list of the same length as current hosts, then append the new one.
+current_poe_raw = (vals.get('SWITCH_POE') or 'yes').strip().lower()
+poe_parts = [x.strip() for x in current_poe_raw.split(',') if x.strip()]
+n_old = len(vals['SWITCH_HOSTS'].split())
+if len(poe_parts) == 1:
+    poe_parts = [poe_parts[0]] * n_old
+elif len(poe_parts) != n_old:
+    # mismatched length – pad or trim to current host count using the last value
+    while len(poe_parts) < n_old:
+        poe_parts.append(poe_parts[-1] if poe_parts else 'yes')
+    poe_parts = poe_parts[:n_old]
+new_poe_norm = 'yes' if new_poe.lower() in ('y','yes','true','1') else 'no'
+if was_new:
+    poe_parts.append(new_poe_norm)
+new_poe_value = ','.join(poe_parts)
 updates={'SWITCH_HOSTS':' '.join(new_hosts),'SWITCH_HOSTS_BYTES':','.join(new_octets),
          'WATCHDOG_SWITCH_HOSTS':' '.join(watch),
-         'SWITCH_GE_MAX':str(max(max_ge,int(vals.get('SWITCH_GE_MAX') or 48)))}
+         'SWITCH_GE_MAX':str(max(max_ge,int(vals.get('SWITCH_GE_MAX') or 48))),
+         'SWITCH_POE': new_poe_value}
 for k,v in updates.items():
     if not re.fullmatch(r'[0-9A-Za-z_,. ]+',v):
         raise SystemExit('Unsafe environment value: '+k)
 seen=set(); out=[]
 for line in lines:
-    m=re.match(r'^(\s*)(SWITCH_HOSTS|SWITCH_HOSTS_BYTES|WATCHDOG_SWITCH_HOSTS|SWITCH_GE_MAX)\s*=.*$',line)
+    m=re.match(r'^(\s*)(SWITCH_HOSTS|SWITCH_HOSTS_BYTES|WATCHDOG_SWITCH_HOSTS|SWITCH_GE_MAX|SWITCH_POE)\s*=.*$',line)
     if m:
         k=m.group(2)
         if k in seen:
@@ -1682,6 +1701,7 @@ else:
     print('Updated site .env. Backup:',backup)
 print('SWITCH_HOSTS:', updates['SWITCH_HOSTS'])
 print('SWITCH_HOSTS_BYTES:', updates['SWITCH_HOSTS_BYTES'])
+print('SWITCH_POE:', updates['SWITCH_POE'])
 PYENV
 
 echo 'Restarting Kea, web, watchdog and FreeRADIUS to load the new switch list...'
@@ -1778,6 +1798,13 @@ add_switch_to_existing_network() {
         prompt_default ADD_SW_ISP_VLANS "ISP uplink VLAN IDs to carry on the trunk (space separated)" "2 3" "add_switch_isp_vlans"
     fi
     prompt_default ADD_SW_MAX_1G "Highest 1Gbps port number on this switch" "48" "add_switch_max_1g"
+    prompt_default ADD_SW_POE "Does this new switch support PoE? (yes/no)" "yes" "add_switch_poe"
+    # normalise the single answer to yes/no
+    case "$(printf '%s' "$ADD_SW_POE" | tr '[:upper:]' '[:lower:]')" in
+        y|yes|true|1) ADD_SW_POE=yes ;;
+        *) ADD_SW_POE=no ;;
+    esac
+    save_answer "add_switch_poe" "$ADD_SW_POE"
     prompt_required ADD_SW_ISL "Inter-switch port number on the NEW switch" "add_switch_isl_port"
     prompt_default ADD_SW_EXISTING_ISL "Inter-switch port on the EXISTING switch (for the manual step, e.g. GE1/0/46)" "GE1/0/46" "add_switch_existing_isl"
 
@@ -6935,11 +6962,38 @@ prompt_default DOCKER_LOG_MAX_SIZE "Docker per-container log max size before rot
 prompt_default DOCKER_LOG_MAX_FILE "Docker rotated log files kept per container" "3"
 prompt_default SWITCH_REPLUG_ENABLED "Enable automatic switch replug after wired approval?" "true"
 prompt_default SWITCH_REPLUG_DELAY_SEC "Switch replug delay seconds" "3"
-prompt_default SWITCH_POE "Do the HP 5130 switches support PoE? (yes/no)" "yes" "switch_poe"
-case "$(printf '%s' "$SWITCH_POE" | tr '[:upper:]' '[:lower:]')" in
-    y|yes|true|1) SWITCH_POE=yes ;;
-    *) SWITCH_POE=no ;;
-esac
+prompt_default SWITCH_POE \
+    "PoE support for the HP 5130 switches (single yes/no applies to all, or comma-separated list matching SWITCH_HOSTS order, e.g. yes,no,yes)" \
+    "yes" "switch_poe"
+# Normalise: single value → yes/no; list → comma-separated yes/no in same order.
+normalize_switch_poe() {
+    local raw="$1"
+    local out="" part lower
+    # strip spaces around commas
+    raw="$(printf '%s' "$raw" | tr -d ' ')"
+    if [[ "$raw" != *,* ]]; then
+        case "$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')" in
+            y|yes|true|1) printf 'yes' ;;
+            *) printf 'no' ;;
+        esac
+        return
+    fi
+    IFS=',' read -ra parts <<< "$raw"
+    for part in "${parts[@]}"; do
+        lower="$(printf '%s' "$part" | tr '[:upper:]' '[:lower:]')"
+        case "$lower" in
+            y|yes|true|1) part=yes ;;
+            *) part=no ;;
+        esac
+        if [ -n "$out" ]; then
+            out="${out},${part}"
+        else
+            out="$part"
+        fi
+    done
+    printf '%s' "$out"
+}
+SWITCH_POE="$(normalize_switch_poe "$SWITCH_POE")"
 save_answer "switch_poe" "$SWITCH_POE"
 
 info "UniFi Network Controller (Docker)"

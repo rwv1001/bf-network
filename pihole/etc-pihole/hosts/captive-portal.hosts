@@ -1,1 +1,0 @@
-${NETWORK_WORD:-192.168}.${MANAGEMENT_VLAN:-99}.${PORTAL_IP_BYTE:-4} bf-network.duckdns.org

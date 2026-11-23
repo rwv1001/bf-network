@@ -1,0 +1,15 @@
+{
+  "description": "SWITCH_POE may be a single yes/no (applies to every switch) or a comma-separated list matching the order of SWITCH_HOSTS / SWITCH_HOSTS_BYTES (e.g. yes,no,yes). Fully backwards compatible with existing single-value deployments.",
+  "env": {
+    "add": [],
+    "remove": [],
+    "notes": "Existing SWITCH_POE=yes or SWITCH_POE=no continues to work unchanged. To use per-switch control, set a comma-separated list in the same order as SWITCH_HOSTS. The installer and --add-switch now prompt for this."
+  },
+  "db": {
+    "up": null,
+    "down": null,
+    "verify_up": [],
+    "verify_down": []
+  },
+  "notes": "No database changes. Code in core/switch.py, switch_ports.py and hp5130-replug.sh now accepts the list form and looks up the correct entry by switch host. Unknown host or mismatched list length is treated as no (PoE commands omitted) for safety."
+}

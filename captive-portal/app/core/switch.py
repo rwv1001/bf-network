@@ -26,10 +26,37 @@ from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
 
-def switch_poe_supported() -> bool:
-    """True unless SWITCH_POE is explicitly disabled. A missing .env entry means yes."""
+def switch_poe_supported(switch_host: str | None = None) -> bool:
+    """Return whether the given switch (or all switches) supports PoE.
+
+    SWITCH_POE in .env may be:
+      - a single value (yes/no/true/false/1/0/…) that applies to every switch
+      - a comma-separated list matching the order of SWITCH_HOSTS /
+        SWITCH_HOSTS_BYTES (e.g. "yes,no,yes")
+
+    A missing entry means yes. When a list is used and the host is unknown or
+    out of range, returns False (safer: omit PoE commands that would be rejected).
+    """
     raw = (os.getenv('SWITCH_POE') or 'yes').strip().lower()
-    return raw not in {'0', 'no', 'n', 'false', 'off', 'disabled'}
+    if not raw:
+        return True
+    parts = [p.strip() for p in raw.split(',') if p.strip()]
+    if not parts:
+        return True
+    if len(parts) == 1:
+        return parts[0] not in {'0', 'no', 'n', 'false', 'off', 'disabled'}
+
+    # List mode — need the ordered host list to pick the right entry.
+    if not switch_host:
+        return False
+    try:
+        hosts = get_switch_hosts()
+        idx = hosts.index(switch_host)
+        if 0 <= idx < len(parts):
+            return parts[idx] not in {'0', 'no', 'n', 'false', 'off', 'disabled'}
+    except (ValueError, Exception):
+        pass
+    return False
 
 
 COMMON_PORT_UNDO_COMMANDS = [
@@ -58,9 +85,9 @@ COMMON_PORT_UNDO_COMMANDS = [
 ]
 
 
-def common_port_undo_commands():
-    """Undo block for a role push. Omits PoE when SWITCH_POE is no."""
-    if switch_poe_supported():
+def common_port_undo_commands(switch_host: str | None = None):
+    """Undo block for a role push. Omits PoE when the switch does not support it."""
+    if switch_poe_supported(switch_host):
         return list(COMMON_PORT_UNDO_COMMANDS)
     return [cmd for cmd in COMMON_PORT_UNDO_COMMANDS if 'poe' not in cmd.lower()]
 

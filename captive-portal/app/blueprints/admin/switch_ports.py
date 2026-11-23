@@ -25,6 +25,7 @@ from core.switch import (
     expand_switch_iface_name, find_switch_port_for_mac,
     get_switch_hosts, normalize_switch_mac, persist_switch_port,
     run_switch_command, switch_port_allowed,
+    switch_poe_supported,
 )
 from core.vlan_utils import get_wired_vlan_id, get_management_vlan_id
 
@@ -119,10 +120,8 @@ def _role_allowed(role: str) -> bool:
     return vlan_id is not None and vlan_id in set(_isp_wired_vlan_ids())
 
 
-def switch_poe_supported() -> bool:
-    """True unless SWITCH_POE is explicitly disabled. A missing entry means yes."""
-    raw = (os.getenv('SWITCH_POE') or 'yes').strip().lower()
-    return raw not in {'0', 'no', 'n', 'false', 'off', 'disabled'}
+# switch_poe_supported is imported from core.switch (supports single value or
+# comma-separated list matching SWITCH_HOSTS order).
 
 
 ROLE_PURPOSES = {
@@ -431,7 +430,7 @@ def _get_locked_ports() -> dict:
     return locked
 
 
-def _build_port_config(port_name: str, role: str, description: str = '') -> str:
+def _build_port_config(port_name: str, role: str, description: str = '', switch_host: str | None = None) -> str:
     """Build the complete HP5130 config command block for a given port role."""
     from models import ISPRouter
     from core.switch import COMMON_PORT_UNDO_COMMANDS, expand_switch_iface_name
@@ -468,9 +467,9 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
 
     head = ['system-view', f'interface {expanded}']
 
-    # Common cleanup. PoE undo is omitted when SWITCH_POE=no — Comware
-    # rejects 'undo poe enable' on a switch with no PoE.
-    body = common_port_undo_commands()
+    # Common cleanup. PoE undo is omitted when this switch does not support PoE
+    # — Comware rejects 'undo poe enable' on a switch with no PoE.
+    body = common_port_undo_commands(switch_host)
 
     if role == 'wired':
         wired_untagged = vlans_list
@@ -534,7 +533,7 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
             'dhcp snooping binding record',
             'dhcp snooping check mac-address',
             'stp edged-port',
-            *(['poe enable'] if switch_poe_supported() else []),
+            *(['poe enable'] if switch_poe_supported(switch_host) else []),
         ])
 
     elif role == 'migration_ap':
@@ -572,7 +571,7 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
             'undo ip verify source',
             'dhcp snooping binding record',
             'dhcp snooping check mac-address',
-            *(['poe enable'] if switch_poe_supported() else []),
+            *(['poe enable'] if switch_poe_supported(switch_host) else []),
         ])
 
     elif role == 'cheapap':
@@ -591,7 +590,7 @@ def _build_port_config(port_name: str, role: str, description: str = '') -> str:
             'mac-authentication host-mode multi-vlan',
             'dhcp snooping binding record',
             'dhcp snooping check mac-address',
-            *(['poe enable'] if switch_poe_supported() else []),
+            *(['poe enable'] if switch_poe_supported(switch_host) else []),
         ])
 
     elif parse_wired_vlan_role(role) is not None:
@@ -697,7 +696,7 @@ def refresh_pi_trunk_vlans() -> None:
         """)
     ).fetchall()
     for host, port_name, desc in rows:
-        cmds = _build_port_config(port_name, 'pi', desc or '')
+        cmds = _build_port_config(port_name, 'pi', desc or '', switch_host=host)
         result = run_switch_command(host, cmds)
         if result is None:
             logger.warning("Failed to refresh Pi trunk on %s %s", host, port_name)
@@ -866,9 +865,9 @@ def _canonical_description(role: str, existing_desc: str = '') -> str:
     return canonical.get(role) or existing_desc or ''
 
 
-def _interface_block(port_name: str, role: str, description: str = '') -> str:
+def _interface_block(port_name: str, role: str, description: str = '', switch_host: str | None = None) -> str:
     """Interface commands for one port, without the system-view / save wrapper."""
-    lines = _build_port_config(port_name, role, description).splitlines()
+    lines = _build_port_config(port_name, role, description, switch_host=switch_host).splitlines()
     if lines and lines[0] == 'system-view':
         lines = lines[1:]
     while lines and lines[-1] in ('quit', 'save force'):
@@ -938,7 +937,7 @@ def update_batch():
         pushed = True
         if role_items:
             blocks = [
-                _interface_block(item['port'], item['role'], item['existing_desc'])
+                _interface_block(item['port'], item['role'], item['existing_desc'], switch_host=host)
                 for item in role_items
             ]
             cmds = '\n'.join(['system-view', *blocks, 'quit', 'save force'])
@@ -1029,7 +1028,7 @@ def update_single():
     if existing_role == role:
         return jsonify({'success': True, 'message': 'No change needed', 'description': existing_desc or '', 'role': role})
 
-    cmds = _build_port_config(port_name, role, existing_desc)
+    cmds = _build_port_config(port_name, role, existing_desc, switch_host=host)
     result = run_switch_command(host, cmds)
     if result is None:
         return jsonify({'success': False, 'error': f'SSH to {host} failed'})
