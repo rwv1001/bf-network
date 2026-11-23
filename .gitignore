@@ -87,10 +87,17 @@ keys/
 letsencrypt/
 
 # Backup files
-*.backup
+*backups
 *.bak
-*-backup.*
-
+kea/config/dhcp4.json
+.vscode/settings.json
+mdns/peers.json
+pihole/etc-pihole/custom.list
+pihole/etc-pihole/dnsmasq.conf
+pihole/etc-pihole/pihole.toml
+watchdog/state.json
+scripts/scriptdata/hp5130-policy.json
+scripts/scriptdata/hp5130-current-config.json
 # Session data
 sessions/
 **/sessions/

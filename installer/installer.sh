@@ -3265,6 +3265,8 @@ write_pi_env_file() {
         # to import that certificate into NPM as a custom certificate.
         write_env_line NPM_SETUP_SKIP_SSL "true"
         write_env_line NPM_SETUP_FORCE_SSL "true"
+        # NPM uses its patched image; HTTP/2 remains off by default.
+        write_env_line NPM_HTTP2_SUPPORT "false"
         write_env_line NPM_CUSTOM_CERT_FULLCHAIN "/etc/letsencrypt/live/${MAIN_DOMAIN}/fullchain.pem"
         write_env_line NPM_CUSTOM_CERT_KEY "/etc/letsencrypt/live/${MAIN_DOMAIN}/privkey.pem"
         write_env_line PIHOLE_WEBPASSWORD "$PIHOLE_WEBPASSWORD"

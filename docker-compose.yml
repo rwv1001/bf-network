@@ -636,7 +636,9 @@ services:
 
   # ── Nginx Proxy Manager ───────────────────────────────────────────────────────
   npm:
-    image: jc21/nginx-proxy-manager:latest
+    # NPM 2.17.1 contains the upstream OpenResty nginx2root backports (2026-11-19).
+    # Move this pin forward after reviewing newer NPM security releases.
+    image: ${NPM_IMAGE:-jc21/nginx-proxy-manager:2.17.1}
     restart: unless-stopped
     logging: *default-logging
     network_mode: host

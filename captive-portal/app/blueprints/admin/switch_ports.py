@@ -241,15 +241,15 @@ def _detect_port_role(port_name: str, description: str) -> str:
 
 
 def _discover_switch_ports(switch_host: str) -> list:
-    """
-    SSH to switch_host and return a list of port dicts.
+    """Discover physical GE/XGE ports from a Comware 7 switch.
 
-    Three-phase, pagination-safe strategy for HP5130/Comware 7:
-    Phase 1 – slot detection
-    Phase 2 – port existence & link state
-    Phase 3 – descriptions
+    Prefer ``display interface brief``: it lists ports that actually exist,
+    including XGE1/0/49-52 on 48+4 models and XGE1/0/25-28 on 24+4
+    models, whether or not those ports have saved configuration.
 
-    Returns: [{'port_name': str, 'link_status': str, 'description': str}]
+    Older firmware/SSH output that cannot be parsed falls back to targeted
+    interface state probes, then obtains the full descriptions as before.
+    Discovery is read-only and does not change port roles or switch config.
     """
     def _shorten(name):
         if name.startswith('GigabitEthernet'):
@@ -258,109 +258,121 @@ def _discover_switch_ports(switch_host: str) -> list:
             return 'XGE' + name[len('Ten-GigabitEthernet'):]
         return name
 
+    def _expand(name):
+        if name.startswith('XGE'):
+            return 'Ten-GigabitEthernet' + name[3:]
+        if name.startswith('GE'):
+            return 'GigabitEthernet' + name[2:]
+        return name
+
     def _iface_sort_key(name):
-        nums = [int(x) for x in re.findall(r'\d+', name)]
-        return (1 if name.startswith('Ten-') else 0, nums)
+        short = _shorten(name)
+        nums = tuple(int(x) for x in re.findall(r'\d+', short))
+        return (1 if short.startswith('XGE') else 0, nums)
+
+    def _link_status(raw):
+        state = (raw or 'UNKNOWN').strip().upper()
+        if state.startswith('ADM'):
+            return 'ADMDOWN'
+        if state.startswith('UP'):
+            return 'UP'
+        if 'DOWN' in state:
+            return 'DOWN'
+        return state[:10]
 
     def _split_by_prompts(output):
-        parts = re.split(r'<[A-Za-z][^>\n]{0,40}>', output)
+        parts = re.split(r'<[A-Za-z][^>\n]{0,40}>', output or '')
         sections = []
         for part in parts[1:]:
             lines = part.replace('\r', '').split('\n')
+            # The first line after the prompt is the echoed command.
             body = '\n'.join(l for l in lines[1:] if l.strip())
             sections.append(body)
         return sections
 
-    max_slot = int(os.getenv('SWITCH_MAX_SLOT', '8'))
-    ge_max   = int(os.getenv('SWITCH_GE_MAX',   '52'))
-    # Ten-Gig ports are few. Probing them up to GE_MAX produces
-    # "Wrong parameter" errors on the switch for non-existent ports.
-    xge_max  = int(os.getenv('SWITCH_XGE_MAX',  '4'))
-
-    # Phase 1 — slot detection
-    slot_cmds = '\n'.join(
-        f'display current-configuration | include interface | include GigabitEthernet{s}/0/1'
-        for s in range(1, max_slot + 1)
+    # Parse the *actual interface list* before trying any guessed numbers.
+    # Comware normally abbreviates these as GE1/0/1 and XGE1/0/49.
+    brief = run_switch_command(switch_host, 'display interface brief',
+                               disable_paging=True) or ''
+    row = re.compile(
+        r'^\s*((?:Ten-GigabitEthernet|GigabitEthernet|XGE|GE)'
+        r'\d+/\d+/\d+)\s+(UP|DOWN|ADM|ADMDOWN|STBY)\b',
+        re.IGNORECASE,
     )
-    slot_output = run_switch_command(switch_host, slot_cmds)
-    detected_slots = set()
-    for line in (slot_output or '').splitlines():
-        stripped = line.strip()
-        if stripped.startswith('interface GigabitEthernet'):
-            m = re.search(r'GigabitEthernet(\d+)/', stripped)
-            if m:
-                detected_slots.add(int(m.group(1)))
-
-    if not detected_slots:
-        logger.warning("No switch slots detected on %s", switch_host)
-        return []
-
-    # Phase 2 — port existence & link state
-    candidates = []
-    for s in sorted(detected_slots):
-        for n in range(1, ge_max + 1):
-            candidates.append(f'GigabitEthernet{s}/0/{n}')
-        for n in range(1, xge_max + 1):
-            candidates.append(f'Ten-GigabitEthernet{s}/0/{n}')
-
-    state_cmds = '\n'.join(
-        f'display interface {full} | include state'
-        for full in candidates
-    )
-    state_raw = run_switch_command(switch_host, state_cmds) or ''
-    state_sections = _split_by_prompts(state_raw)
-
     existing = {}
-    for i, full_name in enumerate(candidates):
-        if i >= len(state_sections):
-            break
-        section = state_sections[i]
-        if '% ' in section or 'Wrong' in section or 'Error' in section:
-            continue
-        m = re.search(r'Current state:\s*(\S+(?:\s+\S+)?)', section, re.IGNORECASE)
-        raw = (m.group(1) if m else 'UNKNOWN').upper()
-        if 'ADMINISTRATIVELY' in raw:
-            link = 'ADMDOWN'
-        elif raw.startswith('UP'):
-            link = 'UP'
-        elif 'DOWN' in raw:
-            link = 'DOWN'
-        else:
-            link = raw[:10]
-        existing[full_name] = link
+    for line in brief.replace('\r', '').splitlines():
+        m = row.match(line)
+        if m:
+            existing[_expand(m.group(1))] = _link_status(m.group(2))
 
     if not existing:
-        logger.warning("No ports found via state probe on %s", switch_host)
+        # Fallback for a switch that rejects/truncates 'display interface brief'.
+        # Include both 24+4 and 48+4 XGE numbering schemes, not just XGE1-4.
+        max_slot = int(os.getenv('SWITCH_MAX_SLOT', '8'))
+        ge_max = int(os.getenv('SWITCH_GE_MAX', '52'))
+        xge_max = int(os.getenv('SWITCH_XGE_MAX', '4'))
+        slot_cmds = '\n'.join(
+            f'display current-configuration | include interface | include GigabitEthernet{s}/0/1'
+            for s in range(1, max_slot + 1)
+        )
+        slot_output = run_switch_command(switch_host, slot_cmds) or ''
+        detected_slots = set()
+        for line in slot_output.splitlines():
+            m = re.search(r'^\s*interface GigabitEthernet(\d+)/', line)
+            if m:
+                detected_slots.add(int(m.group(1)))
+        if not detected_slots:
+            logger.warning('No switch slots detected on %s', switch_host)
+            return []
+
+        candidates = []
+        xge_numbers = set(range(1, xge_max + 1))
+        for base in (24, 48, ge_max):
+            xge_numbers.update(range(base + 1, base + xge_max + 1))
+        for slot in sorted(detected_slots):
+            candidates.extend(f'GigabitEthernet{slot}/0/{n}'
+                              for n in range(1, ge_max + 1))
+            candidates.extend(f'Ten-GigabitEthernet{slot}/0/{n}'
+                              for n in sorted(xge_numbers))
+        state_cmds = '\n'.join(
+            f'display interface {name} | include state' for name in candidates
+        )
+        sections = _split_by_prompts(run_switch_command(switch_host, state_cmds) or '')
+        for name, section in zip(candidates, sections):
+            if '% ' in section or 'Wrong' in section or 'Error' in section:
+                continue
+            m = re.search(r'Current state:\s*(\S+(?:\s+\S+)?)',
+                          section, re.IGNORECASE)
+            if m:
+                existing[name] = _link_status(m.group(1))
+
+    if not existing:
+        logger.warning('No ports found via interface discovery on %s', switch_host)
         return []
 
-    sorted_existing = sorted(existing.keys(), key=_iface_sort_key)
-
-    # Phase 3 — descriptions
-    desc_cmds = '\n'.join(
-        f'display interface {full} | include Description'
-        for full in sorted_existing
+    # Full descriptions are queried separately (brief descriptions truncate).
+    names = sorted(existing, key=_iface_sort_key)
+    commands = '\n'.join(
+        f'display interface {name} | include Description' for name in names
     )
-    desc_raw = run_switch_command(switch_host, desc_cmds) or ''
-    desc_sections = _split_by_prompts(desc_raw)
-
+    sections = _split_by_prompts(run_switch_command(switch_host, commands) or '')
     ports = []
-    for i, full_name in enumerate(sorted_existing):
-        desc = ''
-        if i < len(desc_sections):
-            section = desc_sections[i]
-            if 'Description:' in section:
-                raw = [l for l in section.splitlines() if 'Description:' in l]
-                if raw:
-                    desc = raw[0].split(':', 1)[1].strip()
-        if desc.endswith(' Interface') and 'Ethernet' in desc:
-            desc = ''
+    for i, name in enumerate(names):
+        description = ''
+        if i < len(sections):
+            for line in sections[i].splitlines():
+                if 'Description:' in line:
+                    description = line.split('Description:', 1)[1].strip()
+                    break
+        if description.endswith(' Interface') and 'Ethernet' in description:
+            description = ''
         ports.append({
-            'port_name':   _shorten(full_name),
-            'link_status': existing[full_name],
-            'description': desc,
+            'port_name': _shorten(name),
+            'link_status': existing[name],
+            'description': description,
         })
 
-    logger.info("Discovered %d ports on %s", len(ports), switch_host)
+    logger.info('Discovered %d ports on %s', len(ports), switch_host)
     return ports
 
 

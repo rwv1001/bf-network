@@ -42,6 +42,11 @@ SKIP_SSL = os.environ.get("NPM_SETUP_SKIP_SSL", "false").strip().lower() in {
 FORCE_SSL = os.environ.get("NPM_SETUP_FORCE_SSL", "true").strip().lower() not in {
     "0", "false", "no", "n", "off"
 }
+# HTTP/2 is not needed by the portal. Keep it off by default as an extra
+# defence-in-depth measure, including on newly created certificate hosts.
+HTTP2_SUPPORT = os.environ.get("NPM_HTTP2_SUPPORT", "false").strip().lower() in {
+    "1", "true", "yes", "y", "on"
+}
 
 
 def _api(method, path, data=None, token=None, timeout=60):
@@ -231,7 +236,7 @@ proxy_set_header X-Forwarded-Proto $scheme;
         "block_exploits": False,
         "caching_enabled": False,
         "allow_websocket_upgrade": True,
-        "http2_support": True if cert_id else False,
+        "http2_support": bool(cert_id and HTTP2_SUPPORT),
         "hsts_enabled": False,
         "hsts_subdomains": False,
         "ssl_forced": bool(ssl_forced and cert_id),
@@ -245,6 +250,37 @@ def _get_proxy_host(token, domain):
         if domain in host.get("domain_names", []):
             return host
     return None
+
+
+def _sync_existing_http2_setting(token, host):
+    """Update only HTTP/2 while preserving user-managed NPM proxy settings.
+
+    Existing hosts are not always re-saved by npm-setup: if the certificate
+    files are absent, the certificate-attachment path does not run. Ensure an
+    existing SSL host also receives NPM_HTTP2_SUPPORT=false without replacing
+    its access list, advanced configuration or other options.
+    """
+    enabled = bool(host.get("certificate_id") and HTTP2_SUPPORT)
+    if bool(host.get("http2_support")) == enabled:
+        return host
+    keys = (
+        "domain_names", "forward_scheme", "forward_host", "forward_port",
+        "access_list_id", "certificate_id", "meta", "advanced_config",
+        "locations", "block_exploits", "caching_enabled",
+        "allow_websocket_upgrade", "http2_support", "hsts_enabled",
+        "hsts_subdomains", "ssl_forced", "enabled",
+    )
+    # Refuse to send an incomplete PUT which might reset unrelated settings.
+    missing = [key for key in keys if key not in host]
+    if missing:
+        print(f"npm-setup: cannot safely change HTTP/2 on host {host.get('id')}: "
+              f"missing API fields {', '.join(missing)}", flush=True)
+        return host
+    payload = {key: host[key] for key in keys}
+    payload["http2_support"] = enabled
+    _api("PUT", f"/api/nginx/proxy-hosts/{host['id']}", payload, token=token)
+    print(f"npm-setup: HTTP/2 set to {enabled} on existing host id={host['id']}", flush=True)
+    return _get_proxy_host(token, host['domain_names'][0]) or host
 
 
 def _create_or_get_proxy_host(token, domain, forward_host, forward_port):
@@ -261,7 +297,7 @@ def _create_or_get_proxy_host(token, domain, forward_host, forward_port):
             print(f"npm-setup: updated proxy host for {domain} (id={host['id']}).", flush=True)
             return _get_proxy_host(token, domain)
         print(f"npm-setup: proxy host for {domain} already exists (id={host['id']}).", flush=True)
-        return host
+        return _sync_existing_http2_setting(token, host)
 
     print(f"npm-setup: creating proxy host for {domain}...", flush=True)
     host = _api("POST", "/api/nginx/proxy-hosts", payload, token=token)
