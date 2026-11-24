@@ -232,16 +232,14 @@
 
 {% if reassign_mode %}
 <div class="info-box" style="margin-bottom:18px">
-    <strong>Change your WiFi network</strong>
-    <p>Complete registration again for <strong>{{ detected_ssid or 'the current SSID' }}</strong>.
-    If this network is already permitted for your account, the move will be approved automatically.
-    Otherwise the administrator will receive an approval request.</p>
+    <strong>Register this device on {{ detected_ssid or 'the current WiFi network' }}</strong>
+    <p>Complete the form below and select <strong>Register Device</strong> to submit your request.
+    If your account is permitted on this network, the move will be made automatically.
+    If administrator approval is required, a request will be recorded and an email notification
+    will be queued for the network administrator.</p>
 </div>
 {% endif %}
 <div id="statusMessage" style="display: none; margin-top: 20px; padding: 15px; border-radius: 8px; text-align: center;"></div>
-<div id="wrongVlanAction" style="display:{% if show_status and device and detected_vlan and device.assigned_vlan and detected_vlan != device.assigned_vlan %}block{% else %}none{% endif %};margin-top:14px;text-align:center">
-    <a class="btn" href="{{ url_for('portal.wrong_vlan_page') }}">I want to stay on this WiFi network</a>
-</div>
 <div id="confirmWarning" style="display: {% if show_status and device and device.internet_accessible == True and not device.ownership_validated %}block{% else %}none{% endif %}; margin-top: 10px; padding: 12px 15px; border-radius: 8px; background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba; text-align: center;">{% if show_status and device and device.internet_accessible == True and not device.ownership_validated %}&#9888; Please click the <strong>Accept and Keep Access</strong> link in the confirmation email you have just received within the next <strong>{{ confirm_timeout_minutes|default(2) }} minute{{ 's' if (confirm_timeout_minutes|default(2)) != 1 else '' }}</strong> or your internet access will be blocked.{% endif %}</div>
 <div id="institutionLink" style="display: none; margin-top: 8px; text-align: center;"></div>
 <div id="userHomeLink" style="display: {% if show_status and device and device.internet_accessible == True and user_home_url %}block{% else %}none{% endif %}; margin-top: 8px; text-align: center;">{% if show_status and device and device.internet_accessible == True and user_home_url %}<a href="{{ user_home_url }}" class="btn" style="display:inline-block;">Go to your home page</a>{% endif %}</div>
@@ -271,6 +269,10 @@ document.addEventListener('DOMContentLoaded', function() {
     })();
     const apiUrl = (path) => `${pollBase}${path}`;
     const showStatusMode = {{ 'true' if show_status else 'false' }};
+    // An explicit reassignment is already in the fresh registration workflow.
+    // Do not let the normal device-status poll redisplay the old-VLAN warning
+    // or the opt-in link above the registration form.
+    const reassignMode = {{ 'true' if reassign_mode else 'false' }};
     const detectedIpEl = document.getElementById('detectedIp');
     const knownMac = "{{ detected_mac or (device.mac_address if device else '') }}";
 
@@ -286,8 +288,6 @@ document.addEventListener('DOMContentLoaded', function() {
     let registrationSubmitted = false;
     let pollingStarted = false;
     let currentPrefill = null;
-    let mismatchPolling = false;
-    let mismatchInterval = null;
     let accessConfirmed = false;
     let deviceStatusPollingStarted = false;
     // false (default): a domain password that Microsoft did not reject is enough.
@@ -504,13 +504,8 @@ document.addEventListener('DOMContentLoaded', function() {
 
             if (status === 'registered') {
                 if (data.network_mismatch && data.current_ssid && data.expected_ssid) {
-                    showStatus(
-                        `You have logged onto the wrong WiFi network. To gain full internet access, please disconnect from "${data.current_ssid}" and connect to "${data.expected_ssid}".`,
-                        'error'
-                    );
-                    const changeAction = document.getElementById('wrongVlanAction');
-                    if (changeAction) changeAction.style.display = 'block';
-                    startMismatchPolling();
+                    window.location.replace("{{ url_for('portal.wrong_vlan_page') }}");
+                    return;
                 } else {
                     showStatus(message + ' Checking access...', 'success');
                     if (data.needs_ownership_confirmation) {
@@ -883,7 +878,8 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (data.status === 'registered') {
                     pwdDiv.remove();
                     if (data.network_mismatch && data.current_ssid && data.expected_ssid) {
-                        startMismatchPolling();
+                        window.location.replace("{{ url_for('portal.wrong_vlan_page') }}");
+                        return;
                     } else {
                         showStatus((data.message || 'Device registered successfully') + ' Checking access...', 'success');
                         if (data.needs_ownership_confirmation) {
@@ -962,7 +958,8 @@ document.addEventListener('DOMContentLoaded', function() {
                                 `You have logged onto the wrong WiFi network. To gain full internet access, please disconnect from "${data.current_ssid}" and connect to "${data.expected_ssid}".`,
                                 'error'
                             );
-                            startMismatchPolling();
+                            window.location.replace("{{ url_for('portal.wrong_vlan_page') }}");
+                        return;
                         } else {
                             showStatus('Request approved! Checking internet access.... You may need to unplug and replug your device if no internet access is detected after a couple of minutes.', 'success');
                             if (data.needs_ownership_confirmation) {
@@ -1031,10 +1028,6 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (pollInterval) {
                         clearInterval(pollInterval);
                         pollInterval = null;
-                    }
-                    if (mismatchInterval) {
-                        clearInterval(mismatchInterval);
-                        mismatchInterval = null;
                     }
                     showStatus('You now have full internet access.', 'success');
                     if (userHomeLink) {
@@ -1170,7 +1163,8 @@ document.addEventListener('DOMContentLoaded', function() {
                             `You have logged onto the wrong WiFi network. To gain full internet access, please disconnect from "${data.current_ssid}" and connect to "${data.expected_ssid}".`,
                             'error'
                         );
-                        startMismatchPolling();
+                        window.location.replace("{{ url_for('portal.wrong_vlan_page') }}");
+                        return;
                     } else {
                         showStatus('Device already registered. Checking access...', 'success');
                         startAccessCheck();
@@ -1197,7 +1191,8 @@ document.addEventListener('DOMContentLoaded', function() {
                     form.style.display = 'none';
                     startPolling();
                 } else if (data.status === 'wrong_vlan') {
-                    startDeviceStatusPolling();
+                    window.location.replace("{{ url_for('portal.wrong_vlan_page') }}");
+                    return;
                 } else {
                     form.style.display = 'block';
                 }
@@ -1209,7 +1204,14 @@ document.addEventListener('DOMContentLoaded', function() {
             });
     };
 
-    if (showStatusMode) {
+    if (reassignMode) {
+        // This is the deliberate "register on the WiFi I am currently using"
+        // path. The existing assignment will still differ until the form is
+        // submitted and the normal permission/approval checks complete.
+        const loadingEl = document.getElementById('statusCheckLoading');
+        if (loadingEl) loadingEl.style.display = 'none';
+        form.style.display = 'block';
+    } else if (showStatusMode) {
         startDeviceStatusPolling();
     } else {
         checkInitialStatus();
@@ -1350,26 +1352,9 @@ document.addEventListener('DOMContentLoaded', function() {
 
                 case 'wrong_vlan': {
                     console.log('[DevicePoll] Status: wrong_vlan', data);
-                    const changeAction = document.getElementById('wrongVlanAction');
-                    if (changeAction) changeAction.style.display = 'block';
-                    const isWired = data.connection_type === 'wired';
-                    const assignedVlan = data.assigned_vlan;
-                    const assignedSsid = data.assigned_ssid;
-
-                    let message = '';
-
-                    if (isWired) {
-                        const vlanText = assignedVlan ? `VLAN ${assignedVlan}` : 'the assigned network';
-                        message = `The administrator has not granted you access to this network, but has instead granted you access to <strong>${vlanText}</strong>.<br><br>
-                                <strong>Please unplug your Ethernet cable, wait 5 seconds, and plug it back in again.</strong>`;
-                    } else {
-                        const networkName = assignedSsid || (assignedVlan ? `VLAN ${assignedVlan}` : 'the assigned network');
-                        message = `The administrator has not granted you access to this network, but has instead granted you access to <strong>${networkName}</strong>.<br><br>
-                                Please disconnect from your current network and connect to <strong>${networkName}</strong>.`;
-                    }
-
-                    showStatus(message, 'error', true); // true = render as HTML
-                    // Keep polling (do not call stopDevicePoll)
+                    if (reassignMode) break;
+                    stopDevicePoll();
+                    window.location.replace("{{ url_for('portal.wrong_vlan_page') }}");
                     break;
                 }
 
@@ -1403,34 +1388,6 @@ document.addEventListener('DOMContentLoaded', function() {
         }, 3000);
     }
 
-    function startMismatchPolling() {
-        if (mismatchPolling) {
-            return;
-        }
-        mismatchPolling = true;
-
-        mismatchInterval = setInterval(() => {
-            fetch(apiUrlWithDevice('{{ url_for("portal.registration_status") }}'))
-                .then(response => response.json())
-                .then(data => {
-                    if (accessConfirmed) {
-                        if (mismatchInterval) {
-                            clearInterval(mismatchInterval);
-                            mismatchInterval = null;
-                        }
-                        return;
-                    }
-                    if (data.current_ip && detectedIpEl) {
-                        detectedIpEl.textContent = data.current_ip;
-                    }
-                    if (data.status === 'registered' && !data.network_mismatch) {
-                        showStatus('Device is on the correct network. Checking access...', 'success');
-                        startAccessCheck();
-                    }
-                })
-                .catch(() => {});
-        }, 3000);
-    }
 
     {% if resume_mfa %}
     if (domainAuthRequireMfa) {

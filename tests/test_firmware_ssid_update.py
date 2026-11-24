@@ -130,7 +130,7 @@ class FirmwareNoticeTests(TestCase):
         self.assertEqual(path.read_text(), '{not json}')
 
     def test_manifest_for_current_head(self):
-        manifest = json.loads((ROOT/'captive-portal/commit-migrations/adee740.json').read_text())
+        manifest = json.loads((ROOT/'captive-portal/commit-migrations/1d7eb6a.json').read_text())
         cmds = manifest['post_update']['commands']
         self.assertNotIn('docker compose run --rm npm-setup',cmds)
         self.assertIn('docker compose up -d --build --no-deps web',cmds)
@@ -153,7 +153,9 @@ class SSIDReassignmentTests(TestCase):
         device = SimpleNamespace(mac_address='AA',assigned_vlan=11,
                                  internet_blocked=False,device_name='laptop')
         rq = MagicMock()
-        rq.filter_by.return_value.first.return_value = object() if pending else None
+        rq.filter_by.return_value.order_by.return_value.first.return_value = (
+            SimpleNamespace(approval_token='test-token', id=42) if pending else None
+        )
         bindings = {
             'get_client_mac':lambda:'AA',
             'Device':SimpleNamespace(query=SimpleNamespace(filter_by=lambda **kwargs:SimpleNamespace(first=lambda:device))),
@@ -161,13 +163,20 @@ class SSIDReassignmentTests(TestCase):
             'User':SimpleNamespace(query=SimpleNamespace(get=lambda uid:owner)),
             'get_client_ip':lambda:'192.168.21.101',
             'detect_connection_type':lambda ip:(conn,21,'Guest'),
+            'portal_host_mismatch':lambda:False,
+            'build_portal_url':lambda path:path,
             'get_vlan_map':lambda:{'Staff':11,'Guest':21},
             'get_wired_unregistered_vlan_id':lambda:250,
-            'RegistrationRequest':SimpleNamespace(query=rq),
+            'RegistrationRequest':SimpleNamespace(query=rq, submitted_at=SimpleNamespace(desc=lambda:None)),
             'session':{}, 'flash':MagicMock(), 'redirect':lambda url:url,
-            'url_for':lambda endpoint:'/register' if endpoint=='portal.register' else '/wrong-vlan',
-            'datetime':datetime, 'time':time,
+            'url_for':lambda endpoint, **kwargs:'/register' if endpoint=='portal.register' else '/wrong-vlan',
+            'datetime':datetime, 'time':time, 'os':os,
+            'urlparse':lambda value:SimpleNamespace(scheme='https', netloc='portal.example.test'),
+            'send_admin_notification':MagicMock(return_value=1),
+            'logger':MagicMock(),
+            'get_ssid_for_vlan':lambda vlan:'Guest',
         }
+        bindings['_pending_request_for_vlan'] = extract_function(PORTAL,'_pending_request_for_vlan',bindings)
         route = extract_function(PORTAL,'wrong_vlan_request_change',bindings)
         return route,bindings,owner,device
 
@@ -178,13 +187,62 @@ class SSIDReassignmentTests(TestCase):
         self.assertEqual(b['session']['portal_reassignment']['vlan'],21)
         self.assertEqual(device.assigned_vlan,11)
 
-    def test_wired_or_pending_changes_cannot_start(self):
+    def test_wired_change_is_blocked_but_existing_target_request_can_resend_email(self):
         route,b,_,_=self._route_env(conn='wired')
         self.assertEqual(route(),'/wrong-vlan')
         self.assertFalse(b['session'])
         route,b,_,_=self._route_env(pending=True)
         self.assertEqual(route(),'/wrong-vlan')
         self.assertFalse(b['session'])
+        b['send_admin_notification'].assert_called_once()
+        b['flash'].assert_called_once()
+
+    def test_wrong_vlan_detection_helper_redirect_condition(self):
+        helper = extract_function(PORTAL, '_is_registered_device_on_wrong_wifi', {})
+        registered = SimpleNamespace(registration_status='registered', assigned_vlan=11)
+        self.assertTrue(helper(registered, 'wifi', 21, False))
+        self.assertFalse(helper(registered, 'wifi', 11, False))
+        self.assertFalse(helper(registered, 'wired', 21, False))
+        self.assertFalse(helper(registered, 'wifi', 21, True))
+
+    def test_register_get_redirects_registered_device_to_wrong_vlan_page(self):
+        device = SimpleNamespace(
+            mac_address='AA', assigned_vlan=11, registration_status='registered',
+            internet_blocked=False, user=SimpleNamespace(email='owner@example.test'),
+        )
+        owner = SimpleNamespace(user_id=7)
+        bindings = {
+            'request':SimpleNamespace(method='GET', headers={}, query_string=b''),
+            'get_client_mac':lambda:'AA', 'get_client_ip':lambda:'192.168.21.101',
+            'detect_connection_type':lambda ip:('wifi',21,'Guest'),
+            'get_wired_unregistered_vlan_id':lambda:250,
+            'get_wired_assignable_entries':lambda:[], 'get_vlan_map':lambda:{'Staff':11,'Guest':21},
+            'Device':SimpleNamespace(query=SimpleNamespace(filter_by=lambda **kw:SimpleNamespace(first=lambda:device))),
+            'get_active_ownership':lambda mac:owner,
+            'normalize_device_status':lambda value:value,
+            'portal_host_mismatch':lambda:False,
+            '_reassignment_intent':lambda mac,vlan:None,
+            '_is_registered_device_on_wrong_wifi':extract_function(PORTAL,'_is_registered_device_on_wrong_wifi',{}),
+            'url_for':lambda endpoint, **kwargs:'/wrong-vlan',
+            'redirect':lambda target:('redirect',target),
+        }
+        route=extract_function(PORTAL,'register',bindings)
+        self.assertEqual(route(),('redirect','/wrong-vlan'))
+
+    def test_pending_request_lookup_is_scoped_to_exact_target_vlan(self):
+        seen = {}
+        class Query:
+            def filter_by(self, **kwargs):
+                seen.update(kwargs)
+                return self
+            def order_by(self, *args):
+                return self
+            def first(self):
+                return 'matching request'
+        bindings = {'RegistrationRequest':SimpleNamespace(query=Query(), submitted_at=SimpleNamespace(desc=lambda:None))}
+        helper = extract_function(PORTAL, '_pending_request_for_vlan', bindings)
+        self.assertEqual(helper('AA', 21), 'matching request')
+        self.assertEqual(seen, {'mac_address':'AA', 'requested_vlan':21, 'status':'pending'})
 
     def _registration_env(self, allow):
         import secrets
@@ -208,7 +266,7 @@ class SSIDReassignmentTests(TestCase):
                   'first_name':'Lee','last_name':'Tester','device_type':'laptop'},
             args={})
         bindings = {
-            'request':request,'session':session,
+            'request':request,'session':session,'logger':MagicMock(),
             'get_client_mac':lambda:'AA','get_client_ip':lambda:'192.168.21.101',
             'get_wired_unregistered_vlan_id':lambda:250,
             'get_wired_assignable_entries':lambda:[],
@@ -282,6 +340,16 @@ class SSIDReassignmentTests(TestCase):
         self.assertEqual(device.assigned_vlan,11)
         notifications.assert_called_once()
 
+    def test_admin_notification_queue_failure_is_reported(self):
+        register,b,device,rq,notifications,confirmation=self._registration_env(False)
+        notifications.return_value = 0
+        answer=register()
+        self.assertEqual(answer['status'],'pending')
+        self.assertTrue(any(
+            'administrator notification could not be queued' in str(call)
+            for call in b['flash'].call_args_list
+        ))
+
     def test_reassignment_expiry_does_not_silently_switch(self):
         register,b,device,rq,notifications,confirmation=self._registration_env(True)
         b['session']['portal_reassignment']['expires']=time.time()-10
@@ -289,6 +357,23 @@ class SSIDReassignmentTests(TestCase):
         self.assertEqual(status,409)
         self.assertEqual(device.assigned_vlan,11)
         confirmation.assert_not_called()
+
+    def test_register_page_has_no_wrong_vlan_action_or_inline_mismatch_message(self):
+        template = (ROOT/'captive-portal/app/templates/register.html').read_text()
+        self.assertNotIn('wrongVlanAction', template)
+        self.assertIn("window.location.replace(\"{{ url_for('portal.wrong_vlan_page') }}\")", template)
+        self.assertIn("const reassignMode = {{ 'true' if reassign_mode else 'false' }};", template)
+
+    def test_wrong_vlan_page_offers_only_one_action_per_state(self):
+        template = (ROOT/'captive-portal/app/templates/wrong_vlan.html').read_text()
+        self.assertIn('Resend administrator notification', template)
+        self.assertIn('I want to use {{ detected_ssid', template)
+
+    def test_pending_wrong_vlan_page_does_not_claim_email_was_sent(self):
+        template = (ROOT/'captive-portal/app/templates/wrong_vlan.html').read_text()
+        self.assertIn("Network Change Request Pending", template)
+        self.assertIn("is already awaiting a decision", template)
+        self.assertNotIn("The administrator has been notified", template)
 
     def test_jinja_templates_parse(self):
         from jinja2 import Environment

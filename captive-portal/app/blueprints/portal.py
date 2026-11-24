@@ -950,6 +950,37 @@ def api_block_status():
 # Reassignment is an explicit, short-lived browser flow, not a VLAN override
 # supplied by an untrusted form or query parameter. The detected network is
 # rechecked on every request and the normal registration policy still applies.
+def _is_registered_device_on_wrong_wifi(device, connection_type, detected_vlan, reassignment):
+    """Return true when a registered device must use the explicit SSID-change page."""
+    if reassignment or connection_type != 'wifi' or not device or not detected_vlan:
+        return False
+    assigned_vlan = getattr(device, 'assigned_vlan', None)
+    try:
+        return bool(
+            getattr(device, 'registration_status', None) == 'registered'
+            and assigned_vlan is not None
+            and int(assigned_vlan) != int(detected_vlan)
+        )
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _pending_request_for_vlan(mac_address, vlan_id):
+    """Return only a pending request for this device and this exact destination VLAN."""
+    if not mac_address or not vlan_id:
+        return None
+    try:
+        vlan_id = int(vlan_id)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return (
+        RegistrationRequest.query
+        .filter_by(mac_address=mac_address, requested_vlan=vlan_id, status='pending')
+        .order_by(RegistrationRequest.submitted_at.desc())
+        .first()
+    )
+
+
 def _reassignment_intent(mac_address, detected_vlan):
     intent = session.get('portal_reassignment')
     if not isinstance(intent, dict):
@@ -1038,6 +1069,10 @@ def register():
             # ownership row (e.g. left open by a device deletion, or a pending
             # re-registration) must NOT unblock an unapproved device.
             if device.registration_status == 'registered' and not reassignment:
+                if _is_registered_device_on_wrong_wifi(
+                    device, connection_type, detected_vlan, reassignment
+                ):
+                    return redirect(url_for('portal.wrong_vlan_page'))
                 # Rendering /register must be side-effect-free. The registration
                 # POST and the provisioning worker already queue unblock; the
                 # old GET handler caused repeated SSH jobs for simple refreshes.
@@ -1530,9 +1565,31 @@ def register():
                     'admin.approvals.approve_request',
                     token=reg_request.approval_token, _external=True,
                 )
-            send_admin_notification(
+            admin_notifications_queued = send_admin_notification(
                 reg_request, approval_url, selected_vlan, ssid or 'Wired Network'
             )
+            if admin_notifications_queued:
+                logger.info(
+                    "Registration request %s saved; queued %s admin notification(s) "
+                    "for reassignment=%s, VLAN=%s, SSID=%s",
+                    reg_request.id, admin_notifications_queued, bool(reassignment),
+                    selected_vlan, ssid or 'Wired Network',
+                )
+            else:
+                # The request is committed, but no email was accepted for
+                # delivery (for example, no eligible admin or Graph sender
+                # configuration). Do not imply that an email was sent.
+                logger.error(
+                    "Registration request %s saved but NO admin notification "
+                    "was queued; check Admin.can_manage_users/Admin.email, "
+                    "ADMIN_EMAIL and GRAPH_FROM_EMAIL",
+                    reg_request.id,
+                )
+                flash(
+                    "Your request was saved, but the administrator notification "
+                    "could not be queued. Please contact the network administrator.",
+                    "warning",
+                )
             if reassignment:
                 session.pop('portal_reassignment', None)
 
@@ -1588,14 +1645,24 @@ def register():
 
         clear_unregistered_lease(mac_address)
 
-        RegistrationRequest.query.filter(
-            RegistrationRequest.mac_address == mac_address,
-            RegistrationRequest.status.in_(['pending', 'pending_password']),
-        ).update(
-            {'status': 'approved', 'processed_at': datetime.utcnow(),
-             'processed_by': 'auto-approved'},
-            synchronize_session=False,
-        )
+        if reassignment:
+            RegistrationRequest.query.filter(
+                RegistrationRequest.mac_address == mac_address,
+                RegistrationRequest.status.in_(['pending', 'pending_password']),
+            ).update(
+                {'status': 'superseded', 'processed_at': datetime.utcnow(),
+                 'processed_by': 'superseded-by-auto-reassignment'},
+                synchronize_session=False,
+            )
+        else:
+            RegistrationRequest.query.filter(
+                RegistrationRequest.mac_address == mac_address,
+                RegistrationRequest.status.in_(['pending', 'pending_password']),
+            ).update(
+                {'status': 'approved', 'processed_at': datetime.utcnow(),
+                 'processed_by': 'auto-approved'},
+                synchronize_session=False,
+            )
         db.session.commit()
 
         unregister_url = build_unregister_url(device.unregister_token)
@@ -1746,6 +1813,11 @@ def request_rejected():
 
 @portal_bp.route('/wrong-vlan')
 def wrong_vlan_page():
+    # Keep the explicit reassignment flow on the canonical portal host so the
+    # signed session cookie set by the POST action is sent to /register.
+    if portal_host_mismatch():
+        return redirect(build_portal_url(url_for('portal.wrong_vlan_page')))
+
     mac_address = get_client_mac()
     device = Device.query.filter_by(mac_address=mac_address).first() if mac_address else None
 
@@ -1770,12 +1842,7 @@ def wrong_vlan_page():
     pending_change = None
     can_request_change = False
     if device and detected_vlan and device.assigned_vlan and detected_vlan != device.assigned_vlan:
-        pending_change = (
-            RegistrationRequest.query
-            .filter_by(mac_address=device.mac_address, status='pending')
-            .order_by(RegistrationRequest.submitted_at.desc())
-            .first()
-        )
+        pending_change = _pending_request_for_vlan(device.mac_address, detected_vlan)
         can_request_change = (
             connection_type == 'wifi'
             and pending_change is None
@@ -1799,12 +1866,15 @@ def wrong_vlan_page():
 @portal_bp.route('/wrong-vlan/request-change', methods=['POST'])
 @limiter.limit("5 per minute")
 def wrong_vlan_request_change():
-    """Start the normal registration workflow for the currently connected SSID.
+    """Start registration on this SSID, or resend an existing request's email.
 
-    This action itself NEVER changes a VLAN or sends an approval request.
-    Submission on /register checks the existing owner, credentials when
-    required, and the destination VLAN's effective permission policy.
+    A new reassignment is kept in the signed session and the destination VLAN
+    is rechecked by /register. An existing pending request is not duplicated;
+    this explicit action only retries its administrator notification.
     """
+    if portal_host_mismatch():
+        return redirect(build_portal_url(url_for('portal.wrong_vlan_page')))
+
     mac_address = get_client_mac()
     device = Device.query.filter_by(mac_address=mac_address).first() if mac_address else None
     ownership = get_active_ownership(mac_address) if device else None
@@ -1822,8 +1892,46 @@ def wrong_vlan_request_change():
         flash('Please connect to the WiFi network you want to register on.', 'error')
         return redirect(url_for('portal.wrong_vlan_page'))
 
-    if RegistrationRequest.query.filter_by(mac_address=mac_address, status='pending').first():
-        flash('A request for this device is already waiting for the administrator.', 'info')
+    pending_target_request = _pending_request_for_vlan(mac_address, detected_vlan)
+    if pending_target_request:
+        # A previous attempt may have saved the approval request but failed to
+        # queue its email. Let the user explicitly resend the notification
+        # without creating duplicate pending rows or changing VLAN assignment.
+        portal_url = os.getenv('PORTAL_URL')
+        if portal_url:
+            parsed = urlparse(portal_url)
+            approval_url = (
+                f"{parsed.scheme}://{parsed.netloc}"
+                f"{url_for('admin.approvals.approve_request', token=pending_target_request.approval_token)}"
+            )
+        else:
+            approval_url = url_for(
+                'admin.approvals.approve_request',
+                token=pending_target_request.approval_token, _external=True,
+            )
+        try:
+            queued = send_admin_notification(
+                pending_target_request, approval_url, detected_vlan,
+                get_ssid_for_vlan(detected_vlan) or 'WiFi Network',
+            )
+        except Exception:
+            logger.exception(
+                "Unable to resend admin notification for pending request %s",
+                getattr(pending_target_request, 'id', 'unknown'),
+            )
+            queued = 0
+        if queued:
+            logger.info(
+                "Re-sent %s admin notification(s) for existing registration request %s",
+                queued, getattr(pending_target_request, 'id', 'unknown'),
+            )
+            flash('The administrator notification has been queued again. Your existing request remains pending.', 'success')
+        else:
+            logger.error(
+                "Could not queue admin notification for existing request %s; check Graph sender and admin recipients",
+                getattr(pending_target_request, 'id', 'unknown'),
+            )
+            flash('Your request is still pending, but the administrator email could not be queued. Please contact the network administrator.', 'warning')
         return redirect(url_for('portal.wrong_vlan_page'))
 
     session['portal_reassignment'] = {

@@ -1,0 +1,29 @@
+{
+  "description": "Correct wrong-SSID routing, canonical reassignment session handling, and pending admin notification retry",
+  "env": {
+    "add": [],
+    "remove": []
+  },
+  "db": {
+    "up": null,
+    "down": null,
+    "verify_up": [],
+    "verify_down": []
+  },
+  "post_update": {
+    "description": "Rebuild the captive portal web image to activate the corrected SSID reassignment workflow and administrator notification retry",
+    "notes": "The wrong-SSID page is the only page that offers the network-change action. Pending requests are matched to the exact destination VLAN; an existing matching request can resend its administrator notification without creating a duplicate. No database migration or Nginx Proxy Manager update is required.",
+    "commands": [
+      "docker compose up -d --build --no-deps web",
+      "docker compose ps web"
+    ]
+  },
+  "post_rollback": {
+    "description": "Rebuild the captive portal web image after rolling back this update",
+    "notes": "Only the web service needs rebuilding for these portal source/template changes.",
+    "commands": [
+      "docker compose up -d --build --no-deps web"
+    ]
+  },
+  "notes": "The manifest is named for the current starting commit 1d7eb6a and is intended to be committed with the next firmware revision."
+}

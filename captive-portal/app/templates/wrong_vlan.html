@@ -1,16 +1,16 @@
 {% extends "base.html" %}
 
-{% block title %}Connect to Different Network - Network Access Portal{% endblock %}
+{% block title %}{% if pending_change %}Network Change Request Pending{% else %}Connect to Different Network - Network Access Portal{% endif %}{% endblock %}
 
-{% block header %}Network Access Approved{% endblock %}
+{% block header %}{% if pending_change %}Network Change Request Pending{% else %}Network Mismatch{% endif %}{% endblock %}
 
 {% block subheader %}
-<p style="margin-top: 10px; opacity: 0.9;">Please connect to a different network.</p>
+<p style="margin-top: 10px; opacity: 0.9;">{% if pending_change %}Your request to use this network is awaiting review.{% else %}You are connected to a WiFi network different from the one assigned to this device. Choose whether to switch networks or request access here.{% endif %}</p>
 {% endblock %}
 
 {% block content %}
 <div id="statusAlert" class="alert alert-info">
-    <strong>ℹ Access granted on a different network</strong>
+    <strong>ℹ You are connected to a different network</strong>
     <div style="margin-top: 6px;">
         The administrator has not granted you access to
         <strong id="detectedNetwork">{{ detected_ssid or 'your current network' }}</strong>,
@@ -34,19 +34,24 @@
 <div id="changeRequestBox" class="info-box" style="margin-top: 16px;">
     <strong>⏳ Request sent</strong>
     <p style="margin-top: 6px; color: #555;">
-        You asked on {{ pending_change.submitted_at|localtime }} for this device to be allowed on
-        <strong>{{ detected_ssid or ('VLAN ' ~ detected_vlan) }}</strong>. The administrator has been notified;
-        internet access stays off until the request is decided. You can still connect to
-        <strong>{{ assigned_ssid or ('VLAN ' ~ assigned_vlan) if assigned_vlan else 'your assigned network' }}</strong> in the meantime.
+        A request submitted on {{ pending_change.submitted_at|localtime }} for
+        <strong>{{ detected_ssid or ('VLAN ' ~ detected_vlan) }}</strong> is already awaiting a decision.
+        Internet access on this network remains off until it is approved. If the administrator did not
+        receive the notification, you can resend it below. Your request will not be duplicated.
     </p>
+    <form method="POST" action="{{ url_for('portal.wrong_vlan_request_change') }}" style="margin-top: 10px;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button type="submit" class="btn btn-primary">Resend administrator notification</button>
+    </form>
 </div>
 {% elif can_request_change %}
 <div id="changeRequestBox" class="info-box" style="margin-top: 16px;">
     <strong>Prefer to stay on {{ detected_ssid or ('VLAN ' ~ detected_vlan) }}?</strong>
     <p style="margin-top: 6px; color: #555;">
-        Continue through registration for the WiFi network you are using.
-        If your account is already permitted on this VLAN, access can be granted
-        automatically; otherwise the normal administrator approval email is sent.
+        The next page will ask you to confirm your registered email and device details.
+        When you submit that form, access is granted automatically if your account is
+        permitted on this VLAN. Otherwise, an administrator approval request is created
+        and an email notification is queued.
     </p>
     <form method="POST" action="{{ url_for('portal.wrong_vlan_request_change') }}" style="margin-top: 10px;">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
