@@ -22,6 +22,9 @@ from flask import (
 from flask_login import login_required
 
 from core.auth import permission_required
+from .firmware_notices import (
+    pending_notices, record_step, record_fallback, acknowledge_notices,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -229,10 +232,15 @@ def admin_firmware():
     except Exception as exc:
         error = str(exc)
 
-    restart_needed = (
-        session.pop('firmware_restart_needed', None)
-        or (request.args.get('show_restart') == '1')
-    )
+    try:
+        notices = pending_notices()
+        notice_error = None
+    except Exception as exc:
+        notices = []
+        notice_error = str(exc)
+        logger.exception('Could not load post-update instructions')
+
+    restart_needed = None
 
     return render_template(
         'admin_firmware.html',
@@ -244,6 +252,7 @@ def admin_firmware():
         test_enabled=os.getenv('FIRMWARE_TEST_ENABLED', '').lower() not in ('', '0', 'false', 'no'),
         commits_ahead_count=len(status.get('commits_ahead', [])),
         restart_needed=restart_needed,
+        pending_notices=notices, notice_error=notice_error,
     )
 
 
@@ -474,6 +483,16 @@ def stream(action):
                     yield emit("=== Step 2/3: No database migration needed ===")
                     yield emit("")
 
+                # Persist manual instructions BEFORE the SSE completes. Flask
+                # cookie-session writes from a streaming generator are lost.
+                try:
+                    if record_step('update', status.get('current_full'), next_hash, manifest):
+                        yield emit('Post-update instructions saved for administrator.')
+                except Exception as exc:
+                    yield emit(f'ERROR: Could not save post-update instructions: {exc}')
+                    yield emit('__EXIT__:1')
+                    return
+
             elif action == 'rollback':
                 changed_dirs    = status.get('back_dirs', [])
                 current_hash    = status.get('current_full')
@@ -521,6 +540,14 @@ def stream(action):
                     except Exception as exc:
                         yield emit(f"WARNING: Could not remove .env var(s): {exc}")
                 yield emit("")
+
+                try:
+                    if record_step('rollback', current_hash, status.get('prev_full'), manifest):
+                        yield emit('Post-rollback instructions saved for administrator.')
+                except Exception as exc:
+                    yield emit(f'ERROR: Could not save post-rollback instructions: {exc}')
+                    yield emit('__EXIT__:1')
+                    return
 
             elif action == 'update-latest':
                 commits_ahead    = status.get('commits_ahead', [])
@@ -577,8 +604,28 @@ def stream(action):
                             return
                     else:
                         yield emit("  No DB migration for this commit.")
+                    try:
+                        if record_step('update', from_full, commit_hash, step_manifest):
+                            yield emit('  Saved manual follow-up instructions for this commit.')
+                    except Exception as exc:
+                        yield emit(f'ERROR: Could not save instructions for {commit_short}: {exc}')
+                        yield emit('__EXIT__:1')
+                        return
                     yield emit("")
 
+                # Overall no-manifest fallback for affected Compose stacks.
+                try:
+                    if all_changed_dirs and not any(
+                        i.get('from_commit') in {c['from_full'][:7] for c in commits_ahead}
+                        and i.get('direction') == 'update'
+                        for i in pending_notices()
+                    ):
+                        record_fallback('update', status.get('current_full'), latest_hash,
+                                        all_changed_dirs)
+                except Exception as exc:
+                    yield emit(f'ERROR: Could not save stack reminder: {exc}')
+                    yield emit('__EXIT__:1')
+                    return
 
                 yield emit("")
                 yield emit("=" * 50)
@@ -596,11 +643,19 @@ def stream(action):
             elif action == 'update-latest' and 'all_changed_dirs' in locals():
                 affected_stacks = all_changed_dirs
 
-            if affected_stacks:
-                def _friendly(d):
-                    return "Root stack (main application)" if d == "." else d
-                session['firmware_restart_needed'] = [_friendly(d) for d in affected_stacks]
-                session.modified = True
+            # If there was no explicit per-commit notice, still surface an
+            # affected-stack reminder that survives page reloads.
+            try:
+                direction = 'rollback' if action == 'rollback' else 'update'
+                from_hash = status.get('current_full') if direction == 'rollback' else status.get('current_full')
+                to_hash = status.get('prev_full') if direction == 'rollback' else status.get('next_full')
+                existing_id = f'{direction}:{from_hash}:{to_hash}'
+                if affected_stacks and not any(i['id'] == existing_id for i in pending_notices()):
+                    record_fallback(direction, from_hash, to_hash, affected_stacks)
+            except Exception as exc:
+                yield emit(f'ERROR: Could not persist restart reminder: {exc}')
+                yield emit('__EXIT__:1')
+                return
 
             yield emit("=== Step 3/3: No automatic restart — please restart manually ===")
 
@@ -631,6 +686,18 @@ def mark_done(action):
         session['firmware_last_op'] = 'update' if action == 'update-latest' else action
         session.modified = True
     return jsonify({'ok': True})
+
+
+@firmware_bp.route('/firmware/acknowledge-instructions', methods=['POST'])
+@login_required
+@permission_required('manage_firmware')
+def acknowledge_instructions():
+    try:
+        ids = (request.get_json(silent=True) or {}).get('ids')
+        count = acknowledge_notices(ids)
+    except (ValueError, OSError, TypeError, json.JSONDecodeError) as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 400
+    return jsonify({'ok': True, 'completed': count})
 
 
 @firmware_bp.route('/firmware/verify-last')

@@ -153,3 +153,49 @@ Microsoft Graph OAuth.  In the same commit as `def5678…` you include the file
 
 If a commit needs no env or database changes, **do not create a manifest file**
 for it.  The firmware page will show a green "No migration needed" badge.
+
+## Manual instructions after upgrading or rolling back
+
+Optional `post_update` and `post_rollback` sections tell administrators what
+**manual** commands are required **after** a particular transition. The
+existing naming rule still applies: when committing a change after `d0c8f28`,
+include `d0c8f28.json` in the new commit.
+
+```json
+{
+  "description": "Short summary",
+  "post_update": {
+    "description": "Rebuild the captive portal",
+    "notes": "Run on the Pi from the bf-network project directory.",
+    "commands": [
+      "docker compose up -d --build --no-deps web"
+    ]
+  },
+  "post_rollback": {
+    "description": "Rebuild after rollback",
+    "commands": ["docker compose up -d --build --no-deps web"]
+  }
+}
+```
+
+The new firmware UI **never automatically executes** these commands. As each
+commit is checked out successfully (after any database migration completes),
+the updater appends its instructions to an atomic JSON file at
+`captive-portal/data/firmware-post-update-notices.json` in the mounted repo.
+The Firmware Management page displays all unacknowledged notices, grouped by
+commit and in upgrade order, even after a page reload or web container rebuild.
+Only clicking the administrator's acknowledgement button removes a notice from
+the pending view (the completed entry is retained in the JSON audit data).
+
+For **Update to Latest**, each traversed commit contributes its own manual
+instructions; only the final aggregate of affected Docker stacks is shown as a
+fallback when no commit included specific instructions. Release authors must
+write exact, idempotent commands where possible, and must not include secrets.
+If a change needs an nginx Proxy Manager reconfiguration, for example, it may
+list `docker compose up -d --no-deps npm` and `docker compose run --rm npm-setup`;
+those commands are **not** necessary for unrelated firmware updates.
+
+The first installation of this updater is a bootstrap exception: older firmware
+cannot record notices using functionality it does not yet contain. Rebuild the
+web container manually after deploying this updater, then make sure the change
+is committed to your repository so future firmware checkouts preserve it.

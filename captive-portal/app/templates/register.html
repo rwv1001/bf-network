@@ -230,7 +230,18 @@
     <button type="submit" class="btn" id="registerBtn" disabled>Continue</button>
 </form>
 
+{% if reassign_mode %}
+<div class="info-box" style="margin-bottom:18px">
+    <strong>Change your WiFi network</strong>
+    <p>Complete registration again for <strong>{{ detected_ssid or 'the current SSID' }}</strong>.
+    If this network is already permitted for your account, the move will be approved automatically.
+    Otherwise the administrator will receive an approval request.</p>
+</div>
+{% endif %}
 <div id="statusMessage" style="display: none; margin-top: 20px; padding: 15px; border-radius: 8px; text-align: center;"></div>
+<div id="wrongVlanAction" style="display:{% if show_status and device and detected_vlan and device.assigned_vlan and detected_vlan != device.assigned_vlan %}block{% else %}none{% endif %};margin-top:14px;text-align:center">
+    <a class="btn" href="{{ url_for('portal.wrong_vlan_page') }}">I want to stay on this WiFi network</a>
+</div>
 <div id="confirmWarning" style="display: {% if show_status and device and device.internet_accessible == True and not device.ownership_validated %}block{% else %}none{% endif %}; margin-top: 10px; padding: 12px 15px; border-radius: 8px; background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba; text-align: center;">{% if show_status and device and device.internet_accessible == True and not device.ownership_validated %}&#9888; Please click the <strong>Accept and Keep Access</strong> link in the confirmation email you have just received within the next <strong>{{ confirm_timeout_minutes|default(2) }} minute{{ 's' if (confirm_timeout_minutes|default(2)) != 1 else '' }}</strong> or your internet access will be blocked.{% endif %}</div>
 <div id="institutionLink" style="display: none; margin-top: 8px; text-align: center;"></div>
 <div id="userHomeLink" style="display: {% if show_status and device and device.internet_accessible == True and user_home_url %}block{% else %}none{% endif %}; margin-top: 8px; text-align: center;">{% if show_status and device and device.internet_accessible == True and user_home_url %}<a href="{{ user_home_url }}" class="btn" style="display:inline-block;">Go to your home page</a>{% endif %}</div>
@@ -497,6 +508,8 @@ document.addEventListener('DOMContentLoaded', function() {
                         `You have logged onto the wrong WiFi network. To gain full internet access, please disconnect from "${data.current_ssid}" and connect to "${data.expected_ssid}".`,
                         'error'
                     );
+                    const changeAction = document.getElementById('wrongVlanAction');
+                    if (changeAction) changeAction.style.display = 'block';
                     startMismatchPolling();
                 } else {
                     showStatus(message + ' Checking access...', 'success');
@@ -1337,6 +1350,8 @@ document.addEventListener('DOMContentLoaded', function() {
 
                 case 'wrong_vlan': {
                     console.log('[DevicePoll] Status: wrong_vlan', data);
+                    const changeAction = document.getElementById('wrongVlanAction');
+                    if (changeAction) changeAction.style.display = 'block';
                     const isWired = data.connection_type === 'wired';
                     const assignedVlan = data.assigned_vlan;
                     const assignedSsid = data.assigned_ssid;

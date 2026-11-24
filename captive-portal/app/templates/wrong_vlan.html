@@ -44,17 +44,13 @@
 <div id="changeRequestBox" class="info-box" style="margin-top: 16px;">
     <strong>Prefer to stay on {{ detected_ssid or ('VLAN ' ~ detected_vlan) }}?</strong>
     <p style="margin-top: 6px; color: #555;">
-        Ask the administrator to move this device's access to this network instead.
-        Internet access remains blocked until they approve.
+        Continue through registration for the WiFi network you are using.
+        If your account is already permitted on this VLAN, access can be granted
+        automatically; otherwise the normal administrator approval email is sent.
     </p>
     <form method="POST" action="{{ url_for('portal.wrong_vlan_request_change') }}" style="margin-top: 10px;">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <div class="form-group" style="margin-bottom: 10px;">
-            <label for="reason">Reason (optional)</label>
-            <input type="text" id="reason" name="reason" class="form-control" maxlength="500"
-                   placeholder="e.g. this laptop is used for guest presentations">
-        </div>
-        <button type="submit" class="btn btn-primary">Request access on {{ detected_ssid or ('VLAN ' ~ detected_vlan) }}</button>
+        <button type="submit" class="btn btn-primary">I want to use {{ detected_ssid or ('VLAN ' ~ detected_vlan) }} — register here</button>
     </form>
 </div>
 {% endif %}

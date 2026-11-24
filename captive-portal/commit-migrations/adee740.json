@@ -1,0 +1,29 @@
+{
+  "description": "Firmware update instructions and optional re-registration on a different SSID",
+  "env": {
+    "add": [],
+    "remove": []
+  },
+  "db": {
+    "up": null,
+    "down": null,
+    "verify_up": [],
+    "verify_down": []
+  },
+  "post_update": {
+    "description": "Rebuild the captive portal to activate firmware instruction reminders and SSID re-registration",
+    "notes": "Required for this code change: rebuild the web image. Nginx Proxy Manager 2.17.1 is already running on the reported Pi, so npm and npm-setup do not need to be rerun just for this change. For any future NPM version/configuration change, its own commit manifest should list its required steps.",
+    "commands": [
+      "docker compose up -d --build --no-deps web",
+      "docker compose ps web"
+    ]
+  },
+  "post_rollback": {
+    "description": "Rebuild captive-portal web image after rolling back this update",
+    "notes": "Run in the bf-network repository on the Pi. Check any NPM changes before downgrading it.",
+    "commands": [
+      "docker compose up -d --build --no-deps web"
+    ]
+  },
+  "notes": "Instructions are collected per transition and displayed persistently after an update. Do not run installer again."
+}

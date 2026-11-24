@@ -34,6 +34,7 @@ import logging
 import os
 import re
 import secrets
+import time
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
@@ -946,6 +947,28 @@ def api_block_status():
     return jsonify({'blocked': False, 'message': 'Device is not blocked'})
 
 
+# Reassignment is an explicit, short-lived browser flow, not a VLAN override
+# supplied by an untrusted form or query parameter. The detected network is
+# rechecked on every request and the normal registration policy still applies.
+def _reassignment_intent(mac_address, detected_vlan):
+    intent = session.get('portal_reassignment')
+    if not isinstance(intent, dict):
+        return None
+    try:
+        valid = (
+            mac_address and detected_vlan
+            and intent.get('mac') == mac_address
+            and int(intent.get('vlan')) == int(detected_vlan)
+            and time.time() < float(intent.get('expires'))
+        )
+    except (TypeError, ValueError, OverflowError):
+        valid = False
+    if not valid:
+        session.pop('portal_reassignment', None)
+        return None
+    return intent
+
+
 # ---------------------------------------------------------------------------
 # Registration (spec 4b)
 # ---------------------------------------------------------------------------
@@ -993,6 +1016,8 @@ def register():
         for e in get_wired_assignable_entries()
     ]
 
+    reassignment = _reassignment_intent(mac_address, detected_vlan)
+
     # ── GET: show form or status page ────────────────────────────────────────
     if request.method == 'GET' and mac_address:
         device = Device.query.filter_by(mac_address=mac_address).first()
@@ -1012,7 +1037,7 @@ def register():
             # Only fully-registered devices get re-granted access here. A bare
             # ownership row (e.g. left open by a device deletion, or a pending
             # re-registration) must NOT unblock an unapproved device.
-            if device.registration_status == 'registered':
+            if device.registration_status == 'registered' and not reassignment:
                 # Rendering /register must be side-effect-free. The registration
                 # POST and the provisioning worker already queue unblock; the
                 # old GET handler caused repeated SSH jobs for simple refreshes.
@@ -1033,6 +1058,7 @@ def register():
                     detected_ip=ip_address,
                     wired_vlan_required=False,
                     wired_vlan_options=wired_vlan_options,
+                    detected_vlan=detected_vlan,
                     user_home_url=build_portal_url(url_for('portal.user_home')),
                     confirm_timeout_minutes=wifi_confirm_timeout_minutes(),
                 )
@@ -1040,6 +1066,21 @@ def register():
             # registration form so authentication and approval must complete.
 
     prefill = _build_prefill_from_request()
+    if reassignment and request.method == 'GET':
+        _ownership = get_active_ownership(mac_address)
+        _owner = User.query.get(_ownership.user_id) if _ownership else None
+        if not _owner:
+            session.pop('portal_reassignment', None)
+            return redirect(url_for('portal.wrong_vlan_page'))
+        prefill.update({
+            'email': _owner.email or '',
+            'first_name': _owner.first_name or '',
+            'last_name': _owner.last_name or '',
+            'phone_number': _owner.phone_number or '',
+        })
+        _device = Device.query.filter_by(mac_address=mac_address).first()
+        if _device:
+            prefill['device_type'] = _device.device_name or ''
 
     # ── POST: process registration ────────────────────────────────────────────
     if request.method == 'POST':
@@ -1054,6 +1095,12 @@ def register():
             email_check = (request.form.get('email') or '').strip().lower()
             if not email_check or '@' not in email_check:
                 return jsonify({'status': 'error', 'message': 'A valid email address is required.'}), 400
+            if reassignment:
+                _ownership = get_active_ownership(mac_address)
+                _owner = User.query.get(_ownership.user_id) if _ownership else None
+                if not _owner or email_check != (_owner.email or '').lower():
+                    return jsonify({'status': 'error',
+                                    'message': 'Use the current registered owner email to change networks.'}), 400
             existing_user = User.query.filter_by(email=email_check).first()
             if existing_user:
                 return jsonify({
@@ -1100,13 +1147,42 @@ def register():
             session.pop('domain_mfa_form', None)
             return jsonify({'status': 'error', 'message': err or 'Sign-in failed. Please try again.'})
 
-        # Full registration
+        # Full registration. A registered device on a DIFFERENT WiFi VLAN
+        # cannot silently re-register: it must start the explicit switch flow.
+        _registered_device = Device.query.filter_by(mac_address=mac_address).first()
+        if (not reassignment and connection_type == 'wifi' and detected_vlan
+                and _registered_device and _registered_device.assigned_vlan
+                and int(_registered_device.assigned_vlan) != int(detected_vlan)
+                and get_active_ownership(mac_address)):
+            msg = 'To use this WiFi network, choose Stay on this network and register again.'
+            if is_ajax:
+                return jsonify({'status': 'error', 'message': msg}), 409
+            flash(msg, 'error')
+            return redirect(url_for('portal.wrong_vlan_page'))
+
         email        = (request.form.get('email')        or '').strip().lower()
         first_name   = (request.form.get('first_name')   or '').strip()
         last_name    = (request.form.get('last_name')    or '').strip()
         phone_number = (request.form.get('phone_number') or '').strip()
         device_type  = (request.form.get('device_type')  or '').strip()
         password_input = (request.form.get('network_password') or '').strip()
+
+        if reassignment:
+            _existing = Device.query.filter_by(mac_address=mac_address).first()
+            _ownership = get_active_ownership(mac_address)
+            _owner = User.query.get(_ownership.user_id) if _ownership else None
+            if (not _existing or not _owner or not _existing.assigned_vlan
+                    or _existing.internet_blocked or _owner.blocked
+                    or email != (_owner.email or '').lower()
+                    or not detected_vlan or detected_vlan == _existing.assigned_vlan
+                    or detected_vlan not in get_vlan_map().values()
+                    or detected_vlan == get_wired_unregistered_vlan_id()):
+                msg = 'Network change is no longer valid. Please return to the network selection page.'
+                if is_ajax:
+                    return jsonify({'status': 'error', 'message': msg}), 400
+                flash(msg, 'error')
+                session.pop('portal_reassignment', None)
+                return redirect(url_for('portal.wrong_vlan_page'))
 
         wired_vlan_id = None
         if is_wired_unregistered:
@@ -1188,7 +1264,7 @@ def register():
             db.session.add(device)
 
         network_mismatch = bool(
-            connection_type == 'wifi' and detected_vlan
+            not reassignment and connection_type == 'wifi' and detected_vlan
             and device.current_vlan and detected_vlan != device.current_vlan
         )
 
@@ -1227,7 +1303,7 @@ def register():
             return redirect(url_for('portal.request_rejected', reason=_msg))
 
         # Password-required VLAN handling (spec 4b.ii.1)
-        if selected_vlan and vlan_requires_password(selected_vlan) and not device.ownership_validated:
+        if selected_vlan and vlan_requires_password(selected_vlan) and (reassignment or not device.ownership_validated):
             from domain_auth import get_provider_for_email, start_device_login, verify_domain_credentials
             provider = get_provider_for_email(email)
             auth_method = (request.form.get('auth_method') or '').strip().lower()
@@ -1413,6 +1489,15 @@ def register():
         domain_policy_map = load_domain_policy_map()
         effective_allowed, _ = get_effective_vlans_for_user(user, domain_policy_map)
         needs_approval = bool(selected_vlan and selected_vlan not in effective_allowed)
+        # Reassignments must also honour explicit account-level approval policy.
+        # A user allowed onto a VLAN is not necessarily exempt from a manual
+        # review of every device or an admin-required password approval mode.
+        if reassignment:
+            needs_approval = needs_approval or bool(
+                user.require_approval_every_device
+                or (selected_vlan and vlan_requires_password(selected_vlan)
+                    and user.network_password_approval_mode == 'admin_required')
+            )
 
         if needs_approval:
             RegistrationRequest.query.filter(
@@ -1448,6 +1533,8 @@ def register():
             send_admin_notification(
                 reg_request, approval_url, selected_vlan, ssid or 'Wired Network'
             )
+            if reassignment:
+                session.pop('portal_reassignment', None)
 
             if is_ajax:
                 return jsonify({
@@ -1535,6 +1622,8 @@ def register():
         )
 
         central_client.queue_device_registered(device, user)
+        if reassignment:
+            session.pop('portal_reassignment', None)
 
         if is_ajax:
             _needs_confirm = not bool(device.ownership_validated)
@@ -1582,6 +1671,8 @@ def register():
         detected_ip=ip_address,
         wired_vlan_required=is_wired_unregistered,
         wired_vlan_options=wired_vlan_options,
+        reassign_mode=bool(reassignment),
+        detected_ssid=ssid,
     )
 
 
@@ -1671,7 +1762,7 @@ def wrong_vlan_page():
         except (TypeError, ValueError):
             assigned_ssid = None
 
-    _, detected_vlan, _ = detect_connection_type(get_client_ip())
+    connection_type, detected_vlan, _ = detect_connection_type(get_client_ip())
     detected_ssid = get_ssid_for_vlan(detected_vlan) if detected_vlan else None
 
     # Offer "request access here instead" only for a real, owned, registered
@@ -1686,7 +1777,8 @@ def wrong_vlan_page():
             .first()
         )
         can_request_change = (
-            pending_change is None
+            connection_type == 'wifi'
+            and pending_change is None
             and get_active_ownership(device.mac_address) is not None
             and detected_vlan in get_vlan_map().values()
             and detected_vlan != get_wired_unregistered_vlan_id()
@@ -1707,76 +1799,38 @@ def wrong_vlan_page():
 @portal_bp.route('/wrong-vlan/request-change', methods=['POST'])
 @limiter.limit("5 per minute")
 def wrong_vlan_request_change():
-    """
-    Registered device on a VLAN other than its assigned one asks the admin to
-    move its assignment to the network it is currently on. Files an ordinary
-    RegistrationRequest with requested_vlan = detected VLAN, so the existing
-    approval flow (assigned_vlan := requested_vlan, unhijack, unblock) applies.
+    """Start the normal registration workflow for the currently connected SSID.
+
+    This action itself NEVER changes a VLAN or sends an approval request.
+    Submission on /register checks the existing owner, credentials when
+    required, and the destination VLAN's effective permission policy.
     """
     mac_address = get_client_mac()
     device = Device.query.filter_by(mac_address=mac_address).first() if mac_address else None
-    if not device or not device.assigned_vlan:
-        flash('This device is not registered.', 'error')
+    ownership = get_active_ownership(mac_address) if device else None
+    user = User.query.get(ownership.user_id) if ownership else None
+    if (not device or not device.assigned_vlan or not ownership or not user
+            or user.blocked or device.internet_blocked):
+        flash('This device cannot change networks through this page.', 'error')
         return redirect(url_for('portal.wrong_vlan_page'))
 
-    ownership = get_active_ownership(device.mac_address)
-    user = User.query.get(ownership.user_id) if ownership and ownership.user_id else None
-    if not user:
-        flash('This device has no owner on record; please register it instead.', 'error')
-        return redirect(url_for('portal.register'))
-
-    ip_address = get_client_ip()
-    _, detected_vlan, detected_ssid = detect_connection_type(ip_address)
-    if not detected_vlan or detected_vlan == device.assigned_vlan:
-        flash('You are already on your assigned network.', 'info')
-        return redirect(url_for('portal.register'))
-    if detected_vlan not in get_vlan_map().values() or detected_vlan == get_wired_unregistered_vlan_id():
-        flash('Access cannot be requested for this network.', 'error')
+    connection_type, detected_vlan, _ = detect_connection_type(get_client_ip())
+    if (connection_type != 'wifi' or not detected_vlan
+            or detected_vlan == device.assigned_vlan
+            or detected_vlan not in get_vlan_map().values()
+            or detected_vlan == get_wired_unregistered_vlan_id()):
+        flash('Please connect to the WiFi network you want to register on.', 'error')
         return redirect(url_for('portal.wrong_vlan_page'))
 
-    if RegistrationRequest.query.filter_by(mac_address=device.mac_address, status='pending').first():
+    if RegistrationRequest.query.filter_by(mac_address=mac_address, status='pending').first():
         flash('A request for this device is already waiting for the administrator.', 'info')
         return redirect(url_for('portal.wrong_vlan_page'))
 
-    note = (request.form.get('reason') or '').strip()[:500]
-    reg_request = RegistrationRequest(
-        mac_address=device.mac_address,
-        ip_address=ip_address,
-        email=user.email,
-        first_name=user.first_name or '',
-        last_name=user.last_name or '',
-        phone_number=user.phone_number or '',
-        device_type=device.device_name or 'device',
-        requested_vlan=detected_vlan,
-        user_agent=request.headers.get('User-Agent', '')[:500],
-        status='pending',
-        approval_token=secrets.token_urlsafe(32),
-        notes=(
-            f"VLAN change request: device is assigned VLAN {device.assigned_vlan} "
-            f"({get_ssid_for_vlan(device.assigned_vlan) or 'wired'}) but connected on VLAN "
-            f"{detected_vlan} ({detected_ssid or 'wired'})."
-            + (f" User note: {note}" if note else "")
-        ),
-    )
-    db.session.add(reg_request)
-    db.session.commit()
-
-    try:
-        approval_url = build_portal_url(
-            url_for('admin.approvals.approve_request', token=reg_request.approval_token)
-        )
-        send_admin_notification(
-            reg_request, approval_url,
-            current_vlan=detected_vlan, current_ssid=detected_ssid,
-        )
-    except Exception as exc:
-        logger.warning("VLAN change request: admin notification failed for %s: %s",
-                       device.mac_address, exc)
-
-    logger.info("VLAN change requested: mac=%s user=%s assigned=%s detected=%s",
-                device.mac_address, user.email, device.assigned_vlan, detected_vlan)
-    flash('Your request has been sent to the administrator. This page will update once it is decided.', 'success')
-    return redirect(url_for('portal.wrong_vlan_page'))
+    session['portal_reassignment'] = {
+        'mac': mac_address, 'vlan': int(detected_vlan),
+        'expires': time.time() + 600,
+    }
+    return redirect(url_for('portal.register'))
 
 
 @portal_bp.route('/registered')

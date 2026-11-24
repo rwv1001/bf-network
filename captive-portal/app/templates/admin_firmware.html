@@ -164,6 +164,55 @@
 </div>
 {% endif %}
 
+{% if notice_error %}
+<div class="flash error" style="margin-bottom:15px">
+    Could not load saved firmware instructions: {{ notice_error }}. Do not assume updates are complete.
+</div>
+{% endif %}
+{% if pending_notices %}
+<section class="firmware-card" style="border-color:#c05621;background:#fffaf0" aria-label="Outstanding firmware instructions">
+    <h3>Action required: post-update commands</h3>
+    <p>These instructions have been saved across firmware updates. Run each set in order on the Pi,
+       from <code>~/bf-network</code>. They will remain here until you confirm completion.</p>
+    {% for item in pending_notices %}
+    <div style="border-top:1px solid #e2e8f0;padding-top:12px;margin-top:12px">
+        <strong>{{ item.from_commit }} → {{ item.to_commit }} ({{ item.direction }})</strong>
+        <p>{{ item.description }}</p>
+        {% if item.notes %}<p>{{ item.notes }}</p>{% endif %}
+        {% if item.commands %}
+        <pre style="white-space:pre-wrap;overflow-wrap:anywhere;background:#1a202c;color:white;padding:12px;border-radius:5px">{% for cmd in item.commands %}{{ cmd }}
+{% endfor %}</pre>
+        {% endif %}
+    </div>
+    {% endfor %}
+    <button type="button" class="btn-firmware btn-update" id="ack-firmware-instructions">
+        I have completed all instructions above
+    </button>
+    <p id="ack-firmware-result" role="status"></p>
+</section>
+<script>
+(function () {
+    const btn = document.getElementById('ack-firmware-instructions');
+    btn.addEventListener('click', async () => {
+        if (!confirm('Confirm that you have performed every command and checked the results?')) return;
+        btn.disabled = true;
+        try {
+            const response = await fetch({{ url_for('admin.firmware.acknowledge_instructions')|tojson }}, {
+                method: 'POST',
+                headers: {'Content-Type':'application/json', 'X-CSRFToken': document.querySelector('meta[name=csrf-token]').content},
+                body: JSON.stringify({ids: {{ pending_notices | map(attribute='id') | list | tojson }}})
+            });
+            if (!response.ok) throw Error('Could not mark instructions completed');
+            window.location.reload();
+        } catch (err) {
+            document.getElementById('ack-firmware-result').textContent = err.message;
+            btn.disabled = false;
+        }
+    });
+})();
+</script>
+{% endif %}
+
 {% if restart_needed %}
 <div class="flash warning" style="margin-bottom: 24px; padding: 10px; border: 6px solid #c05621; background: #fffaf0;">
     <strong>Operation complete.</strong><br>
