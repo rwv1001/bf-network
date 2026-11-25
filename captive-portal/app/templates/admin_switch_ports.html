@@ -509,64 +509,76 @@ if (updatePortsBtn) {
             const statusEl = document.getElementById(statusId);
             if (statusEl) statusEl.innerHTML = '<span class="status-pending">⏳ Updating…</span>';
         });
-        fetch('/admin/switch-ports/update-batch', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({changes})
-        })
-        .then(r => r.json())
-        .then(data => {
-            const results = (data && data.results) || [];
-            results.forEach(result => {
-                const key = changeKey(result.host, result.port);
-                const item = pendingChanges.get(key);
-                if (!item) return;
-                const statusId = 'status_' + item.host + '_' + item.port.replace(/\//g, '_').replace(/\./g, '_');
-                const statusEl = document.getElementById(statusId);
-                item.group.classList.remove('role-updating');
-                if (result.success) {
-                    if (item.role) item.group.dataset.currentRole = item.role;
-                    clearPendingMark(item.group);
-                    updateRoleStyle(item.group, item.role || item.group.dataset.currentRole || 'unknown');
-                    pendingChanges.delete(key);
-                    const row = item.group ? item.group.closest('tr') : null;
-                    const noteInput = row ? row.querySelector('.port-note') : null;
-                    if (noteInput && result.notes !== undefined && result.notes !== null) {
-                        noteInput.dataset.currentNote = result.notes;
-                        noteInput.value = result.notes;
-                        noteInput.classList.remove('pending');
-                    }
-                    if (row) {
-                        if (item.role) row.classList.toggle('row-unclassified', item.role === 'unknown');
-                        const descEl = row.querySelector('.port-desc');
-                        if (descEl && result.description !== undefined) {
-                            descEl.textContent = result.description || '—';
-                            descEl.setAttribute('title', result.description || '');
+        // Send in small sequential batches so neither the browser nor a reverse
+        // proxy times out the whole request. Each batch is small enough that the
+        // switch finishes and saves before the next one starts.
+        const BATCH = 3;
+        const processBatch = async (start) => {
+            if (start >= changes.length) {
+                updatePortsBtn.textContent = 'Update ports';
+                refreshUpdateButton();
+                return;
+            }
+            const slice = changes.slice(start, start + BATCH);
+            try {
+                const r = await fetch('/admin/switch-ports/update-batch', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({changes: slice})
+                });
+                const data = await r.json();
+                const results = (data && data.results) || [];
+                results.forEach(result => {
+                    const key = changeKey(result.host, result.port);
+                    const item = pendingChanges.get(key);
+                    if (!item) return;
+                    const statusId = 'status_' + item.host + '_' + item.port.replace(/\//g, '_').replace(/\./g, '_');
+                    const statusEl = document.getElementById(statusId);
+                    item.group.classList.remove('role-updating');
+                    if (result.success) {
+                        if (item.role) item.group.dataset.currentRole = item.role;
+                        clearPendingMark(item.group);
+                        updateRoleStyle(item.group, item.role || item.group.dataset.currentRole || 'unknown');
+                        pendingChanges.delete(key);
+                        const row = item.group ? item.group.closest('tr') : null;
+                        const noteInput = row ? row.querySelector('.port-note') : null;
+                        if (noteInput && result.notes !== undefined && result.notes !== null) {
+                            noteInput.dataset.currentNote = result.notes;
+                            noteInput.value = result.notes;
+                            noteInput.classList.remove('pending');
                         }
+                        if (row) {
+                            if (item.role) row.classList.toggle('row-unclassified', item.role === 'unknown');
+                            const descEl = row.querySelector('.port-desc');
+                            if (descEl && result.description !== undefined) {
+                                descEl.textContent = result.description || '—';
+                                descEl.setAttribute('title', result.description || '');
+                            }
+                        }
+                        if (statusEl) {
+                            statusEl.innerHTML = '<span class="status-ok">✓ Saved</span>';
+                            setTimeout(() => { if (statusEl) statusEl.innerHTML = ''; }, 3000);
+                        }
+                    } else {
+                        item.group.querySelectorAll('label').forEach(lbl => lbl.classList.remove('committed-fading'));
+                        if (statusEl) statusEl.innerHTML = '<span class="status-err">✗ ' + (result.error || 'Failed') + '</span>';
                     }
-                    if (statusEl) {
-                        statusEl.innerHTML = '<span class="status-ok">✓ Saved</span>';
-                        setTimeout(() => { if (statusEl) statusEl.innerHTML = ''; }, 3000);
-                    }
-                } else {
+                });
+            } catch (e) {
+                slice.forEach(change => {
+                    const key = changeKey(change.host, change.port);
+                    const item = pendingChanges.get(key);
+                    if (!item) return;
+                    item.group.classList.remove('role-updating');
                     item.group.querySelectorAll('label').forEach(lbl => lbl.classList.remove('committed-fading'));
-                    if (statusEl) statusEl.innerHTML = '<span class="status-err">✗ ' + (result.error || 'Failed') + '</span>';
-                }
-            });
-            updatePortsBtn.textContent = 'Update ports';
-            refreshUpdateButton();
-        })
-        .catch(() => {
-            pendingChanges.forEach(item => {
-                item.group.classList.remove('role-updating');
-                item.group.querySelectorAll('label').forEach(lbl => lbl.classList.remove('committed-fading'));
-                const statusId = 'status_' + item.host + '_' + item.port.replace(/\//g, '_').replace(/\./g, '_');
-                const statusEl = document.getElementById(statusId);
-                if (statusEl) statusEl.innerHTML = '<span class="status-err">✗ Network error</span>';
-            });
-            updatePortsBtn.textContent = 'Update ports';
-            refreshUpdateButton();
-        });
+                    const statusId = 'status_' + item.host + '_' + item.port.replace(/\//g, '_').replace(/\./g, '_');
+                    const statusEl = document.getElementById(statusId);
+                    if (statusEl) statusEl.innerHTML = '<span class="status-err">✗ Network error</span>';
+                });
+            }
+            await processBatch(start + BATCH);
+        };
+        processBatch(0);
     });
 }
 

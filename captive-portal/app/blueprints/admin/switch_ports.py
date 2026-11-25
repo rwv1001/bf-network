@@ -459,6 +459,9 @@ def _build_port_config(port_name: str, role: str, description: str = '', switch_
     # EXTERNAL_VLANS: upstream-DHCP VLANs carried on trunks / AP uplinks
     external_vlans_raw = os.getenv('EXTERNAL_VLANS', '')
     external_vlans_list = ' '.join(v for v in external_vlans_raw.split(',') if v.strip())
+    # ISP_VLANS: VLANs for ISP routers (e.g. old ISP LAN) that should be tagged
+    # on AP uplinks so an SSID in that VLAN can still reach the ISP DHCP server.
+    isp_vlans_env = [v.strip() for v in os.getenv('ISP_VLANS', '').split(',') if v.strip()]
 
     CANONICAL_DESC = {
         'ap':              'Uplink to UniFi AP',
@@ -526,10 +529,14 @@ def _build_port_config(port_name: str, role: str, description: str = '', switch_
             isp_tagged = [
                 str(r.vlan_id)
                 for r in ISPRouter.query.order_by(ISPRouter.vlan_id).all()
-                if r.vlan_id is not None and int(r.vlan_id) != 2
+                if r.vlan_id is not None
             ]
         except Exception:
             isp_tagged = []
+        # Always include ISP_VLANS from .env (e.g. '2' for legacy ISP LAN SSID)
+        for v in isp_vlans_env:
+            if v not in isp_tagged:
+                isp_tagged.append(v)
         if isp_tagged:
             ap_tagged = f'{ap_tagged} {" ".join(isp_tagged)}'.strip()
         body.extend([
@@ -944,50 +951,66 @@ def update_batch():
     for item in prepared:
         by_host.setdefault(item['host'], []).append(item)
 
+    CHUNK_SIZE = 4  # Keep each SSH session short so it finishes well under typical web/proxy timeouts
     for host, items in by_host.items():
         role_items = [item for item in items if item.get('role')]
-        pushed = True
-        if role_items:
+        notes_only = [item for item in items if not item.get('role') and item.get('notes') is not None]
+
+        # Process role changes in small chunks so a timeout cannot leave a large
+        # half-applied config. Each chunk is saved before the next starts.
+        for i in range(0, len(role_items), CHUNK_SIZE):
+            chunk = role_items[i:i + CHUNK_SIZE]
             blocks = [
                 _interface_block(item['port'], item['role'], item['existing_desc'], switch_host=host)
-                for item in role_items
+                for item in chunk
             ]
             cmds = '\n'.join(['system-view', *blocks, 'quit', 'save force'])
-            pushed = run_switch_command(host, cmds)
-        for item in items:
-            new_desc = item['existing_desc']
-            if item.get('role'):
+            pushed = run_switch_command(host, cmds, timeout=180)
+            for item in chunk:
+                if pushed is None:
+                    results.append({
+                        'host': host, 'port': item['port'], 'role': item['role'],
+                        'success': False, 'error': f'SSH to {host} failed or timed out',
+                    })
+                    continue
                 new_desc = _canonical_description(item['role'], item['existing_desc'])
-            if item.get('role') and pushed is None:
+                sets = ['port_role = :role', 'port_description = :desc', 'last_updated = NOW()']
+                params = {'role': item['role'], 'desc': new_desc, 'host': host, 'name': item['port']}
+                if item.get('notes') is not None:
+                    sets.append('notes = :notes')
+                    params['notes'] = item['notes']
+                db.session.execute(
+                    text(f"""
+                        UPDATE switch_ports
+                        SET {', '.join(sets)}
+                        WHERE switch_host = :host AND port_name = :name
+                    """),
+                    params,
+                )
                 results.append({
                     'host': host, 'port': item['port'], 'role': item['role'],
-                    'success': False, 'error': f'SSH to {host} failed',
+                    'success': True, 'description': new_desc, 'notes': item.get('notes'),
                 })
-                continue
-            sets = ['last_updated = NOW()']
-            params = {'host': host, 'name': item['port']}
-            if item.get('role'):
-                sets.append('port_role = :role')
-                sets.append('port_description = :desc')
-                params['role'] = item['role']
-                params['desc'] = new_desc
-            if item.get('notes') is not None:
-                sets.append('notes = :notes')
-                params['notes'] = item['notes']
+                logger.info("Admin set %s %s role=%s (batch chunk)", host, item['port'], item['role'])
+            if pushed is not None:
+                db.session.commit()
+
+        # Notes-only updates (no role change) — no SSH needed
+        for item in notes_only:
             db.session.execute(
-                text(f"""
+                text("""
                     UPDATE switch_ports
-                    SET {', '.join(sets)}
+                    SET notes = :notes, last_updated = NOW()
                     WHERE switch_host = :host AND port_name = :name
                 """),
-                params,
+                {'notes': item['notes'], 'host': host, 'name': item['port']},
             )
             results.append({
-                'host': host, 'port': item['port'], 'role': item.get('role') or '',
-                'success': True, 'description': new_desc, 'notes': item.get('notes'),
+                'host': host, 'port': item['port'], 'role': '',
+                'success': True, 'description': item['existing_desc'], 'notes': item['notes'],
             })
-            logger.info("Admin set %s %s role=%s notes=%s (batch)", host, item['port'], item.get('role'), item.get('notes'))
-        if pushed is not None or any(item.get('notes') is not None for item in items):
+            logger.info("Admin set notes on %s %s (batch)", host, item['port'])
+        if notes_only:
             db.session.commit()
 
     return jsonify({'success': all(r.get('success') for r in results), 'results': results})
