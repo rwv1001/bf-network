@@ -299,6 +299,7 @@ def create_app():
         start_wifi_confirmation_sweeper,
         startup_network_enforcement_baseline,
         startup_switch_discovery,
+        startup_refresh_ap_poe,
         startup_write_prefix_map,
         startup_dns_hijack_blocked_pools,
         startup_host_firewall,
@@ -308,6 +309,7 @@ def create_app():
     from core.ap_ingress_acl import start_ap_ingress_acl_reconciler
     start_ap_ingress_acl_reconciler(app)
     startup_switch_discovery(app)
+    startup_refresh_ap_poe(app)
     startup_write_prefix_map(app)
     startup_dns_hijack_blocked_pools(app)
     startup_host_firewall(app)

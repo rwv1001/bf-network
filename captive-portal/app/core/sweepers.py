@@ -313,6 +313,26 @@ def startup_switch_discovery(app) -> None:
     threading.Thread(target=_run, daemon=True).start()
     
 
+def startup_refresh_ap_poe(app) -> None:
+    """On web container start, re-push all AP ports so PoE matches SWITCH_POE.
+
+    This lets an operator change SWITCH_POE in .env and restart the web
+    container to enable or disable PoE on every AP uplink without manually
+    re-applying port roles.
+    """
+    def _run():
+        time.sleep(15 + (os.getpid() % 4))  # after discovery
+        try:
+            with app.app_context():
+                from blueprints.admin.switch_ports import refresh_ap_poe
+                logger.info("Startup: refreshing PoE on AP ports to match SWITCH_POE")
+                refresh_ap_poe()
+        except Exception as exc:
+            logger.warning("Startup AP PoE refresh failed: %s", exc)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def startup_network_enforcement_baseline(app) -> None:
     """Push ACL/PBR baseline + re-apply all per-device blocks on startup.
 

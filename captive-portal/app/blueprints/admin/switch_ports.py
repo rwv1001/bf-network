@@ -721,6 +721,34 @@ def refresh_pi_trunk_vlans() -> None:
             logger.warning("Failed to refresh Pi trunk on %s %s", host, port_name)
         else:
             logger.info("Refreshed Pi trunk VLANs on %s %s", host, port_name)
+
+
+
+def refresh_ap_poe() -> None:
+    """Re-push every AP-role port so PoE enable/disable matches SWITCH_POE in .env.
+
+    Called on web container startup. Changing SWITCH_POE and restarting the
+    web container is then sufficient to enable or disable PoE on all AP ports.
+    """
+    ap_roles = ('ap', 'cheapap', 'migration_ap')
+    rows = db.session.execute(
+        text("""
+            SELECT switch_host, port_name, port_role, port_description
+            FROM switch_ports
+            WHERE port_role = ANY(:roles)
+        """),
+        {'roles': list(ap_roles)},
+    ).fetchall()
+    for host, port_name, role, desc in rows:
+        try:
+            cmds = _build_port_config(port_name, role, desc or '', switch_host=host)
+            result = run_switch_command(host, cmds)
+            if result is None:
+                logger.warning("Failed to refresh PoE on %s %s (%s)", host, port_name, role)
+            else:
+                logger.info("Refreshed PoE on %s %s (%s)", host, port_name, role)
+        except Exception as exc:
+            logger.warning("Error refreshing PoE on %s %s: %s", host, port_name, exc)
     
 
 

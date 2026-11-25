@@ -5289,6 +5289,62 @@ echo
 # GnuPG is needed before any other prompts so prior answers can be restored.
 install_gpg
 
+# Interactive menu when the user just runs ./installer.sh with no recovery flags.
+if [ -z "$RECOVERY_MODE" ]; then
+    echo
+    echo "============================================================================"
+    echo " bf-network installer"
+    echo "============================================================================"
+    echo
+    echo "What would you like to do?"
+    echo
+    echo "  1) New site install (normal first-time setup)"
+    echo "  2) Clone a switch from a backup (replacement HP 5130)"
+    echo "  3) Restore a site server from a backup"
+    echo "  4) Inspect a backup bundle (see what is inside)"
+    echo "  5) Create a new recovery key (once per organisation)"
+    echo "  6) Retarget the tunnel VPS"
+    echo "  q) Quit"
+    echo
+    read -r -p "Choice [1]: " choice
+    choice="${choice:-1}"
+    case "$choice" in
+        1|"") ;;
+        2)
+            RECOVERY_MODE="clone-switch"
+            read -r -p "Path to the site backup bundle (.tar.gz.gpg): " RECOVERY_BUNDLE
+            [ -f "$RECOVERY_BUNDLE" ] || die "Backup file not found: $RECOVERY_BUNDLE"
+            # Peek inside to list switch names without fully extracting yet
+            echo "Opening backup to list switches (you will be asked for the recovery key passphrase)..."
+            # Temporary open just to list; the real open happens in recovery_clone_switch
+            # For simplicity we let recovery_clone_switch do the open, but we need the name first.
+            # Ask for the name; the function will validate it.
+            read -r -p "Switch name to clone (as it appears in the backup, e.g. Lei-01): " CLONE_SWITCH_NAME
+            [ -n "$CLONE_SWITCH_NAME" ] || die "Switch name is required."
+            read -r -p "Wipe the replacement switch to factory defaults first? [y/N]: " wipe
+            case "${wipe,,}" in y|yes) CLONE_WIPE=1 ;; esac
+            ;;
+        3)
+            RECOVERY_MODE="restore-site"
+            read -r -p "Path to the site backup bundle (.tar.gz.gpg): " RECOVERY_BUNDLE
+            [ -f "$RECOVERY_BUNDLE" ] || die "Backup file not found: $RECOVERY_BUNDLE"
+            ;;
+        4)
+            RECOVERY_MODE="inspect"
+            read -r -p "Path to the backup bundle: " RECOVERY_BUNDLE
+            [ -f "$RECOVERY_BUNDLE" ] || die "Backup file not found: $RECOVERY_BUNDLE"
+            ;;
+        5) RECOVERY_MODE="init-key" ;;
+        6)
+            RECOVERY_MODE="retarget-vps"
+            read -r -p "Hostname or IP of the new VPS: " RETARGET_VPS_HOST
+            [ -n "$RETARGET_VPS_HOST" ] || die "VPS host is required."
+            ;;
+        q|Q) echo "Bye."; exit 0 ;;
+        *) die "Invalid choice." ;;
+    esac
+fi
+
 # Recovery modes that need no installer state (see lib/recovery.sh, lib/central.sh).
 case "$RECOVERY_MODE" in
     init-key)        recovery_init_key; exit 0 ;;
